@@ -1,0 +1,3116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MySearch Proxy Console</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect width='48' height='48' rx='12' fill='%230f172a'/%3E%3Cpath d='M13 14h8l6.5 11L34 14h8L31.5 34h-7L13 14Z' fill='%23f8fafc'/%3E%3C/svg%3E">
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+:root {
+  --bg: #edf3fb;
+  --bg-soft: #f7fbff;
+  --surface: rgba(255, 255, 255, 0.84);
+  --surface-strong: rgba(255, 255, 255, 0.96);
+  --surface-muted: rgba(248, 250, 252, 0.78);
+  --text: #0f172a;
+  --text-soft: #1e293b;
+  --muted: #64748b;
+  --border: rgba(148, 163, 184, 0.18);
+  --border-strong: rgba(148, 163, 184, 0.28);
+  --shadow: 0 18px 45px rgba(15, 23, 42, 0.08);
+  --shadow-lg: 0 24px 62px rgba(15, 23, 42, 0.14);
+  --radius: 24px;
+  --radius-sm: 12px;
+  --tavily: #0f766e;
+  --tavily-soft: rgba(15, 118, 110, 0.10);
+  --firecrawl: #b45309;
+  --firecrawl-soft: rgba(180, 83, 9, 0.10);
+  --ok: #15803d;
+  --warn: #d97706;
+  --danger: #dc2626;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  min-height: 100vh;
+  position: relative;
+  overflow-x: hidden;
+  font-family: "Manrope", "Avenir Next", "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: var(--text);
+  background:
+    radial-gradient(circle at top left, rgba(15, 118, 110, 0.18), transparent 28%),
+    radial-gradient(circle at 85% 10%, rgba(180, 83, 9, 0.16), transparent 22%),
+    linear-gradient(180deg, var(--bg-soft) 0%, var(--bg) 100%);
+}
+
+body::before,
+body::after {
+  content: "";
+  position: fixed;
+  width: 320px;
+  height: 320px;
+  border-radius: 999px;
+  filter: blur(70px);
+  opacity: 0.45;
+  pointer-events: none;
+  z-index: 0;
+}
+
+body::before {
+  left: -120px;
+  bottom: 12vh;
+  background: rgba(15, 118, 110, 0.20);
+}
+
+body::after {
+  right: -120px;
+  top: 18vh;
+  background: rgba(180, 83, 9, 0.18);
+}
+
+.container {
+  position: relative;
+  z-index: 1;
+  max-width: 1320px;
+  margin: 0 auto;
+  padding: 24px 20px 42px;
+}
+
+.hidden { display: none !important; }
+
+.card {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(255, 255, 255, 0.78));
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  border-radius: var(--radius);
+  backdrop-filter: blur(18px);
+}
+
+.hero {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(320px, 0.95fr);
+  gap: 20px;
+  padding: 32px;
+  margin-bottom: 18px;
+  overflow: visible;
+  z-index: 8;
+}
+
+.hero::before,
+.hero::after {
+  content: "";
+  position: absolute;
+  border-radius: 999px;
+  pointer-events: none;
+}
+
+.hero::before {
+  width: 260px;
+  height: 260px;
+  top: -120px;
+  right: 18%;
+  background: rgba(15, 118, 110, 0.14);
+  filter: blur(18px);
+}
+
+.hero::after {
+  width: 220px;
+  height: 220px;
+  bottom: -120px;
+  right: -40px;
+  background: rgba(180, 83, 9, 0.14);
+  filter: blur(12px);
+}
+
+.hero-copy,
+.hero-side {
+  position: relative;
+  z-index: 1;
+}
+
+.hero-copy h1 {
+  font-size: clamp(32px, 4.4vw, 44px);
+  line-height: 1.05;
+  margin-bottom: 12px;
+  letter-spacing: -0.03em;
+}
+
+.hero-copy p {
+  color: var(--text-soft);
+  max-width: 720px;
+  line-height: 1.75;
+  font-size: 15px;
+}
+
+.hero-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.hero-tag,
+.service-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 999px;
+  padding: 8px 14px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.hero-tag {
+  background: rgba(255, 255, 255, 0.76);
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.48);
+  color: var(--text);
+}
+
+.service-chip[data-service="tavily"] {
+  background: var(--tavily-soft);
+  color: var(--tavily);
+  border: 1px solid rgba(15, 118, 110, 0.14);
+}
+
+.service-chip[data-service="firecrawl"] {
+  background: var(--firecrawl-soft);
+  color: var(--firecrawl);
+  border: 1px solid rgba(180, 83, 9, 0.14);
+}
+
+.hero-side {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.hero-focus {
+  width: 100%;
+  padding: 22px;
+  border-radius: 22px;
+  border: 1px solid rgba(255, 255, 255, 0.58);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(248, 250, 252, 0.64)),
+    radial-gradient(circle at top right, rgba(15, 118, 110, 0.10), transparent 42%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.72),
+    0 18px 45px rgba(15, 23, 42, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.hero-focus-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.hero-focus-kicker {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.hero-focus-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.06);
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.hero-focus-name {
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+
+.hero-focus-desc {
+  color: var(--muted);
+  line-height: 1.7;
+  font-size: 14px;
+}
+
+.hero-focus-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.hero-focus-metric {
+  padding: 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.hero-focus-metric .label {
+  color: var(--muted);
+  font-size: 11px;
+  margin-bottom: 6px;
+}
+
+.hero-focus-metric .value {
+  font-size: 24px;
+  line-height: 1.05;
+  font-weight: 800;
+}
+
+.hero-focus-foot {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.user-menu {
+  position: relative;
+  align-self: flex-end;
+  z-index: 12;
+}
+
+.user-btn,
+.btn {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-strong);
+  color: var(--text);
+  cursor: pointer;
+  transition: transform .18s ease, box-shadow .18s ease, background .18s ease;
+}
+
+.user-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  font-size: 14px;
+  min-width: 130px;
+  justify-content: center;
+}
+
+.btn {
+  padding: 9px 14px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.btn:hover,
+.user-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+}
+
+.btn-primary {
+  color: #fff;
+  border-color: transparent;
+  background: linear-gradient(135deg, #0f172a, #334155);
+}
+
+.btn-primary:hover {
+  background: linear-gradient(135deg, #1e293b, #475569);
+}
+
+.btn-soft {
+  background: rgba(15, 23, 42, 0.04);
+}
+
+.btn-danger {
+  color: var(--danger);
+  border-color: rgba(220, 38, 38, 0.25);
+  background: rgba(220, 38, 38, 0.04);
+}
+
+.btn-sm {
+  padding: 6px 10px;
+  border-radius: 10px;
+  font-size: 12px;
+}
+
+.dropdown {
+  position: absolute;
+  top: calc(100% + 12px);
+  right: 0;
+  width: 300px;
+  padding: 18px;
+  display: none;
+  z-index: 80;
+}
+
+.dropdown.show { display: block; }
+
+.dropdown h3 {
+  font-size: 14px;
+  margin-bottom: 12px;
+}
+
+.dropdown .pwd-row {
+  display: flex;
+  gap: 10px;
+}
+
+.dropdown .logout-btn {
+  width: 100%;
+  margin-top: 14px;
+}
+
+.summary-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.guide-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(320px, 0.9fr);
+  gap: 16px;
+  margin-top: 22px;
+}
+
+.social-board {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.social-board-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.social-board-kicker {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.social-board-title {
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  margin-top: 6px;
+}
+
+.social-board-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.06);
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.social-board-desc {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.social-board-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.social-metric {
+  padding: 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.social-metric .label {
+  color: var(--muted);
+  font-size: 11px;
+  margin-bottom: 6px;
+}
+
+.social-metric .value {
+  font-size: 24px;
+  line-height: 1.05;
+  font-weight: 800;
+}
+
+.social-metric .value.ok { color: var(--ok); }
+.social-metric .value.warn { color: var(--warn); }
+.social-metric .value.danger { color: var(--danger); }
+.social-metric .value.info { color: #2563eb; }
+.social-metric .value.muted { color: #94a3b8; }
+
+.social-board-foot {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.social-board-foot strong {
+  color: var(--text-soft);
+}
+
+.switcher-shell {
+  position: relative;
+  overflow: hidden;
+  padding: 22px;
+  margin-bottom: 18px;
+}
+
+.switcher-shell::after {
+  content: "";
+  position: absolute;
+  right: -36px;
+  top: -72px;
+  width: 200px;
+  height: 200px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.04);
+}
+
+.switcher-head {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: flex-end;
+  margin-bottom: 16px;
+}
+
+.switcher-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.switcher-head h2 {
+  margin-top: 8px;
+  font-size: 26px;
+  letter-spacing: -0.03em;
+}
+
+.switcher-head p {
+  margin-top: 8px;
+  color: var(--muted);
+  line-height: 1.65;
+  max-width: 720px;
+}
+
+.switcher-note {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 auto;
+  align-self: flex-start;
+  padding: 10px 14px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--surface-muted);
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.service-switcher {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.service-toggle {
+  position: relative;
+  overflow: hidden;
+  text-align: left;
+  padding: 20px;
+  border-radius: 22px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.90), rgba(248, 250, 252, 0.78)),
+    radial-gradient(circle at top right, rgba(15, 23, 42, 0.04), transparent 42%);
+  cursor: pointer;
+  transition:
+    transform .18s ease,
+    box-shadow .18s ease,
+    border-color .18s ease,
+    background .18s ease;
+}
+
+.service-toggle::before {
+  content: "";
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  top: 0;
+  height: 4px;
+  border-radius: 0 0 999px 999px;
+  transform: scaleX(0.28);
+  transform-origin: left center;
+  opacity: 0;
+  transition: transform .18s ease, opacity .18s ease;
+}
+
+.service-toggle::after {
+  content: "";
+  position: absolute;
+  inset: auto -36px -60px auto;
+  width: 170px;
+  height: 170px;
+  border-radius: 999px;
+  opacity: .60;
+}
+
+.service-toggle:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 20px 44px rgba(15, 23, 42, 0.12);
+}
+
+.service-toggle[data-service="tavily"]::before {
+  background: linear-gradient(90deg, #0f766e, #14b8a6);
+}
+
+.service-toggle[data-service="firecrawl"]::before {
+  background: linear-gradient(90deg, #b45309, #fb923c);
+}
+
+.service-toggle[data-service="tavily"]::after {
+  background: var(--tavily-soft);
+}
+
+.service-toggle[data-service="firecrawl"]::after {
+  background: var(--firecrawl-soft);
+}
+
+.service-toggle.is-active[data-service="tavily"] {
+  border-color: rgba(15, 118, 110, 0.22);
+  background:
+    linear-gradient(135deg, rgba(15, 118, 110, 0.16), rgba(255, 255, 255, 0.94)),
+    radial-gradient(circle at top right, rgba(15, 118, 110, 0.12), transparent 40%);
+  box-shadow:
+    0 24px 56px rgba(15, 23, 42, 0.14),
+    0 0 0 1px rgba(15, 118, 110, 0.10);
+}
+
+.service-toggle.is-active[data-service="firecrawl"] {
+  border-color: rgba(180, 83, 9, 0.22);
+  background:
+    linear-gradient(135deg, rgba(180, 83, 9, 0.16), rgba(255, 255, 255, 0.94)),
+    radial-gradient(circle at top right, rgba(180, 83, 9, 0.12), transparent 40%);
+  box-shadow:
+    0 24px 56px rgba(15, 23, 42, 0.14),
+    0 0 0 1px rgba(180, 83, 9, 0.10);
+}
+
+.service-toggle.is-active::before {
+  opacity: 1;
+  transform: scaleX(1);
+}
+
+.service-toggle-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.service-toggle-title {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.service-toggle-title strong {
+  font-size: 24px;
+  letter-spacing: -0.03em;
+}
+
+.service-toggle-title span {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.service-toggle-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.service-toggle.is-active .service-toggle-status {
+  color: var(--text);
+  background: rgba(15, 23, 42, 0.08);
+}
+
+.service-toggle-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.service-toggle-metric {
+  position: relative;
+  z-index: 1;
+  padding: 12px;
+  border-radius: 16px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.service-toggle-metric .label {
+  color: var(--muted);
+  font-size: 11px;
+  margin-bottom: 4px;
+}
+
+.service-toggle-metric .value {
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1.1;
+}
+
+.service-toggle-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.service-toggle-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.06);
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.service-toggle-foot {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.service-toggle-arrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  color: var(--text-soft);
+  font-weight: 700;
+}
+
+.summary-box,
+.stat-box {
+  position: relative;
+  overflow: hidden;
+  padding: 18px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(255, 255, 255, 0.72));
+}
+
+.summary-box::after,
+.stat-box::after {
+  content: "";
+  position: absolute;
+  width: 110px;
+  height: 110px;
+  right: -28px;
+  bottom: -48px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.03);
+}
+
+.summary-box .label,
+.stat-box .label {
+  position: relative;
+  z-index: 1;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.summary-box .value,
+.stat-box .value {
+  position: relative;
+  z-index: 1;
+  font-size: 30px;
+  font-weight: 800;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+}
+
+.summary-box .hint,
+.stat-box .hint {
+  position: relative;
+  z-index: 1;
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 6px;
+  line-height: 1.5;
+}
+
+.service-panel {
+  position: relative;
+  margin-bottom: 18px;
+  overflow: hidden;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(248, 250, 252, 0.82));
+}
+
+.service-panel.is-inactive {
+  display: none;
+}
+
+.service-panel[data-service="tavily"] {
+  border-top: 6px solid var(--tavily);
+}
+
+.service-panel[data-service="firecrawl"] {
+  border-top: 6px solid var(--firecrawl);
+}
+
+.service-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 28px 28px 12px;
+  align-items: stretch;
+}
+
+.service-head h2 {
+  font-size: 32px;
+  margin: 12px 0 8px;
+  letter-spacing: -0.03em;
+}
+
+.service-head p {
+  color: var(--muted);
+  line-height: 1.6;
+  max-width: 760px;
+}
+
+.service-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: stretch;
+  min-width: 290px;
+  padding: 16px;
+  border-radius: 18px;
+  border: 1px solid var(--border);
+  background: var(--surface-muted);
+}
+
+.service-sync-meta {
+  font-size: 12px;
+  color: var(--muted);
+  text-align: left;
+  max-width: 360px;
+  line-height: 1.5;
+}
+
+.service-body {
+  padding: 0 28px 28px;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.section-grid {
+  display: grid;
+  grid-template-columns: 1.05fr 1.25fr;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.subcard {
+  padding: 18px;
+  border-radius: 18px;
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.84), rgba(255, 255, 255, 0.72));
+}
+
+.subcard h3 {
+  font-size: 17px;
+  margin-bottom: 6px;
+}
+
+.subcard .desc {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+  margin-bottom: 14px;
+}
+
+.inline-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 12px;
+}
+
+.mono {
+  font-family: "SFMono-Regular", Menlo, Consolas, monospace;
+}
+
+.api-shell {
+  position: relative;
+}
+
+.code-toolbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.code-toolbar .endpoint {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.code-block {
+  position: relative;
+  padding: 16px;
+  border-radius: 14px;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.form-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+input[type="text"],
+input[type="password"],
+textarea {
+  width: 100%;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.26);
+  background: rgba(255, 255, 255, 0.90);
+  padding: 10px 12px;
+  font-size: 14px;
+  color: var(--text);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.60);
+}
+
+textarea {
+  min-height: 96px;
+  resize: vertical;
+}
+
+.input-grow { flex: 1 1 220px; }
+
+.toggle-area {
+  margin-bottom: 14px;
+}
+
+.table-wrap {
+  overflow-x: auto;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+th, td {
+  padding: 12px;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.9);
+  vertical-align: top;
+}
+
+th {
+  color: var(--muted);
+  font-weight: 600;
+  text-align: left;
+  background: rgba(248, 250, 252, 0.95);
+}
+
+tr:last-child td { border-bottom: none; }
+
+.table-note {
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.table-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.quota-bar {
+  height: 6px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(148, 163, 184, 0.18);
+  margin-top: 6px;
+}
+
+.quota-bar-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--ok);
+}
+
+.quota-bar-fill.warn { background: var(--warn); }
+.quota-bar-fill.danger { background: var(--danger); }
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.tag-ok {
+  color: var(--ok);
+  background: rgba(21, 128, 61, 0.10);
+}
+
+.tag-off {
+  color: var(--danger);
+  background: rgba(220, 38, 38, 0.10);
+}
+
+.muted { color: var(--muted); }
+
+.auth {
+  width: min(420px, calc(100% - 32px));
+  margin: 120px auto;
+  padding: 28px;
+}
+
+.auth h2 {
+  font-size: 28px;
+  margin-bottom: 10px;
+}
+
+.auth p {
+  color: var(--muted);
+  line-height: 1.7;
+  margin-bottom: 18px;
+}
+
+.auth .stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.login-error {
+  color: var(--danger);
+  font-size: 13px;
+  margin-top: 8px;
+}
+
+@media (max-width: 1080px) {
+  .hero,
+  .service-head,
+  .section-grid,
+  .guide-shell {
+    grid-template-columns: 1fr;
+    display: grid;
+  }
+
+  .switcher-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .hero-side .user-menu {
+    align-self: flex-start;
+  }
+
+  .service-tools {
+    min-width: 0;
+  }
+
+  .service-sync-meta {
+    max-width: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .container { padding: 18px 14px 28px; }
+  .hero,
+  .service-head,
+  .service-body { padding-left: 18px; padding-right: 18px; }
+  .switcher-shell { padding: 18px; }
+  .service-panel .service-body { padding-bottom: 18px; }
+  .hero-focus-metrics,
+  .service-toggle-grid,
+  .social-board-grid { grid-template-columns: 1fr 1fr; }
+  .service-toggle-foot { align-items: flex-start; flex-direction: column; }
+  th, td { padding: 10px; }
+}
+
+/* Visual refresh: make the console feel like a polished public product instead of a raw admin table. */
+:root {
+  --bg: #f2eadf;
+  --bg-soft: #f7f1e8;
+  --surface: rgba(255, 249, 242, 0.88);
+  --surface-strong: rgba(255, 251, 247, 0.97);
+  --surface-muted: rgba(253, 245, 235, 0.8);
+  --text: #101826;
+  --text-soft: #223049;
+  --muted: #687588;
+  --border: rgba(28, 36, 54, 0.1);
+  --border-strong: rgba(28, 36, 54, 0.18);
+  --shadow: 0 28px 60px rgba(17, 24, 39, 0.08);
+  --shadow-lg: 0 38px 90px rgba(17, 24, 39, 0.16);
+  --radius: 30px;
+  --radius-sm: 16px;
+  --tavily: #0d7a73;
+  --tavily-soft: rgba(13, 122, 115, 0.12);
+  --firecrawl: #c46f1c;
+  --firecrawl-soft: rgba(196, 111, 28, 0.12);
+  --social: #5b78f6;
+  --social-soft: rgba(91, 120, 246, 0.12);
+  --ok: #0f8a56;
+  --warn: #d47a1e;
+  --danger: #dd4f43;
+}
+
+body {
+  font-family: "Avenir Next", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  background:
+    radial-gradient(circle at 12% 16%, rgba(13, 122, 115, 0.16), transparent 24%),
+    radial-gradient(circle at 88% 12%, rgba(196, 111, 28, 0.16), transparent 22%),
+    linear-gradient(180deg, #fbf6ef 0%, var(--bg) 100%);
+}
+
+body::before {
+  width: 420px;
+  height: 420px;
+  left: -160px;
+  bottom: 8vh;
+  background: rgba(13, 122, 115, 0.14);
+  filter: blur(88px);
+}
+
+body::after {
+  width: 360px;
+  height: 360px;
+  right: -120px;
+  top: 14vh;
+  background: rgba(196, 111, 28, 0.16);
+  filter: blur(74px);
+}
+
+h1,
+h2,
+h3,
+.hero-focus-name,
+.social-board-title,
+.service-toggle-title strong,
+.service-head h2,
+.auth h2 {
+  font-family: "Sora", "Avenir Next", "PingFang SC", sans-serif;
+}
+
+.mono {
+  font-family: "IBM Plex Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+}
+
+.card,
+.subcard,
+.summary-box,
+.stat-box,
+.service-toggle,
+.service-panel {
+  box-shadow: var(--shadow);
+}
+
+.card {
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(255, 253, 249, 0.95), rgba(252, 245, 236, 0.8));
+}
+
+.hero {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(135deg, rgba(11, 22, 39, 0.98), rgba(18, 37, 58, 0.95) 54%, rgba(32, 57, 84, 0.96)),
+    radial-gradient(circle at top right, rgba(132, 167, 255, 0.16), transparent 28%);
+  box-shadow: var(--shadow-lg);
+  color: #f8fafc;
+}
+
+.hero::before {
+  width: 320px;
+  height: 320px;
+  top: -130px;
+  right: 20%;
+  background: rgba(87, 128, 240, 0.18);
+  filter: blur(24px);
+}
+
+.hero::after {
+  width: 260px;
+  height: 260px;
+  bottom: -140px;
+  right: -50px;
+  background: rgba(233, 147, 58, 0.22);
+  filter: blur(16px);
+}
+
+.hero-copy h1 {
+  font-size: clamp(38px, 4.6vw, 54px);
+  line-height: 0.98;
+  margin-bottom: 14px;
+}
+
+.hero-copy p {
+  max-width: 700px;
+  color: rgba(231, 238, 246, 0.82);
+  font-size: 16px;
+  line-height: 1.78;
+}
+
+.hero-tags {
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.hero-tag {
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.09);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: rgba(248, 250, 252, 0.9);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.guide-shell {
+  gap: 18px;
+  margin-top: 28px;
+}
+
+.hero-lanes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 28px;
+}
+
+.hero-lane {
+  min-height: 154px;
+  padding: 18px;
+  border-radius: 22px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.10), rgba(255, 255, 255, 0.04));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.hero-lane-kicker {
+  display: inline-flex;
+  margin-bottom: 12px;
+  color: rgba(226, 232, 240, 0.68);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.hero-lane strong {
+  display: block;
+  margin-bottom: 8px;
+  color: #f8fafc;
+  font-family: "Sora", "Avenir Next", "PingFang SC", sans-serif;
+  font-size: 18px;
+  letter-spacing: -0.02em;
+}
+
+.hero-lane p {
+  color: rgba(226, 232, 240, 0.74);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.hero .subcard {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.04));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.hero .subcard h3,
+.hero .social-board-title,
+.hero .social-board-foot strong,
+.hero .code-toolbar .endpoint {
+  color: #f8fafc;
+}
+
+.hero .desc,
+.social-board-desc,
+.social-board-foot,
+.hero .inline-meta,
+.hero .inline-meta .mono {
+  color: rgba(226, 232, 240, 0.78);
+}
+
+.social-board-status,
+.hero-focus-status {
+  border-radius: 999px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.social-board-status {
+  background: rgba(87, 128, 240, 0.14);
+  border: 1px solid rgba(133, 165, 255, 0.18);
+  color: #d9e5ff;
+}
+
+.social-board-grid {
+  gap: 14px;
+}
+
+.social-metric {
+  border-radius: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.04));
+  backdrop-filter: blur(12px);
+}
+
+.social-metric .label {
+  color: rgba(226, 232, 240, 0.72);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.social-metric .value {
+  color: #f8fafc;
+  font-size: 27px;
+}
+
+.social-metric .value.ok { color: #a7f3d0; }
+.social-metric .value.warn { color: #fdba74; }
+.social-metric .value.danger { color: #fca5a5; }
+.social-metric .value.info { color: #bfdbfe; }
+.social-metric .value.muted { color: #cbd5e1; }
+
+.hero-focus {
+  border-radius: 28px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  background:
+    linear-gradient(180deg, rgba(255, 246, 232, 0.98), rgba(255, 252, 246, 0.94)),
+    radial-gradient(circle at top right, rgba(208, 122, 32, 0.08), transparent 42%);
+  box-shadow:
+    0 28px 70px rgba(4, 10, 19, 0.24),
+    inset 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+.hero-focus-kicker {
+  color: #7a5a35;
+}
+
+.hero-focus-status {
+  background: rgba(13, 122, 115, 0.1);
+  border: 1px solid rgba(13, 122, 115, 0.12);
+  color: var(--tavily);
+}
+
+.hero-focus-name {
+  font-size: 34px;
+  color: #121a28;
+}
+
+.hero-focus-desc,
+.hero-focus-foot {
+  color: #5f6d80;
+}
+
+.hero-focus-metric {
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(17, 24, 39, 0.08);
+}
+
+.hero-focus-metric .label {
+  color: #6f7c8f;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 10px;
+}
+
+.hero-focus-metric .value {
+  font-size: 28px;
+  color: #101826;
+}
+
+.user-btn {
+  min-width: 154px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.08);
+  color: #f8fafc;
+  backdrop-filter: blur(14px);
+}
+
+.user-btn .muted {
+  color: rgba(226, 232, 240, 0.72);
+}
+
+.dropdown {
+  border-radius: 22px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.96), rgba(24, 38, 61, 0.94));
+  color: #f8fafc;
+  box-shadow: var(--shadow-lg);
+}
+
+.dropdown h3 {
+  color: #f8fafc;
+}
+
+.dropdown input[type="password"] {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.14);
+  color: #f8fafc;
+}
+
+.summary-strip {
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.credit-strip {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(260px, 0.9fr);
+  gap: 18px;
+  align-items: center;
+  margin-bottom: 20px;
+  padding: 22px 24px;
+  border-radius: 26px;
+  border: 1px solid rgba(17, 24, 39, 0.08);
+  background:
+    linear-gradient(135deg, rgba(17, 28, 49, 0.96), rgba(36, 63, 100, 0.94)),
+    radial-gradient(circle at top right, rgba(145, 166, 255, 0.18), transparent 28%);
+  box-shadow: var(--shadow);
+  color: #f8fafc;
+}
+
+.credit-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.credit-kicker {
+  color: rgba(226, 232, 240, 0.72);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.credit-copy strong {
+  font-family: "Sora", "Avenir Next", "PingFang SC", sans-serif;
+  font-size: 24px;
+  letter-spacing: -0.03em;
+}
+
+.credit-copy p {
+  color: rgba(226, 232, 240, 0.78);
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.credit-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  width: fit-content;
+  margin-top: 2px;
+  color: #f8fafc;
+  text-decoration: none;
+  font-weight: 700;
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.10);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.credit-link:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.credit-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.credit-pill {
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.09);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.credit-pill .label {
+  color: rgba(226, 232, 240, 0.7);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+
+.credit-pill .value {
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.summary-box,
+.stat-box {
+  border-radius: 24px;
+  border: 1px solid rgba(17, 24, 39, 0.08);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(255, 247, 239, 0.84));
+}
+
+.summary-box::before,
+.stat-box::before {
+  content: "";
+  position: absolute;
+  left: 18px;
+  right: 18px;
+  top: 0;
+  height: 5px;
+  border-radius: 0 0 999px 999px;
+  background: linear-gradient(90deg, rgba(87, 128, 240, 0.86), rgba(13, 122, 115, 0.8));
+}
+
+#global-summary .summary-box:nth-child(2)::before,
+#global-summary .summary-box:nth-child(4)::before {
+  background: linear-gradient(90deg, rgba(196, 111, 28, 0.92), rgba(233, 147, 58, 0.82));
+}
+
+#global-summary .summary-box:nth-child(5)::before,
+#global-summary .summary-box:nth-child(6)::before {
+  background: linear-gradient(90deg, rgba(87, 128, 240, 0.92), rgba(120, 142, 244, 0.82));
+}
+
+.summary-box .label,
+.stat-box .label {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 11px;
+}
+
+.switcher-shell {
+  border: 1px solid rgba(17, 24, 39, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(252, 246, 238, 0.86)),
+    radial-gradient(circle at top right, rgba(87, 128, 240, 0.1), transparent 24%);
+  padding: 28px;
+}
+
+.switcher-shell::after {
+  width: 260px;
+  height: 260px;
+  right: -70px;
+  top: -100px;
+  background: rgba(87, 128, 240, 0.08);
+}
+
+.switcher-eyebrow {
+  color: #5b6574;
+}
+
+.switcher-note {
+  border-radius: 18px;
+  background: rgba(12, 21, 36, 0.92);
+  color: #f8fafc;
+  border-color: rgba(12, 21, 36, 0.92);
+}
+
+.service-switcher {
+  gap: 18px;
+}
+
+.service-toggle {
+  min-height: 282px;
+  padding: 24px;
+  border-radius: 28px;
+  border: 1px solid rgba(17, 24, 39, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(252, 246, 238, 0.88)),
+    radial-gradient(circle at top right, rgba(17, 24, 39, 0.03), transparent 38%);
+}
+
+.service-toggle:hover {
+  transform: translateY(-4px) scale(1.01);
+  box-shadow: 0 24px 58px rgba(17, 24, 39, 0.12);
+}
+
+.service-chip[data-service="social"] {
+  background: var(--social-soft);
+  color: var(--social);
+  border: 1px solid rgba(91, 120, 246, 0.18);
+}
+
+.service-toggle[data-service="social"]::before {
+  background: linear-gradient(90deg, #5b78f6, #91a6ff);
+}
+
+.service-toggle[data-service="social"]::after {
+  background: var(--social-soft);
+}
+
+.service-toggle.is-active[data-service="social"] {
+  border-color: rgba(91, 120, 246, 0.22);
+  background:
+    linear-gradient(135deg, rgba(91, 120, 246, 0.15), rgba(255, 255, 255, 0.95)),
+    radial-gradient(circle at top right, rgba(91, 120, 246, 0.12), transparent 40%);
+  box-shadow:
+    0 24px 56px rgba(15, 23, 42, 0.14),
+    0 0 0 1px rgba(91, 120, 246, 0.10);
+}
+
+.service-toggle-title span {
+  line-height: 1.65;
+}
+
+.service-toggle-status {
+  background: rgba(17, 24, 39, 0.05);
+  color: #475467;
+}
+
+.service-toggle-grid {
+  gap: 14px;
+}
+
+.service-toggle-metric {
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(17, 24, 39, 0.08);
+}
+
+.service-toggle-metric .label {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 10px;
+}
+
+.service-toggle-badge {
+  background: rgba(17, 24, 39, 0.06);
+}
+
+.service-toggle-arrow {
+  padding: 7px 11px;
+  border-radius: 999px;
+  background: rgba(17, 24, 39, 0.06);
+}
+
+.service-panel {
+  border-radius: 30px;
+  border-top: none;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(252, 246, 238, 0.88));
+}
+
+.service-panel::before {
+  content: "";
+  position: absolute;
+  left: 26px;
+  right: 26px;
+  top: 0;
+  height: 6px;
+  border-radius: 0 0 999px 999px;
+}
+
+.service-panel[data-service="tavily"]::before {
+  background: linear-gradient(90deg, #0d7a73, #3cc7b0);
+}
+
+.service-panel[data-service="firecrawl"]::before {
+  background: linear-gradient(90deg, #c46f1c, #f3a250);
+}
+
+.service-panel[data-service="social"]::before {
+  background: linear-gradient(90deg, #5b78f6, #91a6ff);
+}
+
+.service-head {
+  padding: 32px 32px 16px;
+}
+
+.service-head p {
+  max-width: 820px;
+  font-size: 14px;
+}
+
+.service-tools {
+  border-radius: 20px;
+  border: 1px solid rgba(17, 24, 39, 0.08);
+  background: linear-gradient(180deg, rgba(17, 24, 39, 0.03), rgba(255, 255, 255, 0.86));
+}
+
+.service-body {
+  padding: 0 32px 32px;
+}
+
+.subcard {
+  border-radius: 22px;
+  border: 1px solid rgba(17, 24, 39, 0.08);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(252, 247, 241, 0.88));
+}
+
+.code-block {
+  border-radius: 18px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  background: linear-gradient(180deg, #0d1525, #152136);
+}
+
+.table-wrap {
+  border-radius: 18px;
+  border: 1px solid rgba(17, 24, 39, 0.08);
+  background: rgba(255, 255, 255, 0.9);
+}
+
+th {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 11px;
+}
+
+input[type="text"],
+input[type="password"],
+textarea {
+  border-radius: 14px;
+  border: 1px solid rgba(17, 24, 39, 0.12);
+  background: rgba(255, 255, 255, 0.96);
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+input[type="text"]:focus,
+input[type="password"]:focus,
+textarea:focus {
+  outline: none;
+  border-color: rgba(87, 128, 240, 0.44);
+  box-shadow: 0 0 0 4px rgba(87, 128, 240, 0.12);
+}
+
+.btn {
+  border-radius: 14px;
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, #111c31, #263f64);
+}
+
+.btn-primary:hover {
+  background: linear-gradient(135deg, #15233b, #31527f);
+}
+
+.btn-soft {
+  background: rgba(17, 24, 39, 0.05);
+}
+
+.auth {
+  width: min(480px, calc(100% - 32px));
+  margin: 12vh auto;
+  padding: 32px;
+  border-radius: 32px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background:
+    linear-gradient(135deg, rgba(11, 22, 39, 0.98), rgba(18, 37, 58, 0.96) 58%, rgba(32, 57, 84, 0.94)),
+    radial-gradient(circle at top right, rgba(133, 165, 255, 0.14), transparent 26%);
+  color: #f8fafc;
+  box-shadow: var(--shadow-lg);
+}
+
+.auth-kicker {
+  display: inline-flex;
+  align-items: center;
+  padding: 7px 12px;
+  margin-bottom: 14px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(248, 250, 252, 0.88);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.auth h2 {
+  font-size: 38px;
+  line-height: 1;
+  margin-bottom: 12px;
+}
+
+.auth p {
+  color: rgba(226, 232, 240, 0.78);
+  margin-bottom: 20px;
+}
+
+.auth input[type="password"] {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.16);
+  color: #f8fafc;
+}
+
+.auth input[type="password"]::placeholder {
+  color: rgba(226, 232, 240, 0.58);
+}
+
+.auth .btn-primary {
+  background: linear-gradient(135deg, #ed9e48, #f2863d);
+  color: #122033;
+}
+
+.auth .btn-primary:hover {
+  background: linear-gradient(135deg, #f3ad61, #f5904a);
+}
+
+.login-error {
+  color: #fecaca;
+}
+
+.hero,
+.summary-box,
+.switcher-shell,
+.service-panel {
+  animation: rise-in 0.58s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 1080px) {
+  .hero {
+    padding: 24px;
+  }
+
+  .guide-shell,
+  .hero-lanes {
+    margin-top: 20px;
+  }
+
+  .hero-lanes {
+    grid-template-columns: 1fr;
+  }
+
+  .credit-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .service-toggle {
+    min-height: auto;
+  }
+}
+
+@media (max-width: 720px) {
+  .auth {
+    margin: 8vh auto;
+    padding: 24px;
+  }
+
+  .hero-copy h1 {
+    font-size: 34px;
+  }
+
+  .hero,
+  .switcher-shell,
+  .service-body,
+  .service-head {
+    padding-left: 18px;
+    padding-right: 18px;
+  }
+
+  .summary-strip {
+    gap: 12px;
+  }
+
+  .summary-box,
+  .stat-box,
+  .subcard {
+    border-radius: 20px;
+  }
+}
+</style>
+</head>
+<body>
+
+<div id="login-box" class="auth card">
+  <div class="auth-kicker">MySearch Proxy</div>
+  <h2>Search Infrastructure Console</h2>
+  <p>把 Tavily、Firecrawl 和 Social / X 接入放进同一块工作台里，适合你自己用，也适合直接公开给团队或社区部署。</p>
+  <form class="stack" onsubmit="doLogin(event)">
+    <input type="text" name="proxy-admin-user" value="admin" autocomplete="username" tabindex="-1" aria-hidden="true" style="position:absolute;opacity:0;pointer-events:none;height:0">
+    <input type="password" id="pwd-input" placeholder="输入管理密码" autocomplete="current-password">
+    <button type="submit" class="btn btn-primary">进入控制台</button>
+  </form>
+  <p id="login-err" class="login-error hidden"></p>
+</div>
+
+<div id="dashboard" class="hidden">
+  <div class="container">
+    <header class="hero card">
+      <div class="hero-copy">
+        <div class="hero-tags">
+          <span class="hero-tag">独立 Key 池</span>
+          <span class="hero-tag">官方额度同步</span>
+          <span class="hero-tag">MySearch 兼容输出</span>
+          <span class="hero-tag">Social / X Router</span>
+        </div>
+        <h1>把搜索基础设施做成真正可交付的工作台</h1>
+        <p>这里不是单纯的 key 面板，而是把 Tavily、Firecrawl 和 Social / X 路由放到统一控制台里：同一眼看清独立 Key 池、Token 发放、官方额度同步、compatible 网关接入，以及 MySearch 的最终接线方式。</p>
+
+        <section class="hero-lanes">
+          <article class="hero-lane">
+            <span class="hero-lane-kicker">Router</span>
+            <strong>Tavily 做发现</strong>
+            <p>适合新闻、快速 answer、网页线索收集，放在 MySearch 的第一层路由里。</p>
+          </article>
+          <article class="hero-lane">
+            <span class="hero-lane-kicker">Depth</span>
+            <strong>Firecrawl 做抓取</strong>
+            <p>文档站、GitHub、PDF、pricing 和 changelog 这类正文内容，交给 Firecrawl 更稳。</p>
+          </article>
+          <article class="hero-lane">
+            <span class="hero-lane-kicker">Social</span>
+            <strong>Social / X 做舆情</strong>
+            <p>兼容 grok2api 和 xAI-compatible 搜索，把 X 结果统一整理成 MySearch 可直接消费的结构。</p>
+          </article>
+        </section>
+      </div>
+      <div class="hero-side">
+        <div class="hero-focus" id="hero-focus"></div>
+        <div class="user-menu">
+          <button class="user-btn" onclick="toggleDropdown()">
+            Admin
+            <span class="muted">密码 / 退出</span>
+          </button>
+          <div class="dropdown card" id="user-dropdown">
+            <h3>修改控制台密码</h3>
+            <form class="pwd-row" onsubmit="changePwd(event)">
+              <input type="text" name="proxy-admin-user-reset" value="admin" autocomplete="username" tabindex="-1" aria-hidden="true" style="position:absolute;opacity:0;pointer-events:none;height:0">
+              <input type="password" id="new-pwd" placeholder="新密码（至少 4 位）" autocomplete="new-password">
+              <button type="submit" class="btn btn-primary">保存</button>
+            </form>
+            <button type="button" class="btn btn-danger logout-btn" onclick="logout()">退出登录</button>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <section class="summary-strip" id="global-summary"></section>
+
+    <section class="credit-strip">
+      <div class="credit-copy">
+        <span class="credit-kicker">Powered by grok2api</span>
+        <strong>Social / X 工作台当前默认调用 grok2api</strong>
+        <p>这部分能力基于 grok2api 提供的兼容接口和后台 token 状态完成接线。MySearch 的 Social / X 路由在这里向 grok2api 项目致谢，并保留它作为默认兼容实现来源。</p>
+        <a
+          class="credit-link mono"
+          href="https://github.com/chenyme/grok2api"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          github.com/chenyme/grok2api
+        </a>
+      </div>
+      <div class="credit-meta">
+        <div class="credit-pill">
+          <div class="label">当前用途</div>
+          <div class="value">X Search Compatible</div>
+        </div>
+        <div class="credit-pill">
+          <div class="label">感谢项目</div>
+          <div class="value">grok2api</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="switcher-shell card">
+      <div class="switcher-head">
+        <div>
+          <span class="switcher-eyebrow">Workspace Switcher</span>
+          <h2>一屏切换不同搜索引擎工作台</h2>
+          <p>顶部负责在 Tavily、Firecrawl 和 Social / X 之间切换，下面只展开当前工作台的完整操作区。信息密度保留，但首屏优先级更清楚。</p>
+        </div>
+        <div class="switcher-note" id="switcher-note">已记住上次打开的工作台</div>
+      </div>
+      <section class="service-switcher" id="service-switcher"></section>
+    </section>
+
+    <div id="services-root"></div>
+  </div>
+</div>
+
+<script>
+const STORAGE_KEY = 'multi_service_proxy_pwd';
+const LEGACY_STORAGE_KEY = 'tavily_proxy_pwd';
+const ACTIVE_SERVICE_KEY = 'multi_service_proxy_active_service';
+const API = '';
+const SERVICE_META = {
+  tavily: {
+    label: 'Tavily',
+    emailPrefix: 'tavily-',
+    tokenPrefix: 'tvly-',
+    keyPlaceholder: 'tvly-xxxxxxxx',
+    importPlaceholder: '支持粘贴 email,password,tvly-xxx,timestamp 或仅 tvly-xxx，每行一条',
+    quotaSource: '真实额度来自 Tavily 官方 GET /usage',
+    routeHint: '代理端点: POST /api/search, POST /api/extract',
+    syncButton: '同步 Tavily 额度',
+  },
+  firecrawl: {
+    label: 'Firecrawl',
+    emailPrefix: 'fc-',
+    tokenPrefix: 'fctk-',
+    keyPlaceholder: 'fc-xxxxxxxx',
+    importPlaceholder: '支持粘贴 email,password,fc-xxx,timestamp 或仅 fc-xxx，每行一条',
+    quotaSource: '真实额度来自 Firecrawl /v2/team/credit-usage',
+    routeHint: '代理端点: /firecrawl/*，例如 POST /firecrawl/v2/scrape',
+    syncButton: '同步 Firecrawl 额度',
+  },
+};
+
+const WORKSPACE_META = {
+  ...SERVICE_META,
+  social: {
+    label: 'Social / X',
+    emailPrefix: 'X search',
+    tokenPrefix: 'shared auth',
+    routeHint: '代理端点: POST /social/search',
+    quotaSource: 'grok2api / xAI-compatible social router',
+  },
+};
+
+let PWD = localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY) || '';
+let activeService = localStorage.getItem(ACTIVE_SERVICE_KEY) || 'tavily';
+let latestServices = {};
+let latestSocial = {};
+
+function socialModeLabel(mode) {
+  if (mode === 'admin-auto') return '后台自动继承';
+  if (mode === 'hybrid') return '后台继承 + 手动覆写';
+  return '手动模式';
+}
+
+function buildSocialProxyEnv(social) {
+  const baseUrl = social.upstream_base_url || 'https://media.example.com/v1';
+  const adminBaseUrl = social.admin_base_url || baseUrl.replace(/\/v1$/, '');
+  return `# 推荐：只填 grok2api 后台地址和 app_key，proxy 会自动继承 app.api_key 与 token 池
+SOCIAL_GATEWAY_UPSTREAM_BASE_URL=${baseUrl}
+SOCIAL_GATEWAY_ADMIN_BASE_URL=${adminBaseUrl}
+SOCIAL_GATEWAY_ADMIN_APP_KEY=YOUR_GROK2API_APP_KEY
+SOCIAL_GATEWAY_MODEL=grok-4.1-fast
+
+# 可选：只有你想覆写默认行为时才需要
+# SOCIAL_GATEWAY_UPSTREAM_API_KEY=
+# SOCIAL_GATEWAY_TOKEN=`;
+}
+
+function buildSocialMySearchEnv(social) {
+  const baseUrl = location.origin;
+  const token = social.client_token || 'YOUR_SOCIAL_GATEWAY_TOKEN';
+  return `MYSEARCH_TAVILY_BASE_URL=${baseUrl}
+MYSEARCH_TAVILY_SEARCH_PATH=/api/search
+MYSEARCH_TAVILY_EXTRACT_PATH=/api/extract
+
+MYSEARCH_FIRECRAWL_BASE_URL=${baseUrl}
+MYSEARCH_FIRECRAWL_SEARCH_PATH=/firecrawl/v2/search
+MYSEARCH_FIRECRAWL_SCRAPE_PATH=/firecrawl/v2/scrape
+
+MYSEARCH_XAI_SEARCH_MODE=compatible
+MYSEARCH_XAI_SOCIAL_BASE_URL=${baseUrl}
+MYSEARCH_XAI_SOCIAL_SEARCH_PATH=/social/search
+MYSEARCH_XAI_API_KEY=${token}`;
+}
+
+function renderSocialBoard(social) {
+  const stats = social?.stats || {};
+  const mode = socialModeLabel(social?.mode || 'manual');
+  const healthy = Boolean(social?.admin_connected || social?.upstream_key_configured);
+  const statusText = healthy ? (social?.admin_connected ? '已接入 grok2api 后台' : '已配置 social 代理') : '等待配置';
+  const foot = social?.admin_connected
+    ? `当前通过 grok2api 后台自动同步 token 状态与剩余额度。来源：${social.token_source || 'grok2api app.api_key'}。`
+    : social?.upstream_key_configured
+      ? '当前可转发 social 搜索，但还没有拿到 grok2api 后台统计。补上后台 app_key 后，这里会自动变成实时面板。'
+      : '还没有拿到 social 上游配置。只要补齐 SOCIAL_GATEWAY_ADMIN_* 或手动 SOCIAL_GATEWAY_*，这里就会显示实时状态。';
+  const errorLine = social?.error
+    ? `<div class="social-board-foot" style="color: var(--warn)">最近错误：${escapeHtml(social.error)}</div>`
+    : '';
+
+  document.getElementById('social-board').innerHTML = `
+    <div class="social-board-top">
+      <div>
+        <div class="social-board-kicker">Social / X 状态</div>
+        <div class="social-board-title">Social / X Router</div>
+      </div>
+      <div class="social-board-status">${mode}</div>
+    </div>
+    <div class="social-board-desc">
+      这里展示的是 Social 路由能力本身。底层可以对接 grok2api 后台，也可以走别的 xAI-compatible 上游，但对 MySearch 来说统一都是同一套 Social / X 工作台。
+    </div>
+    <div class="social-board-grid">
+      <div class="social-metric">
+        <div class="label">Token 总数</div>
+        <div class="value">${fmtNum(stats.token_total || 0)}</div>
+      </div>
+      <div class="social-metric">
+        <div class="label">Token 正常</div>
+        <div class="value ok">${fmtNum(stats.token_normal || 0)}</div>
+      </div>
+      <div class="social-metric">
+        <div class="label">Token 限流</div>
+        <div class="value warn">${fmtNum(stats.token_limited || 0)}</div>
+      </div>
+      <div class="social-metric">
+        <div class="label">Token 失效</div>
+        <div class="value danger">${fmtNum(stats.token_invalid || 0)}</div>
+      </div>
+      <div class="social-metric">
+        <div class="label">Chat 剩余</div>
+        <div class="value">${fmtNum(stats.chat_remaining || 0)}</div>
+      </div>
+      <div class="social-metric">
+        <div class="label">Image 剩余</div>
+        <div class="value info">${fmtNum(stats.image_remaining || 0)}</div>
+      </div>
+      <div class="social-metric">
+        <div class="label">Video 剩余</div>
+        <div class="value muted">${stats.video_remaining === null ? '无法统计' : fmtNum(stats.video_remaining)}</div>
+      </div>
+      <div class="social-metric">
+        <div class="label">总调用次数</div>
+        <div class="value">${fmtNum(stats.total_calls || 0)}</div>
+      </div>
+    </div>
+    <div class="social-board-foot">
+      <strong>${statusText}</strong> ${foot}
+    </div>
+    ${errorLine}
+  `;
+}
+
+function renderSocialIntegration(social) {
+  const mode = socialModeLabel(social?.mode || 'manual');
+  const source = social?.token_source || 'not_configured';
+  const proxyConfigured = Boolean(social?.upstream_key_configured);
+  const clientConfigured = Boolean(social?.client_auth_configured);
+  const authLabel = clientConfigured ? '已就绪' : '未配置';
+  const upstreamBase = social?.upstream_base_url || 'https://media.example.com/v1';
+
+  document.getElementById('social-integration').innerHTML = `
+    <h3>Social / X 接入</h3>
+    <p class="desc">` + 
+      `现在 proxy 支持两种 social 模式：手动填 ` +
+      '`SOCIAL_GATEWAY_*`' +
+      `，或者只填 ` +
+      '`SOCIAL_GATEWAY_ADMIN_BASE_URL + SOCIAL_GATEWAY_ADMIN_APP_KEY`' +
+      `，后台自动继承 grok2api 的 ` +
+      '`app.api_key`' +
+      ` 和 token 池。` +
+    `</p>
+    <div class="inline-meta">
+      <span>Mode: <b class="mono">${mode}</b></span>
+      <span>Upstream: <b class="mono">${escapeHtml(upstreamBase)}</b></span>
+      <span>Token 来源: <b class="mono">${escapeHtml(source)}</b></span>
+      <span>客户端鉴权: <b class="mono">${escapeHtml(authLabel)}</b></span>
+    </div>
+    <div class="code-toolbar">
+      <div class="endpoint">${proxyConfigured ? 'proxy 已拿到上游可用 key' : 'proxy 还没拿到上游 key'} · ${clientConfigured ? '客户端可直接调 /social/search' : '客户端 token 未配置'}</div>
+      <button class="btn btn-sm" onclick="copyCode('social-proxy-env', this)">复制 Proxy 配置</button>
+    </div>
+    <pre class="code-block mono" id="social-proxy-env"></pre>
+    <div class="code-toolbar" style="margin-top:12px">
+      <div class="endpoint">只要填当前站点根地址，MySearch 默认会自动追加 /social/search。</div>
+      <button class="btn btn-sm" onclick="copyCode('social-mysearch-env', this)">复制 MySearch 配置</button>
+    </div>
+    <pre class="code-block mono" id="social-mysearch-env"></pre>
+  `;
+
+  document.getElementById('social-proxy-env').textContent = buildSocialProxyEnv(social || {});
+  document.getElementById('social-mysearch-env').textContent = buildSocialMySearchEnv(social || {});
+}
+
+function headers() {
+  return {
+    'Content-Type': 'application/json',
+    'X-Admin-Password': PWD,
+  };
+}
+
+async function api(method, path, body) {
+  const options = { method, headers: headers() };
+  if (body !== undefined) {
+    options.body = JSON.stringify(body);
+  }
+
+  const response = await fetch(API + path, options);
+  const text = await response.text();
+  let payload = {};
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch {
+    payload = text ? { detail: text } : {};
+  }
+
+  if (response.status === 401) {
+    logout();
+    throw new Error('Unauthorized');
+  }
+
+  if (!response.ok) {
+    throw new Error(payload.detail || `HTTP ${response.status}`);
+  }
+
+  return payload;
+}
+
+function renderServiceShells() {
+  const providerHtml = Object.keys(SERVICE_META).map((service) => {
+    const meta = SERVICE_META[service];
+    return `
+      <section class="service-panel card" data-service="${service}">
+        <div class="service-head">
+          <div>
+            <span class="service-chip" data-service="${service}">${meta.label}</span>
+            <h2>${meta.label} 栏目</h2>
+            <p>邮箱别名前缀 ${meta.emailPrefix}，代理 Token 前缀 ${meta.tokenPrefix}。${meta.quotaSource}。</p>
+          </div>
+          <div class="service-tools">
+            <div id="sync-meta-${service}" class="service-sync-meta">等待同步状态...</div>
+            <button class="btn btn-soft" id="sync-btn-${service}" onclick="syncUsage('${service}', true)">${meta.syncButton}</button>
+          </div>
+        </div>
+        <div class="service-body">
+          <div class="stats-grid" id="overview-${service}"></div>
+
+          <div class="section-grid">
+            <div class="subcard api-shell">
+              <h3>调用方式</h3>
+              <p class="desc">${meta.routeHint}</p>
+              <div class="inline-meta">
+                <span>Base URL: <b class="mono" id="base-url-${service}"></b></span>
+                <span>代理 Token 前缀: <b class="mono">${meta.tokenPrefix}</b></span>
+              </div>
+              <div class="code-toolbar">
+                <div class="endpoint">${meta.quotaSource}</div>
+                <button class="btn btn-sm" onclick="copyCode('curl-example-${service}', this)">复制示例</button>
+              </div>
+              <pre class="code-block mono" id="curl-example-${service}"></pre>
+            </div>
+
+            <div class="subcard">
+              <h3>Token 池</h3>
+              <p class="desc">给业务侧发放代理 Token。Tavily 和 Firecrawl 分开创建、分开限流、分开统计。</p>
+              <div class="form-row">
+                <input class="input-grow" type="text" id="token-name-${service}" placeholder="Token 备注（可选）">
+                <button class="btn btn-primary" onclick="createToken('${service}')">创建 ${meta.label} Token</button>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Token</th>
+                      <th>备注</th>
+                      <th>配额 / 剩余</th>
+                      <th>代理统计</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="tokens-body-${service}"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div class="subcard">
+            <h3>API Key 池</h3>
+            <p class="desc">服务隔离存储，导入时会按当前栏目写入数据库。不会再和另一种服务共用一套 Key 池。</p>
+            <div class="form-row">
+              <input class="input-grow mono" type="text" id="single-key-${service}" placeholder="${meta.keyPlaceholder}">
+              <button class="btn btn-primary" onclick="addSingleKey('${service}')">添加 ${meta.label} Key</button>
+              <button class="btn btn-soft" onclick="toggleImport('${service}')">批量导入</button>
+            </div>
+            <div id="import-wrap-${service}" class="toggle-area hidden">
+              <textarea id="import-text-${service}" placeholder="${meta.importPlaceholder}"></textarea>
+              <div class="form-row" style="margin-top:10px">
+                <button class="btn btn-primary" onclick="importKeys('${service}')">导入到 ${meta.label} 池</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Key</th>
+                    <th>邮箱</th>
+                    <th>Key 额度</th>
+                    <th>账户额度</th>
+                    <th>代理统计</th>
+                    <th>状态</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="keys-body-${service}"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+    `;
+  }).join('');
+
+  const socialHtml = `
+    <section class="service-panel card" data-service="social">
+      <div class="service-head">
+        <div>
+          <span class="service-chip" data-service="social">Social / X</span>
+          <h2>Social / X 栏目</h2>
+          <p>这里收口的是 X / Social 搜索路由，不再把底层实现名字放成主标题。你看到的是 MySearch 的 Social 工作台，底层可以复用 grok2api 后台，也可以兼容别的 xAI-compatible 上游。</p>
+        </div>
+        <div class="service-tools">
+          <div id="sync-meta-social" class="service-sync-meta">等待 Social 状态...</div>
+          <div class="service-sync-meta">用于查看 token 池、剩余额度、调用次数和客户端接线方式。</div>
+        </div>
+      </div>
+      <div class="service-body">
+        <div class="stats-grid" id="overview-social"></div>
+        <div class="section-grid">
+          <div class="subcard social-board" id="social-board"></div>
+          <div class="subcard api-shell" id="social-integration"></div>
+        </div>
+      </div>
+    </section>
+  `;
+
+  document.getElementById('services-root').innerHTML = providerHtml + socialHtml;
+  renderSocialBoard({});
+  renderSocialIntegration({});
+  renderSocialWorkspace({});
+  renderHeroFocus({}, {});
+  renderServiceSwitcher({}, {});
+  applyActiveService();
+}
+
+function renderHeroFocus(services, social) {
+  const meta = WORKSPACE_META[activeService] || WORKSPACE_META.tavily;
+
+  if (activeService === 'social') {
+    const stats = social?.stats || {};
+    const syncLabel = socialModeLabel(social?.mode || 'manual');
+    const statusStyle = 'background: rgba(91, 120, 246, 0.12); border-color: rgba(91, 120, 246, 0.18); color: var(--social);';
+
+    document.getElementById('hero-focus').innerHTML = `
+      <div class="hero-focus-top">
+        <div>
+          <div class="hero-focus-kicker">Active Workspace</div>
+          <div class="hero-focus-name">${meta.label}</div>
+        </div>
+        <div class="hero-focus-status" style="${statusStyle}">${syncLabel}</div>
+      </div>
+      <div class="hero-focus-desc">
+        当前工作台已经切到 Social / X。这里优先展示社交搜索路由、token 池状态、剩余额度和客户端接线方式，不再把底层实现名字放在最显眼的位置。
+      </div>
+      <div class="hero-focus-metrics">
+        <div class="hero-focus-metric">
+          <div class="label">Token 总数</div>
+          <div class="value">${fmtNum(stats.token_total || 0)}</div>
+        </div>
+        <div class="hero-focus-metric">
+          <div class="label">Token 正常</div>
+          <div class="value">${fmtNum(stats.token_normal || 0)}</div>
+        </div>
+        <div class="hero-focus-metric">
+          <div class="label">Chat 剩余</div>
+          <div class="value">${fmtNum(stats.chat_remaining || 0)}</div>
+        </div>
+        <div class="hero-focus-metric">
+          <div class="label">总调用次数</div>
+          <div class="value">${fmtNum(stats.total_calls || 0)}</div>
+        </div>
+      </div>
+      <div class="hero-focus-foot">
+        ${meta.routeHint}。点击下方卡片切换工作台后，这里的焦点数据会立刻联动刷新。
+      </div>
+    `;
+    return;
+  }
+
+  const payload = services?.[activeService] || {};
+  const quota = payload.real_quota || {};
+  const overview = payload.overview || {};
+  const syncLabel = activeService === 'firecrawl' ? 'Credits Sync' : 'Usage Sync';
+  const statusStyle = activeService === 'firecrawl'
+    ? 'background: rgba(196, 111, 28, 0.12); border-color: rgba(196, 111, 28, 0.18); color: var(--firecrawl);'
+    : 'background: rgba(13, 122, 115, 0.1); border-color: rgba(13, 122, 115, 0.12); color: var(--tavily);';
+
+  document.getElementById('hero-focus').innerHTML = `
+    <div class="hero-focus-top">
+      <div>
+        <div class="hero-focus-kicker">Active Workspace</div>
+        <div class="hero-focus-name">${meta.label}</div>
+      </div>
+      <div class="hero-focus-status" style="${statusStyle}">${syncLabel}</div>
+    </div>
+    <div class="hero-focus-desc">
+      当前工作台已经切到 ${meta.label}。这一侧优先显示它的 Key 池、Token 发放、代理调用和官方额度同步结果。
+    </div>
+    <div class="hero-focus-metrics">
+      <div class="hero-focus-metric">
+        <div class="label">活跃 Key</div>
+        <div class="value">${fmtNum(payload.keys_active || 0)}</div>
+      </div>
+      <div class="hero-focus-metric">
+        <div class="label">代理 Token</div>
+        <div class="value">${fmtNum((payload.tokens || []).length)}</div>
+      </div>
+      <div class="hero-focus-metric">
+        <div class="label">今日调用</div>
+        <div class="value">${fmtNum(overview.today_count || 0)}</div>
+      </div>
+      <div class="hero-focus-metric">
+        <div class="label">真实剩余</div>
+        <div class="value">${fmtNum(quota.total_remaining ?? 0)}</div>
+      </div>
+    </div>
+    <div class="hero-focus-foot">
+      ${meta.routeHint}。点击下方卡片切换工作台后，这里的焦点数据会立刻联动刷新。
+    </div>
+  `;
+}
+
+function renderServiceSwitcher(services, social) {
+  const html = Object.entries(WORKSPACE_META).map(([service, meta]) => {
+    const isSocial = service === 'social';
+    const payload = isSocial ? {} : (services?.[service] || {});
+    const quota = payload.real_quota || {};
+    const socialStats = social?.stats || {};
+    const remaining = isSocial ? (socialStats.chat_remaining || 0) : (quota.total_remaining ?? 0);
+    const activeKeys = isSocial ? (socialStats.token_normal || 0) : (payload.keys_active || 0);
+    const tokenCount = isSocial ? (socialStats.token_total || 0) : ((payload.tokens || []).length);
+    const todayCount = isSocial ? (socialStats.total_calls || 0) : (payload.overview?.today_count || 0);
+    const badgeOne = isSocial ? 'X Search' : `账号 ${meta.emailPrefix}`;
+    const badgeTwo = isSocial ? 'compatible' : `Token ${meta.tokenPrefix}`;
+    const badgeThree = isSocial ? '自动继承' : '池子独立';
+    const foot = isSocial ? '统一 Social 路由 + 统一输出结构' : '独立 Key 池 + 独立额度同步';
+    const metricOneLabel = isSocial ? '可用 Token' : '活跃 Key';
+    const metricTwoLabel = 'Token';
+    const metricThreeLabel = isSocial ? '总调用' : '今日调用';
+    const metricFourLabel = isSocial ? 'Chat 剩余' : '真实剩余';
+
+    return `
+      <button
+        type="button"
+        class="service-toggle ${activeService === service ? 'is-active' : ''}"
+        data-service="${service}"
+        aria-pressed="${activeService === service ? 'true' : 'false'}"
+        onclick="setActiveService('${service}')"
+      >
+        <div class="service-toggle-top">
+          <div class="service-toggle-title">
+            <span class="service-chip" data-service="${service}">${meta.label}</span>
+            <strong>${meta.label}</strong>
+            <span>${meta.routeHint}</span>
+          </div>
+          <div class="service-toggle-status">${activeService === service ? '当前查看' : '点击切换'}</div>
+        </div>
+        <div class="service-toggle-grid">
+          <div class="service-toggle-metric">
+            <div class="label">${metricOneLabel}</div>
+            <div class="value">${fmtNum(activeKeys)}</div>
+          </div>
+          <div class="service-toggle-metric">
+            <div class="label">${metricTwoLabel}</div>
+            <div class="value">${fmtNum(tokenCount)}</div>
+          </div>
+          <div class="service-toggle-metric">
+            <div class="label">${metricThreeLabel}</div>
+            <div class="value">${fmtNum(todayCount)}</div>
+          </div>
+          <div class="service-toggle-metric">
+            <div class="label">${metricFourLabel}</div>
+            <div class="value">${fmtNum(remaining)}</div>
+          </div>
+        </div>
+        <div class="service-toggle-badges">
+          <span class="service-toggle-badge">${badgeOne}</span>
+          <span class="service-toggle-badge">${badgeTwo}</span>
+          <span class="service-toggle-badge">${badgeThree}</span>
+        </div>
+        <div class="service-toggle-foot">
+          <span>${foot}</span>
+          <span class="service-toggle-arrow">${activeService === service ? '正在查看' : '切换到此工作台'} →</span>
+        </div>
+      </button>
+    `;
+  }).join('');
+
+  document.getElementById('service-switcher').innerHTML = html;
+}
+
+function applyActiveService() {
+  if (!WORKSPACE_META[activeService]) {
+    activeService = 'tavily';
+  }
+
+  for (const service of Object.keys(WORKSPACE_META)) {
+    const panel = document.querySelector(`.service-panel[data-service="${service}"]`);
+    if (!panel) continue;
+    panel.classList.toggle('is-inactive', service !== activeService);
+  }
+
+  document.querySelectorAll('.service-toggle').forEach((item) => {
+    const isActive = item.dataset.service === activeService;
+    item.classList.toggle('is-active', isActive);
+    item.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+    const status = item.querySelector('.service-toggle-status');
+    if (status) {
+      status.textContent = isActive ? '当前查看' : '点击切换';
+    }
+    const arrow = item.querySelector('.service-toggle-arrow');
+    if (arrow) {
+      arrow.textContent = isActive ? '正在查看 →' : '切换到此工作台 →';
+    }
+  });
+
+  const switcherNote = document.getElementById('switcher-note');
+  if (switcherNote) {
+    switcherNote.textContent = `当前工作台：${WORKSPACE_META[activeService].label} · 已记住你的切换偏好`;
+  }
+
+  renderHeroFocus(latestServices, latestSocial);
+}
+
+function setActiveService(service) {
+  if (!WORKSPACE_META[service]) return;
+  activeService = service;
+  localStorage.setItem(ACTIVE_SERVICE_KEY, service);
+  applyActiveService();
+  const panel = document.querySelector(`.service-panel[data-service="${service}"]`);
+  if (panel) {
+    panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+}
+
+function toggleDropdown() {
+  document.getElementById('user-dropdown').classList.toggle('show');
+}
+
+function doLogin(event) {
+  event?.preventDefault?.();
+  const input = document.getElementById('pwd-input');
+  PWD = input.value.trim();
+  localStorage.setItem(STORAGE_KEY, PWD);
+  localStorage.removeItem(LEGACY_STORAGE_KEY);
+
+  api('GET', '/api/stats')
+    .then(() => {
+      document.getElementById('login-err').classList.add('hidden');
+      document.getElementById('login-box').classList.add('hidden');
+      document.getElementById('dashboard').classList.remove('hidden');
+      refresh();
+    })
+    .catch(() => {
+      document.getElementById('login-err').textContent = '密码错误，或管理 API 不可用。';
+      document.getElementById('login-err').classList.remove('hidden');
+    });
+}
+
+function logout() {
+  PWD = '';
+  localStorage.removeItem(STORAGE_KEY);
+  localStorage.removeItem(LEGACY_STORAGE_KEY);
+  document.getElementById('dashboard').classList.add('hidden');
+  document.getElementById('login-box').classList.remove('hidden');
+  document.getElementById('user-dropdown').classList.remove('show');
+}
+
+document.addEventListener('click', (event) => {
+  const menu = document.querySelector('.user-menu');
+  if (menu && !menu.contains(event.target)) {
+    document.getElementById('user-dropdown').classList.remove('show');
+  }
+});
+
+function fmtNum(value) {
+  if (value === null || value === undefined || value === '') {
+    return '--';
+  }
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric.toLocaleString() : String(value);
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function formatTime(iso) {
+  if (!iso) return '未同步';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '未同步';
+  return date.toLocaleString();
+}
+
+function quotaBar(used, limit) {
+  const safeLimit = Number(limit || 0);
+  const safeUsed = Number(used || 0);
+  if (!safeLimit) return '';
+  const pct = Math.min(100, (safeUsed / safeLimit) * 100);
+  const cls = pct >= 90 ? 'danger' : pct >= 70 ? 'warn' : '';
+  return `
+    <div class="quota-bar">
+      <div class="quota-bar-fill ${cls}" style="width:${pct}%"></div>
+    </div>
+  `;
+}
+
+function buildCurlExample(service, tokenValue) {
+  const baseUrl = location.origin;
+  const token = tokenValue || 'YOUR_PROXY_TOKEN';
+  if (service === 'firecrawl') {
+    return `# Firecrawl Scrape
+curl -X POST ${baseUrl}/firecrawl/v2/scrape \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer ${token}" \\
+  -d '{"url":"https://example.com","formats":["markdown"]}'
+
+# Firecrawl 额度查询
+curl -X GET ${baseUrl}/firecrawl/v2/team/credit-usage \\
+  -H "Authorization: Bearer ${token}"
+
+# 也支持 body 里传 api_key
+curl -X POST ${baseUrl}/firecrawl/v2/scrape \\
+  -H "Content-Type: application/json" \\
+  -d '{"api_key":"${token}","url":"https://example.com"}'`;
+  }
+
+  return `# Tavily Search
+curl -X POST ${baseUrl}/api/search \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer ${token}" \\
+  -d '{"query":"hello world","max_results":1}'
+
+# Tavily Extract
+curl -X POST ${baseUrl}/api/extract \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer ${token}" \\
+  -d '{"urls":["https://example.com"]}'
+
+# 也支持 body 里传 api_key
+curl -X POST ${baseUrl}/api/search \\
+  -H "Content-Type: application/json" \\
+  -d '{"api_key":"${token}","query":"hello world"}'`;
+}
+
+function renderGlobalSummary(services, social) {
+  const list = Object.values(services || {});
+  const totalKeys = list.reduce((sum, item) => sum + Number(item.keys_total || 0), 0);
+  const totalTokens = list.reduce((sum, item) => sum + Number((item.tokens || []).length), 0);
+  const todayCount = list.reduce((sum, item) => sum + Number(item.overview?.today_count || 0), 0);
+  const realRemaining = list.reduce((sum, item) => sum + Number(item.real_quota?.total_remaining || 0), 0);
+  const syncedKeys = list.reduce((sum, item) => sum + Number(item.real_quota?.synced_keys || 0), 0);
+  const socialStats = social?.stats || {};
+  const socialMode = socialModeLabel(social?.mode || 'manual');
+
+  document.getElementById('global-summary').innerHTML = `
+    <div class="summary-box">
+      <div class="label">代理 Token 总数</div>
+      <div class="value">${fmtNum(totalTokens)}</div>
+      <div class="hint">共 ${fmtNum(totalKeys)} 个已导入 Key，Tavily 和 Firecrawl 分别签发，不会混用</div>
+    </div>
+    <div class="summary-box">
+      <div class="label">今日代理调用</div>
+      <div class="value">${fmtNum(todayCount)}</div>
+      <div class="hint">来自本地 usage_logs 聚合统计</div>
+    </div>
+    <div class="summary-box">
+      <div class="label">真实剩余额度</div>
+      <div class="value">${fmtNum(realRemaining)}</div>
+      <div class="hint">已同步 ${fmtNum(syncedKeys)} 个 Key，来自两个池子的真实额度汇总</div>
+    </div>
+    <div class="summary-box">
+      <div class="label">Social / X Token</div>
+      <div class="value">${fmtNum(socialStats.token_total || 0)}</div>
+      <div class="hint">${social?.admin_connected ? `模式 ${socialMode}` : '等待 grok2api 后台接入'}</div>
+    </div>
+    <div class="summary-box">
+      <div class="label">Social Chat 剩余</div>
+      <div class="value">${fmtNum(socialStats.chat_remaining || 0)}</div>
+      <div class="hint">Image ${fmtNum(socialStats.image_remaining || 0)} · X Router 总调用 ${fmtNum(socialStats.total_calls || 0)}</div>
+    </div>
+  `;
+}
+
+function renderSyncMeta(service, payload) {
+  const quota = payload.real_quota || {};
+  const usageSync = payload.usage_sync || {};
+  const parts = [];
+
+  parts.push(`已同步 ${fmtNum(quota.synced_keys || 0)} / ${fmtNum(quota.total_keys || 0)} 个 Key`);
+  if ((quota.key_level_count || 0) > 0) {
+    parts.push(`Key 级额度 ${fmtNum(quota.key_level_count)}`);
+  }
+  if ((quota.account_fallback_count || 0) > 0) {
+    parts.push(`账户级回退 ${fmtNum(quota.account_fallback_count)}`);
+  }
+  if (quota.last_synced_at) {
+    parts.push(`最近同步 ${formatTime(quota.last_synced_at)}`);
+  }
+  if ((quota.error_keys || 0) > 0) {
+    parts.push(`错误 ${fmtNum(quota.error_keys)}`);
+  }
+  if ((usageSync.synced || 0) > 0 || (usageSync.errors || 0) > 0) {
+    parts.push(`本轮同步 ${fmtNum(usageSync.synced || 0)} 成功 / ${fmtNum(usageSync.errors || 0)} 失败`);
+  }
+
+  document.getElementById(`sync-meta-${service}`).textContent = parts.join(' · ');
+}
+
+function renderOverview(service, payload) {
+  const overview = payload.overview || {};
+  const quota = payload.real_quota || {};
+  const totalLimit = Number(quota.total_limit || 0);
+  const totalUsed = Number(quota.total_used || 0);
+  const totalRemaining = Number(quota.total_remaining || 0);
+  const remainStyle = totalLimit && totalUsed / totalLimit >= 0.9
+    ? 'color: var(--danger)'
+    : totalLimit && totalUsed / totalLimit >= 0.7
+      ? 'color: var(--warn)'
+      : 'color: var(--ok)';
+
+  document.getElementById(`overview-${service}`).innerHTML = `
+    <div class="stat-box">
+      <div class="label">真实总额度</div>
+      <div class="value">${fmtNum(totalLimit)}</div>
+      <div class="hint">${SERVICE_META[service].quotaSource}</div>
+    </div>
+    <div class="stat-box">
+      <div class="label">真实已用</div>
+      <div class="value">${fmtNum(totalUsed)}</div>
+      <div class="hint">按已同步 Key 汇总</div>
+    </div>
+    <div class="stat-box">
+      <div class="label">真实剩余</div>
+      <div class="value" style="${remainStyle}">${fmtNum(totalRemaining)}</div>
+      <div class="hint">${quotaBar(totalUsed, totalLimit) || '尚未获得完整上限信息'}</div>
+    </div>
+    <div class="stat-box">
+      <div class="label">Key 池状态</div>
+      <div class="value">${fmtNum(payload.keys_active || 0)} <span class="muted">/ ${fmtNum(payload.keys_total || 0)}</span></div>
+      <div class="hint">活跃 / 总数</div>
+    </div>
+    <div class="stat-box">
+      <div class="label">今日代理调用</div>
+      <div class="value">${fmtNum(overview.today_count || 0)}</div>
+      <div class="hint">成功 ${fmtNum(overview.today_success || 0)} / 失败 ${fmtNum(overview.today_failed || 0)}</div>
+    </div>
+    <div class="stat-box">
+      <div class="label">本月代理调用</div>
+      <div class="value">${fmtNum(overview.month_count || 0)}</div>
+      <div class="hint">成功 ${fmtNum(overview.month_success || 0)}</div>
+    </div>
+  `;
+}
+
+function renderSocialWorkspace(social) {
+  const stats = social?.stats || {};
+  const mode = socialModeLabel(social?.mode || 'manual');
+  const source = social?.token_source || 'not_configured';
+  const syncLine = [
+    mode,
+    `Token ${fmtNum(stats.token_total || 0)}`,
+    `Chat ${fmtNum(stats.chat_remaining || 0)}`,
+    `总调用 ${fmtNum(stats.total_calls || 0)}`,
+  ].join(' · ');
+
+  const syncMeta = document.getElementById('sync-meta-social');
+  if (syncMeta) {
+    syncMeta.textContent = social?.error ? `${syncLine} · 最近错误 ${social.error}` : syncLine;
+  }
+
+  document.getElementById('overview-social').innerHTML = `
+    <div class="stat-box">
+      <div class="label">工作模式</div>
+      <div class="value">${escapeHtml(mode)}</div>
+      <div class="hint">当前 Social / X 工作台的路由状态</div>
+    </div>
+    <div class="stat-box">
+      <div class="label">Token 正常 / 总数</div>
+      <div class="value">${fmtNum(stats.token_normal || 0)} <span class="muted">/ ${fmtNum(stats.token_total || 0)}</span></div>
+      <div class="hint">兼容上游 token 池实时汇总</div>
+    </div>
+    <div class="stat-box">
+      <div class="label">Chat 剩余</div>
+      <div class="value">${fmtNum(stats.chat_remaining || 0)}</div>
+      <div class="hint">Image ${fmtNum(stats.image_remaining || 0)} · Video ${stats.video_remaining === null ? '无法统计' : fmtNum(stats.video_remaining)}</div>
+    </div>
+    <div class="stat-box">
+      <div class="label">Token 来源</div>
+      <div class="value">${escapeHtml(source)}</div>
+      <div class="hint">${social?.admin_connected ? '当前已接入后台自动继承' : '当前为手动或混合模式'}</div>
+    </div>
+  `;
+}
+
+function renderApiExample(service, tokens) {
+  const firstToken = tokens && tokens.length ? tokens[0].token : 'YOUR_PROXY_TOKEN';
+  document.getElementById(`base-url-${service}`).textContent = location.origin;
+  document.getElementById(`curl-example-${service}`).textContent = buildCurlExample(service, firstToken);
+}
+
+function renderTokenQuota(token) {
+  const stats = token.stats || {};
+  const unlimited = !token.hourly_limit && !token.daily_limit && !token.monthly_limit;
+  if (unlimited) {
+    return '<div class="table-note"><b style="color: var(--ok)">无限制</b><br><span class="muted">当前未设置小时 / 日 / 月限额</span></div>';
+  }
+
+  const hourRemain = Number(token.hourly_limit || 0) - Number(stats.hour_count || 0);
+  const dayRemain = Number(token.daily_limit || 0) - Number(stats.today_count || 0);
+  const monthRemain = Number(token.monthly_limit || 0) - Number(stats.month_count || 0);
+  return `
+    <div class="table-note">小时 ${fmtNum(stats.hour_count || 0)} / ${fmtNum(token.hourly_limit || 0)}，剩余 ${fmtNum(hourRemain)}</div>
+    ${quotaBar(stats.hour_count || 0, token.hourly_limit || 0)}
+    <div class="table-note" style="margin-top:8px">今日 ${fmtNum(stats.today_count || 0)} / ${fmtNum(token.daily_limit || 0)}，剩余 ${fmtNum(dayRemain)}</div>
+    ${quotaBar(stats.today_count || 0, token.daily_limit || 0)}
+    <div class="table-note" style="margin-top:8px">本月 ${fmtNum(stats.month_count || 0)} / ${fmtNum(token.monthly_limit || 0)}，剩余 ${fmtNum(monthRemain)}</div>
+    ${quotaBar(stats.month_count || 0, token.monthly_limit || 0)}
+  `;
+}
+
+function renderTokens(service, tokens) {
+  const tbody = document.getElementById(`tokens-body-${service}`);
+  if (!tokens || tokens.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" class="muted">当前还没有 Token，先创建一个给下游使用。</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = tokens.map((token) => {
+    const stats = token.stats || {};
+    return `
+      <tr>
+        <td class="mono">${escapeHtml(token.token)}</td>
+        <td>${escapeHtml(token.name || '-')}</td>
+        <td>${renderTokenQuota(token)}</td>
+        <td class="table-note">
+          今日成功 ${fmtNum(stats.today_success || 0)} / 失败 ${fmtNum(stats.today_failed || 0)}<br>
+          本月成功 ${fmtNum(stats.month_success || 0)}<br>
+          小时调用 ${fmtNum(stats.hour_count || 0)}
+        </td>
+        <td>
+          <div class="table-actions">
+            <button class="btn btn-sm" onclick='copyText(${JSON.stringify(token.token)}, this)'>复制</button>
+            <button class="btn btn-sm btn-danger" onclick="delToken(${token.id})">删除</button>
+          </div>
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function renderKeyQuota(service, key) {
+  if (key.usage_key_limit !== null && key.usage_key_used !== null) {
+    const remain = key.usage_key_remaining ?? Math.max(0, key.usage_key_limit - key.usage_key_used);
+    return `
+      <div class="table-note">已用 ${fmtNum(key.usage_key_used)} / ${fmtNum(key.usage_key_limit)}</div>
+      <div class="table-note"><b style="color:${remain > 0 ? 'var(--ok)' : 'var(--danger)'}">剩余 ${fmtNum(remain)}</b></div>
+      ${quotaBar(key.usage_key_used, key.usage_key_limit)}
+      <div class="table-note muted" style="margin-top:6px">同步 ${formatTime(key.usage_synced_at)}</div>
+      ${key.usage_sync_error ? `<div class="table-note" style="color: var(--warn); margin-top: 6px">最近错误: ${escapeHtml(key.usage_sync_error)}</div>` : ''}
+    `;
+  }
+
+  if (service === 'firecrawl' && key.usage_synced_at) {
+    return `
+      <div class="table-note muted">Firecrawl 当前主要返回账户级 credits。</div>
+      <div class="table-note muted">单 Key 独立限额请看右侧账户额度。</div>
+      ${key.usage_sync_error ? `<div class="table-note" style="color: var(--warn); margin-top: 6px">最近错误: ${escapeHtml(key.usage_sync_error)}</div>` : ''}
+    `;
+  }
+
+  if (key.usage_sync_error) {
+    return `<div class="table-note" style="color: var(--warn)">同步失败：${escapeHtml(key.usage_sync_error)}</div>`;
+  }
+
+  return '<span class="muted">未同步</span>';
+}
+
+function renderAccountQuota(service, key) {
+  if (key.usage_account_limit !== null && key.usage_account_used !== null) {
+    const remain = key.usage_account_remaining ?? Math.max(0, key.usage_account_limit - key.usage_account_used);
+    const plan = key.usage_account_plan || (service === 'firecrawl' ? 'Firecrawl Credits' : '未知计划');
+    return `
+      <div class="table-note">${escapeHtml(plan)}</div>
+      <div class="table-note">已用 ${fmtNum(key.usage_account_used)} / ${fmtNum(key.usage_account_limit)}</div>
+      <div class="table-note"><b style="color:${remain > 0 ? 'var(--ok)' : 'var(--danger)'}">剩余 ${fmtNum(remain)}</b></div>
+      ${quotaBar(key.usage_account_used, key.usage_account_limit)}
+    `;
+  }
+  return '<span class="muted">未返回</span>';
+}
+
+function renderKeys(service, keys) {
+  const tbody = document.getElementById(`keys-body-${service}`);
+  if (!keys || keys.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="8" class="muted">当前服务还没有导入 Key。</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = keys.map((key) => {
+    const active = Number(key.active) === 1;
+    return `
+      <tr>
+        <td>${fmtNum(key.id)}</td>
+        <td class="mono">${escapeHtml(key.key_masked || key.key)}</td>
+        <td>${escapeHtml(key.email || '-')}</td>
+        <td>${renderKeyQuota(service, key)}</td>
+        <td>${renderAccountQuota(service, key)}</td>
+        <td class="table-note">
+          成功 ${fmtNum(key.total_used || 0)}<br>
+          失败 ${fmtNum(key.total_failed || 0)}<br>
+          最近使用 ${formatTime(key.last_used_at)}
+        </td>
+        <td><span class="tag ${active ? 'tag-ok' : 'tag-off'}">${active ? '正常' : '禁用'}</span></td>
+        <td>
+          <div class="table-actions">
+            <button class="btn btn-sm" onclick="toggleKey(${key.id}, ${active ? 0 : 1})">${active ? '禁用' : '启用'}</button>
+            <button class="btn btn-sm btn-danger" onclick="delKey(${key.id})">删除</button>
+          </div>
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+async function refresh() {
+  const payload = await api('GET', '/api/stats');
+  const services = payload.services || {};
+  const social = payload.social || {};
+  latestServices = services;
+  latestSocial = social;
+
+  renderGlobalSummary(services, social);
+  renderSocialBoard(social);
+  renderSocialIntegration(social);
+  renderSocialWorkspace(social);
+  renderHeroFocus(services, social);
+  renderServiceSwitcher(services, social);
+  for (const [service, meta] of Object.entries(SERVICE_META)) {
+    const servicePayload = services[service] || {
+      tokens: [],
+      keys: [],
+      overview: {},
+      real_quota: {},
+      usage_sync: {},
+      keys_total: 0,
+      keys_active: 0,
+    };
+    renderSyncMeta(service, servicePayload);
+    renderOverview(service, servicePayload);
+    renderApiExample(service, servicePayload.tokens || []);
+    renderTokens(service, servicePayload.tokens || []);
+    renderKeys(service, servicePayload.keys || []);
+    document.getElementById(`sync-btn-${service}`).textContent = meta.syncButton;
+    document.getElementById(`sync-btn-${service}`).disabled = false;
+  }
+  applyActiveService();
+}
+
+function toggleImport(service) {
+  document.getElementById(`import-wrap-${service}`).classList.toggle('hidden');
+}
+
+async function createToken(service) {
+  const input = document.getElementById(`token-name-${service}`);
+  await api('POST', '/api/tokens', {
+    service,
+    name: input.value.trim(),
+  });
+  input.value = '';
+  await refresh();
+}
+
+async function delToken(id) {
+  if (!confirm('确认删除这个 Token 吗？')) return;
+  await api('DELETE', `/api/tokens/${id}`);
+  await refresh();
+}
+
+async function addSingleKey(service) {
+  const input = document.getElementById(`single-key-${service}`);
+  const key = input.value.trim();
+  if (!key) return;
+  await api('POST', '/api/keys', { service, key });
+  input.value = '';
+  await refresh();
+}
+
+async function importKeys(service) {
+  const textarea = document.getElementById(`import-text-${service}`);
+  const text = textarea.value.trim();
+  if (!text) return;
+  const result = await api('POST', '/api/keys', { service, file: text });
+  textarea.value = '';
+  document.getElementById(`import-wrap-${service}`).classList.add('hidden');
+  alert(`已导入 ${result.imported || 0} 个 ${SERVICE_META[service].label} Key`);
+  await refresh();
+}
+
+async function delKey(id) {
+  if (!confirm('确认删除这个 Key 吗？')) return;
+  await api('DELETE', `/api/keys/${id}`);
+  await refresh();
+}
+
+async function toggleKey(id, active) {
+  await api('PUT', `/api/keys/${id}/toggle`, { active });
+  await refresh();
+}
+
+async function syncUsage(service, force) {
+  const button = document.getElementById(`sync-btn-${service}`);
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = '同步中...';
+  try {
+    await api('POST', '/api/usage/sync', { service, force });
+    await refresh();
+  } catch (error) {
+    alert(`同步 ${SERVICE_META[service].label} 额度失败: ${error.message}`);
+    button.disabled = false;
+    button.textContent = originalText;
+  }
+}
+
+async function changePwd(event) {
+  event?.preventDefault?.();
+  const input = document.getElementById('new-pwd');
+  const password = input.value.trim();
+  if (password.length < 4) {
+    alert('密码至少 4 位');
+    return;
+  }
+  await api('PUT', '/api/password', { password });
+  PWD = password;
+  localStorage.setItem(STORAGE_KEY, password);
+  localStorage.removeItem(LEGACY_STORAGE_KEY);
+  input.value = '';
+  document.getElementById('user-dropdown').classList.remove('show');
+  alert('密码已更新');
+}
+
+function flashButtonLabel(button, label) {
+  if (!button) return;
+  const original = button.textContent;
+  button.textContent = label;
+  setTimeout(() => {
+    button.textContent = original;
+  }, 1400);
+}
+
+function copyCode(elementId, button) {
+  const text = document.getElementById(elementId).textContent;
+  navigator.clipboard.writeText(text).then(() => flashButtonLabel(button, '已复制'));
+}
+
+function copyText(value, button) {
+  navigator.clipboard.writeText(value).then(() => flashButtonLabel(button, '已复制'));
+}
+
+renderServiceShells();
+
+if (PWD) {
+  api('GET', '/api/stats')
+    .then(() => {
+      document.getElementById('login-box').classList.add('hidden');
+      document.getElementById('dashboard').classList.remove('hidden');
+      refresh();
+    })
+    .catch(() => {
+      localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(LEGACY_STORAGE_KEY);
+      PWD = '';
+    });
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_PY="$ROOT_DIR/venv/bin/python"
+
+if [[ -f "$ROOT_DIR/mysearch/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$ROOT_DIR/mysearch/.env"
+  set +a
+fi
+
+if [[ -x "$VENV_PY" ]]; then
+  PYTHON_BIN="$VENV_PY"
+else
+  PYTHON_BIN="${PYTHON_BIN:-$(command -v python3)}"
+fi
+
+echo "Installing MySearch MCP dependencies..."
+"$PYTHON_BIN" -m pip install -r "$ROOT_DIR/mysearch/requirements.txt"
+
+ENV_KEYS=(
+  MYSEARCH_NAME
+  MYSEARCH_TIMEOUT_SECONDS
+  MYSEARCH_TAVILY_BASE_URL
+  MYSEARCH_TAVILY_SEARCH_PATH
+  MYSEARCH_TAVILY_EXTRACT_PATH
+  MYSEARCH_TAVILY_AUTH_MODE
+  MYSEARCH_TAVILY_AUTH_HEADER
+  MYSEARCH_TAVILY_AUTH_SCHEME
+  MYSEARCH_TAVILY_AUTH_FIELD
+  MYSEARCH_TAVILY_API_KEY
+  MYSEARCH_TAVILY_API_KEYS
+  MYSEARCH_TAVILY_KEYS_FILE
+  MYSEARCH_TAVILY_ACCOUNTS_FILE
+  MYSEARCH_FIRECRAWL_BASE_URL
+  MYSEARCH_FIRECRAWL_SEARCH_PATH
+  MYSEARCH_FIRECRAWL_SCRAPE_PATH
+  MYSEARCH_FIRECRAWL_AUTH_MODE
+  MYSEARCH_FIRECRAWL_AUTH_HEADER
+  MYSEARCH_FIRECRAWL_AUTH_SCHEME
+  MYSEARCH_FIRECRAWL_AUTH_FIELD
+  MYSEARCH_FIRECRAWL_API_KEY
+  MYSEARCH_FIRECRAWL_API_KEYS
+  MYSEARCH_FIRECRAWL_KEYS_FILE
+  MYSEARCH_FIRECRAWL_ACCOUNTS_FILE
+  MYSEARCH_XAI_BASE_URL
+  MYSEARCH_XAI_RESPONSES_PATH
+  MYSEARCH_XAI_SOCIAL_BASE_URL
+  MYSEARCH_XAI_SOCIAL_SEARCH_PATH
+  MYSEARCH_XAI_SEARCH_MODE
+  MYSEARCH_XAI_AUTH_MODE
+  MYSEARCH_XAI_AUTH_HEADER
+  MYSEARCH_XAI_AUTH_SCHEME
+  MYSEARCH_XAI_AUTH_FIELD
+  MYSEARCH_XAI_API_KEY
+  MYSEARCH_XAI_API_KEYS
+  MYSEARCH_XAI_KEYS_FILE
+  MYSEARCH_XAI_MODEL
+)
+
+CLAUDE_ENV_ARGS=(-e "PYTHONPATH=$ROOT_DIR")
+CODEX_ENV_ARGS=(--env "PYTHONPATH=$ROOT_DIR")
+
+for key in "${ENV_KEYS[@]}"; do
+  value="${!key-}"
+  if [[ -n "${value}" ]]; then
+    CLAUDE_ENV_ARGS+=(-e "$key=$value")
+    CODEX_ENV_ARGS+=(--env "$key=$value")
+  fi
+done
+
+registered_targets=()
+
+if command -v claude >/dev/null 2>&1; then
+  echo "Registering MySearch in Claude Code..."
+  claude mcp remove mysearch >/dev/null 2>&1 || true
+  claude mcp add mysearch \
+    "${CLAUDE_ENV_ARGS[@]}" \
+    -- "$PYTHON_BIN" -m mysearch
+  registered_targets+=("Claude Code")
+fi
+
+if command -v codex >/dev/null 2>&1; then
+  echo "Registering MySearch in Codex..."
+  codex mcp remove mysearch >/dev/null 2>&1 || true
+  codex mcp add mysearch \
+    "${CODEX_ENV_ARGS[@]}" \
+    -- "$PYTHON_BIN" -m mysearch
+  registered_targets+=("Codex")
+fi
+
+echo
+if [[ ${#registered_targets[@]} -eq 0 ]]; then
+  echo "Dependencies are installed, but neither 'claude' nor 'codex' was found in PATH."
+  echo "You can register manually with:"
+  echo "  claude mcp add mysearch -e PYTHONPATH=$ROOT_DIR -- $PYTHON_BIN -m mysearch"
+  echo "  codex mcp add mysearch --env PYTHONPATH=$ROOT_DIR -- $PYTHON_BIN -m mysearch"
+  exit 0
+fi
+
+echo "MySearch is ready."
+printf 'Registered in: %s\n' "${registered_targets[*]}"
+if command -v claude >/dev/null 2>&1; then
+  echo "Check Claude Code with: claude mcp list"
+fi
+if command -v codex >/dev/null 2>&1; then
+  echo "Check Codex with: codex mcp list"
+fi

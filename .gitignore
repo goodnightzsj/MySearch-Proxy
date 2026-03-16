@@ -1,0 +1,29 @@
+.DS_Store
+.env
+.env.local
+*.pyc
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# 本地账号与 key 文件
+accounts.txt
+firecrawl_accounts.txt
+*.accounts.txt
+*.keys.txt
+
+# MySearch / proxy 本地配置
+mysearch/.env
+proxy/.env
+
+# proxy 运行时数据
+proxy/data/
+*.db
+*.sqlite
+*.sqlite3
+
+# 本地测试输出
+htmlcov/
+.coverage

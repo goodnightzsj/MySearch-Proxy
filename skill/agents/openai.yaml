@@ -1,0 +1,7 @@
+interface:
+  display_name: "MySearch"
+  short_description: "Unified Tavily, Firecrawl, and X research workflow"
+  default_prompt: "Use $mysearch to search the web, docs, and X with the right provider automatically."
+
+policy:
+  allow_implicit_invocation: true
