@@ -92,9 +92,9 @@ body::after {
 
 .hero {
   position: relative;
-  display: grid;
-  grid-template-columns: minmax(0, 1.45fr) minmax(320px, 0.95fr);
-  gap: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
   padding: 32px;
   margin-bottom: 18px;
   overflow: visible;
@@ -127,11 +127,28 @@ body::after {
   filter: blur(12px);
 }
 
-.hero-copy,
-.hero-side {
+.hero-topbar,
+.hero-main,
+.hero-stack,
+.hero-copy {
   position: relative;
   z-index: 1;
 }
+
+.hero-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.hero-topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.hero-main { display: block; }
 
 .hero-copy h1 {
   font-size: clamp(32px, 4.4vw, 44px);
@@ -142,9 +159,43 @@ body::after {
 
 .hero-copy p {
   color: var(--text-soft);
-  max-width: 720px;
+  max-width: 780px;
   line-height: 1.75;
   font-size: 15px;
+}
+
+.hero-copy .hero-intro + .hero-intro {
+  margin-top: 12px;
+}
+
+.hero-usage-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.hero-usage-card {
+  padding: 16px 18px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.hero-usage-card strong {
+  display: block;
+  margin-bottom: 8px;
+  color: #f8fafc;
+  font-size: 16px;
+  line-height: 1.3;
+}
+
+.hero-usage-card span {
+  display: block;
+  color: rgba(226, 232, 240, 0.76);
+  font-size: 13px;
+  line-height: 1.7;
 }
 
 .hero-tags {
@@ -184,103 +235,10 @@ body::after {
   border: 1px solid rgba(180, 83, 9, 0.14);
 }
 
-.hero-side {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  min-width: 0;
-}
-
 .hero-actions {
   display: flex;
   justify-content: flex-end;
   align-items: center;
-}
-
-.hero-focus {
-  width: 100%;
-  padding: 22px;
-  border-radius: 22px;
-  border: 1px solid rgba(255, 255, 255, 0.58);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(248, 250, 252, 0.64)),
-    radial-gradient(circle at top right, rgba(15, 118, 110, 0.10), transparent 42%);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.72),
-    0 18px 45px rgba(15, 23, 42, 0.08);
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.hero-focus-top {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  align-items: flex-start;
-}
-
-.hero-focus-kicker {
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-
-.hero-focus-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  border-radius: 999px;
-  background: rgba(15, 23, 42, 0.06);
-  color: var(--text-soft);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.hero-focus-name {
-  font-size: 30px;
-  font-weight: 800;
-  letter-spacing: -0.03em;
-}
-
-.hero-focus-desc {
-  color: var(--muted);
-  line-height: 1.7;
-  font-size: 14px;
-}
-
-.hero-focus-metrics {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.hero-focus-metric {
-  padding: 14px;
-  border-radius: 18px;
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  background: rgba(255, 255, 255, 0.72);
-}
-
-.hero-focus-metric .label {
-  color: var(--muted);
-  font-size: 11px;
-  margin-bottom: 6px;
-}
-
-.hero-focus-metric .value {
-  font-size: 24px;
-  line-height: 1.05;
-  font-weight: 800;
-}
-
-.hero-focus-foot {
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.65;
 }
 
 .user-btn,
@@ -552,6 +510,10 @@ body.modal-open {
   gap: 16px;
 }
 
+.social-section-grid {
+  align-items: start;
+}
+
 .social-board-top {
   display: flex;
   justify-content: space-between;
@@ -587,9 +549,9 @@ body.modal-open {
 }
 
 .social-board-desc {
-  color: var(--muted);
-  font-size: 13px;
-  line-height: 1.7;
+  color: var(--text-soft);
+  font-size: 14px;
+  line-height: 1.75;
 }
 
 .social-board-grid {
@@ -599,38 +561,105 @@ body.modal-open {
 }
 
 .social-metric {
-  padding: 14px;
+  padding: 16px 18px;
   border-radius: 18px;
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(255, 255, 255, 0.82));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
 }
 
 .social-metric .label {
-  color: var(--muted);
-  font-size: 11px;
-  margin-bottom: 6px;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 8px;
 }
 
 .social-metric .value {
-  font-size: 24px;
-  line-height: 1.05;
+  color: var(--text);
+  font-size: 34px;
+  line-height: 1;
   font-weight: 800;
+  letter-spacing: -0.04em;
 }
 
 .social-metric .value.ok { color: var(--ok); }
 .social-metric .value.warn { color: var(--warn); }
 .social-metric .value.danger { color: var(--danger); }
 .social-metric .value.info { color: #2563eb; }
-.social-metric .value.muted { color: #94a3b8; }
+.social-metric .value.muted { color: #475569; }
 
 .social-board-foot {
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.7;
+  padding: 14px 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(255, 255, 255, 0.78);
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.75;
 }
 
 .social-board-foot strong {
   color: var(--text-soft);
+}
+
+.social-board-foot.is-error {
+  color: var(--warn);
+  border-color: rgba(212, 122, 30, 0.24);
+  background: rgba(212, 122, 30, 0.08);
+}
+
+.social-board-summary,
+.integration-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.social-board-summary-item,
+.integration-summary-item {
+  padding: 16px 18px;
+  border-radius: 18px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(255, 255, 255, 0.8);
+}
+
+.social-board-summary-item .label,
+.integration-summary-item .label {
+  color: #475569;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  margin-bottom: 8px;
+}
+
+.social-board-summary-item .value,
+.integration-summary-item .value {
+  color: var(--text-soft);
+  font-size: 17px;
+  font-weight: 800;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.integration-note {
+  padding: 14px 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(255, 255, 255, 0.78);
+  color: #475569;
+  line-height: 1.75;
+  font-size: 13px;
+}
+
+.integration-note strong {
+  color: var(--text-soft);
+}
+
+.integration-note.is-error {
+  color: var(--warn);
+  border-color: rgba(212, 122, 30, 0.24);
+  background: rgba(212, 122, 30, 0.08);
 }
 
 .switcher-shell {
@@ -1234,12 +1263,20 @@ tr:last-child td { border-bottom: none; }
 }
 
 @media (max-width: 1080px) {
-  .hero,
   .service-head,
   .section-grid,
   .guide-shell {
     grid-template-columns: 1fr;
     display: grid;
+  }
+
+  .hero-main {
+    grid-template-columns: 1fr;
+  }
+
+  .hero-topbar {
+    flex-direction: column;
+    align-items: flex-start;
   }
 
   .switcher-head {
@@ -1271,7 +1308,7 @@ tr:last-child td { border-bottom: none; }
   .service-body { padding-left: 18px; padding-right: 18px; }
   .switcher-shell { padding: 18px; }
   .service-panel .service-body { padding-bottom: 18px; }
-  .hero-focus-metrics,
+  .hero-value-list,
   .service-toggle-grid,
   .social-board-grid { grid-template-columns: 1fr 1fr; }
   .settings-fields { grid-template-columns: 1fr; }
@@ -1479,14 +1516,14 @@ h3,
 }
 
 .hero .desc,
-.social-board-desc,
-.social-board-foot,
+.hero .social-board-desc,
+.hero .social-board-foot,
 .hero .inline-meta,
 .hero .inline-meta .mono {
   color: rgba(226, 232, 240, 0.78);
 }
 
-.social-board-status,
+.hero .social-board-status,
 .hero-focus-status {
   border-radius: 999px;
   font-weight: 700;
@@ -1494,40 +1531,40 @@ h3,
   text-transform: uppercase;
 }
 
-.social-board-status {
+.hero .social-board-status {
   background: rgba(87, 128, 240, 0.14);
   border: 1px solid rgba(133, 165, 255, 0.18);
   color: #d9e5ff;
 }
 
-.social-board-grid {
+.hero .social-board-grid {
   gap: 14px;
 }
 
-.social-metric {
+.hero .social-metric {
   border-radius: 20px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.04));
   backdrop-filter: blur(12px);
 }
 
-.social-metric .label {
+.hero .social-metric .label {
   color: rgba(226, 232, 240, 0.72);
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.1em;
 }
 
-.social-metric .value {
+.hero .social-metric .value {
   color: #f8fafc;
   font-size: 27px;
 }
 
-.social-metric .value.ok { color: #a7f3d0; }
-.social-metric .value.warn { color: #fdba74; }
-.social-metric .value.danger { color: #fca5a5; }
-.social-metric .value.info { color: #bfdbfe; }
-.social-metric .value.muted { color: #cbd5e1; }
+.hero .social-metric .value.ok { color: #a7f3d0; }
+.hero .social-metric .value.warn { color: #fdba74; }
+.hero .social-metric .value.danger { color: #fca5a5; }
+.hero .social-metric .value.info { color: #bfdbfe; }
+.hero .social-metric .value.muted { color: #cbd5e1; }
 
 .hero-focus {
   border-radius: 28px;
@@ -2105,15 +2142,42 @@ textarea:focus {
 <div id="dashboard" class="hidden">
   <div class="container">
     <header class="hero card">
-      <div class="hero-copy">
-        <div class="hero-tags">
-          <span class="hero-tag">独立 Key 池</span>
-          <span class="hero-tag">官方额度同步</span>
-          <span class="hero-tag">MySearch 兼容输出</span>
-          <span class="hero-tag">Social / X Router</span>
+      <div class="hero-stack">
+        <div class="hero-topbar">
+          <div class="hero-tags">
+            <span class="hero-tag">统一搜索入口</span>
+            <span class="hero-tag">官方 / 兼容双接入</span>
+            <span class="hero-tag">MCP + Proxy + Skill</span>
+          </div>
+          <div class="hero-actions">
+            <button class="user-btn settings-btn" type="button" onclick="openSettingsModal()">
+              设置
+              <span class="muted">密码 / grok2api / 退出</span>
+            </button>
+          </div>
         </div>
-        <h1>把搜索基础设施做成真正可交付的工作台</h1>
-        <p>这里不是单纯的 key 面板，而是把 Tavily、Firecrawl 和 Social / X 路由放到统一控制台里：同一眼看清独立 Key 池、Token 发放、官方额度同步、compatible 网关接入，以及 MySearch 的最终接线方式。</p>
+
+        <div class="hero-main">
+          <div class="hero-copy">
+            <h1>把搜索基础设施做成真正可交付的工作台</h1>
+            <p class="hero-intro">MySearch 把 Tavily、Firecrawl 和 Social / X 统一成一套可被 Codex、Claude Code 和团队 Agent 直接调用的搜索入口。使用者拿到后，不需要自己维护多套 provider、兼容网关和结果结构，也不需要每次手动判断这一轮该用网页搜索、正文抓取还是社交舆情。</p>
+
+            <div class="hero-usage-grid">
+              <div class="hero-usage-card">
+                <strong>统一入口</strong>
+                <span>网页发现、正文抓取、社交舆情走同一套接线方式。</span>
+              </div>
+              <div class="hero-usage-card">
+                <strong>统一运维</strong>
+                <span>Key 池、Token、额度同步和团队共享入口放在同一个控制台里。</span>
+              </div>
+              <div class="hero-usage-card">
+                <strong>统一兼容</strong>
+                <span>官方 API 和自定义 compatible 聚合服务都能接，不锁死单一后端。</span>
+              </div>
+            </div>
+          </div>
+        </div>
 
         <section class="hero-lanes">
           <article class="hero-lane">
@@ -2132,15 +2196,6 @@ textarea:focus {
             <p>兼容 grok2api 和 xAI-compatible 搜索，把 X 结果统一整理成 MySearch 可直接消费的结构。</p>
           </article>
         </section>
-      </div>
-      <div class="hero-side">
-        <div class="hero-actions">
-          <button class="user-btn settings-btn" type="button" onclick="openSettingsModal()">
-            设置
-            <span class="muted">密码 / grok2api / 退出</span>
-          </button>
-        </div>
-        <div class="hero-focus" id="hero-focus"></div>
       </div>
     </header>
 
@@ -2177,7 +2232,7 @@ textarea:focus {
         <div>
           <span class="switcher-eyebrow">Workspace Switcher</span>
           <h2>一屏切换不同搜索引擎工作台</h2>
-          <p>顶部负责在 Tavily、Firecrawl 和 Social / X 之间切换，下面只展开当前工作台的完整操作区。信息密度保留，但首屏优先级更清楚。</p>
+          <p>选择要查看的工作台，下面会展开对应服务的 Key、Token、额度和接入配置。</p>
         </div>
         <div class="switcher-note" id="switcher-note">已记住上次打开的工作台</div>
       </div>
@@ -2344,10 +2399,23 @@ function socialModeLabel(mode) {
   return '手动模式';
 }
 
+function socialTokenSourceLabel(source) {
+  if (source === 'grok2api app.api_key') return '后台自动继承';
+  if (source === 'SOCIAL_GATEWAY_UPSTREAM_API_KEY') return '手动上游 API key';
+  if (source === 'manual SOCIAL_GATEWAY_TOKEN') return '手动客户端 token';
+  return '尚未配置';
+}
+
+function socialStatusLabel(social) {
+  if (social?.admin_connected) return '后台已接通';
+  if (social?.upstream_key_configured) return '已可转发搜索';
+  return '等待配置';
+}
+
 function buildSocialProxyEnv(social) {
   const baseUrl = social.upstream_base_url || 'https://media.example.com/v1';
   const adminBaseUrl = social.admin_base_url || baseUrl.replace(/\/v1$/, '');
-  return `# 推荐：只填 grok2api 后台地址和 app_key，proxy 会自动继承 app.api_key 与 token 池
+  return `# 推荐：只填 grok2api 后台地址和后台 app_key，proxy 会自动继承上游凭证与 token 池
 SOCIAL_GATEWAY_UPSTREAM_BASE_URL=${baseUrl}
 SOCIAL_GATEWAY_ADMIN_BASE_URL=${adminBaseUrl}
 SOCIAL_GATEWAY_ADMIN_APP_KEY=YOUR_GROK2API_APP_KEY
@@ -2360,7 +2428,9 @@ SOCIAL_GATEWAY_MODEL=grok-4.1-fast
 
 function buildSocialMySearchEnv(social) {
   const baseUrl = location.origin;
-  const token = social.client_token || 'YOUR_SOCIAL_GATEWAY_TOKEN';
+  const tokenLine = social?.client_auth_configured
+    ? `# 当前客户端 token 已配置（${social.client_token_masked || '已隐藏'}），出于安全考虑这里不直接回显\nMYSEARCH_XAI_API_KEY=YOUR_SOCIAL_GATEWAY_TOKEN`
+    : 'MYSEARCH_XAI_API_KEY=YOUR_SOCIAL_GATEWAY_TOKEN';
   return `MYSEARCH_TAVILY_BASE_URL=${baseUrl}
 MYSEARCH_TAVILY_SEARCH_PATH=/api/search
 MYSEARCH_TAVILY_EXTRACT_PATH=/api/extract
@@ -2372,21 +2442,23 @@ MYSEARCH_FIRECRAWL_SCRAPE_PATH=/firecrawl/v2/scrape
 MYSEARCH_XAI_SEARCH_MODE=compatible
 MYSEARCH_XAI_SOCIAL_BASE_URL=${baseUrl}
 MYSEARCH_XAI_SOCIAL_SEARCH_PATH=/social/search
-MYSEARCH_XAI_API_KEY=${token}`;
+${tokenLine}`;
 }
 
 function renderSocialBoard(social) {
   const stats = social?.stats || {};
   const mode = socialModeLabel(social?.mode || 'manual');
-  const healthy = Boolean(social?.admin_connected || social?.upstream_key_configured);
-  const statusText = healthy ? (social?.admin_connected ? '已接入 grok2api 后台' : '已配置 social 代理') : '等待配置';
-  const foot = social?.admin_connected
-    ? `当前通过 grok2api 后台自动同步 token 状态与剩余额度。来源：${social.token_source || 'grok2api app.api_key'}。`
-    : social?.upstream_key_configured
-      ? '当前可转发 social 搜索，但还没有拿到 grok2api 后台统计。补上后台 app_key 后，这里会自动变成实时面板。'
-      : '还没有拿到 social 上游配置。只要补齐 SOCIAL_GATEWAY_ADMIN_* 或手动 SOCIAL_GATEWAY_*，这里就会显示实时状态。';
+  const statusText = socialStatusLabel(social);
+  const tokenSource = socialTokenSourceLabel(social?.token_source || '');
+  const authText = social?.client_auth_configured ? '已允许客户端调用 /social/search' : '还没有设置客户端 token';
+  let foot = '现在还没有连上 Social / X 上游。补齐 grok2api 后台地址和 app key，或者手动填写上游 key 后，这里会开始显示完整状态。';
+  if (social?.admin_connected) {
+    foot = '当前通过 grok2api 后台自动同步 token 状态和剩余额度。对外仍然统一提供 MySearch 的 /social/search 结果结构。';
+  } else if (social?.upstream_key_configured) {
+    foot = '当前已经能转发 Social 搜索，但还没有连上后台统计。补上 grok2api app key 后，这里会显示完整 token 状态。';
+  }
   const errorLine = social?.error
-    ? `<div class="social-board-foot" style="color: var(--warn)">最近错误：${escapeHtml(social.error)}</div>`
+    ? `<div class="social-board-foot is-error">最近错误：${escapeHtml(social.error)}</div>`
     : '';
 
   document.getElementById('social-board').innerHTML = `
@@ -2395,10 +2467,9 @@ function renderSocialBoard(social) {
         <div class="social-board-kicker">Social / X 状态</div>
         <div class="social-board-title">Social / X Router</div>
       </div>
-      <div class="social-board-status">${mode}</div>
     </div>
     <div class="social-board-desc">
-      这里展示的是 Social 路由能力本身。底层可以对接 grok2api 后台，也可以走别的 xAI-compatible 上游，但对 MySearch 来说统一都是同一套 Social / X 工作台。
+      这里看的是 MySearch 的 Social / X 路由运行面。底层可以接 grok2api，也可以兼容别的 xAI-compatible 上游，但对外始终是一套统一结果结构。
     </div>
     <div class="social-board-grid">
       <div class="social-metric">
@@ -2434,6 +2505,24 @@ function renderSocialBoard(social) {
         <div class="value">${fmtNum(stats.total_calls || 0)}</div>
       </div>
     </div>
+    <div class="social-board-summary">
+      <div class="social-board-summary-item">
+        <div class="label">当前状态</div>
+        <div class="value">${escapeHtml(statusText)}</div>
+      </div>
+      <div class="social-board-summary-item">
+        <div class="label">Token 来源</div>
+        <div class="value">${escapeHtml(tokenSource)}</div>
+      </div>
+      <div class="social-board-summary-item">
+        <div class="label">客户端访问</div>
+        <div class="value">${escapeHtml(authText)}</div>
+      </div>
+      <div class="social-board-summary-item">
+        <div class="label">工作模式</div>
+        <div class="value">${escapeHtml(mode)}</div>
+      </div>
+    </div>
     <div class="social-board-foot">
       <strong>${statusText}</strong> ${foot}
     </div>
@@ -2443,36 +2532,60 @@ function renderSocialBoard(social) {
 
 function renderSocialIntegration(social) {
   const mode = socialModeLabel(social?.mode || 'manual');
-  const source = social?.token_source || 'not_configured';
+  const source = socialTokenSourceLabel(social?.token_source || '');
   const proxyConfigured = Boolean(social?.upstream_key_configured);
   const clientConfigured = Boolean(social?.client_auth_configured);
   const authLabel = clientConfigured ? '已就绪' : '未配置';
   const upstreamBase = social?.upstream_base_url || 'https://media.example.com/v1';
+  const adminBase = social?.admin_base_url || '未设置';
+  let note = '推荐只填写 grok2api 后台地址和 app key，让 proxy 自动继承上游密钥和 token 池。';
+  if (social?.admin_connected) {
+    note = '当前已经走后台自动继承，后面通常不需要再手动维护上游 key 和客户端 token。';
+  } else if (social?.upstream_key_configured) {
+    note = '当前已经可以调用，但还没有接上后台 token 面板；如果你想看到完整统计，补上 grok2api app key 即可。';
+  }
+  const noteClass = social?.error ? 'integration-note is-error' : 'integration-note';
 
   document.getElementById('social-integration').innerHTML = `
     <h3>Social / X 接入</h3>
-    <p class="desc">` + 
-      `现在 proxy 支持两种 social 模式：手动填 ` +
-      '`SOCIAL_GATEWAY_*`' +
-      `，或者只填 ` +
-      '`SOCIAL_GATEWAY_ADMIN_BASE_URL + SOCIAL_GATEWAY_ADMIN_APP_KEY`' +
-      `，后台自动继承 grok2api 的 ` +
-      '`app.api_key`' +
-      ` 和 token 池。` +
-    `</p>
-    <div class="inline-meta">
-      <span>Mode: <b class="mono">${mode}</b></span>
-      <span>Upstream: <b class="mono">${escapeHtml(upstreamBase)}</b></span>
-      <span>Token 来源: <b class="mono">${escapeHtml(source)}</b></span>
-      <span>客户端鉴权: <b class="mono">${escapeHtml(authLabel)}</b></span>
+    <p class="desc">推荐优先接 grok2api 后台。这样只要填后台地址和 app key，proxy 就能自动继承上游密钥与 token 池，不需要再把配置拆成很多手动变量。</p>
+    <div class="integration-summary">
+      <div class="integration-summary-item">
+        <div class="label">工作模式</div>
+        <div class="value">${escapeHtml(mode)}</div>
+      </div>
+      <div class="integration-summary-item">
+        <div class="label">上游接口</div>
+        <div class="value mono">${escapeHtml(upstreamBase)}</div>
+      </div>
+      <div class="integration-summary-item">
+        <div class="label">后台地址</div>
+        <div class="value mono">${escapeHtml(adminBase)}</div>
+      </div>
+      <div class="integration-summary-item">
+        <div class="label">Token 来源</div>
+        <div class="value">${escapeHtml(source)}</div>
+      </div>
+      <div class="integration-summary-item">
+        <div class="label">客户端鉴权</div>
+        <div class="value">${escapeHtml(authLabel)}</div>
+      </div>
+      <div class="integration-summary-item">
+        <div class="label">接入结果</div>
+        <div class="value">${proxyConfigured ? '已拿到可用上游 key' : '尚未拿到上游 key'}</div>
+      </div>
+    </div>
+    <div class="${noteClass}">
+      <strong>${socialStatusLabel(social)}</strong> ${escapeHtml(note)}
+      ${social?.error ? `<br>最近错误：${escapeHtml(social.error)}` : ''}
     </div>
     <div class="code-toolbar">
-      <div class="endpoint">${proxyConfigured ? 'proxy 已拿到上游可用 key' : 'proxy 还没拿到上游 key'} · ${clientConfigured ? '客户端可直接调 /social/search' : '客户端 token 未配置'}</div>
+      <div class="endpoint">Proxy 端环境变量。通常只要复制这一段，再补你自己的 grok2api app key。</div>
       <button class="btn btn-sm" onclick="copyCode('social-proxy-env', this)">复制 Proxy 配置</button>
     </div>
     <pre class="code-block mono" id="social-proxy-env"></pre>
     <div class="code-toolbar" style="margin-top:12px">
-      <div class="endpoint">只要填当前站点根地址，MySearch 默认会自动追加 /social/search。</div>
+      <div class="endpoint">MySearch / MCP / Skill 端环境变量。客户端 token 出于安全考虑不会在这里直接明文展示。</div>
       <button class="btn btn-sm" onclick="copyCode('social-mysearch-env', this)">复制 MySearch 配置</button>
     </div>
     <pre class="code-block mono" id="social-mysearch-env"></pre>
@@ -2706,7 +2819,7 @@ function renderServiceShells() {
       </div>
       <div class="service-body">
         <div class="stats-grid" id="overview-social"></div>
-        <div class="section-grid">
+        <div class="section-grid social-section-grid">
           <div class="subcard social-board" id="social-board"></div>
           <div class="subcard api-shell" id="social-integration"></div>
         </div>
@@ -2718,96 +2831,8 @@ function renderServiceShells() {
   renderSocialBoard({});
   renderSocialIntegration({});
   renderSocialWorkspace({});
-  renderHeroFocus({}, {});
   renderServiceSwitcher({}, {});
   applyActiveService();
-}
-
-function renderHeroFocus(services, social) {
-  const meta = WORKSPACE_META[activeService] || WORKSPACE_META.tavily;
-
-  if (activeService === 'social') {
-    const stats = social?.stats || {};
-    const syncLabel = socialModeLabel(social?.mode || 'manual');
-    const statusStyle = 'background: rgba(91, 120, 246, 0.12); border-color: rgba(91, 120, 246, 0.18); color: var(--social);';
-
-    document.getElementById('hero-focus').innerHTML = `
-      <div class="hero-focus-top">
-        <div>
-          <div class="hero-focus-kicker">Active Workspace</div>
-          <div class="hero-focus-name">${meta.label}</div>
-        </div>
-        <div class="hero-focus-status" style="${statusStyle}">${syncLabel}</div>
-      </div>
-      <div class="hero-focus-desc">
-        当前工作台已经切到 Social / X。这里优先展示社交搜索路由、token 池状态、剩余额度和客户端接线方式，不再把底层实现名字放在最显眼的位置。
-      </div>
-      <div class="hero-focus-metrics">
-        <div class="hero-focus-metric">
-          <div class="label">Token 总数</div>
-          <div class="value">${fmtNum(stats.token_total || 0)}</div>
-        </div>
-        <div class="hero-focus-metric">
-          <div class="label">Token 正常</div>
-          <div class="value">${fmtNum(stats.token_normal || 0)}</div>
-        </div>
-        <div class="hero-focus-metric">
-          <div class="label">Chat 剩余</div>
-          <div class="value">${fmtNum(stats.chat_remaining || 0)}</div>
-        </div>
-        <div class="hero-focus-metric">
-          <div class="label">总调用次数</div>
-          <div class="value">${fmtNum(stats.total_calls || 0)}</div>
-        </div>
-      </div>
-      <div class="hero-focus-foot">
-        ${meta.routeHint}。点击下方卡片切换工作台后，这里的焦点数据会立刻联动刷新。
-      </div>
-    `;
-    return;
-  }
-
-  const payload = services?.[activeService] || {};
-  const quota = payload.real_quota || {};
-  const overview = payload.overview || {};
-  const syncLabel = activeService === 'firecrawl' ? 'Credits Sync' : 'Usage Sync';
-  const statusStyle = activeService === 'firecrawl'
-    ? 'background: rgba(196, 111, 28, 0.12); border-color: rgba(196, 111, 28, 0.18); color: var(--firecrawl);'
-    : 'background: rgba(13, 122, 115, 0.1); border-color: rgba(13, 122, 115, 0.12); color: var(--tavily);';
-
-  document.getElementById('hero-focus').innerHTML = `
-    <div class="hero-focus-top">
-      <div>
-        <div class="hero-focus-kicker">Active Workspace</div>
-        <div class="hero-focus-name">${meta.label}</div>
-      </div>
-      <div class="hero-focus-status" style="${statusStyle}">${syncLabel}</div>
-    </div>
-    <div class="hero-focus-desc">
-      当前工作台已经切到 ${meta.label}。这一侧优先显示它的 Key 池、Token 发放、代理调用和官方额度同步结果。
-    </div>
-    <div class="hero-focus-metrics">
-      <div class="hero-focus-metric">
-        <div class="label">活跃 Key</div>
-        <div class="value">${fmtNum(payload.keys_active || 0)}</div>
-      </div>
-      <div class="hero-focus-metric">
-        <div class="label">代理 Token</div>
-        <div class="value">${fmtNum((payload.tokens || []).length)}</div>
-      </div>
-      <div class="hero-focus-metric">
-        <div class="label">今日调用</div>
-        <div class="value">${fmtNum(overview.today_count || 0)}</div>
-      </div>
-      <div class="hero-focus-metric">
-        <div class="label">真实剩余</div>
-        <div class="value">${fmtNum(quota.total_remaining ?? 0)}</div>
-      </div>
-    </div>
-    <div class="hero-focus-foot">
-      ${meta.routeHint}。点击下方卡片切换工作台后，这里的焦点数据会立刻联动刷新。
-    </div>
-  `;
 }
 
 function renderServiceSwitcher(services, social) {
@@ -2908,8 +2933,6 @@ function applyActiveService() {
   if (switcherNote) {
     switcherNote.textContent = `当前工作台：${WORKSPACE_META[activeService].label} · 已记住你的切换偏好`;
   }
-
-  renderHeroFocus(latestServices, latestSocial);
 }
 
 function setActiveService(service) {
@@ -3140,7 +3163,7 @@ function renderOverview(service, payload) {
 function renderSocialWorkspace(social) {
   const stats = social?.stats || {};
   const mode = socialModeLabel(social?.mode || 'manual');
-  const source = social?.token_source || 'not_configured';
+  const source = socialTokenSourceLabel(social?.token_source || '');
   const syncLine = [
     mode,
     `Token ${fmtNum(stats.token_total || 0)}`,
@@ -3318,7 +3341,6 @@ async function refresh() {
   renderSocialBoard(social);
   renderSocialIntegration(social);
   renderSocialWorkspace(social);
-  renderHeroFocus(services, social);
   renderServiceSwitcher(services, social);
   for (const [service, meta] of Object.entries(SERVICE_META)) {
     const servicePayload = services[service] || {

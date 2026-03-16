@@ -14,6 +14,16 @@
 - `skill/`
   - 可直接给智能体安装的 MySearch Skill
 
+## 界面预览
+
+### 首屏
+
+![MySearch Console Hero](./docs/images/mysearch-console-hero.jpg)
+
+### 工作台
+
+![MySearch Console Workspaces](./docs/images/mysearch-console-workspaces.jpg)
+
 ## 这个项目的优势
 
 和很多“只包一层 API”或“只做单一搜索源”的项目相比，`MySearch Proxy`
