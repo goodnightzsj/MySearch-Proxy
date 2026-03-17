@@ -340,6 +340,24 @@ MYSEARCH_FIRECRAWL_API_KEY=your-token
 3. 自动检测并注册 `Codex`
 4. 把 `mysearch/.env` 里的 `MYSEARCH_*` 注入 MCP 配置
 
+默认注册的是本地 `stdio` MCP。
+
+如果你想额外暴露一个远程 `streamableHTTP` 入口，可以单独启动：
+
+```bash
+./venv/bin/python -m mysearch \
+  --transport streamable-http \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --streamable-http-path /mcp
+```
+
+默认远程 endpoint：
+
+```text
+http://127.0.0.1:8000/mcp
+```
+
 ### 2. 安装 Codex / Claude Code skill
 
 如果你希望 AI 不只“看见一个 MCP”，还知道该怎么调用它，再装 skill：
