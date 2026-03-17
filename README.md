@@ -201,7 +201,40 @@ bash scripts/release_openclaw_skill.sh \
 ```
 
 脚本会在发布后自动再跑一次 `clawhub inspect`，把 `security.status` 和
-`llm.verdict` 打出来，方便你确认 Gamora 状态。
+`llm.verdict` 打出来，方便你确认当前公开可验证的安全扫描结果。
+
+### 1.7 ClawHub 页面与安全扫描
+
+`MySearch` 的 OpenClaw skill 页面：
+
+- [clawhub.ai/skernelx/mysearch](https://clawhub.ai/skernelx/mysearch)
+
+当前公开可验证的安全结论，以 ClawHub skill 页面里的 `Security Scan`
+模块和 `clawhub inspect` 输出为准。
+
+截至 `2026-03-17`，`mysearch@0.1.1` 的公开结论是：
+
+- `security.status = clean`
+- `scanners.llm.verdict = benign`
+- skill 页面会显示 `Security Scan -> OpenClaw: Benign`
+
+建议用下面这条命令自行复核：
+
+```bash
+clawhub inspect mysearch --version 0.1.1 --json
+```
+
+重点看：
+
+- `version.security.status`
+- `version.security.scanners.llm.verdict`
+- `version.security.scanners.llm.summary`
+
+说明：
+
+- 当前公开页面展示的是 `Security Scan` 结果
+- 它不一定和社区里流传的那种“多维打分 / 平均分”评测卡是同一种页面样式
+- 对外写 README 时，建议优先引用 skill 页和 `inspect` 的真实结果
 
 ### 2. 启动 Proxy 控制台
 
