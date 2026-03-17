@@ -1284,6 +1284,7 @@ async def console(request: Request):
         {
             "request": request,
             "base_url": str(request.base_url).rstrip("/"),
+            "initial_authenticated": has_valid_admin_session(request),
         },
     )
 
