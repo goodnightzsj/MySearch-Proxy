@@ -556,11 +556,15 @@ body.modal-open {
 
 .social-board-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
   gap: 12px;
 }
 
 .social-metric {
+  min-height: 104px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
   padding: 16px 18px;
   border-radius: 18px;
   border: 1px solid rgba(148, 163, 184, 0.24);
@@ -577,10 +581,18 @@ body.modal-open {
 
 .social-metric .value {
   color: var(--text);
-  font-size: 34px;
-  line-height: 1;
+  font-size: clamp(27px, 3vw, 34px);
+  line-height: 1.08;
   font-weight: 800;
-  letter-spacing: -0.04em;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.social-metric .value.is-text {
+  font-size: 28px;
+  line-height: 1.04;
+  white-space: normal;
 }
 
 .social-metric .value.ok { color: var(--ok); }
@@ -1316,6 +1328,9 @@ tr:last-child td { border-bottom: none; }
   th, td { padding: 10px; }
   .settings-modal-shell { padding: 14px; }
   .settings-head { flex-direction: column; }
+  .social-metric { min-height: 96px; padding: 14px 16px; }
+  .social-metric .value { font-size: 30px; }
+  .social-metric .value.is-text { font-size: 24px; }
 }
 
 /* Visual refresh: make the console feel like a polished public product instead of a raw admin table. */
@@ -2531,6 +2546,9 @@ function renderSocialBoard(social) {
   const statusText = socialStatusLabel(social);
   const tokenSource = socialTokenSourceLabel(social?.token_source || '');
   const authText = social?.client_auth_configured ? '已允许客户端调用 /social/search' : '还没有设置客户端 token';
+  const videoValue = stats.video_remaining === null
+    ? '<div class="value muted is-text">无法统计</div>'
+    : `<div class="value muted">${fmtNum(stats.video_remaining)}</div>`;
   let foot = '现在还没有连上 Social / X 上游。补齐 grok2api 后台地址和 app key，或者手动填写上游 key 后，这里会开始显示完整状态。';
   if (social?.admin_connected) {
     foot = '当前通过 grok2api 后台自动同步 token 状态和剩余额度。对外仍然统一提供 MySearch 的 /social/search 结果结构。';
@@ -2578,7 +2596,7 @@ function renderSocialBoard(social) {
       </div>
       <div class="social-metric">
         <div class="label">Video 剩余</div>
-        <div class="value muted">${stats.video_remaining === null ? '无法统计' : fmtNum(stats.video_remaining)}</div>
+        ${videoValue}
       </div>
       <div class="social-metric">
         <div class="label">总调用次数</div>
