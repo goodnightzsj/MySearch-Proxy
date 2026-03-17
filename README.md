@@ -43,6 +43,10 @@
   - 内置 `intent` 和 `strategy`
   - 支持 `search`、`extract_url`、`research`
   - 不只是返回链接，还能做更稳定的证据组织
+- X / Social 可选启用
+  - 没有 `grok2api` 或官方 `xAI` key 时，`MySearch` 仍可正常提供
+    `web`、`docs`、`extract_url`、`research`
+  - 只有 `mode="social"` 这类 X 路由会被关闭，不会把整个 MCP 一起拖挂
 - Social / X 是一等公民
   - 不再把 X 搜索塞成附属脚本
   - 支持单独的 `/social/search`、兼容 `grok2api`、统一输出结构
@@ -101,7 +105,29 @@ MySearch Proxy
 cp mysearch/.env.example mysearch/.env
 ```
 
-填入你自己的 API 配置后执行：
+最小可用配置只需要先填 `Tavily + Firecrawl`：
+
+```env
+MYSEARCH_TAVILY_API_KEY=tvly-...
+MYSEARCH_FIRECRAWL_API_KEY=fc-...
+```
+
+如果你还要启用 X / Social，再额外填写：
+
+```env
+MYSEARCH_XAI_API_KEY=xai-...
+```
+
+或者：
+
+```env
+MYSEARCH_XAI_BASE_URL=https://your-compatible-gateway.example.com/v1
+MYSEARCH_XAI_SOCIAL_BASE_URL=https://your-social-gateway.example.com
+MYSEARCH_XAI_SEARCH_MODE=compatible
+MYSEARCH_XAI_API_KEY=your-gateway-token
+```
+
+填入配置后执行：
 
 ```bash
 ./install.sh
@@ -113,6 +139,14 @@ cp mysearch/.env.example mysearch/.env
 - 自动注册到 `Claude Code`
 - 自动注册到 `Codex`
 - 自动读取 `mysearch/.env` 里的 `MYSEARCH_*` 和 `SOCIAL_GATEWAY_*`
+
+如果暂时没有 `grok2api` 或 `xAI`：
+
+- `search(mode="web")` 仍可用
+- `search(mode="docs")` 仍可用
+- `extract_url(...)` 仍可用
+- `research(...)` 仍会返回网页部分，只是在结果里给出 `social_error`
+- 只有 `search(mode="social")` 会提示你补充 `xAI` / social gateway 配置
 
 ### 2. 启动 Proxy 控制台
 

@@ -17,6 +17,7 @@
 - Tavily：普通网页发现、新闻搜索、快速 answer
 - Firecrawl：文档站、GitHub、pricing、changelog、PDF、正文抓取
 - xAI Responses API：X / Twitter 搜索与社交舆情
+  - 这是可选增强项，不是 MySearch 启动的前置条件
 
 ## MCP 工具
 
@@ -27,6 +28,22 @@
 
 `extract_url` 默认优先 `Firecrawl`，如果抓取失败或返回空正文，会自动回退到
 `Tavily extract`。
+
+## X / Social 是可选能力
+
+即使你暂时没有 `grok2api`、compatible gateway，或者官方 `xAI` key，
+`MySearch` 也不是不可用状态。
+
+- 只配置 `Tavily + Firecrawl` 时：
+  - `search(mode="web")` 可用
+  - `search(mode="docs")` 可用
+  - `extract_url(...)` 可用
+  - `research(...)` 可用
+- 没配置 `xAI` 时：
+  - `search(mode="social")` 会返回明确提示
+  - `research(include_social=true)` 不会让整个工作流失败，而是返回网页结果并附带 `social_error`
+
+所以你可以把 `X / Social` 当成按需打开的第三个 provider，而不是安装门槛。
 
 ## 自动路由
 
@@ -61,6 +78,11 @@ cp mysearch/.env.example mysearch/.env
 ```env
 MYSEARCH_TAVILY_API_KEY=tvly-...
 MYSEARCH_FIRECRAWL_API_KEY=fc-...
+```
+
+如果你需要 X / Social，再补：
+
+```env
 MYSEARCH_XAI_API_KEY=xai-...
 ```
 
@@ -86,7 +108,7 @@ claude mcp list
 codex mcp list
 ```
 
-## 官方模式与 compatible 模式
+## 如果你要启用 X / Social
 
 官方模式：
 
@@ -110,6 +132,9 @@ MYSEARCH_XAI_API_KEY=your-gateway-token
 - `MYSEARCH_XAI_BASE_URL` 指向模型 / `/responses` 网关
 - `MYSEARCH_XAI_SOCIAL_BASE_URL` 指向 social gateway 根地址
 - `MySearch` 默认自动追加 `/social/search`
+
+如果你没有 `grok2api`，也没有官方 `xAI` key，可以先不配这一段，
+MySearch 仍会作为 `Tavily + Firecrawl` 聚合 MCP 正常工作。
 
 ## 内置 social gateway
 
