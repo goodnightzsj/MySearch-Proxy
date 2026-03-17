@@ -85,7 +85,7 @@ cp mysearch/.env.example mysearch/.env
 2. `codex mcp get mysearch`
 3. `python skill/scripts/check_mysearch.py --health-only`
 4. `python skill/scripts/check_mysearch.py --web-query "OpenAI"`
-5. `python skill/scripts/check_mysearch.py --social-query "Model Context Protocol"`
+5. 如果 `xai.available_keys > 0`，再跑 `python skill/scripts/check_mysearch.py --social-query "Model Context Protocol"`
 
 如果用户要更完整的烟测，再加：
 
@@ -122,6 +122,12 @@ python skill/scripts/check_mysearch.py --health-only
 - `xai.alternate_base_urls.social_search`
 - `available_keys`
 
+如果这里看到 `xai.available_keys = 0`：
+
+- 不要直接判定 `MySearch` 安装失败
+- 先验证 `web` / `docs` / `extract_url`
+- 只有 `social` 路由会不可用
+
 ### 3. 网页搜索正常，X 不正常
 
 优先检查：
@@ -132,6 +138,9 @@ python skill/scripts/check_mysearch.py --health-only
 
 `compatible` 模式下，真正的 X 搜索结果应该来自 social gateway，
 不是直接指望 `/responses` 自己变成结构化 X 列表。
+
+如果用户没有 `grok2api`，也没有官方 `xAI` key，不要强推 X；
+这时 `MySearch` 仍然可以作为 `Tavily + Firecrawl` 搜索 MCP 正常工作。
 
 ### 4. `extract_url` 正文为空
 
@@ -227,6 +236,7 @@ MySearch 会自动回退到 `Tavily extract`。
 - 输出里如果有 `evidence`，要把它当成“证据密度提示”一起解读
 - 需要同时看网页和 X 时，传 `sources=["web","x"]`
 - X 搜索依赖单独的 xAI key；没配时应该显式说明 social 部分不可用
+- 用户如果只配置了 `Tavily + Firecrawl`，应视为“Web 版 MySearch 可用”，不是“安装失败”
 - 单个页面阅读优先 `extract_url`
 - 多来源整理优先 `research`
 - 用户只贴 skill 地址时，先安装 skill，再检查 MCP 是否已注册

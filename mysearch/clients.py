@@ -1260,6 +1260,13 @@ class MySearchClient:
     def _get_key_or_raise(self, provider: ProviderConfig):
         record = self.keyring.get_next(provider.name)
         if record is None:
+            if provider.name == "xai":
+                raise MySearchError(
+                    "xAI / Social search is not configured; MySearch can still use "
+                    "Tavily + Firecrawl for web/docs/extract. Add "
+                    "MYSEARCH_XAI_API_KEY for official xAI, or configure a "
+                    "compatible /social/search gateway to enable mode='social'."
+                )
             raise MySearchError(f"{provider.name} is not configured")
         return record
 

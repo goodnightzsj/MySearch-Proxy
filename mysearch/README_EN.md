@@ -17,6 +17,7 @@ Its product boundary is:
 - Tavily for general web discovery, news, and quick answers
 - Firecrawl for docs, GitHub, changelogs, pricing pages, PDFs, and extraction
 - xAI Responses API for X / Twitter search and social sentiment
+  - this is optional, not a startup requirement for MySearch
 
 ## MCP Tools
 
@@ -27,6 +28,22 @@ Its product boundary is:
 
 `extract_url` prefers `Firecrawl` first, and automatically falls back to
 `Tavily extract` when Firecrawl fails or returns empty content.
+
+## X / Social is optional
+
+MySearch does not require `grok2api`, a compatible gateway, or an official
+`xAI` key to be usable.
+
+- With only `Tavily + Firecrawl` configured:
+  - `search(mode="web")` works
+  - `search(mode="docs")` works
+  - `extract_url(...)` works
+  - `research(...)` works
+- Without `xAI` configured:
+  - `search(mode="social")` returns a clear setup hint
+  - `research(include_social=true)` still returns web results and adds `social_error`
+
+Treat X / Social as an optional third provider, not as the installation gate.
 
 ## Default Routing
 
@@ -61,6 +78,11 @@ Minimal config:
 ```env
 MYSEARCH_TAVILY_API_KEY=tvly-...
 MYSEARCH_FIRECRAWL_API_KEY=fc-...
+```
+
+If you also want X / Social, add:
+
+```env
 MYSEARCH_XAI_API_KEY=xai-...
 ```
 
@@ -86,7 +108,7 @@ claude mcp list
 codex mcp list
 ```
 
-## Official mode and compatible mode
+## If you want X / Social
 
 Official mode:
 
@@ -110,6 +132,9 @@ In this mode:
 - `MYSEARCH_XAI_BASE_URL` points to the model / `/responses` gateway
 - `MYSEARCH_XAI_SOCIAL_BASE_URL` points to the social gateway root
 - `MySearch` appends `/social/search` by default
+
+If you do not have `grok2api` or an official `xAI` key yet, you can leave the
+entire X section unset and still use MySearch as a Tavily + Firecrawl MCP.
 
 ## Integrated social gateway
 
