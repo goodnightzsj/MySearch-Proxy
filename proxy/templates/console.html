@@ -1114,108 +1114,6 @@ body.modal-open {
   margin-bottom: 16px;
 }
 
-.workspace-spotlight {
-  margin-top: 16px;
-  display: grid;
-  grid-template-columns: minmax(260px, 0.85fr) minmax(0, 1.15fr);
-  gap: 16px;
-}
-
-.workspace-spotlight-card {
-  padding: 20px;
-  border-radius: 24px;
-  border: 1px solid var(--border);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(248, 250, 252, 0.86));
-}
-
-.workspace-spotlight-card[data-service="tavily"] {
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(233, 251, 248, 0.92)),
-    radial-gradient(circle at top right, rgba(15, 118, 110, 0.10), transparent 46%);
-}
-
-.workspace-spotlight-card[data-service="exa"] {
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(235, 244, 255, 0.92)),
-    radial-gradient(circle at top right, rgba(15, 95, 215, 0.10), transparent 46%);
-}
-
-.workspace-spotlight-card[data-service="firecrawl"] {
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(255, 244, 232, 0.92)),
-    radial-gradient(circle at top right, rgba(180, 83, 9, 0.10), transparent 46%);
-}
-
-.workspace-spotlight-card[data-service="social"] {
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(238, 241, 255, 0.92)),
-    radial-gradient(circle at top right, rgba(91, 120, 246, 0.10), transparent 46%);
-}
-
-.workspace-spotlight-kicker {
-  color: var(--muted);
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  margin-bottom: 10px;
-}
-
-.workspace-spotlight-title {
-  font-size: 30px;
-  line-height: 1.05;
-  letter-spacing: -0.03em;
-  margin-bottom: 10px;
-}
-
-.workspace-spotlight-desc {
-  color: var(--text-soft);
-  line-height: 1.7;
-  font-size: 14px;
-}
-
-.workspace-spotlight-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.workspace-spotlight-metric {
-  padding: 14px 16px;
-  border-radius: 18px;
-  border: 1px solid rgba(17, 24, 39, 0.08);
-  background: rgba(255, 255, 255, 0.88);
-}
-
-.workspace-spotlight-metric .label {
-  color: var(--muted);
-  font-size: 11px;
-  margin-bottom: 6px;
-}
-
-.workspace-spotlight-metric .value {
-  font-size: 24px;
-  font-weight: 800;
-  line-height: 1.1;
-}
-
-.workspace-spotlight-foot {
-  margin-top: 14px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.workspace-spotlight-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 7px 11px;
-  border-radius: 999px;
-  background: rgba(17, 24, 39, 0.06);
-  color: var(--text-soft);
-  font-size: 11px;
-  font-weight: 700;
-}
-
 .subcard {
   padding: 18px;
   border-radius: 18px;
@@ -2290,13 +2188,6 @@ textarea:focus {
     border-radius: 20px;
   }
 
-  .workspace-spotlight {
-    grid-template-columns: 1fr;
-  }
-
-  .workspace-spotlight-grid {
-    grid-template-columns: 1fr;
-  }
 }
 </style>
 </head>
@@ -2421,7 +2312,6 @@ textarea:focus {
         <div class="switcher-note" id="switcher-note">已记住上次打开的工作台</div>
       </div>
       <section class="service-switcher" id="service-switcher"></section>
-      <div class="workspace-spotlight" id="workspace-spotlight"></div>
     </section>
 
     <div id="services-root"></div>
@@ -2563,7 +2453,7 @@ const SERVICE_META = {
     tokenPrefix: 'exat-',
     keyPlaceholder: 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx',
     importPlaceholder: '支持粘贴 email,password,uuid,timestamp 或仅 UUID Key，每行一条',
-    quotaSource: 'Exa 当前未接入官方额度同步，控制台先展示独立代理调用统计',
+    quotaSource: 'Exa 实时额度暂时无法查询，控制台当前只统计代理调用',
     routeHint: '代理端点: POST /exa/search',
     syncButton: 'Exa 暂不支持同步',
     syncSupported: false,
@@ -3159,8 +3049,8 @@ function renderServiceSwitcher(services, social) {
     const metricOneLabel = isSocial ? '可用 Token' : '活跃 Key';
     const metricTwoLabel = 'Token';
     const metricThreeLabel = isSocial ? '总调用' : '今日调用';
-    const metricFourLabel = isSocial ? 'Chat 剩余' : (service === 'exa' ? '官方额度' : '真实剩余');
-    const metricFourValue = isSocial ? fmtNum(remaining) : (service === 'exa' ? '未接入' : fmtNum(remaining));
+    const metricFourLabel = isSocial ? 'Chat 剩余' : (service === 'exa' ? '实时额度' : '真实剩余');
+    const metricFourValue = isSocial ? fmtNum(remaining) : (service === 'exa' ? '暂不可查' : fmtNum(remaining));
 
     return `
       <button
@@ -3239,8 +3129,6 @@ function applyActiveService() {
   if (switcherNote) {
     switcherNote.textContent = `当前工作台：${WORKSPACE_META[activeService].label} · 已记住你的切换偏好`;
   }
-
-  renderWorkspaceSpotlight(latestServices, latestSocial);
 }
 
 function setActiveService(service) {
@@ -3381,75 +3269,6 @@ curl -X POST ${baseUrl}/api/search \\
   -d '{"api_key":"${token}","query":"hello world"}'`;
 }
 
-function renderWorkspaceSpotlight(services, social) {
-  const root = document.getElementById('workspace-spotlight');
-  const meta = WORKSPACE_META[activeService];
-  if (!root || !meta) return;
-
-  let metrics = [];
-  let summary = meta.spotlightDesc || meta.routeHint;
-
-  if (activeService === 'social') {
-    const stats = social?.stats || {};
-    metrics = [
-      { label: '可用 Token', value: `${fmtNum(stats.token_normal || 0)} / ${fmtNum(stats.token_total || 0)}` },
-      { label: 'Chat 剩余', value: fmtNum(stats.chat_remaining || 0) },
-      { label: '总调用', value: fmtNum(stats.total_calls || 0) },
-      { label: '工作模式', value: socialModeLabel(social?.mode || 'manual') },
-    ];
-    summary = social?.admin_connected
-      ? '当前已接入后台自动继承，可以直接在这里查看 token 池、调用次数和客户端接线状态。'
-      : '当前还没有完全接入后台自动继承，但 Social / X 工作台结构已经就位。';
-  } else {
-    const payload = services?.[activeService] || {};
-    const overview = payload.overview || {};
-    const quota = payload.real_quota || {};
-    const tokenCount = (payload.tokens || []).length;
-
-    if (activeService === 'exa') {
-      metrics = [
-        { label: '活跃 Key', value: `${fmtNum(payload.keys_active || 0)} / ${fmtNum(payload.keys_total || 0)}` },
-        { label: '代理 Token', value: fmtNum(tokenCount) },
-        { label: '今日调用', value: fmtNum(overview.today_count || 0) },
-        { label: '官方额度', value: '未接入' },
-      ];
-      summary = payload.usage_sync?.detail || meta.spotlightDesc;
-    } else {
-      metrics = [
-        { label: '活跃 Key', value: `${fmtNum(payload.keys_active || 0)} / ${fmtNum(payload.keys_total || 0)}` },
-        { label: '代理 Token', value: fmtNum(tokenCount) },
-        { label: '今日调用', value: fmtNum(overview.today_count || 0) },
-        { label: '真实剩余', value: fmtNum(quota.total_remaining || 0) },
-      ];
-      summary = quota.last_synced_at
-        ? `最近同步时间：${formatTime(quota.last_synced_at)}`
-        : meta.spotlightDesc;
-    }
-  }
-
-  const badges = (meta.switcherBadges || []).map((badge) => `<span class="workspace-spotlight-badge">${escapeHtml(badge)}</span>`).join('');
-  const metricsHtml = metrics.map((item) => `
-    <div class="workspace-spotlight-metric">
-      <div class="label">${escapeHtml(item.label)}</div>
-      <div class="value">${escapeHtml(item.value)}</div>
-    </div>
-  `).join('');
-
-  root.innerHTML = `
-    <article class="workspace-spotlight-card" data-service="${activeService}">
-      <div class="workspace-spotlight-kicker">Current Workspace</div>
-      <div class="workspace-spotlight-title">${meta.label}</div>
-      <div class="workspace-spotlight-desc">${escapeHtml(meta.spotlightDesc || meta.routeHint)}</div>
-      <div class="workspace-spotlight-foot">${badges}</div>
-    </article>
-    <article class="workspace-spotlight-card" data-service="${activeService}">
-      <div class="workspace-spotlight-kicker">Live Snapshot</div>
-      <div class="workspace-spotlight-grid">${metricsHtml}</div>
-      <div class="workspace-spotlight-desc" style="margin-top:14px">${escapeHtml(summary)}</div>
-    </article>
-  `;
-}
-
 function renderGlobalSummary(services, social) {
   const list = Object.values(services || {});
   const totalKeys = list.reduce((sum, item) => sum + Number(item.keys_total || 0), 0);
@@ -3493,7 +3312,7 @@ function renderGlobalSummary(services, social) {
 
 function renderSyncMeta(service, payload) {
   if (service === 'exa') {
-    const detail = payload.usage_sync?.detail || 'Exa 当前未接入官方额度同步';
+    const detail = payload.usage_sync?.detail || 'Exa 实时额度暂时无法查询';
     document.getElementById(`sync-meta-${service}`).textContent = [
       `已导入 ${fmtNum(payload.keys_total || 0)} 个 Key`,
       `已签发 ${fmtNum((payload.tokens || []).length)} 个 Token`,
@@ -3537,9 +3356,9 @@ function renderOverview(service, payload) {
 
     document.getElementById(`overview-${service}`).innerHTML = `
       <div class="stat-box">
-        <div class="label">官方额度同步</div>
-        <div class="value">未接入</div>
-        <div class="hint">Exa 当前先展示独立代理调用统计</div>
+        <div class="label">实时额度</div>
+        <div class="value">暂时无法查询</div>
+        <div class="hint">控制台当前只统计 Exa 代理调用</div>
       </div>
       <div class="stat-box">
         <div class="label">Key 池状态</div>
@@ -3564,7 +3383,7 @@ function renderOverview(service, payload) {
       <div class="stat-box">
         <div class="label">今日成功率</div>
         <div class="value">${successRate}</div>
-        <div class="hint">${payload.usage_sync?.detail || '后续如果接入官方额度同步，会在这里继续补充展示。'}</div>
+        <div class="hint">${payload.usage_sync?.detail || 'Exa 实时额度暂时无法查询，后续如果接入官方读取会补充显示。'}</div>
       </div>
     `;
     return;
@@ -3712,8 +3531,8 @@ function renderTokens(service, tokens) {
 function renderKeyQuota(service, key) {
   if (service === 'exa') {
     return `
-      <div class="table-note muted">Exa 当前只展示代理层调用统计。</div>
-      <div class="table-note muted">官方 Key 额度同步待接入。</div>
+      <div class="table-note muted">Exa 实时额度暂时无法查询。</div>
+      <div class="table-note muted">当前只展示代理层调用统计。</div>
       ${key.usage_sync_error ? `<div class="table-note" style="color: var(--warn); margin-top: 6px">最近错误: ${escapeHtml(key.usage_sync_error)}</div>` : ''}
     `;
   }
@@ -3746,7 +3565,7 @@ function renderKeyQuota(service, key) {
 
 function renderAccountQuota(service, key) {
   if (service === 'exa') {
-    return '<span class="muted">官方账户额度未接入</span>';
+    return '<span class="muted">Exa 账户实时额度暂时无法查询</span>';
   }
 
   if (key.usage_account_limit !== null && key.usage_account_used !== null) {
