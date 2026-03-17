@@ -2,6 +2,7 @@
 多服务 API Proxy — FastAPI 主服务
 """
 import asyncio
+import hashlib
 import hmac
 import json
 import os
@@ -18,6 +19,8 @@ import database as db
 from key_pool import pool
 
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin")
+ADMIN_SESSION_COOKIE = os.environ.get("ADMIN_SESSION_COOKIE", "mysearch_proxy_session")
+ADMIN_SESSION_MAX_AGE = max(300, int(os.environ.get("ADMIN_SESSION_MAX_AGE", "2592000")))
 TAVILY_API_BASE = "https://api.tavily.com"
 FIRECRAWL_API_BASE = "https://api.firecrawl.dev"
 
@@ -83,6 +86,38 @@ social_gateway_state_lock = asyncio.Lock()
 
 def get_admin_password():
     return db.get_setting("admin_password", ADMIN_PASSWORD)
+
+
+def build_admin_session_token(password):
+    return hmac.new(
+        password.encode("utf-8"),
+        b"mysearch-proxy-session-v1",
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def has_valid_admin_session(request: Request):
+    token = (request.cookies.get(ADMIN_SESSION_COOKIE) or "").strip()
+    if not token:
+        return False
+    expected = build_admin_session_token(get_admin_password())
+    return hmac.compare_digest(token, expected)
+
+
+def apply_admin_session_cookie(response: Response, request: Request, password: str):
+    response.set_cookie(
+        ADMIN_SESSION_COOKIE,
+        build_admin_session_token(password),
+        max_age=ADMIN_SESSION_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+        secure=request.url.scheme == "https",
+        path="/",
+    )
+
+
+def clear_admin_session_cookie(response: Response):
+    response.delete_cookie(ADMIN_SESSION_COOKIE, path="/")
 
 
 def get_service(service_value, default="tavily"):
@@ -174,7 +209,7 @@ def verify_admin(request: Request):
     auth = request.headers.get("Authorization", "")
     password = request.headers.get("X-Admin-Password", "")
     pwd = get_admin_password()
-    if auth == f"Bearer {pwd}" or password == pwd:
+    if auth == f"Bearer {pwd}" or password == pwd or has_valid_admin_session(request):
         return True
     raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -1255,6 +1290,28 @@ async def console(request: Request):
 
 # ═══ 管理 API ═══
 
+@app.get("/api/session")
+async def get_session(request: Request, _=Depends(verify_admin)):
+    return {"ok": True}
+
+
+@app.post("/api/session/login")
+async def login_session(request: Request):
+    body = await request.json()
+    password = str((body or {}).get("password") or "").strip()
+    if not password or not hmac.compare_digest(password, get_admin_password()):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    response = JSONResponse({"ok": True})
+    apply_admin_session_cookie(response, request, password)
+    return response
+
+
+@app.post("/api/session/logout")
+async def logout_session():
+    response = JSONResponse({"ok": True})
+    clear_admin_session_cookie(response)
+    return response
+
 @app.get("/api/stats")
 async def stats(request: Request, _=Depends(verify_admin)):
     tavily_stats, firecrawl_stats, social_stats = await asyncio.gather(
@@ -1415,4 +1472,6 @@ async def change_password(request: Request, _=Depends(verify_admin)):
     if not new_pwd or len(new_pwd) < 4:
         raise HTTPException(status_code=400, detail="Password too short (min 4)")
     db.set_setting("admin_password", new_pwd)
-    return {"ok": True}
+    response = JSONResponse({"ok": True})
+    apply_admin_session_cookie(response, request, new_pwd)
+    return response

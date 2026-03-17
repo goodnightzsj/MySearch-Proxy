@@ -2134,7 +2134,7 @@ textarea:focus {
   <form class="stack" onsubmit="doLogin(event)">
     <input type="text" name="proxy-admin-user" value="admin" autocomplete="username" tabindex="-1" aria-hidden="true" style="position:absolute;opacity:0;pointer-events:none;height:0">
     <input type="password" id="pwd-input" placeholder="输入管理密码" autocomplete="current-password">
-    <button type="submit" class="btn btn-primary">进入控制台</button>
+    <button type="submit" class="btn btn-primary" id="login-submit">进入控制台</button>
   </form>
   <p id="login-err" class="login-error hidden"></p>
 </div>
@@ -2393,6 +2393,85 @@ let latestServices = {};
 let latestSocial = {};
 let latestSettings = {};
 
+function clearStoredPasswords() {
+  localStorage.removeItem(STORAGE_KEY);
+  localStorage.removeItem(LEGACY_STORAGE_KEY);
+}
+
+function setLoginBusy(isBusy) {
+  const input = document.getElementById('pwd-input');
+  const button = document.getElementById('login-submit');
+  if (input) input.disabled = isBusy;
+  if (button) {
+    button.disabled = isBusy;
+    button.textContent = isBusy ? '登录中...' : '进入控制台';
+  }
+}
+
+function showDashboard() {
+  document.getElementById('login-err').classList.add('hidden');
+  document.getElementById('login-box').classList.add('hidden');
+  document.getElementById('dashboard').classList.remove('hidden');
+}
+
+function showLogin() {
+  document.getElementById('dashboard').classList.add('hidden');
+  document.getElementById('login-box').classList.remove('hidden');
+  setLoginBusy(false);
+}
+
+async function fetchSession(method, path, body) {
+  const options = {
+    method,
+    credentials: 'same-origin',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+  };
+  if (body !== undefined) {
+    options.body = JSON.stringify(body);
+  }
+  const response = await fetch(API + path, options);
+  const text = await response.text();
+  let payload = {};
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch {
+    payload = text ? { detail: text } : {};
+  }
+  if (!response.ok) {
+    throw new Error(payload.detail || `HTTP ${response.status}`);
+  }
+  return payload;
+}
+
+async function loginWithPassword(password) {
+  await fetchSession('POST', '/api/session/login', { password });
+}
+
+async function hasServerSession() {
+  try {
+    await fetchSession('GET', '/api/session');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function migrateStoredPasswordIfNeeded() {
+  if (!PWD) return false;
+  try {
+    await loginWithPassword(PWD);
+    PWD = '';
+    clearStoredPasswords();
+    return true;
+  } catch {
+    PWD = '';
+    clearStoredPasswords();
+    return false;
+  }
+}
+
 function socialModeLabel(mode) {
   if (mode === 'admin-auto') return '后台自动继承';
   if (mode === 'hybrid') return '后台继承 + 手动覆写';
@@ -2596,14 +2675,17 @@ function renderSocialIntegration(social) {
 }
 
 function headers() {
-  return {
+  const base = {
     'Content-Type': 'application/json',
-    'X-Admin-Password': PWD,
   };
+  if (PWD) {
+    base['X-Admin-Password'] = PWD;
+  }
+  return base;
 }
 
 async function api(method, path, body) {
-  const options = { method, headers: headers() };
+  const options = { method, headers: headers(), credentials: 'same-origin' };
   if (body !== undefined) {
     options.body = JSON.stringify(body);
   }
@@ -2949,30 +3031,40 @@ function setActiveService(service) {
 function doLogin(event) {
   event?.preventDefault?.();
   const input = document.getElementById('pwd-input');
-  PWD = input.value.trim();
-  localStorage.setItem(STORAGE_KEY, PWD);
-  localStorage.removeItem(LEGACY_STORAGE_KEY);
-
-  api('GET', '/api/stats')
-    .then(() => {
-      document.getElementById('login-err').classList.add('hidden');
-      document.getElementById('login-box').classList.add('hidden');
-      document.getElementById('dashboard').classList.remove('hidden');
-      refresh();
+  const password = input.value.trim();
+  if (!password) {
+    document.getElementById('login-err').textContent = '请输入管理密码。';
+    document.getElementById('login-err').classList.remove('hidden');
+    return;
+  }
+  setLoginBusy(true);
+  loginWithPassword(password)
+    .then(async () => {
+      PWD = '';
+      clearStoredPasswords();
+      showDashboard();
+      await refresh();
     })
-    .catch(() => {
-      document.getElementById('login-err').textContent = '密码错误，或管理 API 不可用。';
+    .catch((error) => {
+      document.getElementById('login-err').textContent = error.message === 'Unauthorized'
+        ? '密码错误。'
+        : '登录失败，请检查管理 API 是否可用。';
       document.getElementById('login-err').classList.remove('hidden');
+    })
+    .finally(() => {
+      setLoginBusy(false);
     });
 }
 
 function logout() {
   PWD = '';
-  localStorage.removeItem(STORAGE_KEY);
-  localStorage.removeItem(LEGACY_STORAGE_KEY);
-  document.getElementById('dashboard').classList.add('hidden');
-  document.getElementById('login-box').classList.remove('hidden');
+  clearStoredPasswords();
+  showLogin();
   closeSettingsModal();
+  fetch(API + '/api/session/logout', {
+    method: 'POST',
+    credentials: 'same-origin',
+  }).catch(() => {});
 }
 
 function fmtNum(value) {
@@ -3507,19 +3599,27 @@ document.addEventListener('keydown', (event) => {
 
 renderServiceShells();
 
-if (PWD) {
-  api('GET', '/api/stats')
-    .then(() => {
-      document.getElementById('login-box').classList.add('hidden');
-      document.getElementById('dashboard').classList.remove('hidden');
-      refresh();
-    })
-    .catch(() => {
-      localStorage.removeItem(STORAGE_KEY);
-      localStorage.removeItem(LEGACY_STORAGE_KEY);
-      PWD = '';
-    });
+async function initConsole() {
+  const migrated = await migrateStoredPasswordIfNeeded();
+  const hasSession = migrated || await hasServerSession();
+  if (!hasSession) {
+    showLogin();
+    return;
+  }
+  showDashboard();
+  try {
+    await refresh();
+  } catch (error) {
+    if (error.message === 'Unauthorized') {
+      showLogin();
+      return;
+    }
+    document.getElementById('login-err').textContent = `控制台加载失败：${error.message}`;
+    document.getElementById('login-err').classList.remove('hidden');
+  }
 }
+
+initConsole();
 </script>
 </body>
 </html>
