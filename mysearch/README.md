@@ -280,6 +280,32 @@ MYSEARCH_FIRECRAWL_API_KEY=your-token
 http://127.0.0.1:8000/mcp
 ```
 
+这和默认的本地 `stdio` 安装是两条不同路径：
+
+- 本地 `stdio`
+  - 用 `./install.sh`
+  - 适合当前机器上的 `Codex` / `Claude Code` 直接拉起
+- 远程 `streamableHTTP`
+  - 用 `python -m mysearch --transport streamable-http ...`
+  - 适合跑在服务器上给远程客户端复用
+
+如果你是让 `Codex` 连接这个远程 endpoint，已实测可直接使用：
+
+```bash
+codex mcp add mysearch --url http://127.0.0.1:8000/mcp
+codex mcp get mysearch
+```
+
+如果远程入口需要 Bearer Token：
+
+```bash
+export MYSEARCH_MCP_BEARER_TOKEN=your-token
+codex mcp add mysearch \
+  --url https://mysearch.example.com/mcp \
+  --bearer-token-env-var MYSEARCH_MCP_BEARER_TOKEN
+codex mcp get mysearch
+```
+
 也可以通过 `mysearch/.env` 配置这些参数：
 
 ```env
@@ -294,6 +320,7 @@ MYSEARCH_MCP_STATELESS_HTTP=false
 - `./install.sh` 注册的是本地 `stdio` MCP
 - `python -m mysearch --transport streamable-http ...` 是额外的远程入口
 - 两者可以并存，互不冲突
+- `OpenClaw` 使用 `openclaw/` skill bundle，不需要依赖这个远程 HTTP 入口
 
 ## X / Social 配置
 

@@ -359,6 +359,42 @@ Default remote endpoint:
 http://127.0.0.1:8000/mcp
 ```
 
+There are two different install paths here:
+
+- local `stdio`
+  - best when `Codex` / `Claude Code` runs the MCP on the same machine
+  - use `./install.sh`
+- remote `streamableHTTP`
+  - best when `MySearch` runs on a server and clients connect by URL
+  - clients do not need to run `./install.sh` locally
+
+If you want `Codex` to connect to a remote `MySearch`, this flow is already
+tested:
+
+```bash
+codex mcp add mysearch --url http://127.0.0.1:8000/mcp
+codex mcp get mysearch
+```
+
+If the remote endpoint is behind a reverse proxy or bearer auth:
+
+```bash
+export MYSEARCH_MCP_BEARER_TOKEN=your-token
+codex mcp add mysearch \
+  --url https://mysearch.example.com/mcp \
+  --bearer-token-env-var MYSEARCH_MCP_BEARER_TOKEN
+codex mcp get mysearch
+```
+
+Notes:
+
+- the `Codex --url` flow is the `streamableHTTP` path
+- these commands have already been tested locally
+- if `Claude Code` is still using a local MCP config flow, keep using the
+  default `stdio` install path
+- the `openclaw/` bundle does not depend on this remote `streamableHTTP`
+  endpoint
+
 ### 2. Install the Codex / Claude Code skill
 
 If you want the assistant to understand how to use MySearch, install the skill

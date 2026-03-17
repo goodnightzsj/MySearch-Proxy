@@ -31,6 +31,13 @@ If you only want to share the GitHub link, you can also say:
 Please read https://github.com/skernelx/MySearch-Proxy/tree/main/skill and automatically install and verify MySearch for me.
 ```
 
+If you already have a deployed `MySearch streamableHTTP` endpoint, you can also
+send this:
+
+```text
+Register this MySearch MCP URL in Codex and verify it for me: http://127.0.0.1:8000/mcp. If auth is required, use the MYSEARCH_MCP_BEARER_TOKEN environment variable.
+```
+
 ## If you are an AI assistant, what to do after receiving this directory
 
 ### 1. Treat this as the install-and-use entry, not as a standalone MCP package
@@ -63,6 +70,8 @@ After installation, remind the user to:
 
 ### 3. Then ensure the MySearch MCP is installed
 
+If the user gave you the source repository, follow the local install path:
+
 From the repository root:
 
 ```bash
@@ -92,6 +101,31 @@ Notes:
 - `skill/` teaches the assistant how to use MySearch
 - the root `install.sh` registers the `mysearch` MCP for `Codex` / `Claude Code`
 - both parts matter
+
+If the user gives you a deployed `MySearch streamableHTTP` URL instead of the
+source repository, treat it as a remote MCP and do not ask the user to run
+`./install.sh` locally:
+
+```bash
+codex mcp add mysearch --url http://127.0.0.1:8000/mcp
+codex mcp get mysearch
+```
+
+If the endpoint requires bearer auth:
+
+```bash
+export MYSEARCH_MCP_BEARER_TOKEN=your-token
+codex mcp add mysearch \
+  --url https://mysearch.example.com/mcp \
+  --bearer-token-env-var MYSEARCH_MCP_BEARER_TOKEN
+codex mcp get mysearch
+```
+
+Keep the paths separate:
+
+- local repository install = `stdio`
+- remote URL attach = `streamableHTTP`
+- the `openclaw/` bundle does not depend on this remote MCP URL
 
 ## Recommended provider path
 

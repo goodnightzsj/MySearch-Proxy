@@ -358,6 +358,41 @@ MYSEARCH_FIRECRAWL_API_KEY=your-token
 http://127.0.0.1:8000/mcp
 ```
 
+这里要明确区分两条安装路径：
+
+- 本地 `stdio`
+  - 适合当前机器直接安装到 `Codex` / `Claude Code`
+  - 直接跑 `./install.sh`
+- 远程 `streamableHTTP`
+  - 适合把 `MySearch` 跑在服务器上，再让别的客户端通过 URL 接入
+  - 客户端不需要再本地执行 `./install.sh`
+
+如果你是让 `Codex` 连接远程 `MySearch`，已实测可以直接这样注册：
+
+```bash
+codex mcp add mysearch --url http://127.0.0.1:8000/mcp
+codex mcp get mysearch
+```
+
+如果你的远程入口前面还有反向代理或 Bearer Token：
+
+```bash
+export MYSEARCH_MCP_BEARER_TOKEN=your-token
+codex mcp add mysearch \
+  --url https://mysearch.example.com/mcp \
+  --bearer-token-env-var MYSEARCH_MCP_BEARER_TOKEN
+codex mcp get mysearch
+```
+
+补充说明：
+
+- `Codex` 这套 `--url` 接法对应的是 `streamableHTTP`
+- 这套命令已经做过本地实测
+- `Claude Code` 如果暂时没有走 URL 型 MCP 配置，也可以继续使用默认的
+  `stdio` 安装路径
+- `OpenClaw` 使用的是 `openclaw/` 目录里的 skill bundle，不依赖这里的远程
+  `streamableHTTP` 入口
+
 ### 2. 安装 Codex / Claude Code skill
 
 如果你希望 AI 不只“看见一个 MCP”，还知道该怎么调用它，再装 skill：

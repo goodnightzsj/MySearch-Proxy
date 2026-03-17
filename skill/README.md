@@ -31,6 +31,12 @@
 请阅读 https://github.com/skernelx/MySearch-Proxy/tree/main/skill 里的 README 和 SKILL，帮我自动安装并验证 MySearch。
 ```
 
+如果你手里已经有一个部署好的 `MySearch streamableHTTP` 地址，也可以直接这样发：
+
+```text
+请把这个 MySearch MCP 地址注册到 Codex 并验证可用性：http://127.0.0.1:8000/mcp。如果需要鉴权，请使用环境变量 MYSEARCH_MCP_BEARER_TOKEN。
+```
+
 ## 如果你是 AI 助手，收到这个目录后应该怎么做
 
 ### 1. 先判断这是 skill 入口，不是单独的 MCP 包
@@ -63,6 +69,8 @@ bash skill/scripts/install_codex_skill.sh --force
 
 ### 3. 再确认 MySearch MCP 是否已安装
 
+如果用户给你的是源码仓库，继续走本地安装：
+
 在仓库根目录执行：
 
 ```bash
@@ -92,6 +100,30 @@ cp mysearch/.env.example mysearch/.env
 - `skill/` 负责让 AI 知道怎么用
 - 根目录 `install.sh` 负责把 `mysearch` MCP 注册进 `Codex` / `Claude Code`
 - 两者互补，不要只做其中一件
+
+如果用户给你的不是源码仓库，而是已经部署好的 `MySearch streamableHTTP` URL，
+优先按远程 MCP 处理，不要再让用户本地执行 `./install.sh`：
+
+```bash
+codex mcp add mysearch --url http://127.0.0.1:8000/mcp
+codex mcp get mysearch
+```
+
+如果远程入口需要 Bearer Token：
+
+```bash
+export MYSEARCH_MCP_BEARER_TOKEN=your-token
+codex mcp add mysearch \
+  --url https://mysearch.example.com/mcp \
+  --bearer-token-env-var MYSEARCH_MCP_BEARER_TOKEN
+codex mcp get mysearch
+```
+
+这里要分清：
+
+- 本地仓库安装 = `stdio`
+- 远程 URL 接入 = `streamableHTTP`
+- `OpenClaw` 走的是 `openclaw/` bundle，不依赖这条远程 MCP URL
 
 ## 最推荐的 provider 接法
 

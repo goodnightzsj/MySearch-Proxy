@@ -286,6 +286,32 @@ Default endpoint:
 http://127.0.0.1:8000/mcp
 ```
 
+This is different from the default local `stdio` install path:
+
+- local `stdio`
+  - use `./install.sh`
+  - best when `Codex` / `Claude Code` launches MySearch on the same machine
+- remote `streamableHTTP`
+  - use `python -m mysearch --transport streamable-http ...`
+  - best when MySearch runs on a server for shared clients
+
+If you want `Codex` to connect to that remote endpoint, this is already tested:
+
+```bash
+codex mcp add mysearch --url http://127.0.0.1:8000/mcp
+codex mcp get mysearch
+```
+
+If the remote endpoint requires a bearer token:
+
+```bash
+export MYSEARCH_MCP_BEARER_TOKEN=your-token
+codex mcp add mysearch \
+  --url https://mysearch.example.com/mcp \
+  --bearer-token-env-var MYSEARCH_MCP_BEARER_TOKEN
+codex mcp get mysearch
+```
+
 You can also configure the HTTP listener via `mysearch/.env`:
 
 ```env
@@ -301,6 +327,7 @@ Notes:
 - `python -m mysearch --transport streamable-http ...` is an additional
   remote entry point
 - both can coexist without conflict
+- the `openclaw/` skill bundle does not require this remote HTTP endpoint
 
 ## X / Social configuration
 
