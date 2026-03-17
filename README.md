@@ -14,6 +14,8 @@
 
 - GitHub：
   [skernelx/MySearch-Proxy](https://github.com/skernelx/MySearch-Proxy)
+- Docker Hub：
+  [skernelx/mysearch-proxy](https://hub.docker.com/r/skernelx/mysearch-proxy)
 - OpenClaw Hub Skill：
   [clawhub.ai/skernelx/mysearch](https://clawhub.ai/skernelx/mysearch)
 - Tavily / Firecrawl 默认推荐搭档：
@@ -396,6 +398,13 @@ bash openclaw/scripts/install_openclaw_skill.sh \
 
 ### 4. 部署 Proxy Console
 
+默认公开镜像：
+
+- Docker Hub：
+  [skernelx/mysearch-proxy](https://hub.docker.com/r/skernelx/mysearch-proxy)
+- 拉取地址：
+  `docker pull skernelx/mysearch-proxy:latest`
+
 ```bash
 cd proxy
 docker compose up -d
@@ -410,7 +419,7 @@ docker run -d \
   -p 9874:9874 \
   -e ADMIN_PASSWORD=your-admin-password \
   -v $(pwd)/mysearch-proxy-data:/app/data \
-  your-registry/mysearch-proxy:latest
+  skernelx/mysearch-proxy:latest
 ```
 
 启动后访问：

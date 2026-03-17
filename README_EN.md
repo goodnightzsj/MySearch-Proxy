@@ -15,6 +15,8 @@ Project entry points:
 
 - GitHub:
   [skernelx/MySearch-Proxy](https://github.com/skernelx/MySearch-Proxy)
+- Docker Hub:
+  [skernelx/mysearch-proxy](https://hub.docker.com/r/skernelx/mysearch-proxy)
 - OpenClaw Hub Skill:
   [clawhub.ai/skernelx/mysearch](https://clawhub.ai/skernelx/mysearch)
 - Recommended Tavily / Firecrawl provider layer:
@@ -398,6 +400,13 @@ The more shareable entry for humans and AI assistants is:
 
 ### 4. Deploy the Proxy Console
 
+Default public image:
+
+- Docker Hub:
+  [skernelx/mysearch-proxy](https://hub.docker.com/r/skernelx/mysearch-proxy)
+- Pull:
+  `docker pull skernelx/mysearch-proxy:latest`
+
 ```bash
 cd proxy
 docker compose up -d
@@ -412,7 +421,7 @@ docker run -d \
   -p 9874:9874 \
   -e ADMIN_PASSWORD=your-admin-password \
   -v $(pwd)/mysearch-proxy-data:/app/data \
-  your-registry/mysearch-proxy:latest
+  skernelx/mysearch-proxy:latest
 ```
 
 Open:
