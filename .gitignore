@@ -1,6 +1,7 @@
 .DS_Store
 .env
 .env.local
+.tmp-*
 *.pyc
 __pycache__/
 .pytest_cache/
@@ -26,7 +27,6 @@ proxy/data/
 *.sqlite3
 
 # OpenClaw skill 本地运行时
-openclaw/runtime/
 openclaw/.venv/
 
 # 本地测试输出

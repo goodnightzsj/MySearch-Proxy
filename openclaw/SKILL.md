@@ -7,48 +7,88 @@ description: >-
   discussion. Prefer this over legacy Tavily-only skill or raw web_search when
   MySearch is healthy.
 homepage: https://github.com/skernelx/MySearch-Proxy/tree/main/openclaw
-metadata: {"clawdbot":{"emoji":"🔎","requires":{"bins":["bash","python3","curl"]}}}
+metadata: {"clawdbot":{"emoji":"🔎","requires":{"bins":["bash","python3"]}},"openclaw":{"requires":{"bins":["bash","python3"],"env":["MYSEARCH_TAVILY_API_KEY","MYSEARCH_FIRECRAWL_API_KEY"]},"primaryEnv":"MYSEARCH_TAVILY_API_KEY"}}
 ---
 
 # MySearch For OpenClaw
 
 MySearch 是给 OpenClaw 用的默认搜索 skill。
 
-它不是只包一个搜索源，而是把：
+它把 Tavily、Firecrawl、X / Social 聚合成同一个入口，并且按任务类型自动路由：
 
-- Tavily
-- Firecrawl
-- X / Social（可选）
+- 最新网页、普通实时搜索：优先 Tavily
+- 文档、GitHub、pricing、changelog、PDF：优先 Firecrawl
+- X / Twitter / 社交舆情：优先 xAI 或 compatible `/social/search`
+- 单页正文抓取：优先 Firecrawl，失败或空正文时回退 Tavily extract
 
-统一成一个搜索入口。
+## 最小配置
 
-## 一次性安装
+Hub 版 skill 已经自带 runtime，不需要在安装时再下载远程代码。
 
-如果这个 skill 已经被放进你的 OpenClaw skills 目录，先做一次 bootstrap：
+最小可用配置：
+
+- `MYSEARCH_TAVILY_API_KEY`
+- `MYSEARCH_FIRECRAWL_API_KEY`
+
+可选增强：
+
+- `MYSEARCH_XAI_API_KEY`
+- `MYSEARCH_XAI_BASE_URL`
+- `MYSEARCH_XAI_SOCIAL_BASE_URL`
+- `MYSEARCH_XAI_SEARCH_MODE=official|compatible`
+
+如果没有 X / Social 配置，MySearch 仍然可以正常完成：
+
+- `web`
+- `news`
+- `docs`
+- `github`
+- `pdf`
+- `extract`
+- `research`
+
+只有 `mode="social"` 或 `--include-social` 才会要求 X / Social。
+
+## OpenClaw 配置建议
+
+优先把 provider key 放进 OpenClaw skill env，而不是到处复制 shell 环境。
+
+```json
+{
+  "skills": {
+    "entries": {
+      "mysearch": {
+        "enabled": true,
+        "env": {
+          "MYSEARCH_TAVILY_API_KEY": "tvly-...",
+          "MYSEARCH_FIRECRAWL_API_KEY": "fc-...",
+          "MYSEARCH_XAI_API_KEY": "xai-or-gateway-token",
+          "MYSEARCH_XAI_BASE_URL": "https://api.x.ai/v1",
+          "MYSEARCH_XAI_SOCIAL_BASE_URL": "https://your-gateway.example.com",
+          "MYSEARCH_XAI_SEARCH_MODE": "official"
+        }
+      }
+    }
+  }
+}
+```
+
+如果你是从源码目录直接调试，也可以：
 
 ```bash
 cp {baseDir}/.env.example {baseDir}/.env
-# 编辑 {baseDir}/.env，至少填 Tavily + Firecrawl
-
-bash {baseDir}/scripts/install_openclaw_skill.sh
 python3 {baseDir}/scripts/mysearch_openclaw.py health
 ```
 
-如果你要直接替换旧的 Tavily skill：
+如果要把 skill 复制到别的 OpenClaw skills 目录，再执行：
 
 ```bash
-bash {baseDir}/scripts/install_openclaw_skill.sh --replace-skill tavily
+bash {baseDir}/scripts/install_openclaw_skill.sh --install-to ~/.openclaw/skills/mysearch
 ```
-
-说明：
-
-- 不填 X / Social 也能正常用
-- `install_openclaw_skill.sh` 会安装 skill 本地 runtime 和 `.venv`
-- 如果你是从仓库源码安装，也可以传 `--repo-root /path/to/MySearch-Proxy`
 
 ## MySearch-First 规则
 
-只要 `health` 显示至少有一个 provider 可用：
+只要 `health` 显示 Tavily + Firecrawl 已配置完成：
 
 - 外部搜索任务优先走 MySearch
 - 不要把 raw `web_search` 当主流程
@@ -56,10 +96,9 @@ bash {baseDir}/scripts/install_openclaw_skill.sh --replace-skill tavily
 
 只有这些情况才回退：
 
-- MySearch 还没 bootstrap
-- 需要的 provider 没配好
-- MySearch 返回冲突结果，你要额外复核
-- 用户明确要求你换别的搜索方式
+- MySearch 还没配置最小 key
+- 用户明确要求改用别的搜索方式
+- MySearch 返回冲突结果，需要额外复核
 
 ## 严格参数规则
 
@@ -162,26 +201,6 @@ python3 {baseDir}/scripts/mysearch_openclaw.py research \
   --include-social
 ```
 
-## 路由原则
-
-- 普通网页、最新动态：Tavily
-- 文档、GitHub、pricing、changelog、PDF：Firecrawl
-- X / Twitter / 社交舆情：xAI / compatible social gateway
-- 单页正文：优先 Firecrawl，失败或空正文时回退 Tavily extract
-
-## 降级规则
-
-- 没配 X / Social 时：
-  - `web`
-  - `docs`
-  - `extract`
-  - `research`
-  
-  仍可用
-
-- 只有 `mode="social"` 会提示你补充 X / Social 配置
-- `research --include-social` 在 X 不可用时也不应该把整次任务判成失败
-
 ## 输出要求
 
 - 优先给结论，再给来源
@@ -189,4 +208,3 @@ python3 {baseDir}/scripts/mysearch_openclaw.py research \
 - 区分事实、引文和推断
 - 同时包含网页和 X 时，明确分区，不要混成一句模糊总结
 - `max_results` 默认保持小一些，先拿 3 到 5 条
-

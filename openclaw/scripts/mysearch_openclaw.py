@@ -12,7 +12,6 @@ from typing import Any
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-VENV_SENTINEL = "MYSEARCH_OPENCLAW_IN_VENV"
 
 
 def _load_env_file(path: Path) -> None:
@@ -29,26 +28,6 @@ def _load_env_file(path: Path) -> None:
         if value[:1] == value[-1:] and value[:1] in {"'", '"'}:
             value = value[1:-1]
         os.environ.setdefault(key, value)
-
-
-def _maybe_reexec_into_venv() -> None:
-    if os.environ.get(VENV_SENTINEL) == "1":
-        return
-
-    candidates = [
-        BASE_DIR / ".venv" / "bin" / "python3",
-        BASE_DIR / ".venv" / "bin" / "python",
-    ]
-    current = Path(sys.executable).resolve()
-    for candidate in candidates:
-        if not candidate.exists():
-            continue
-        resolved = candidate.resolve()
-        if resolved == current:
-            return
-        env = os.environ.copy()
-        env[VENV_SENTINEL] = "1"
-        os.execve(str(resolved), [str(resolved), __file__, *sys.argv[1:]], env)
 
 
 def _bootstrap_error(message: str) -> int:
@@ -73,7 +52,7 @@ def _runtime_imports():
         from mysearch.clients import MySearchClient, MySearchError  # type: ignore
     except ModuleNotFoundError as exc:  # pragma: no cover - runtime bootstrap path
         raise RuntimeError(
-            "MySearch runtime dependencies are missing. Run the install script first."
+            "MySearch bundled runtime is incomplete. Reinstall the skill package."
         ) from exc
 
     return MySearchClient, MySearchError
@@ -287,7 +266,6 @@ def _render_research(payload: dict[str, Any]) -> str:
 
 
 def main() -> int:
-    _maybe_reexec_into_venv()
     _load_env_file(BASE_DIR / ".env")
     _load_env_file(BASE_DIR / "runtime" / ".env")
 
