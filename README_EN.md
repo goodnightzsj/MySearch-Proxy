@@ -341,6 +341,24 @@ The root `install.sh` will:
 3. auto-register `Codex` if available
 4. inject `MYSEARCH_*` variables from `mysearch/.env`
 
+The default registration target is local `stdio`.
+
+If you also want a remote `streamableHTTP` endpoint, start it separately:
+
+```bash
+./venv/bin/python -m mysearch \
+  --transport streamable-http \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --streamable-http-path /mcp
+```
+
+Default remote endpoint:
+
+```text
+http://127.0.0.1:8000/mcp
+```
+
 ### 2. Install the Codex / Claude Code skill
 
 If you want the assistant to understand how to use MySearch, install the skill

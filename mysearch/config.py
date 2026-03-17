@@ -12,6 +12,7 @@ MODULE_DIR = Path(__file__).resolve().parent
 ROOT_DIR = MODULE_DIR.parent
 AuthMode = Literal["bearer", "body"]
 XAISearchMode = Literal["official", "compatible"]
+MCPTransport = Literal["stdio", "sse", "streamable-http"]
 
 
 def _load_env_file(env_path: Path) -> None:
@@ -124,6 +125,12 @@ class MySearchConfig:
     server_name: str
     timeout_seconds: int
     xai_model: str
+    mcp_host: str
+    mcp_port: int
+    mcp_mount_path: str
+    mcp_sse_path: str
+    mcp_streamable_http_path: str
+    mcp_stateless_http: bool
     tavily: ProviderConfig
     firecrawl: ProviderConfig
     xai: ProviderConfig
@@ -137,6 +144,14 @@ class MySearchConfig:
                 "MYSEARCH_XAI_MODEL",
                 default="grok-4.20-beta-latest-non-reasoning",
             ),
+            mcp_host=_get_str("MYSEARCH_MCP_HOST", default="127.0.0.1"),
+            mcp_port=_get_int("MYSEARCH_MCP_PORT", 8000),
+            mcp_mount_path=_normalize_path(_get_str("MYSEARCH_MCP_MOUNT_PATH", default="/")),
+            mcp_sse_path=_normalize_path(_get_str("MYSEARCH_MCP_SSE_PATH", default="/sse")),
+            mcp_streamable_http_path=_normalize_path(
+                _get_str("MYSEARCH_MCP_STREAMABLE_HTTP_PATH", default="/mcp")
+            ),
+            mcp_stateless_http=_get_bool("MYSEARCH_MCP_STATELESS_HTTP", False),
             tavily=ProviderConfig(
                 name="tavily",
                 base_url=_normalize_base_url(

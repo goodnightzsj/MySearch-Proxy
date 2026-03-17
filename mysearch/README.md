@@ -28,6 +28,21 @@
 如果你还要统一 key、token、额度和 social gateway，再看
 [../proxy/README.md](../proxy/README.md)。
 
+## 通信方式
+
+当前 `MySearch MCP` 同时支持：
+
+- `stdio`
+  - 默认方式
+  - 适合 `Codex` / `Claude Code` 本地拉起
+- `streamableHTTP`
+  - 适合远程共享、反向代理、团队网关接入
+- `sse`
+  - 底层库支持，但当前项目主推 `stdio + streamableHTTP`
+
+默认安装脚本注册的仍然是 `stdio`，不会影响你现在给 `Codex` /
+`Claude Code` 的本地使用。
+
 ## 为什么它比常见搜索 MCP 更完整
 
 ### 1. 不是单一搜索源
@@ -245,6 +260,40 @@ MYSEARCH_FIRECRAWL_API_KEY=your-token
 3. 检测 `Codex`
 4. 注册 `mysearch` MCP
 5. 把 `mysearch/.env` 里的 `MYSEARCH_*` 注入到配置里
+
+### 启动 streamableHTTP 入口
+
+如果你要把 `MySearch` 作为远程 MCP 提供给别的客户端，不走本地 `stdio`，
+可以单独启动：
+
+```bash
+./venv/bin/python -m mysearch \
+  --transport streamable-http \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --streamable-http-path /mcp
+```
+
+默认 endpoint 是：
+
+```text
+http://127.0.0.1:8000/mcp
+```
+
+也可以通过 `mysearch/.env` 配置这些参数：
+
+```env
+MYSEARCH_MCP_HOST=127.0.0.1
+MYSEARCH_MCP_PORT=8000
+MYSEARCH_MCP_STREAMABLE_HTTP_PATH=/mcp
+MYSEARCH_MCP_STATELESS_HTTP=false
+```
+
+说明：
+
+- `./install.sh` 注册的是本地 `stdio` MCP
+- `python -m mysearch --transport streamable-http ...` 是额外的远程入口
+- 两者可以并存，互不冲突
 
 ## X / Social 配置
 

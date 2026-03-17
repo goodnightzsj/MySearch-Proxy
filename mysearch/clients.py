@@ -65,6 +65,19 @@ class MySearchClient:
             "server_name": self.config.server_name,
             "timeout_seconds": self.config.timeout_seconds,
             "xai_model": self.config.xai_model,
+            "mcp": {
+                "default_transport": "stdio",
+                "host": self.config.mcp_host,
+                "port": self.config.mcp_port,
+                "mount_path": self.config.mcp_mount_path,
+                "sse_path": self.config.mcp_sse_path,
+                "streamable_http_path": self.config.mcp_streamable_http_path,
+                "stateless_http": self.config.mcp_stateless_http,
+                "streamable_http_url": (
+                    f"http://{self.config.mcp_host}:{self.config.mcp_port}"
+                    f"{self.config.mcp_streamable_http_path}"
+                ),
+            },
             "providers": {
                 "tavily": self._describe_provider(self.config.tavily, keyring_info["tavily"]),
                 "firecrawl": self._describe_provider(

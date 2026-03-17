@@ -28,6 +28,22 @@ If you only need a stronger search MCP, this directory is enough.
 If you also need pooled keys, downstream tokens, quota sync, and a social
 gateway UI, see [../proxy/README_EN.md](../proxy/README_EN.md).
 
+## Transports
+
+`MySearch MCP` now supports:
+
+- `stdio`
+  - default mode
+  - best for local `Codex` / `Claude Code`
+- `streamableHTTP`
+  - best for remote sharing, reverse proxies, and team gateways
+- `sse`
+  - supported by the underlying library, but this project mainly recommends
+    `stdio + streamableHTTP`
+
+The default installer still registers `stdio`, so existing local usage does
+not change.
+
 ## Why it is more complete than typical search MCPs
 
 ### 1. It is not single-source
@@ -250,6 +266,41 @@ The root `install.sh` will:
 3. detect `Codex`
 4. register the `mysearch` MCP
 5. inject `MYSEARCH_*` values from `mysearch/.env`
+
+### Start a streamableHTTP endpoint
+
+If you want to expose `MySearch` as a remote MCP instead of local `stdio`,
+run:
+
+```bash
+./venv/bin/python -m mysearch \
+  --transport streamable-http \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --streamable-http-path /mcp
+```
+
+Default endpoint:
+
+```text
+http://127.0.0.1:8000/mcp
+```
+
+You can also configure the HTTP listener via `mysearch/.env`:
+
+```env
+MYSEARCH_MCP_HOST=127.0.0.1
+MYSEARCH_MCP_PORT=8000
+MYSEARCH_MCP_STREAMABLE_HTTP_PATH=/mcp
+MYSEARCH_MCP_STATELESS_HTTP=false
+```
+
+Notes:
+
+- `./install.sh` still registers the local `stdio` MCP
+- `python -m mysearch --transport streamable-http ...` is an additional
+  remote entry point
+- both can coexist without conflict
 
 ## X / Social configuration
 
