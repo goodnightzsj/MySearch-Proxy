@@ -1,20 +1,163 @@
 ---
 name: mysearch
 description: >-
-  Unified web research skill for MySearch MCP. Aggregates Tavily, Firecrawl,
-  and X search (via xAI) behind one workflow. Use when the user wants current
-  web search, social/X search, document-oriented search, URL content extraction,
-  or a small multi-source research pack with citations.
+  Install, verify, debug, and use MySearch MCP/Skill. Aggregates Tavily,
+  Firecrawl, and X search (via xAI) behind one workflow. Use when the user
+  shares a MySearch repo/skill URL, wants MySearch installed or repaired, or
+  wants current web search, social/X search, document-oriented search, URL
+  content extraction, or a small multi-source research pack with citations.
 allowed-tools: mcp__mysearch__search, mcp__mysearch__extract_url, mcp__mysearch__research, mcp__mysearch__mysearch_health
 ---
 
 # MySearch
 
-MySearch 是一层聚合搜索技能，不假设你只用单一 provider：
+MySearch 是一层聚合搜索技能，不假设你只用单一 provider，也不把
+“skill 安装”和 “MCP 安装”混成一件事。
 
 - Tavily：适合普通网页发现、新闻检索、快速答案
 - Firecrawl：适合文档、GitHub、pricing、changelog、正文抓取
 - X 搜索：适合“大家在 X 上怎么说”、实时舆情、开发者讨论
+
+## 用户只发了 skill 地址时怎么处理
+
+如果用户贴的是下面任意一种内容：
+
+- `https://github.com/skernelx/MySearch-Proxy`
+- `https://github.com/skernelx/MySearch-Proxy/tree/main/skill`
+- 本地仓库路径里的 `skill/`
+
+默认按下面顺序处理：
+
+1. 先确认这是 `MySearch` skill 仓库，而不是单独的 MCP 包
+2. 先安装 skill 到 `~/.codex/skills/mysearch`
+3. 再确认 `mysearch` MCP 是否已经注册到 `Codex` / `Claude Code`
+4. 如果 MCP 没装，再去仓库根目录执行 `./install.sh`
+5. 安装 skill 后提醒用户重启 `Codex`
+
+要点：
+
+- `skill/` 目录负责“让 AI 知道怎么用 MySearch”
+- 仓库根目录的 `install.sh` 负责“把 MySearch MCP 注册进 Codex / Claude Code”
+- 两者互补，不要只装一个就当全部完成
+
+## 安装流程
+
+### A. 安装 skill
+
+如果已经有仓库本地副本，优先用：
+
+```bash
+bash skill/scripts/install_codex_skill.sh
+```
+
+如果目标目录已存在，需要覆盖时：
+
+```bash
+bash skill/scripts/install_codex_skill.sh --force
+```
+
+安装完成后提醒用户：
+
+- 重启 `Codex`
+
+### B. 安装 MCP
+
+在仓库根目录执行：
+
+```bash
+python3 -m venv venv
+./install.sh
+```
+
+如果只是补配置，先准备：
+
+```bash
+cp mysearch/.env.example mysearch/.env
+```
+
+再填写 `MYSEARCH_*` / `SOCIAL_GATEWAY_*`。
+
+## 快速验收
+
+优先按下面顺序验收，不要一上来就盲调：
+
+1. `codex mcp list`
+2. `codex mcp get mysearch`
+3. `python skill/scripts/check_mysearch.py --health-only`
+4. `python skill/scripts/check_mysearch.py --web-query "OpenAI"`
+5. `python skill/scripts/check_mysearch.py --social-query "Model Context Protocol"`
+
+如果用户要更完整的烟测，再加：
+
+```bash
+python skill/scripts/check_mysearch.py \
+  --web-query "OpenAI latest announcements" \
+  --docs-query "OpenAI API responses docs" \
+  --social-query "Model Context Protocol" \
+  --extract-url "https://www.anthropic.com/news/model-context-protocol"
+```
+
+## 调试顺序
+
+### 1. 工具没出现
+
+- 看 `codex mcp list` 是否有 `mysearch`
+- 没有就回到仓库根目录重跑 `./install.sh`
+- skill 没生效就检查 `~/.codex/skills/mysearch/SKILL.md`
+- skill 新装后如果还是没生效，提醒用户重启 `Codex`
+
+### 2. provider 没配好
+
+先跑：
+
+```bash
+python skill/scripts/check_mysearch.py --health-only
+```
+
+重点看：
+
+- `tavily.base_url`
+- `firecrawl.base_url`
+- `xai.search_mode`
+- `xai.alternate_base_urls.social_search`
+- `available_keys`
+
+### 3. 网页搜索正常，X 不正常
+
+优先检查：
+
+- `MYSEARCH_XAI_SEARCH_MODE`
+- `MYSEARCH_XAI_SOCIAL_BASE_URL`
+- social gateway 是否真的提供 `/social/search`
+
+`compatible` 模式下，真正的 X 搜索结果应该来自 social gateway，
+不是直接指望 `/responses` 自己变成结构化 X 列表。
+
+### 4. `extract_url` 正文为空
+
+默认 `extract_url` 会先走 `Firecrawl`。
+
+如果：
+
+- `Firecrawl` 抓取失败
+- 或返回空正文
+
+MySearch 会自动回退到 `Tavily extract`。
+
+调试时要看返回里的：
+
+- `warning`
+- `fallback.from`
+- `fallback.reason`
+
+### 5. 结果不够稳
+
+优先调整，而不是立刻换 provider：
+
+- 对比 / 原因分析：`intent="comparison"` 或 `intent="exploratory"`
+- 要交叉验证：`strategy="verify"`
+- 要 docs / GitHub / PDF / changelog：`mode="docs"`
+- 要完整小研究：`research(...)`
 
 ## 默认工作流
 
@@ -86,6 +229,8 @@ MySearch 是一层聚合搜索技能，不假设你只用单一 provider：
 - X 搜索依赖单独的 xAI key；没配时应该显式说明 social 部分不可用
 - 单个页面阅读优先 `extract_url`
 - 多来源整理优先 `research`
+- 用户只贴 skill 地址时，先安装 skill，再检查 MCP 是否已注册
+- 调试优先跑 `skill/scripts/check_mysearch.py`，不要先手写一长串 Python one-liner
 
 ## 证据标准
 
