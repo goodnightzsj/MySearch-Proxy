@@ -162,16 +162,7 @@ cp openclaw/.env.example openclaw/.env
 
 bash openclaw/scripts/install_openclaw_skill.sh \
   --install-to ~/.openclaw/skills/mysearch \
-  --repo-root "$(pwd)"
-```
-
-如果你要直接替换旧的 Tavily skill：
-
-```bash
-bash openclaw/scripts/install_openclaw_skill.sh \
-  --install-to ~/.openclaw/skills/mysearch \
-  --repo-root "$(pwd)" \
-  --replace-skill tavily
+  --copy-env openclaw/.env
 ```
 
 安装完成后先验收：
@@ -179,6 +170,38 @@ bash openclaw/scripts/install_openclaw_skill.sh \
 ```bash
 python3 ~/.openclaw/skills/mysearch/scripts/mysearch_openclaw.py health
 ```
+
+这个 OpenClaw skill 现在已经是 Hub 友好的 bundled 形式：
+
+- 自带 `runtime/mysearch`
+- 不在安装时远程下载代码
+- 不会替换别的本地 skill
+- 没有 X / Social key 时，仍可正常用于 `web/docs/extract/research`
+
+### 1.6 发布 OpenClaw Hub 新版本
+
+如果你改了 `mysearch/` 主代码，推荐直接用仓库里的发布脚本：
+
+```bash
+bash scripts/release_openclaw_skill.sh --sync-only
+```
+
+这会自动：
+
+- 同步 `mysearch/*.py` 到 `openclaw/runtime/mysearch/`
+- 清理 OpenClaw skill 里的临时缓存
+- 跑一轮 `py_compile + health` smoke test
+
+真正发新版到 ClawHub 时：
+
+```bash
+bash scripts/release_openclaw_skill.sh \
+  --version 0.1.2 \
+  --changelog "Bundle refreshed runtime and docs"
+```
+
+脚本会在发布后自动再跑一次 `clawhub inspect`，把 `security.status` 和
+`llm.verdict` 打出来，方便你确认 Gamora 状态。
 
 ### 2. 启动 Proxy 控制台
 
@@ -222,6 +245,7 @@ MySearch-Proxy/
 ├── mysearch/
 ├── openclaw/
 ├── proxy/
+├── scripts/
 ├── skill/
 └── install.sh
 ```
