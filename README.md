@@ -47,9 +47,9 @@
 - [`skill/README.md`](./skill/README.md)
   - 给 `Codex` / `Claude Code` 用的 MySearch skill 说明
   - 包含“让 AI 自动安装 MySearch”的直接用法
-- `openclaw/`
-  - 给 OpenClaw / ClawHub 用的独立 skill bundle
-  - runtime 已内置，便于分发、审计和复用
+- [`openclaw/README.md`](./openclaw/README.md)
+  - 给 OpenClaw / ClawHub 用的独立 skill bundle 说明
+  - 包含“让 AI 自动安装 OpenClaw skill”的直接用法
 - [`docs/mysearch-architecture.md`](./docs/mysearch-architecture.md)
   - 架构与设计边界说明
 
@@ -358,6 +358,18 @@ bash skill/scripts/install_codex_skill.sh --force
 
 ### 3. 安装 OpenClaw skill
 
+如果你希望 AI 直接帮你安装 OpenClaw skill，最省事的说法是：
+
+```text
+请打开这个仓库里的 openclaw/README.md 和 openclaw/SKILL.md，按文档为我安装 MySearch OpenClaw skill；如果是本地安装就复制到 ~/.openclaw/skills/mysearch，带上 .env，再跑 health 验证，并告诉我结果。
+```
+
+如果你发的是 GitHub 链接，也可以直接说：
+
+```text
+请阅读 https://github.com/skernelx/MySearch-Proxy/tree/main/openclaw 里的 README 和 SKILL，帮我自动安装并验证 MySearch OpenClaw skill。
+```
+
 先看公开页面：
 
 - [clawhub.ai/skernelx/mysearch](https://clawhub.ai/skernelx/mysearch)
@@ -377,6 +389,10 @@ bash openclaw/scripts/install_openclaw_skill.sh \
   --install-to ~/.openclaw/skills/mysearch \
   --copy-env openclaw/.env
 ```
+
+更适合分发给别人或直接交给 AI 的入口是：
+
+- [openclaw/README.md](./openclaw/README.md)
 
 ### 4. 部署 Proxy Console
 
@@ -498,6 +514,8 @@ python3 openclaw/scripts/mysearch_openclaw.py health
   [mysearch/README.md](./mysearch/README.md)
 - Skill 文档：
   [skill/README.md](./skill/README.md)
+- OpenClaw Skill 文档：
+  [openclaw/README.md](./openclaw/README.md)
 - MCP English：
   [mysearch/README_EN.md](./mysearch/README_EN.md)
 - Proxy 文档：

@@ -48,8 +48,9 @@ The public OpenClaw page is live here:
 - [`skill/README_EN.md`](./skill/README_EN.md)
   - MySearch skill guide for `Codex` / `Claude Code`
   - includes the "tell the AI to install it for me" flow
-- `openclaw/`
-  - bundled MySearch skill for OpenClaw / ClawHub
+- [`openclaw/README_EN.md`](./openclaw/README_EN.md)
+  - bundled MySearch skill guide for OpenClaw / ClawHub
+  - includes the "tell the AI to install the OpenClaw skill" flow
 - [`docs/mysearch-architecture.md`](./docs/mysearch-architecture.md)
   - architecture and design boundaries
 
@@ -359,6 +360,18 @@ The more shareable entry for humans and AI assistants is:
 
 ### 3. Install the OpenClaw skill
 
+If you want the AI to install the OpenClaw skill directly, the easiest prompt is:
+
+```text
+Open openclaw/README_EN.md and openclaw/SKILL.md from this repository, install the MySearch OpenClaw skill for me, copy it into ~/.openclaw/skills/mysearch for local installation, carry over the .env file, run the health check, and tell me the result.
+```
+
+If you are only sharing the GitHub link, this also works:
+
+```text
+Please read https://github.com/skernelx/MySearch-Proxy/tree/main/openclaw and automatically install and verify the MySearch OpenClaw skill for me.
+```
+
 Public page:
 
 - [clawhub.ai/skernelx/mysearch](https://clawhub.ai/skernelx/mysearch)
@@ -378,6 +391,10 @@ bash openclaw/scripts/install_openclaw_skill.sh \
   --install-to ~/.openclaw/skills/mysearch \
   --copy-env openclaw/.env
 ```
+
+The more shareable entry for humans and AI assistants is:
+
+- [openclaw/README_EN.md](./openclaw/README_EN.md)
 
 ### 4. Deploy the Proxy Console
 
@@ -501,6 +518,8 @@ mode by default.
   [mysearch/README_EN.md](./mysearch/README_EN.md)
 - Skill docs:
   [skill/README_EN.md](./skill/README_EN.md)
+- OpenClaw skill docs:
+  [openclaw/README_EN.md](./openclaw/README_EN.md)
 - MCP Chinese:
   [mysearch/README.md](./mysearch/README.md)
 - Proxy docs:

@@ -14,6 +14,12 @@ metadata: {"clawdbot":{"emoji":"🔎","requires":{"bins":["bash","python3"]}},"o
 
 MySearch 是给 OpenClaw 用的默认搜索 skill。
 
+如果你是 AI 助手，并且用户只是给了仓库地址或 `openclaw/` 目录：
+
+- 先打开 `openclaw/README.md`
+- 先按 `README` 完成安装与验收
+- 再回到这个 `SKILL.md` 执行搜索规则和调用策略
+
 它把 Tavily、Firecrawl、X / Social 聚合成同一个入口，并且按任务类型自动路由：
 
 - 最新网页、普通实时搜索：优先 Tavily
