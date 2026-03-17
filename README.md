@@ -3,6 +3,11 @@
 `MySearch Proxy` 是一个面向 `Codex`、`Claude Code` 和自建 Agent 工作流
 的通用搜索基础设施项目。
 
+项目主页：
+
+- GitHub: [skernelx/MySearch-Proxy](https://github.com/skernelx/MySearch-Proxy)
+- OpenClaw Hub Skill: [clawhub.ai/skernelx/mysearch](https://clawhub.ai/skernelx/mysearch)
+
 它不是单一 provider 的薄封装，而是一整套可以直接落地的搜索工作台：
 
 - `mysearch/`
@@ -16,6 +21,32 @@
 - `openclaw/`
   - 可上传到 OpenClaw Hub 的独立搜索 skill
   - 自带 OpenClaw bootstrap 脚本和运行时安装脚本
+
+## 当前状态
+
+这个仓库现在不是“只有一个 MCP 脚本”的阶段，而是已经完整覆盖了：
+
+- `MCP server`
+- `Proxy Console`
+- `Codex / Claude Code skill`
+- `OpenClaw Hub skill`
+
+其中 `OpenClaw Hub` 上线状态已经打通，当前公开可验证的结果是：
+
+- `mysearch@0.1.1`
+- `Security Scan -> OpenClaw: Benign`
+- `clawhub inspect` 中 `security.status = clean`
+- `clawhub inspect` 中 `scanners.llm.verdict = benign`
+
+说明：
+
+- README 里引用的安全结论，以 ClawHub skill 页面和 `clawhub inspect` 的真实输出为准
+- 当前公开页面展示的是 `Security Scan`
+- 它不一定和社区里流传的那种“多维打分 / 平均分”评测卡是同一种页面样式
+
+安全检查截图：
+
+![MySearch Skill Security Scan](./docs/images/mysearch-skill-security-scan.jpg)
 
 ## 界面预览
 
