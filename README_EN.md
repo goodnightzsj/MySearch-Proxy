@@ -45,8 +45,9 @@ The public OpenClaw page is live here:
   - the proxy layer and web console
   - manages Tavily / Firecrawl key pools, downstream tokens, quota sync,
     and `/social/search`
-- `skill/`
-  - MySearch skill for `Codex` / `Claude Code`
+- [`skill/README_EN.md`](./skill/README_EN.md)
+  - MySearch skill guide for `Codex` / `Claude Code`
+  - includes the "tell the AI to install it for me" flow
 - `openclaw/`
   - bundled MySearch skill for OpenClaw / ClawHub
 - [`docs/mysearch-architecture.md`](./docs/mysearch-architecture.md)
@@ -283,6 +284,20 @@ stack.
 
 You do not need every part of the repo for every deployment.
 
+### 0. Let the AI read the docs and install it for you
+
+The easiest option is to send this instruction to `Codex` or `Claude Code`:
+
+```text
+Open skill/README_EN.md and skill/SKILL.md from this repository, install MySearch for me, run install.sh from the repo root if the MCP is not registered yet, then run the health check and smoke tests and tell me the result.
+```
+
+If you are only sharing the GitHub link, this also works:
+
+```text
+Please read https://github.com/skernelx/MySearch-Proxy/tree/main/skill and automatically install and verify MySearch for me.
+```
+
 ### 1. Install the MySearch MCP for Codex / Claude Code
 
 ```bash
@@ -337,6 +352,10 @@ To overwrite an existing local copy:
 ```bash
 bash skill/scripts/install_codex_skill.sh --force
 ```
+
+The more shareable entry for humans and AI assistants is:
+
+- [skill/README_EN.md](./skill/README_EN.md)
 
 ### 3. Install the OpenClaw skill
 
@@ -480,6 +499,8 @@ mode by default.
   [README.md](./README.md)
 - MCP docs:
   [mysearch/README_EN.md](./mysearch/README_EN.md)
+- Skill docs:
+  [skill/README_EN.md](./skill/README_EN.md)
 - MCP Chinese:
   [mysearch/README.md](./mysearch/README.md)
 - Proxy docs:

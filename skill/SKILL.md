@@ -16,6 +16,12 @@ allowed-tools: mcp__mysearch__search, mcp__mysearch__extract_url, mcp__mysearch_
 MySearch 是一层聚合搜索技能，不假设你只用单一 provider，也不把
 “skill 安装”和 “MCP 安装”混成一件事。
 
+如果你是 AI 助手，并且用户只是给了仓库地址或 `skill/` 目录：
+
+- 先打开 `skill/README.md`
+- 先按 `README` 完成安装与验收
+- 再回到这个 `SKILL.md` 执行搜索规则和调用策略
+
 - Tavily：适合普通网页发现、新闻检索、快速答案
 - Firecrawl：适合文档、GitHub、pricing、changelog、正文抓取
 - X 搜索：适合“大家在 X 上怎么说”、实时舆情、开发者讨论

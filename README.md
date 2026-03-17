@@ -44,8 +44,9 @@
 - [`proxy/`](./proxy/README.md)
   - 统一控制台与代理层
   - 管理 Tavily / Firecrawl key 池、下游 token、额度同步、`/social/search`
-- `skill/`
-  - 给 `Codex` / `Claude Code` 用的 MySearch skill
+- [`skill/README.md`](./skill/README.md)
+  - 给 `Codex` / `Claude Code` 用的 MySearch skill 说明
+  - 包含“让 AI 自动安装 MySearch”的直接用法
 - `openclaw/`
   - 给 OpenClaw / ClawHub 用的独立 skill bundle
   - runtime 已内置，便于分发、审计和复用
@@ -283,6 +284,20 @@ Tavily extract。
 
 你不需要一次把所有部分都装上，可以按目标选路径。
 
+### 0. 直接让 AI 读文档自动安装
+
+最省事的方式，是直接把下面这句话发给 `Codex` 或 `Claude Code`：
+
+```text
+请打开这个仓库里的 skill/README.md 和 skill/SKILL.md，按文档为我安装 MySearch；如果 MCP 还没注册，就在仓库根目录执行 install.sh；安装完成后跑 health 和 smoke test，并告诉我结果。
+```
+
+如果你发的是 GitHub 仓库链接，也可以直接说：
+
+```text
+请阅读 https://github.com/skernelx/MySearch-Proxy/tree/main/skill 里的 README 和 SKILL，帮我自动安装并验证 MySearch。
+```
+
 ### 1. 安装 MySearch MCP 到 Codex / Claude Code
 
 ```bash
@@ -336,6 +351,10 @@ bash skill/scripts/install_codex_skill.sh
 ```bash
 bash skill/scripts/install_codex_skill.sh --force
 ```
+
+更适合分发给别人或直接交给 AI 的入口是：
+
+- [skill/README.md](./skill/README.md)
 
 ### 3. 安装 OpenClaw skill
 
@@ -477,6 +496,8 @@ python3 openclaw/scripts/mysearch_openclaw.py health
   [README.md](./README.md)
 - MCP 文档：
   [mysearch/README.md](./mysearch/README.md)
+- Skill 文档：
+  [skill/README.md](./skill/README.md)
 - MCP English：
   [mysearch/README_EN.md](./mysearch/README_EN.md)
 - Proxy 文档：
