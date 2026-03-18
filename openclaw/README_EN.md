@@ -22,7 +22,7 @@ The goal here is equally direct:
 Send this to the AI:
 
 ```text
-Open openclaw/README_EN.md and openclaw/SKILL.md from this repository, install the MySearch OpenClaw skill for me, copy it into ~/.openclaw/skills/mysearch for local installation, carry over the .env file, run the health check, and tell me the result.
+Open openclaw/README_EN.md and openclaw/SKILL.md from this repository, install the MySearch OpenClaw skill for me, copy it into ~/.openclaw/skills/mysearch for local installation, configure the minimal OpenClaw skill env, run the health check, and tell me the result.
 ```
 
 If you only want to share the GitHub link, you can also say:
@@ -58,34 +58,69 @@ debugging a local deployment, prefer the local bundle route.
 
 ### 3. Local bundle installation
 
-Prepare config first:
+Copy the skill bundle first:
 
 ```bash
-cp openclaw/.env.example openclaw/.env
-```
-
-Minimal config:
-
-```env
-MYSEARCH_TAVILY_API_KEY=tvly-...
-MYSEARCH_FIRECRAWL_API_KEY=fc-...
-```
-
-Then run:
-
-```bash
-bash openclaw/scripts/install_openclaw_skill.sh \
-  --install-to ~/.openclaw/skills/mysearch \
-  --copy-env openclaw/.env
+bash openclaw/scripts/install_openclaw_skill.sh --install-to ~/.openclaw/skills/mysearch
 ```
 
 This script will:
 
 1. copy the `openclaw/` bundle into the target directory
 2. preserve the bundled runtime
-3. copy the `.env` file into place
+3. preserve `.env.example` as a local template
 4. avoid remote runtime downloads
 5. avoid modifying other installed skills
+
+After installation, prefer injecting the minimal config through OpenClaw skill
+env:
+
+```json
+{
+  "skills": {
+    "entries": {
+      "mysearch": {
+        "enabled": true,
+        "env": {
+          "MYSEARCH_PROXY_BASE_URL": "https://search.hunters.works",
+          "MYSEARCH_PROXY_API_KEY": "mysp-..."
+        }
+      }
+    }
+  }
+}
+```
+
+With those two variables set, `Tavily / Firecrawl / Exa` will share the same
+proxy token by default. If your proxy also fronts `Social / X`, the same token
+continues to work there too.
+
+If you do not have a proxy yet, fall back to direct provider keys:
+
+```json
+{
+  "skills": {
+    "entries": {
+      "mysearch": {
+        "enabled": true,
+        "env": {
+          "MYSEARCH_TAVILY_API_KEY": "tvly-...",
+          "MYSEARCH_FIRECRAWL_API_KEY": "fc-..."
+        }
+      }
+    }
+  }
+}
+```
+
+Only for repository-local debugging should you copy the example env file:
+
+```bash
+cp openclaw/.env.example openclaw/.env
+python3 openclaw/scripts/mysearch_openclaw.py health
+```
+
+Only point `MYSEARCH_PROXY_BASE_URL` at a proxy host you trust.
 
 ### 4. Verification after local installation
 
@@ -143,10 +178,16 @@ more reliable.
 
 The preferred setup is still:
 
-- use
-  [skernelx/tavily-key-generator](https://github.com/skernelx/tavily-key-generator)
+- deploy `MySearch Proxy`
+- point the OpenClaw MySearch skill at:
+  - `MYSEARCH_PROXY_BASE_URL`
+  - `MYSEARCH_PROXY_API_KEY`
+
+If you do not have a unified proxy yet, you can still keep:
+
+- [skernelx/tavily-key-generator](https://github.com/skernelx/tavily-key-generator)
   as the Tavily / Firecrawl provider layer
-- point the OpenClaw MySearch skill at that normalized layer
+- direct provider keys inside the OpenClaw skill env
 
 If the user does not have X / Social:
 
