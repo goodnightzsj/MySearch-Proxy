@@ -125,7 +125,6 @@ publish_skill() {
 inspect_release() {
   local tmp_json=""
   tmp_json="$(mktemp)"
-  trap 'rm -f "$tmp_json"' EXIT
 
   echo "Waiting for ClawHub inspect to return the new version..."
   local attempt
@@ -138,6 +137,7 @@ inspect_release() {
 
   if [[ ! -s "$tmp_json" ]]; then
     echo "Publish succeeded, but inspect did not return version $VERSION yet." >&2
+    rm -f "$tmp_json"
     return 1
   fi
 
@@ -157,6 +157,7 @@ print(f"  security.status: {security.get('status', '')}")
 print(f"  llm.verdict: {llm.get('verdict', '')}")
 print(f"  llm.confidence: {llm.get('confidence', '')}")
 PY
+  rm -f "$tmp_json"
 }
 
 resolve_version

@@ -20,7 +20,7 @@
 直接把下面这句话发给 AI：
 
 ```text
-请打开这个仓库里的 openclaw/README.md 和 openclaw/SKILL.md，按文档为我安装 MySearch OpenClaw skill；如果是本地安装就复制到 ~/.openclaw/skills/mysearch，带上 .env，再跑 health 验证，并告诉我结果。
+请打开这个仓库里的 openclaw/README.md 和 openclaw/SKILL.md，按文档为我安装 MySearch OpenClaw skill；如果是本地安装就复制到 ~/.openclaw/skills/mysearch，用 OpenClaw skill env 配置最小参数，再跑 health 验证，并告诉我结果。
 ```
 
 如果你发的是 GitHub 链接，也可以直接这样说：
@@ -54,17 +54,36 @@
 
 ### 3. 本地 bundle 安装
 
-先准备配置：
+先复制 skill bundle：
 
 ```bash
-cp openclaw/.env.example openclaw/.env
+bash openclaw/scripts/install_openclaw_skill.sh --install-to ~/.openclaw/skills/mysearch
 ```
 
-推荐先填：
+这个脚本会：
 
-```env
-MYSEARCH_PROXY_BASE_URL=https://search.hunters.works
-MYSEARCH_PROXY_API_KEY=your-mysearch-token
+1. 把 `openclaw/` skill bundle 复制到目标目录
+2. 保留 bundled runtime
+3. 保留 `.env.example` 作为本地模板
+4. 不去下载远端 runtime
+5. 不修改别的 skill
+
+安装后，优先把最小配置注入 OpenClaw skill env：
+
+```json
+{
+  "skills": {
+    "entries": {
+      "mysearch": {
+        "enabled": true,
+        "env": {
+          "MYSEARCH_PROXY_BASE_URL": "https://search.hunters.works",
+          "MYSEARCH_PROXY_API_KEY": "mysp-..."
+        }
+      }
+    }
+  }
+}
 ```
 
 这两项配好后，`Tavily / Firecrawl / Exa` 会默认一起走统一 proxy。
@@ -73,26 +92,30 @@ OpenClaw 单独拆一套客户端 token。
 
 如果你暂时没有 proxy，再退回直连 provider：
 
-```env
-MYSEARCH_TAVILY_API_KEY=tvly-...
-MYSEARCH_FIRECRAWL_API_KEY=fc-...
+```json
+{
+  "skills": {
+    "entries": {
+      "mysearch": {
+        "enabled": true,
+        "env": {
+          "MYSEARCH_TAVILY_API_KEY": "tvly-...",
+          "MYSEARCH_FIRECRAWL_API_KEY": "fc-..."
+        }
+      }
+    }
+  }
+}
 ```
 
-然后执行：
+只有在你直接调试这个仓库工作树时，才建议复制：
 
 ```bash
-bash openclaw/scripts/install_openclaw_skill.sh \
-  --install-to ~/.openclaw/skills/mysearch \
-  --copy-env openclaw/.env
+cp openclaw/.env.example openclaw/.env
+python3 openclaw/scripts/mysearch_openclaw.py health
 ```
 
-这个脚本会：
-
-1. 把 `openclaw/` skill bundle 复制到目标目录
-2. 保留 bundled runtime
-3. 把 `.env` 一起复制过去
-4. 不去下载远端 runtime
-5. 不修改别的 skill
+`MYSEARCH_PROXY_BASE_URL` 只应该指向你自己部署或明确可信的 proxy。
 
 ### 4. 本地安装后的验收
 

@@ -16,6 +16,7 @@ other installed skills.
 Options:
   --install-to DIR   Copy the skill bundle into DIR before finishing setup
   --copy-env FILE    Copy FILE to target .env with 0600 permissions
+                     Optional. Prefer OpenClaw skill env injection instead.
   -h, --help         Show this help
 
 Examples:
@@ -81,8 +82,9 @@ What changed:
 3. No other installed skills were modified
 
 Next steps:
-1. If you do not already have a config source, copy $TARGET_DIR/.env.example to $TARGET_DIR/.env
-2. Prefer filling MYSEARCH_PROXY_BASE_URL + MYSEARCH_PROXY_API_KEY
+1. Prefer injecting env via OpenClaw skill config instead of copying secrets into the skill folder
+2. Minimal trusted setup: MYSEARCH_PROXY_BASE_URL + MYSEARCH_PROXY_API_KEY
 3. If you do not have a proxy yet, fall back to MYSEARCH_TAVILY_API_KEY + MYSEARCH_FIRECRAWL_API_KEY
-4. Run: python3 $TARGET_DIR/scripts/mysearch_openclaw.py health
+4. Only use --copy-env or $TARGET_DIR/.env for local debugging
+5. Run: python3 $TARGET_DIR/scripts/mysearch_openclaw.py health
 EOF
