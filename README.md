@@ -84,6 +84,35 @@ MySearch MCP / Codex Skill / OpenClaw Skill
 如果你暂时还没有 Proxy，也可以让 `mysearch/` 或 `openclaw/` 直接连官方
 provider。
 
+## 最新优化（v0.1.4）
+
+这次版本重点不是“加一个新 provider”，而是把运行时稳定性和可观测性补齐。
+
+- 并行执行优化：
+  - `search` 的混合分支和 `research` 工作流支持并行请求，减少长尾等待。
+- 内存缓存：
+  - 为 `search` 和 `extract` 增加 TTL 缓存，重复查询会显著更快。
+- 调试可见性：
+  - `search` 返回新增 `route_debug`，明确路由决策和是否命中缓存。
+  - `search` / `extract` 返回新增 `cache` 字段，直接看到 `hit` 与 `ttl_seconds`。
+- 健康检查增强：
+  - `mysearch_health` / `health` 现在会返回 `runtime`、`routing_defaults`、`cache`。
+- OpenClaw 同步：
+  - `openclaw` bundle 已同步 runtime 改动，ClawHub 版本为 `mysearch@0.1.4`。
+
+新增运行时参数：
+
+```env
+MYSEARCH_MAX_PARALLEL_WORKERS=4
+MYSEARCH_SEARCH_CACHE_TTL_SECONDS=30
+MYSEARCH_EXTRACT_CACHE_TTL_SECONDS=300
+```
+
+说明：
+
+- 终端里单次 CLI 调用通常是新进程，内存缓存不会跨进程复用。
+- 常驻服务模式下缓存才会持续生效。
+
 ## 从哪里开始
 
 按你的使用场景直接走：

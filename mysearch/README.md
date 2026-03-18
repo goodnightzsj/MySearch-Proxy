@@ -259,6 +259,36 @@ MYSEARCH_PROXY_BASE_URL=
 MYSEARCH_PROXY_API_KEY=
 ```
 
+### 运行时优化参数（v0.1.4+）
+
+```env
+MYSEARCH_MAX_PARALLEL_WORKERS=4
+MYSEARCH_SEARCH_CACHE_TTL_SECONDS=30
+MYSEARCH_EXTRACT_CACHE_TTL_SECONDS=300
+```
+
+含义：
+
+- `MYSEARCH_MAX_PARALLEL_WORKERS`
+  - 控制混合查询与 `research` 中并行请求的工作线程数。
+- `MYSEARCH_SEARCH_CACHE_TTL_SECONDS`
+  - 控制 `search` 缓存生存时间。
+- `MYSEARCH_EXTRACT_CACHE_TTL_SECONDS`
+  - 控制 `extract_url` 缓存生存时间。
+
+返回结构的新增字段：
+
+- `route_debug`
+  - 展示路由决策、解析后的 sources、cache 命中状态等调试信息。
+- `cache`
+  - 展示当前请求是否命中缓存与 TTL。
+
+`mysearch_health` 新增：
+
+- `runtime`
+- `routing_defaults`
+- `cache`
+
 ### MCP 传输配置
 
 ```env
