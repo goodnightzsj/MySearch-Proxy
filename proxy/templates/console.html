@@ -3664,23 +3664,7 @@ function renderApiExample(service, tokens) {
 }
 
 function renderTokenQuota(token) {
-  const stats = token.stats || {};
-  const unlimited = !token.hourly_limit && !token.daily_limit && !token.monthly_limit;
-  if (unlimited) {
-    return '<div class="table-note"><b style="color: var(--ok)">无限制</b><br><span class="muted">当前未设置小时 / 日 / 月限额</span></div>';
-  }
-
-  const hourRemain = Number(token.hourly_limit || 0) - Number(stats.hour_count || 0);
-  const dayRemain = Number(token.daily_limit || 0) - Number(stats.today_count || 0);
-  const monthRemain = Number(token.monthly_limit || 0) - Number(stats.month_count || 0);
-  return `
-    <div class="table-note">小时 ${fmtNum(stats.hour_count || 0)} / ${fmtNum(token.hourly_limit || 0)}，剩余 ${fmtNum(hourRemain)}</div>
-    ${quotaBar(stats.hour_count || 0, token.hourly_limit || 0)}
-    <div class="table-note" style="margin-top:8px">今日 ${fmtNum(stats.today_count || 0)} / ${fmtNum(token.daily_limit || 0)}，剩余 ${fmtNum(dayRemain)}</div>
-    ${quotaBar(stats.today_count || 0, token.daily_limit || 0)}
-    <div class="table-note" style="margin-top:8px">本月 ${fmtNum(stats.month_count || 0)} / ${fmtNum(token.monthly_limit || 0)}，剩余 ${fmtNum(monthRemain)}</div>
-    ${quotaBar(stats.month_count || 0, token.monthly_limit || 0)}
-  `;
+  return '<div class="table-note"><b style="color: var(--ok)">无限制</b><br><span class="muted">已关闭小时 / 日 / 月限流</span></div>';
 }
 
 function renderTokens(service, tokens) {

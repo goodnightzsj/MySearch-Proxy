@@ -80,6 +80,11 @@
 - 给 `mysearch/.env` 和 OpenClaw skill 直接复用
 - 记录这类 token 的调用统计
 
+当前策略：
+
+- 默认关闭 token 小时 / 日 / 月限流
+- token 只做鉴权与统计，不做配额拦截
+
 ### Social / X
 
 代理入口：

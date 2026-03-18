@@ -1309,16 +1309,6 @@ async def proxy_tavily(request: Request):
     token_value = extract_token(request, body)
     token_row = get_token_row_or_401(token_value, "tavily")
 
-    ok, reason = db.check_quota(
-        token_row["id"],
-        token_row["hourly_limit"],
-        token_row["daily_limit"],
-        token_row["monthly_limit"],
-        service=get_token_usage_scope(token_row, "tavily"),
-    )
-    if not ok:
-        raise HTTPException(status_code=429, detail=reason)
-
     key_info = pool.get_next_key("tavily")
     if not key_info:
         raise HTTPException(status_code=503, detail="No available API keys")
@@ -1346,16 +1336,6 @@ async def proxy_firecrawl(path: str, request: Request):
     raw_body, body_json = await parse_json_body(request)
     token_value = extract_token(request, body_json)
     token_row = get_token_row_or_401(token_value, "firecrawl")
-
-    ok, reason = db.check_quota(
-        token_row["id"],
-        token_row["hourly_limit"],
-        token_row["daily_limit"],
-        token_row["monthly_limit"],
-        service=get_token_usage_scope(token_row, "firecrawl"),
-    )
-    if not ok:
-        raise HTTPException(status_code=429, detail=reason)
 
     key_info = pool.get_next_key("firecrawl")
     if not key_info:
@@ -1395,16 +1375,6 @@ async def proxy_exa_search(request: Request):
     raw_body, body_json = await parse_json_body(request)
     token_value = extract_token(request, body_json)
     token_row = get_token_row_or_401(token_value, "exa")
-
-    ok, reason = db.check_quota(
-        token_row["id"],
-        token_row["hourly_limit"],
-        token_row["daily_limit"],
-        token_row["monthly_limit"],
-        service=get_token_usage_scope(token_row, "exa"),
-    )
-    if not ok:
-        raise HTTPException(status_code=429, detail=reason)
 
     key_info = pool.get_next_key("exa")
     if not key_info:

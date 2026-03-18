@@ -106,6 +106,16 @@ def init_db():
     """)
     _ensure_service_columns(conn)
     _ensure_usage_columns(conn)
+    # 当前产品策略：关闭 token 级调用限流，统一把历史限额字段归零。
+    conn.execute(
+        """
+        UPDATE tokens
+        SET hourly_limit = 0,
+            daily_limit = 0,
+            monthly_limit = 0
+        WHERE hourly_limit != 0 OR daily_limit != 0 OR monthly_limit != 0
+        """
+    )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_service_created ON usage_logs(service, created_at)")
     conn.commit()
     conn.close()
@@ -429,12 +439,5 @@ def get_usage_stats(token_id=None, service=None):
 
 
 def check_quota(token_id, hourly_limit, daily_limit, monthly_limit, service=None):
-    """检查 token 配额是否超限，返回 (ok, reason)。"""
-    stats = get_usage_stats(token_id=token_id, service=service)
-    if hourly_limit and stats["hour_count"] >= hourly_limit:
-        return False, "hourly quota exceeded"
-    if daily_limit and stats["today_count"] >= daily_limit:
-        return False, "daily quota exceeded"
-    if monthly_limit and stats["month_count"] >= monthly_limit:
-        return False, "monthly quota exceeded"
+    """保留兼容接口：当前版本不对 token 做调用限额拦截。"""
     return True, ""
