@@ -3515,7 +3515,7 @@ function renderSyncMeta(service, payload) {
     parts.push(`Key 级额度 ${fmtNum(quota.key_level_count)}`);
   }
   if ((quota.account_fallback_count || 0) > 0) {
-    parts.push(`账户级回退 ${fmtNum(quota.account_fallback_count)}`);
+    parts.push(`账户正常数量：${fmtNum(quota.account_fallback_count)}`);
   }
   if (quota.last_synced_at) {
     parts.push(`最近同步 ${formatTime(quota.last_synced_at)}`);
