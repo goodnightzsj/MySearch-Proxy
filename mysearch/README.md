@@ -237,7 +237,18 @@ MYSEARCH_FIRECRAWL_API_KEY=fc-...
 
 更推荐的公开部署方式，是接到
 [skernelx/tavily-key-generator](https://github.com/skernelx/tavily-key-generator)
-暴露出来的统一入口：
+如果你已经部署了 `MySearch Proxy`，最省事的接法是：
+
+```env
+MYSEARCH_PROXY_BASE_URL=https://search.hunters.works
+MYSEARCH_PROXY_API_KEY=your-proxy-token
+```
+
+这样 `Tavily / Firecrawl / Exa` 会默认自动走这套统一 proxy 入口。
+如果你的 proxy 同时接通了 `Social / X`，这一套 token 也会继续复用到
+compatible social 路由，不需要再额外拆一份客户端 token。
+
+如果你要单独指定每个 provider，也可以分别配置：
 
 ```env
 MYSEARCH_TAVILY_BASE_URL=https://your-search-gateway.example.com
@@ -251,6 +262,11 @@ MYSEARCH_FIRECRAWL_SEARCH_PATH=/firecrawl/v2/search
 MYSEARCH_FIRECRAWL_SCRAPE_PATH=/firecrawl/v2/scrape
 MYSEARCH_FIRECRAWL_AUTH_MODE=bearer
 MYSEARCH_FIRECRAWL_API_KEY=your-token
+
+MYSEARCH_EXA_BASE_URL=https://your-search-gateway.example.com
+MYSEARCH_EXA_SEARCH_PATH=/exa/search
+MYSEARCH_EXA_AUTH_MODE=bearer
+MYSEARCH_EXA_API_KEY=your-token
 ```
 
 `install.sh` 会自动：

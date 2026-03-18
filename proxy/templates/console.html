@@ -1040,6 +1040,16 @@ body.modal-open {
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(248, 250, 252, 0.82));
 }
 
+.mysearch-shell {
+  position: relative;
+  margin: 18px 0;
+  overflow: hidden;
+  border-top: 6px solid #0f172a;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(244, 247, 255, 0.84)),
+    radial-gradient(circle at top right, rgba(15, 23, 42, 0.08), transparent 42%);
+}
+
 .service-panel.is-inactive {
   display: none;
 }
@@ -2314,6 +2324,8 @@ textarea:focus {
       <section class="service-switcher" id="service-switcher"></section>
     </section>
 
+    <section class="card mysearch-shell" id="mysearch-quickstart"></section>
+
     <div id="services-root"></div>
   </div>
 
@@ -2501,6 +2513,7 @@ let PWD = localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORA
 let activeService = localStorage.getItem(ACTIVE_SERVICE_KEY) || 'tavily';
 let latestServices = {};
 let latestSocial = {};
+let latestMySearch = {};
 let latestSettings = {};
 
 function clearStoredPasswords() {
@@ -2617,21 +2630,52 @@ SOCIAL_GATEWAY_MODEL=grok-4.1-fast
 
 function buildSocialMySearchEnv(social) {
   const baseUrl = location.origin;
-  const tokenLine = social?.client_auth_configured
-    ? `# 当前客户端 token 已配置（${social.client_token_masked || '已隐藏'}），出于安全考虑这里不直接回显\nMYSEARCH_XAI_API_KEY=YOUR_SOCIAL_GATEWAY_TOKEN`
-    : 'MYSEARCH_XAI_API_KEY=YOUR_SOCIAL_GATEWAY_TOKEN';
-  return `MYSEARCH_TAVILY_BASE_URL=${baseUrl}
-MYSEARCH_TAVILY_SEARCH_PATH=/api/search
-MYSEARCH_TAVILY_EXTRACT_PATH=/api/extract
+  const socialReady = social?.admin_connected || social?.upstream_key_configured;
+  return `# 推荐：直接用 MySearch 通用 token，一次接上 Tavily / Firecrawl / Exa / Social
+MYSEARCH_PROXY_BASE_URL=${baseUrl}
+MYSEARCH_PROXY_API_KEY=YOUR_MYSEARCH_PROXY_TOKEN
 
-MYSEARCH_FIRECRAWL_BASE_URL=${baseUrl}
-MYSEARCH_FIRECRAWL_SEARCH_PATH=/firecrawl/v2/search
-MYSEARCH_FIRECRAWL_SCRAPE_PATH=/firecrawl/v2/scrape
+# 当前 Social / X ${socialReady ? '已经接通，可直接复用上面的通用 token。' : '还没完全接通；上面的通用 token 先可用于 Tavily / Firecrawl / Exa。'}
 
+# 如果你只想单独接 Social / X，也可以显式写 compatible 模式：
 MYSEARCH_XAI_SEARCH_MODE=compatible
 MYSEARCH_XAI_SOCIAL_BASE_URL=${baseUrl}
 MYSEARCH_XAI_SOCIAL_SEARCH_PATH=/social/search
-${tokenLine}`;
+MYSEARCH_XAI_API_KEY=YOUR_MYSEARCH_PROXY_TOKEN`;
+}
+
+function buildMySearchEnv(mysearch, social) {
+  const baseUrl = location.origin;
+  const token = mysearch?.tokens?.[0]?.token || 'YOUR_MYSEARCH_PROXY_TOKEN';
+  const socialReady = social?.admin_connected || social?.upstream_key_configured;
+  return `# 最省事的接法：只填这两项，MySearch 会默认走当前 proxy
+MYSEARCH_PROXY_BASE_URL=${baseUrl}
+MYSEARCH_PROXY_API_KEY=${token}
+
+# 说明：
+# - 这一个 token 会同时允许 Tavily / Firecrawl / Exa${socialReady ? ' / Social' : ''}
+# - Social / X ${socialReady ? '当前已接通，会默认复用同一个 token' : '当前还没完全接通，后续接好后也会自动复用同一个 token'}
+
+# 可选：如果你想把 MCP 额外暴露成远程 HTTP，再补这一段
+# MYSEARCH_MCP_HOST=0.0.0.0
+# MYSEARCH_MCP_PORT=8000
+# MYSEARCH_MCP_STREAMABLE_HTTP_PATH=/mcp`;
+}
+
+function buildMySearchInstall() {
+  return `git clone https://github.com/skernelx/MySearch-Proxy.git
+cd MySearch-Proxy
+cp mysearch/.env.example mysearch/.env
+
+# 把上面的 MYSEARCH_PROXY_* 粘进去后执行
+./install.sh
+
+# 如果你想作为远程 MCP 提供给别的客户端：
+./venv/bin/python -m mysearch \\
+  --transport streamable-http \\
+  --host 0.0.0.0 \\
+  --port 8000 \\
+  --streamable-http-path /mcp`;
 }
 
 function renderSocialBoard(social) {
@@ -2777,7 +2821,7 @@ function renderSocialIntegration(social) {
     </div>
     <pre class="code-block mono" id="social-proxy-env"></pre>
     <div class="code-toolbar" style="margin-top:12px">
-      <div class="endpoint">MySearch / MCP / Skill 端环境变量。客户端 token 出于安全考虑不会在这里直接明文展示。</div>
+      <div class="endpoint">MySearch / MCP / Skill 端环境变量。现在更推荐直接使用 MySearch 通用 token，一次接上全部路由。</div>
       <button class="btn btn-sm" onclick="copyCode('social-mysearch-env', this)">复制 MySearch 配置</button>
     </div>
     <pre class="code-block mono" id="social-mysearch-env"></pre>
@@ -2785,6 +2829,108 @@ function renderSocialIntegration(social) {
 
   document.getElementById('social-proxy-env').textContent = buildSocialProxyEnv(social || {});
   document.getElementById('social-mysearch-env').textContent = buildSocialMySearchEnv(social || {});
+}
+
+function renderMySearchQuickstart(mysearch, social) {
+  const root = document.getElementById('mysearch-quickstart');
+  if (!root) return;
+
+  const tokens = mysearch?.tokens || [];
+  const tokenCount = tokens.length;
+  const todayCount = mysearch?.overview?.today_count || 0;
+  const monthCount = mysearch?.overview?.month_count || 0;
+  const socialReady = Boolean(social?.admin_connected || social?.upstream_key_configured);
+  const noteClass = tokenCount > 0 ? 'integration-note' : 'integration-note is-error';
+  const note = tokenCount > 0
+    ? '这里创建的是 MySearch 通用 token。它会同时被 Tavily / Firecrawl / Exa 路由接受，并且在 Social / X 已接通时也可以直接复用。'
+    : '先创建一个 MySearch 通用 token。创建后控制台会自动生成可直接复制的 .env 配置。';
+
+  root.innerHTML = `
+    <div class="service-head">
+      <div>
+        <span class="service-chip">MySearch MCP</span>
+        <h2>MySearch 快速接入</h2>
+        <p>这块不是 provider 池，而是给 Codex / Claude Code / 其他 MCP 客户端准备的统一接入层。目标就是让用户少填变量、少记路径、少区分底层服务。</p>
+      </div>
+      <div class="service-tools">
+        <div class="service-sync-meta">推荐直接复制下面的 <span class="mono">MYSEARCH_PROXY_*</span> 配置，不再手写一堆 provider 地址。</div>
+        <div class="service-sync-meta">通用 Token 前缀：<span class="mono">${escapeHtml(mysearch?.token_prefix || 'mysp-')}</span></div>
+      </div>
+    </div>
+    <div class="service-body">
+      <div class="section-grid">
+        <div class="subcard api-shell">
+          <h3>一键配置</h3>
+          <p class="desc">推荐把 MySearch 统一接到当前 proxy。这样客户端只认一个 base URL 和一个通用 token，底层 Tavily / Firecrawl / Exa / Social 都由 proxy 负责收口。</p>
+          <div class="integration-summary">
+            <div class="integration-summary-item">
+              <div class="label">Proxy Base URL</div>
+              <div class="value mono">${escapeHtml(location.origin)}</div>
+            </div>
+            <div class="integration-summary-item">
+              <div class="label">通用 Token</div>
+              <div class="value">${fmtNum(tokenCount)}</div>
+            </div>
+            <div class="integration-summary-item">
+              <div class="label">今日总调用</div>
+              <div class="value">${fmtNum(todayCount)}</div>
+            </div>
+            <div class="integration-summary-item">
+              <div class="label">本月总调用</div>
+              <div class="value">${fmtNum(monthCount)}</div>
+            </div>
+            <div class="integration-summary-item">
+              <div class="label">Social / X</div>
+              <div class="value">${socialReady ? '已接通' : '待接通'}</div>
+            </div>
+            <div class="integration-summary-item">
+              <div class="label">默认安装形态</div>
+              <div class="value">stdio</div>
+            </div>
+          </div>
+          <div class="${noteClass}">
+            <strong>${tokenCount > 0 ? '可以直接复制配置了' : '还差一个通用 token'}</strong> ${escapeHtml(note)}
+          </div>
+          <div class="code-toolbar">
+            <div class="endpoint">复制到 <span class="mono">mysearch/.env</span> 就能用。默认已经包含统一 proxy 接法。</div>
+            <button class="btn btn-sm" onclick="copyCode('mysearch-proxy-env', this)">复制 .env</button>
+          </div>
+          <pre class="code-block mono" id="mysearch-proxy-env"></pre>
+          <div class="code-toolbar" style="margin-top:12px">
+            <div class="endpoint">本地安装 / 远程启动命令，按仓库默认流程直接走。</div>
+            <button class="btn btn-sm" onclick="copyCode('mysearch-install-cmd', this)">复制命令</button>
+          </div>
+          <pre class="code-block mono" id="mysearch-install-cmd"></pre>
+        </div>
+        <div class="subcard">
+          <h3>MySearch 通用 Token</h3>
+          <p class="desc">这个 token 专门给上层 MCP / Skill 用。和 Tavily / Firecrawl / Exa 各自的服务 token 分开管理，但调用时会被三条 provider 路由一起接受。</p>
+          <div class="form-row">
+            <input class="input-grow" type="text" id="token-name-mysearch" placeholder="可选备注，例如 Codex / Claude Code / Team Demo">
+            <button class="btn btn-primary" onclick="createToken('mysearch')">创建 MySearch Token</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Token</th>
+                  <th>名称</th>
+                  <th>额度</th>
+                  <th>代理统计</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="tokens-body-mysearch"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  document.getElementById('mysearch-proxy-env').textContent = buildMySearchEnv(mysearch || {}, social || {});
+  document.getElementById('mysearch-install-cmd').textContent = buildMySearchInstall();
+  renderTokens('mysearch', tokens);
 }
 
 function headers() {
@@ -3307,6 +3453,11 @@ function renderGlobalSummary(services, social) {
       <div class="value">${fmtNum(socialStats.chat_remaining || 0)}</div>
       <div class="hint">Image ${fmtNum(socialStats.image_remaining || 0)} · X Router 总调用 ${fmtNum(socialStats.total_calls || 0)}</div>
     </div>
+    <div class="summary-box">
+      <div class="label">MySearch 通用 Token</div>
+      <div class="value">${fmtNum(latestMySearch?.token_count || 0)}</div>
+      <div class="hint">给 MCP / Skill / 上层客户端直接使用，一套 token 统一接入当前 proxy</div>
+    </div>
   `;
 }
 
@@ -3618,10 +3769,13 @@ async function refresh() {
   const payload = await api('GET', '/api/stats');
   const services = payload.services || {};
   const social = payload.social || {};
+  const mysearch = payload.mysearch || {};
   latestServices = services;
   latestSocial = social;
+  latestMySearch = mysearch;
 
   renderGlobalSummary(services, social);
+  renderMySearchQuickstart(mysearch, social);
   renderSocialBoard(social);
   renderSocialIntegration(social);
   renderSocialWorkspace(social);

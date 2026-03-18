@@ -4,11 +4,12 @@
 
 `proxy/` 是 `MySearch Proxy` 里的控制台与代理层。
 
-它不是单纯的 key 面板，而是把 Tavily、Firecrawl、Social / X 三条能力线
+它不是单纯的 key 面板，而是把 Tavily、Exa、Firecrawl、Social / X 四条能力线
 收进一个统一工作台里，让你同时管理：
 
 - 上游 provider key
 - 下游调用 token
+- MySearch 通用 token
 - 官方额度同步
 - compatible gateway 接线
 - MySearch 最终应该怎么接这套搜索基础设施
@@ -28,8 +29,10 @@
 `MySearch Proxy Console` 把这些拆散的问题重新收口：
 
 - Tavily 独立工作台
+- Exa 独立工作台
 - Firecrawl 独立工作台
 - Social / X 独立工作台
+- MySearch MCP 快速接入区
 - 同一个页面里看清 Key 池、Token 池、真实额度、代理统计和接线方式
 
 ## 为什么它比普通 key 面板更好用
@@ -38,9 +41,10 @@
 
 这里不是一个“所有 key 全堆在一起”的控制台。
 
-它明确把三类能力拆开：
+它明确把四类能力拆开：
 
 - Tavily
+- Exa
 - Firecrawl
 - Social / X
 
@@ -143,6 +147,16 @@ MySearch MCP / Skill / OpenClaw Skill
 - Token 池
 - Firecrawl credits 同步
 - 代理调用统计
+
+### MySearch 通用 Token
+
+控制台能力：
+
+- 创建 MySearch 通用 token
+- 一次接通 Tavily / Exa / Firecrawl
+- 在 Social / X 已接通时继续复用同一个 token
+- 直接导出 `MYSEARCH_PROXY_BASE_URL` / `MYSEARCH_PROXY_API_KEY`
+- 直接给 `mysearch/.env` 和 `./install.sh` 使用
 
 ### Social / X
 

@@ -39,7 +39,7 @@ def build_mcp(config: MySearchConfig) -> tuple[MySearchClient, FastMCP]:
             "resource",
         ] = "auto",
         strategy: Literal["auto", "fast", "balanced", "verify", "deep"] = "auto",
-        provider: Literal["auto", "tavily", "firecrawl", "xai"] = "auto",
+        provider: Literal["auto", "tavily", "firecrawl", "exa", "xai"] = "auto",
         sources: list[Literal["web", "x"]] | None = None,
         max_results: int = 5,
         include_content: bool = False,
@@ -53,7 +53,7 @@ def build_mcp(config: MySearchConfig) -> tuple[MySearchClient, FastMCP]:
         include_x_images: bool = False,
         include_x_videos: bool = False,
     ) -> dict:
-        """统一搜索入口。按任务类型自动选择 Tavily / Firecrawl / xAI。"""
+        """统一搜索入口。按任务类型自动选择 Tavily / Firecrawl / Exa / xAI。"""
         return client.search(
             query=query,
             mode=mode,

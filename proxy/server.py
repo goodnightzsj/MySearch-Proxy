@@ -77,6 +77,7 @@ SERVICE_LABELS = {
     "tavily": "Tavily",
     "firecrawl": "Firecrawl",
     "exa": "Exa",
+    "mysearch": "MySearch",
 }
 
 app = FastAPI(title="MySearch Proxy")
@@ -125,6 +126,13 @@ def clear_admin_session_cookie(response: Response):
 def get_service(service_value, default="tavily"):
     try:
         return db.normalize_service(service_value or default)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+def get_token_service(service_value, default="tavily"):
+    try:
+        return db.normalize_token_service(service_value or default)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -468,21 +476,36 @@ async def resolve_social_gateway_state(force=False):
 
 
 def verify_social_gateway_token(token_value, accepted_tokens):
+    if token_value:
+        token_row = db.get_token_by_value(token_value)
+        if token_row and token_row["service"] == "mysearch":
+            return token_row
     if not accepted_tokens:
         raise HTTPException(status_code=503, detail="Social gateway is not configured")
     if not token_value:
         raise HTTPException(status_code=401, detail="Missing API token")
     if not any(hmac.compare_digest(token_value, expected) for expected in accepted_tokens):
         raise HTTPException(status_code=401, detail="Invalid token")
+    return None
 
 
 def get_token_row_or_401(token_value, service):
     if not token_value:
         raise HTTPException(status_code=401, detail="Missing API token")
     token_row = db.get_token_by_value(token_value)
-    if not token_row or token_row["service"] != service:
+    if not token_row or token_row["service"] not in {service, "mysearch"}:
         raise HTTPException(status_code=401, detail="Invalid token")
     return token_row
+
+
+def get_token_usage_scope(token_row, default_service):
+    token_service = default_service
+    if token_row is not None:
+        try:
+            token_service = token_row["service"] or default_service
+        except Exception:
+            token_service = default_service
+    return None if token_service == "mysearch" else default_service
 
 
 def parse_usage_number(value):
@@ -770,6 +793,28 @@ async def build_service_dashboard(service):
         "keys_active": len(active_keys),
         "real_quota": build_real_quota_summary(active_keys),
         "usage_sync": sync_result,
+    }
+
+
+async def build_mysearch_dashboard():
+    tokens = [dict(token) for token in db.get_all_tokens("mysearch")]
+    for token in tokens:
+        token["stats"] = db.get_usage_stats(token_id=token["id"], service="mysearch")
+
+    overview = {
+        "today_count": sum(int((token.get("stats") or {}).get("today_count") or 0) for token in tokens),
+        "today_success": sum(int((token.get("stats") or {}).get("today_success") or 0) for token in tokens),
+        "today_failed": sum(int((token.get("stats") or {}).get("today_failed") or 0) for token in tokens),
+        "month_count": sum(int((token.get("stats") or {}).get("month_count") or 0) for token in tokens),
+        "month_success": sum(int((token.get("stats") or {}).get("month_success") or 0) for token in tokens),
+    }
+    return {
+        "service": "mysearch",
+        "label": SERVICE_LABELS["mysearch"],
+        "token_prefix": db.TOKEN_PREFIX["mysearch"],
+        "tokens": tokens,
+        "token_count": len(tokens),
+        "overview": overview,
     }
 
 
@@ -1158,7 +1203,7 @@ async def proxy_tavily(request: Request):
         token_row["hourly_limit"],
         token_row["daily_limit"],
         token_row["monthly_limit"],
-        service="tavily",
+        service=get_token_usage_scope(token_row, "tavily"),
     )
     if not ok:
         raise HTTPException(status_code=429, detail=reason)
@@ -1196,7 +1241,7 @@ async def proxy_firecrawl(path: str, request: Request):
         token_row["hourly_limit"],
         token_row["daily_limit"],
         token_row["monthly_limit"],
-        service="firecrawl",
+        service=get_token_usage_scope(token_row, "firecrawl"),
     )
     if not ok:
         raise HTTPException(status_code=429, detail=reason)
@@ -1245,7 +1290,7 @@ async def proxy_exa_search(request: Request):
         token_row["hourly_limit"],
         token_row["daily_limit"],
         token_row["monthly_limit"],
-        service="exa",
+        service=get_token_usage_scope(token_row, "exa"),
     )
     if not ok:
         raise HTTPException(status_code=429, detail=reason)
@@ -1401,11 +1446,12 @@ async def logout_session():
 
 @app.get("/api/stats")
 async def stats(request: Request, _=Depends(verify_admin)):
-    tavily_stats, firecrawl_stats, exa_stats, social_stats = await asyncio.gather(
+    tavily_stats, firecrawl_stats, exa_stats, social_stats, mysearch_stats = await asyncio.gather(
         build_service_dashboard("tavily"),
         build_service_dashboard("firecrawl"),
         build_service_dashboard("exa"),
         build_social_dashboard(),
+        build_mysearch_dashboard(),
     )
     return {
         "services": {
@@ -1414,6 +1460,7 @@ async def stats(request: Request, _=Depends(verify_admin)):
             "exa": exa_stats,
         },
         "social": social_stats,
+        "mysearch": mysearch_stats,
     }
 
 
@@ -1543,7 +1590,7 @@ async def list_tokens(request: Request, _=Depends(verify_admin)):
 @app.post("/api/tokens")
 async def create_token(request: Request, _=Depends(verify_admin)):
     body = await request.json()
-    service = get_service(body.get("service"), default="tavily")
+    service = get_token_service(body.get("service"), default="tavily")
     token = db.create_token(body.get("name", ""), service=service)
     return {"token": dict(token)}
 
