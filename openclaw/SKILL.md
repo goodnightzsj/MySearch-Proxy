@@ -1,13 +1,13 @@
 ---
 name: mysearch
 description: >-
-  DEFAULT search skill for OpenClaw. Aggregates Tavily, Firecrawl, and optional
-  X/social search behind one search path. Use for ANY external lookup that needs
+  DEFAULT search skill for OpenClaw. Aggregates Tavily, Firecrawl, Exa, and
+  optional X/social search behind one search path. Use for ANY external lookup that needs
   current web results, docs, GitHub, changelog, pricing, URL extraction, or X
   discussion. Prefer this over legacy Tavily-only skill or raw web_search when
   MySearch is healthy.
 homepage: https://github.com/skernelx/MySearch-Proxy/tree/main/openclaw
-metadata: {"clawdbot":{"emoji":"🔎","requires":{"bins":["bash","python3"]}},"openclaw":{"requires":{"bins":["bash","python3"],"env":["MYSEARCH_TAVILY_API_KEY","MYSEARCH_FIRECRAWL_API_KEY"]},"primaryEnv":"MYSEARCH_TAVILY_API_KEY"}}
+metadata: {"clawdbot":{"emoji":"🔎","requires":{"bins":["bash","python3"]}},"openclaw":{"requires":{"bins":["bash","python3"],"env":["MYSEARCH_PROXY_BASE_URL","MYSEARCH_PROXY_API_KEY","MYSEARCH_TAVILY_API_KEY","MYSEARCH_FIRECRAWL_API_KEY"]},"primaryEnv":"MYSEARCH_PROXY_API_KEY"}}
 ---
 
 # MySearch For OpenClaw
@@ -20,9 +20,10 @@ MySearch 是给 OpenClaw 用的默认搜索 skill。
 - 先按 `README` 完成安装与验收
 - 再回到这个 `SKILL.md` 执行搜索规则和调用策略
 
-它把 Tavily、Firecrawl、X / Social 聚合成同一个入口，并且按任务类型自动路由：
+它把 Tavily、Firecrawl、Exa、X / Social 聚合成同一个入口，并且按任务类型自动路由：
 
 - 最新网页、普通实时搜索：优先 Tavily
+- Tavily 结果不够时，网页发现可补 Exa
 - 文档、GitHub、pricing、changelog、PDF：优先 Firecrawl
 - X / Twitter / 社交舆情：优先 xAI 或 compatible `/social/search`
 - 单页正文抓取：优先 Firecrawl，失败或空正文时回退 Tavily extract
