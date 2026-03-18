@@ -10,10 +10,12 @@ from datetime import datetime, timezone
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "data", "proxy.db")
 SUPPORTED_SERVICES = ("tavily", "firecrawl", "exa")
+TOKEN_SERVICES = SUPPORTED_SERVICES + ("mysearch",)
 TOKEN_PREFIX = {
     "tavily": "tvly-",
     "firecrawl": "fctk-",
     "exa": "exat-",
+    "mysearch": "mysp-",
 }
 KEY_PATTERNS = {
     "tavily": r"(tvly-[A-Za-z0-9\-_]{20,})",
@@ -38,6 +40,13 @@ def normalize_service(service):
     service = (service or "tavily").strip().lower()
     if service not in SUPPORTED_SERVICES:
         raise ValueError(f"unsupported service: {service}")
+    return service
+
+
+def normalize_token_service(service):
+    service = (service or "tavily").strip().lower()
+    if service not in TOKEN_SERVICES:
+        raise ValueError(f"unsupported token service: {service}")
     return service
 
 
@@ -126,10 +135,10 @@ def _ensure_usage_columns(conn):
             conn.execute(f"ALTER TABLE api_keys ADD COLUMN {name} {definition}")
 
 
-def _service_where(service):
+def _service_where(service, normalizer=normalize_service):
     if not service:
         return "", []
-    return " WHERE service = ?", [normalize_service(service)]
+    return " WHERE service = ?", [normalizer(service)]
 
 
 def _query_all(conn, table_name, service=None):
@@ -324,7 +333,7 @@ def update_key_remote_usage_error(key_id, error_message):
 # ═══ Tokens ═══
 
 def create_token(name="", service="tavily"):
-    service = normalize_service(service)
+    service = normalize_token_service(service)
     token = TOKEN_PREFIX[service] + "".join(random.choices(string.ascii_letters + string.digits, k=32))
     conn = get_conn()
     try:
@@ -341,7 +350,8 @@ def create_token(name="", service="tavily"):
 def get_all_tokens(service=None):
     conn = get_conn()
     try:
-        return _query_all(conn, "tokens", service)
+        where_sql, params = _service_where(service, normalize_token_service)
+        return conn.execute(f"SELECT * FROM tokens{where_sql} ORDER BY id", params).fetchall()
     finally:
         conn.close()
 
@@ -392,7 +402,7 @@ def get_usage_stats(token_id=None, service=None):
 
         filters = []
         filter_params = []
-        if service:
+        if service and service != "mysearch":
             filters.append("service = ?")
             filter_params.append(normalize_service(service))
         if token_id is not None:

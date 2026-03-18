@@ -25,7 +25,7 @@
 
 这不是一个“只包一层 Tavily”的小工具。
 
-它的核心目标是：把 `Tavily`、`Firecrawl`、`X / Social` 三条搜索能力线
+它的核心目标是：把 `Tavily`、`Exa`、`Firecrawl`、`X / Social` 四条搜索能力线
 统一到一个可安装、可复用、可公开发布的产品里，并且让调用方尽量少关心
 底层 provider 差异。
 
@@ -45,7 +45,7 @@
   - 统一提供 `search`、`extract_url`、`research`、`mysearch_health`
 - [`proxy/`](./proxy/README.md)
   - 统一控制台与代理层
-  - 管理 Tavily / Firecrawl key 池、下游 token、额度同步、`/social/search`
+  - 管理 Tavily / Exa / Firecrawl key 池、下游 token、MySearch 通用 token、额度同步、`/social/search`
 - [`skill/README.md`](./skill/README.md)
   - 给 `Codex` / `Claude Code` 用的 MySearch skill 说明
   - 包含“让 AI 自动安装 MySearch”的直接用法
@@ -91,6 +91,7 @@ Codex / Claude Code / OpenClaw / 自建 Agent
 `MySearch` 会按任务类型自动选路由：
 
 - 普通网页、新闻、快速发现：优先 Tavily
+- Tavily 不可用时，普通网页发现可回退 Exa
 - 文档站、GitHub、PDF、pricing、changelog、正文抓取：优先 Firecrawl
 - X / Social：优先 xAI 或 compatible `/social/search`
 
