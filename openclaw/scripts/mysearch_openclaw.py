@@ -285,7 +285,7 @@ def main() -> int:
     search_parser.add_argument("--mode", default="auto", choices=("auto", "web", "news", "social", "docs", "research", "github", "pdf"))
     search_parser.add_argument("--intent", default="auto", choices=("auto", "factual", "status", "comparison", "tutorial", "exploratory", "news", "resource"))
     search_parser.add_argument("--strategy", default="auto", choices=("auto", "fast", "balanced", "verify", "deep"))
-    search_parser.add_argument("--provider", default="auto", choices=("auto", "tavily", "firecrawl", "xai"))
+    search_parser.add_argument("--provider", default="auto", choices=("auto", "tavily", "firecrawl", "exa", "xai"))
     search_parser.add_argument("--sources", default="")
     search_parser.add_argument("-n", "--max-results", type=int, default=5)
     search_parser.add_argument("--include-content", action="store_true")

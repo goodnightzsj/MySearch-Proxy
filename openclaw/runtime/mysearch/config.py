@@ -273,8 +273,14 @@ class MySearchConfig:
                     default="https://api.exa.ai",
                 ),
                 auth_mode=_get_str("MYSEARCH_EXA_AUTH_MODE", default="bearer"),  # type: ignore[arg-type]
-                auth_header=_get_str("MYSEARCH_EXA_AUTH_HEADER", default="x-api-key"),
-                auth_scheme=_get_str("MYSEARCH_EXA_AUTH_SCHEME", default=""),
+                auth_header=_get_str(
+                    "MYSEARCH_EXA_AUTH_HEADER",
+                    default="Authorization" if proxy_base_url else "x-api-key",
+                ),
+                auth_scheme=_get_str(
+                    "MYSEARCH_EXA_AUTH_SCHEME",
+                    default="Bearer" if proxy_base_url else "",
+                ),
                 auth_field=_get_str("MYSEARCH_EXA_AUTH_FIELD", default="api_key"),
                 default_paths={
                     "search": _provider_path(
