@@ -2,121 +2,27 @@
 
 [English Guide](./README_EN.md) · [返回仓库](../README.md)
 
-`proxy/` 是 `MySearch Proxy` 里的控制台与代理层。
+`proxy/` 是 MySearch 的控制台与代理层。
 
-它不是单纯的 key 面板，而是把 Tavily、Exa、Firecrawl、Social / X 四条能力线
-收进一个统一工作台里，让你同时管理：
+它不是单纯的 key 面板，而是整套 `proxy-first` 架构的中间层：
 
-- 上游 provider key
-- 下游调用 token
-- MySearch 通用 token
-- 官方额度同步
-- compatible gateway 接线
-- MySearch 最终应该怎么接这套搜索基础设施
+- 上游连 Tavily / Firecrawl / Exa / 可选 Social
+- 下游给 MySearch MCP、OpenClaw skill 和其他 Agent 发统一 token
+- 页面里同时看 key 池、token 池、调用统计和额度信息
 
 ![MySearch Console Hero](../docs/images/mysearch-console-hero.jpg)
 
-## 这个控制台解决什么问题
+## 它解决什么问题
 
-很多代理面板只做其中一小段：
+如果没有 Proxy，常见问题会很散：
 
-- 只存 key，不管下游怎么发 token
-- 只做 token，不同步官方额度
-- 只支持 Tavily，不支持 Firecrawl
-- 只支持官方接口，不支持自己的 compatible social gateway
-- 只适合人工维护，不适合真正给 MCP / Skill 当后端
+- 每台客户端都要单独填 provider key
+- OpenClaw 和本地 Codex 的配置容易分叉
+- token、额度、调用统计没有统一入口
+- 上游 provider 一旦换地址，所有客户端都要跟着改
+- Social / X 这条链很难跟 Web / Docs 搜索放在一个控制平面里
 
-`MySearch Proxy Console` 把这些拆散的问题重新收口：
-
-- Tavily 独立工作台
-- Exa 独立工作台
-- Firecrawl 独立工作台
-- Social / X 独立工作台
-- MySearch MCP 快速接入区
-- 同一个页面里看清 Key 池、Token 池、真实额度、代理统计和接线方式
-
-## 为什么它比普通 key 面板更好用
-
-### 1. 按服务拆开，而不是混成一个池子
-
-这里不是一个“所有 key 全堆在一起”的控制台。
-
-它明确把四类能力拆开：
-
-- Tavily
-- Exa
-- Firecrawl
-- Social / X
-
-这样做的好处是：
-
-- provider 额度不会混算
-- token 不会串用
-- 统计更清楚
-- 下游调用地址也更直观
-
-### 2. 它服务于真正的 MySearch 运行时
-
-这个控制台不是孤立产品。
-
-它的设计目标就是给：
-
-- `mysearch/` MCP
-- `skill/` Codex / Claude Code skill
-- `openclaw/` OpenClaw skill
-
-提供后端与配置落点。
-
-### 3. 它能把 `grok2api` 收进同一控制平面
-
-如果你的 X / Social 侧来自 `grok2api`：
-
-- 可以直接接 `/v1/admin/config`
-- 可以接 `/v1/admin/tokens`
-- 可以自动继承 `app.api_key`
-- 可以把 token 状态也统一展示在自己的工作台里
-
-这点比“再手写一个 social 脚本”整齐很多。
-
-### 4. 没有 X 时，它也不是废的
-
-即使你暂时没有 `grok2api` 或官方 `xAI`：
-
-- Tavily 工作台仍可用
-- Firecrawl 工作台仍可用
-- MySearch 仍可作为 `web + docs + extract` 的统一入口
-
-也就是说，Social / X 是增强项，不是控制台存在的唯一价值。
-
-## 默认推荐怎么接
-
-最推荐的完整链路是：
-
-```text
-tavily-key-generator
-  -> 提供 Tavily / Firecrawl provider 或聚合 API
-
-MySearch Proxy Console
-  -> 管理 key、token、额度、/social/search、grok2api 接线
-
-MySearch MCP / Skill / OpenClaw Skill
-  -> 作为最终给 AI 用的统一搜索入口
-```
-
-推荐项目：
-
-- [skernelx/tavily-key-generator](https://github.com/skernelx/tavily-key-generator)
-
-默认推荐原因：
-
-- Tavily / Firecrawl 更适合先收口在 provider 层
-- MySearch Proxy 再负责把它们组织成真正给 AI 使用的统一工作流
-
-## 界面预览
-
-当前工作台展开区：
-
-![MySearch Console Workspaces](../docs/images/mysearch-console-workspaces.jpg)
+`MySearch Proxy` 的目标就是把这些收回来。
 
 ## 支持的能力
 
@@ -129,88 +35,88 @@ MySearch MCP / Skill / OpenClaw Skill
 
 控制台能力：
 
-- Key 池
-- Token 池
-- Tavily `/usage` 额度同步
-- 代理调用统计
+- key 池
+- token 池
+- 使用量同步
+- 调用统计
 
 ### Firecrawl
 
 代理入口：
 
-- `/firecrawl/*`
-- 例如 `POST /firecrawl/v2/scrape`
+- `POST /firecrawl/v2/search`
+- `POST /firecrawl/v2/scrape`
 
 控制台能力：
 
-- Key 池
-- Token 池
-- Firecrawl credits 同步
-- 代理调用统计
+- key 池
+- token 池
+- credits 同步
+- 调用统计
 
-### MySearch 通用 Token
+### Exa
+
+代理入口：
+
+- `POST /exa/search`
 
 控制台能力：
 
-- 创建 MySearch 通用 token
-- 一次接通 Tavily / Exa / Firecrawl
-- 在 Social / X 已接通时继续复用同一个 token
-- 直接导出 `MYSEARCH_PROXY_BASE_URL` / `MYSEARCH_PROXY_API_KEY`
-- 直接给 `mysearch/.env` 和 `./install.sh` 使用
+- key 池
+- token 池
+- 调用统计
+
+说明：
+
+- Exa 当前在控制台里支持接入和分发
+- 实时官方额度暂时无法查询，所以页面会明确标注这一点
+
+### MySearch 通用 token
+
+控制台能力：
+
+- 创建 `mysp-` 开头的 MySearch token
+- 一次接通 Tavily / Firecrawl / Exa
+- 给 `mysearch/.env` 和 OpenClaw skill 直接复用
+- 记录这类 token 的调用统计
 
 ### Social / X
 
 代理入口：
 
-- `POST /social/search`
 - `GET /social/health`
+- `POST /social/search`
 
 控制台能力：
 
-- upstream base URL 管理
+- 上游 base URL 管理
 - gateway token 管理
-- grok2api admin 读取
-- token 状态与额度展示
+- 兼容 admin API 对接
+- token 状态展示
 
-## 没有某一项支持时会怎样
+## 当前推荐用法
 
-### 没有 `grok2api` 或官方 `xAI`
+推荐你把它当成统一入口，而不是单独使用某一个 provider 工作台。
 
-控制台仍然可用。
+标准链路：
 
-你仍然可以正常管理：
+```text
+上游 provider
+  -> MySearch Proxy
+     -> 生成 mysp- token
+        -> MySearch MCP / OpenClaw skill / 其他 Agent
+```
 
-- Tavily
-- Firecrawl
-- MySearch 对应的 web / docs / extract 路由
+客户端只需要：
 
-只有 Social / X 工作台会变成未配置状态。
-
-### 没有 Tavily
-
-控制台仍然可以正常承担：
-
-- Firecrawl
-- Social / X
-
-但 MySearch 里的普通 `web / news` 路由会明显变弱。
-
-### 没有 Firecrawl
-
-控制台仍然可以正常承担：
-
-- Tavily
-- Social / X
-
-但 MySearch 里的 `docs / github / pdf / extract` 体验会下降。
-
-如果缺的是官方 Tavily / Firecrawl key，默认推荐先接：
-
-- [skernelx/tavily-key-generator](https://github.com/skernelx/tavily-key-generator)
+```env
+MYSEARCH_PROXY_BASE_URL=https://your-mysearch-proxy.example.com
+MYSEARCH_PROXY_API_KEY=mysp-...
+```
 
 ## 部署
 
-### 1. Docker Hub 或自建镜像
+### 方式 A：直接跑 Docker Hub 镜像
 
 ```bash
 mkdir -p mysearch-proxy-data
@@ -219,9 +125,9 @@ docker run -d \
   --name mysearch-proxy \
   --restart unless-stopped \
   -p 9874:9874 \
-  -e ADMIN_PASSWORD=your-admin-password \
+  -e ADMIN_PASSWORD=change-me \
   -v $(pwd)/mysearch-proxy-data:/app/data \
-  your-registry/mysearch-proxy:latest
+  skernelx/mysearch-proxy:latest
 ```
 
 访问：
@@ -230,181 +136,138 @@ docker run -d \
 http://localhost:9874
 ```
 
-### 2. docker compose
+### 方式 B：docker compose
 
 ```bash
 cd proxy
 docker compose up -d
 ```
 
-### 3. 本地源码运行
+### 方式 C：本地源码运行
 
 ```bash
 cd proxy
 pip install -r requirements.txt
-ADMIN_PASSWORD=your-admin-password uvicorn server:app --host 0.0.0.0 --port 9874
+ADMIN_PASSWORD=change-me uvicorn server:app --host 0.0.0.0 --port 9874
 ```
 
-## 更新方式
+## 首次初始化建议
 
-如果你已经有一个旧容器，保留数据卷即可直接替换镜像：
+第一次打开页面后，按这个顺序做最稳：
 
-```bash
-docker pull your-registry/mysearch-proxy:latest
+1. 用 `ADMIN_PASSWORD` 登录控制台
+2. 添加 Tavily / Firecrawl / Exa 的上游 key
+3. 如果你要 Social / X，再补它的 upstream 配置
+4. 执行一轮 usage sync
+5. 创建 MySearch 通用 token
+6. 把 `MYSEARCH_PROXY_BASE_URL` 和 `MYSEARCH_PROXY_API_KEY` 填给客户端
 
-docker rm -f mysearch-proxy
+当前控制台已经带密码登录，不再适合匿名裸放在公网。
 
-docker run -d \
-  --name mysearch-proxy \
-  --restart unless-stopped \
-  -p 9874:9874 \
-  -e ADMIN_PASSWORD=your-admin-password \
-  -v /your/data/path:/app/data \
-  your-registry/mysearch-proxy:latest
+## 下游怎么接
+
+### 给 `mysearch/` MCP
+
+```env
+MYSEARCH_PROXY_BASE_URL=https://your-mysearch-proxy.example.com
+MYSEARCH_PROXY_API_KEY=mysp-...
 ```
 
-只要保留 `/app/data` 对应的数据卷，已有：
+### 给 OpenClaw skill
 
-- key
-- token
-- 控制台密码
-- 历史统计
+```json
+{
+  "skills": {
+    "entries": {
+      "mysearch": {
+        "enabled": true,
+        "env": {
+          "MYSEARCH_PROXY_BASE_URL": "https://your-mysearch-proxy.example.com",
+          "MYSEARCH_PROXY_API_KEY": "mysp-..."
+        }
+      }
+    }
+  }
+}
+```
 
-都会继续保留。
+## 页面与数据
 
-## 配置项
+控制台页面会按服务拆成独立区域：
 
-最基础的控制台配置：
+- Tavily
+- Exa
+- Firecrawl
+- Social / X
+- MySearch 通用 token
+
+这样做的目的是：
+
+- 各服务额度不会混在一起
+- token 不会串用
+- 调用统计更清楚
+- 下游接线一眼能看懂
+
+界面预览：
+
+![MySearch Console Workspaces](../docs/images/mysearch-console-workspaces.jpg)
+
+默认数据目录：
+
+- Docker compose
+  - `./data`
+- `docker run` 示例
+  - `$(pwd)/mysearch-proxy-data`
+
+## 认证与安全
+
+关键环境变量：
 
 ```env
 ADMIN_PASSWORD=change-me
-SOCIAL_GATEWAY_UPSTREAM_BASE_URL=https://api.x.ai/v1
-SOCIAL_GATEWAY_UPSTREAM_RESPONSES_PATH=/responses
-SOCIAL_GATEWAY_ADMIN_BASE_URL=https://media.example.com
-SOCIAL_GATEWAY_ADMIN_APP_KEY=
-SOCIAL_GATEWAY_ADMIN_VERIFY_PATH=/v1/admin/verify
-SOCIAL_GATEWAY_ADMIN_CONFIG_PATH=/v1/admin/config
-SOCIAL_GATEWAY_ADMIN_TOKENS_PATH=/v1/admin/tokens
-SOCIAL_GATEWAY_CACHE_TTL_SECONDS=60
-SOCIAL_GATEWAY_UPSTREAM_API_KEY=
-SOCIAL_GATEWAY_MODEL=grok-4.1-fast
-SOCIAL_GATEWAY_TOKEN=
+ADMIN_SESSION_COOKIE=mysearch_proxy_session
+ADMIN_SESSION_MAX_AGE=2592000
 ```
 
-### 推荐的 `grok2api` 接法
+建议：
 
-如果上游是 `grok2api`，优先只填：
+- 第一时间改掉默认管理员密码
+- 放公网时务必配 HTTPS 反代
+- 不要把生产上游 key 暴露到前端代码仓库
+- 只把 `mysp-` token 发给下游客户端
 
-```env
-SOCIAL_GATEWAY_UPSTREAM_BASE_URL=https://media.example.com/v1
-SOCIAL_GATEWAY_ADMIN_BASE_URL=https://media.example.com
-SOCIAL_GATEWAY_ADMIN_APP_KEY=YOUR_GROK2API_APP_KEY
-SOCIAL_GATEWAY_MODEL=grok-4.1-fast
-```
+## 支持的 API
 
-这样控制台会自动：
+管理和面板相关：
 
-- 从 `/v1/admin/config` 继承 `app.api_key`
-- 从 `/v1/admin/tokens` 读取 token 状态与额度
-- 在没显式填 `SOCIAL_GATEWAY_UPSTREAM_API_KEY` /
-  `SOCIAL_GATEWAY_TOKEN` 时直接复用继承结果
+- `GET /`
+- `GET /api/session`
+- `POST /api/session/login`
+- `POST /api/session/logout`
+- `GET /api/stats`
+- `GET /api/settings`
+- `PUT /api/settings/social`
+- `GET /api/keys`
+- `POST /api/keys`
+- `GET /api/tokens`
+- `POST /api/tokens`
+- `POST /api/usage/sync`
 
-### 手动模式
+搜索代理相关：
 
-如果你不想接 admin API，也可以手动填：
+- `POST /api/search`
+- `POST /api/extract`
+- `POST /firecrawl/v2/search`
+- `POST /firecrawl/v2/scrape`
+- `POST /exa/search`
+- `GET /social/health`
+- `POST /social/search`
 
-```env
-SOCIAL_GATEWAY_UPSTREAM_BASE_URL=https://media.example.com/v1
-SOCIAL_GATEWAY_UPSTREAM_API_KEY=YOUR_UPSTREAM_KEY
-SOCIAL_GATEWAY_TOKEN=YOUR_SOCIAL_GATEWAY_TOKEN
-```
+## 什么时候看别的文档
 
-## API 调用示例
-
-认证方式支持：
-
-- `Authorization: Bearer YOUR_TOKEN`
-- body 里的 `api_key`
-
-### Tavily
-
-```bash
-curl -X POST http://localhost:9874/api/search \
-  -H "Authorization: Bearer YOUR_TAVILY_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "hello world", "max_results": 1}'
-```
-
-```bash
-curl -X POST http://localhost:9874/api/extract \
-  -H "Authorization: Bearer YOUR_TAVILY_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"urls": ["https://example.com"]}'
-```
-
-### Firecrawl
-
-```bash
-curl -X POST http://localhost:9874/firecrawl/v2/scrape \
-  -H "Authorization: Bearer YOUR_FIRECRAWL_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"url": "https://example.com", "formats": ["markdown"]}'
-```
-
-### Social / X
-
-```bash
-curl -X POST http://localhost:9874/social/search \
-  -H "Authorization: Bearer YOUR_SOCIAL_GATEWAY_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "what are people saying about MCP on X",
-    "source": "x",
-    "max_results": 3
-  }'
-```
-
-健康检查：
-
-```bash
-curl http://localhost:9874/social/health
-```
-
-## 快速验收
-
-### 控制台
-
-打开：
-
-```text
-http://localhost:9874
-```
-
-确认下面几项是否正常：
-
-- 能登录
-- 顶部工作台切换正常
-- 当前服务的 key / token 能创建和展示
-- Tavily / Firecrawl 额度同步正常
-- Social / X 工作台能读到 upstream 状态
-
-### 管理 API
-
-```bash
-curl http://localhost:9874/api/stats \
-  -H "X-Admin-Password: your-admin-password"
-```
-
-```bash
-curl "http://localhost:9874/api/keys?service=tavily" \
-  -H "X-Admin-Password: your-admin-password"
-```
-
-## 相关文档
-
-- 仓库总览：
-  [../README.md](../README.md)
-- MySearch MCP：
-  [../mysearch/README.md](../mysearch/README.md)
-- 架构说明：
-  [../docs/mysearch-architecture.md](../docs/mysearch-architecture.md)
+- 你要安装 MCP：
+  看 [../mysearch/README.md](../mysearch/README.md)
+- 你要给 AI 安装 skill：
+  看 [../skill/README.md](../skill/README.md)
+- 你要装 OpenClaw bundle：
+  看 [../openclaw/README.md](../openclaw/README.md)
