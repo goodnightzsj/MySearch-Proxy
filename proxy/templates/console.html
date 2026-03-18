@@ -3799,8 +3799,9 @@ function renderKeys(service, keys) {
   }).join('');
 }
 
-async function refresh() {
-  const payload = await api('GET', '/api/stats');
+async function refresh(options = {}) {
+  const force = options.force ? '?force=1' : '';
+  const payload = await api('GET', `/api/stats${force}`);
   const services = payload.services || {};
   const social = payload.social || {};
   const mysearch = payload.mysearch || {};
@@ -3849,13 +3850,13 @@ async function createToken(service) {
     name: input.value.trim(),
   });
   input.value = '';
-  await refresh();
+  await refresh({ force: true });
 }
 
 async function delToken(id) {
   if (!confirm('确认删除这个 Token 吗？')) return;
   await api('DELETE', `/api/tokens/${id}`);
-  await refresh();
+  await refresh({ force: true });
 }
 
 async function addSingleKey(service) {
@@ -3864,7 +3865,7 @@ async function addSingleKey(service) {
   if (!key) return;
   await api('POST', '/api/keys', { service, key });
   input.value = '';
-  await refresh();
+  await refresh({ force: true });
 }
 
 async function importKeys(service) {
@@ -3875,18 +3876,18 @@ async function importKeys(service) {
   textarea.value = '';
   document.getElementById(`import-wrap-${service}`).classList.add('hidden');
   alert(`已导入 ${result.imported || 0} 个 ${SERVICE_META[service].label} Key`);
-  await refresh();
+  await refresh({ force: true });
 }
 
 async function delKey(id) {
   if (!confirm('确认删除这个 Key 吗？')) return;
   await api('DELETE', `/api/keys/${id}`);
-  await refresh();
+  await refresh({ force: true });
 }
 
 async function toggleKey(id, active) {
   await api('PUT', `/api/keys/${id}/toggle`, { active });
-  await refresh();
+  await refresh({ force: true });
 }
 
 async function syncUsage(service, force) {
@@ -3900,7 +3901,7 @@ async function syncUsage(service, force) {
   button.textContent = '同步中...';
   try {
     await api('POST', '/api/usage/sync', { service, force });
-    await refresh();
+    await refresh({ force: true });
   } catch (error) {
     alert(`同步 ${SERVICE_META[service].label} 额度失败: ${error.message}`);
     button.disabled = false;
@@ -3954,7 +3955,7 @@ async function saveSocialSettings(event) {
     latestSettings = payload || {};
     fillSettingsForm(latestSettings);
     setStatus('settings-social-status', 'Social / X 设置已保存，当前控制台状态已刷新。');
-    await refresh();
+    await refresh({ force: true });
   } catch (error) {
     setStatus('settings-social-status', `保存 Social / X 设置失败：${error.message}`, true);
   }

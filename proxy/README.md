@@ -114,6 +114,28 @@ MYSEARCH_PROXY_BASE_URL=https://your-mysearch-proxy.example.com
 MYSEARCH_PROXY_API_KEY=mysp-...
 ```
 
+## 控制台刷新性能（已优化）
+
+为避免页面每次刷新都被远程额度同步拖慢，控制台现在默认采用：
+
+- `/api/stats` 快速返回（短缓存）
+- 额度同步改为手动触发（或后台节流同步）
+- 写操作后前端会强制刷新，避免读到旧缓存
+
+关键环境变量：
+
+```env
+STATS_CACHE_TTL_SECONDS=8
+DASHBOARD_AUTO_SYNC_ON_STATS=0
+DASHBOARD_BACKGROUND_SYNC_ON_STATS=1
+DASHBOARD_BACKGROUND_SYNC_MIN_INTERVAL_SECONDS=45
+```
+
+说明：
+
+- 如果你更看重“每次刷新都立刻拉最新额度”，可设 `DASHBOARD_AUTO_SYNC_ON_STATS=1`。
+- 默认推荐保持 `0`，然后在页面点击“同步额度”按钮做显式刷新。
+
 ## 部署
 
 ### 方式 A：直接跑 Docker Hub 镜像

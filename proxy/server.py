@@ -73,6 +73,21 @@ SOCIAL_GATEWAY_CACHE_TTL_SECONDS = max(
 )
 USAGE_SYNC_TTL_SECONDS = int(os.environ.get("USAGE_SYNC_TTL_SECONDS", "300"))
 USAGE_SYNC_CONCURRENCY = max(1, int(os.environ.get("USAGE_SYNC_CONCURRENCY", "4")))
+DASHBOARD_AUTO_SYNC_ON_STATS = os.environ.get("DASHBOARD_AUTO_SYNC_ON_STATS", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+STATS_CACHE_TTL_SECONDS = max(0, int(os.environ.get("STATS_CACHE_TTL_SECONDS", "8")))
+DASHBOARD_BACKGROUND_SYNC_ON_STATS = os.environ.get(
+    "DASHBOARD_BACKGROUND_SYNC_ON_STATS",
+    "1",
+).strip().lower() in {"1", "true", "yes", "on"}
+DASHBOARD_BACKGROUND_SYNC_MIN_INTERVAL_SECONDS = max(
+    10,
+    int(os.environ.get("DASHBOARD_BACKGROUND_SYNC_MIN_INTERVAL_SECONDS", "45")),
+)
 SERVICE_LABELS = {
     "tavily": "Tavily",
     "firecrawl": "Firecrawl",
@@ -85,6 +100,11 @@ templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "t
 http_client = httpx.AsyncClient(timeout=60)
 social_gateway_state_cache = {"expires_at": 0.0, "value": None}
 social_gateway_state_lock = asyncio.Lock()
+stats_payload_cache = {"expires_at": 0.0, "value": None}
+stats_payload_lock = asyncio.Lock()
+background_sync_tasks = {}
+background_sync_last_started = {}
+background_sync_lock = asyncio.Lock()
 
 
 def get_admin_password():
@@ -140,6 +160,11 @@ def get_token_service(service_value, default="tavily"):
 def reset_social_gateway_cache():
     social_gateway_state_cache["expires_at"] = 0.0
     social_gateway_state_cache["value"] = None
+
+
+def reset_stats_cache():
+    stats_payload_cache["expires_at"] = 0.0
+    stats_payload_cache["value"] = None
 
 
 def get_setting_text(key, default=""):
@@ -720,6 +745,67 @@ async def sync_usage_cache(force=False, key_id=None, service=None):
     }
 
 
+def build_usage_sync_meta_for_dashboard(service, active_keys):
+    if service == "exa":
+        return {
+            "supported": False,
+            "requested": len(active_keys),
+            "synced": 0,
+            "skipped": len(active_keys),
+            "errors": 0,
+            "stale_keys": 0,
+            "detail": "Exa 实时额度暂时无法查询",
+        }
+
+    stale_keys = sum(1 for key in active_keys if is_usage_sync_stale(key))
+    detail = "已启用后台同步，页面优先快速返回。"
+    if stale_keys > 0:
+        detail = f"检测到 {stale_keys} 个 Key 额度信息较旧，后台会按节流策略刷新。"
+    return {
+        "supported": True,
+        "auto_sync": False,
+        "requested": len(active_keys),
+        "synced": 0,
+        "skipped": len(active_keys),
+        "errors": 0,
+        "stale_keys": stale_keys,
+        "detail": detail,
+    }
+
+
+async def schedule_background_usage_sync(service, active_keys):
+    if not DASHBOARD_BACKGROUND_SYNC_ON_STATS:
+        return
+    if service == "exa":
+        return
+    if not active_keys:
+        return
+    if not any(is_usage_sync_stale(key) for key in active_keys):
+        return
+
+    now = time.monotonic()
+    async with background_sync_lock:
+        running = background_sync_tasks.get(service)
+        if running and not running.done():
+            return
+
+        last_started = background_sync_last_started.get(service, 0.0)
+        if now - last_started < DASHBOARD_BACKGROUND_SYNC_MIN_INTERVAL_SECONDS:
+            return
+        background_sync_last_started[service] = now
+
+        async def _run():
+            try:
+                await sync_usage_cache(force=False, service=service)
+            except Exception:
+                # 后台同步失败不影响页面主流程，下次节流窗口后再尝试。
+                pass
+            finally:
+                reset_stats_cache()
+
+        background_sync_tasks[service] = asyncio.create_task(_run())
+
+
 def build_real_quota_summary(keys):
     synced_keys = [
         key for key in keys
@@ -777,15 +863,19 @@ def mask_key_rows(keys):
     return keys
 
 
-async def build_service_dashboard(service):
+async def build_service_dashboard(service, auto_sync=False):
     service = get_service(service)
-    sync_result = await sync_usage_cache(force=False, service=service)
     overview = db.get_usage_stats(service=service)
     tokens = [dict(token) for token in db.get_all_tokens(service)]
     for token in tokens:
         token["stats"] = db.get_usage_stats(token_id=token["id"], service=service)
     keys = mask_key_rows([dict(key) for key in db.get_all_keys(service)])
     active_keys = [key for key in keys if key["active"]]
+    if auto_sync:
+        sync_result = await sync_usage_cache(force=False, service=service)
+    else:
+        sync_result = build_usage_sync_meta_for_dashboard(service, active_keys)
+        await schedule_background_usage_sync(service, active_keys)
     return {
         "service": service,
         "label": SERVICE_LABELS[service],
@@ -869,6 +959,30 @@ async def build_settings_payload():
             "admin_connected": state["admin_connected"],
             "error": state["error"],
         }
+    }
+
+
+async def build_stats_payload(auto_sync=False):
+    tavily_stats, firecrawl_stats, exa_stats, social_stats, mysearch_stats = await asyncio.gather(
+        build_service_dashboard("tavily", auto_sync=auto_sync),
+        build_service_dashboard("firecrawl", auto_sync=auto_sync),
+        build_service_dashboard("exa", auto_sync=auto_sync),
+        build_social_dashboard(),
+        build_mysearch_dashboard(),
+    )
+    return {
+        "services": {
+            "tavily": tavily_stats,
+            "firecrawl": firecrawl_stats,
+            "exa": exa_stats,
+        },
+        "social": social_stats,
+        "mysearch": mysearch_stats,
+        "meta": {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "stats_cache_ttl_seconds": STATS_CACHE_TTL_SECONDS,
+            "dashboard_auto_sync_on_stats": DASHBOARD_AUTO_SYNC_ON_STATS,
+        },
     }
 
 
@@ -1443,22 +1557,25 @@ async def logout_session():
 
 @app.get("/api/stats")
 async def stats(request: Request, _=Depends(verify_admin)):
-    tavily_stats, firecrawl_stats, exa_stats, social_stats, mysearch_stats = await asyncio.gather(
-        build_service_dashboard("tavily"),
-        build_service_dashboard("firecrawl"),
-        build_service_dashboard("exa"),
-        build_social_dashboard(),
-        build_mysearch_dashboard(),
-    )
-    return {
-        "services": {
-            "tavily": tavily_stats,
-            "firecrawl": firecrawl_stats,
-            "exa": exa_stats,
-        },
-        "social": social_stats,
-        "mysearch": mysearch_stats,
-    }
+    force = request.query_params.get("force", "").strip().lower() in {"1", "true", "yes", "on"}
+    if force or STATS_CACHE_TTL_SECONDS <= 0:
+        return await build_stats_payload(auto_sync=DASHBOARD_AUTO_SYNC_ON_STATS)
+
+    now = time.monotonic()
+    cached_value = stats_payload_cache["value"]
+    if cached_value is not None and now < stats_payload_cache["expires_at"]:
+        return cached_value
+
+    async with stats_payload_lock:
+        now = time.monotonic()
+        cached_value = stats_payload_cache["value"]
+        if cached_value is not None and now < stats_payload_cache["expires_at"]:
+            return cached_value
+
+        payload = await build_stats_payload(auto_sync=DASHBOARD_AUTO_SYNC_ON_STATS)
+        stats_payload_cache["value"] = payload
+        stats_payload_cache["expires_at"] = now + STATS_CACHE_TTL_SECONDS
+        return payload
 
 
 @app.get("/api/settings")
@@ -1531,6 +1648,7 @@ async def sync_usage(request: Request, _=Depends(verify_admin)):
     force = bool(body.get("force", True))
     key_id = body.get("key_id")
     result = await sync_usage_cache(force=force, key_id=key_id, service=service)
+    reset_stats_cache()
     keys = [dict(key) for key in db.get_all_keys(service)]
     active_keys = [key for key in keys if key["active"]]
     return {
@@ -1548,10 +1666,12 @@ async def add_keys(request: Request, _=Depends(verify_admin)):
     if "file" in body:
         count = db.import_keys_from_text(body["file"], service=service)
         pool.reload(service)
+        reset_stats_cache()
         return {"imported": count, "service": service}
     if "key" in body:
         db.add_key(body["key"], body.get("email", ""), service=service)
         pool.reload(service)
+        reset_stats_cache()
         return {"ok": True, "service": service}
     raise HTTPException(status_code=400, detail="Provide 'key' or 'file'")
 
@@ -1562,6 +1682,7 @@ async def remove_key(key_id: int, _=Depends(verify_admin)):
     db.delete_key(key_id)
     if key_row:
         pool.reload(key_row["service"])
+    reset_stats_cache()
     return {"ok": True}
 
 
@@ -1572,6 +1693,7 @@ async def toggle_key(key_id: int, request: Request, _=Depends(verify_admin)):
     key_row = db.get_key_by_id(key_id)
     if key_row:
         pool.reload(key_row["service"])
+    reset_stats_cache()
     return {"ok": True}
 
 
@@ -1589,12 +1711,14 @@ async def create_token(request: Request, _=Depends(verify_admin)):
     body = await request.json()
     service = get_token_service(body.get("service"), default="tavily")
     token = db.create_token(body.get("name", ""), service=service)
+    reset_stats_cache()
     return {"token": dict(token)}
 
 
 @app.delete("/api/tokens/{token_id}")
 async def remove_token(token_id: int, _=Depends(verify_admin)):
     db.delete_token(token_id)
+    reset_stats_cache()
     return {"ok": True}
 
 
