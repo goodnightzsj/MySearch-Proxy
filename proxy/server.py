@@ -229,6 +229,9 @@ def extract_token(request: Request, body: dict = None):
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
         return auth[7:]
+    x_api_key = request.headers.get("x-api-key", "")
+    if x_api_key.strip():
+        return x_api_key.strip()
     if body and body.get("api_key"):
         return body["api_key"]
     return None
@@ -886,20 +889,14 @@ def build_forward_headers(request, real_key):
 
 
 def build_exa_forward_headers(request, real_key):
-    skip_headers = {
-        "authorization",
-        "content-length",
-        "host",
-        "x-admin-password",
-        "x-api-key",
-    }
+    # Do not forward arbitrary inbound headers to Exa. We observed intermittent
+    # upstream failures when proxying edge/CDN headers verbatim.
     headers = {
-        key: value
-        for key, value in request.headers.items()
-        if key.lower() not in skip_headers
+        "x-api-key": real_key,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "MySearch-Proxy/1.0",
     }
-    headers["x-api-key"] = real_key
-    headers.setdefault("Content-Type", "application/json")
     return headers
 
 
