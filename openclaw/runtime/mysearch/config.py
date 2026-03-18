@@ -154,6 +154,9 @@ class MySearchConfig:
     server_name: str
     timeout_seconds: int
     xai_model: str
+    max_parallel_workers: int
+    search_cache_ttl_seconds: int
+    extract_cache_ttl_seconds: int
     mcp_host: str
     mcp_port: int
     mcp_mount_path: str
@@ -176,6 +179,9 @@ class MySearchConfig:
                 "MYSEARCH_XAI_MODEL",
                 default="grok-4.20-beta-latest-non-reasoning",
             ),
+            max_parallel_workers=max(1, _get_int("MYSEARCH_MAX_PARALLEL_WORKERS", 4)),
+            search_cache_ttl_seconds=max(0, _get_int("MYSEARCH_SEARCH_CACHE_TTL_SECONDS", 30)),
+            extract_cache_ttl_seconds=max(0, _get_int("MYSEARCH_EXTRACT_CACHE_TTL_SECONDS", 300)),
             mcp_host=_get_str("MYSEARCH_MCP_HOST", default="127.0.0.1"),
             mcp_port=_get_int("MYSEARCH_MCP_PORT", 8000),
             mcp_mount_path=_normalize_path(_get_str("MYSEARCH_MCP_MOUNT_PATH", default="/")),
