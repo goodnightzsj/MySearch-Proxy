@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import re
+import threading
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -58,9 +63,23 @@ class MySearchClient:
     ) -> None:
         self.config = config or MySearchConfig.from_env()
         self.keyring = keyring or MySearchKeyRing(self.config)
+        self._cache_lock = threading.Lock()
+        self._cache_ttls = {
+            "search": self.config.search_cache_ttl_seconds,
+            "extract": self.config.extract_cache_ttl_seconds,
+        }
+        self._cache_store: dict[str, dict[str, dict[str, Any]]] = {
+            "search": {},
+            "extract": {},
+        }
+        self._cache_stats: dict[str, dict[str, int]] = {
+            "search": {"hits": 0, "misses": 0},
+            "extract": {"hits": 0, "misses": 0},
+        }
 
     def health(self) -> dict[str, Any]:
         keyring_info = self.keyring.describe()
+        cache = self._cache_health()
         return {
             "server_name": self.config.server_name,
             "timeout_seconds": self.config.timeout_seconds,
@@ -78,6 +97,20 @@ class MySearchClient:
                     f"{self.config.mcp_streamable_http_path}"
                 ),
             },
+            "runtime": {
+                "max_parallel_workers": self.config.max_parallel_workers,
+                "cache_ttl_seconds": {
+                    "search": self.config.search_cache_ttl_seconds,
+                    "extract": self.config.extract_cache_ttl_seconds,
+                },
+            },
+            "routing_defaults": {
+                "web": "tavily",
+                "docs": "firecrawl",
+                "content": "firecrawl",
+                "social": "xai",
+                "fallback": "exa",
+            },
             "providers": {
                 "tavily": self._describe_provider(self.config.tavily, keyring_info["tavily"]),
                 "firecrawl": self._describe_provider(
@@ -87,7 +120,218 @@ class MySearchClient:
                 "exa": self._describe_provider(self.config.exa, keyring_info["exa"]),
                 "xai": self._describe_provider(self.config.xai, keyring_info["xai"]),
             },
+            "cache": cache,
         }
+
+    def _cache_health(self) -> dict[str, dict[str, int]]:
+        snapshot: dict[str, dict[str, int]] = {}
+        with self._cache_lock:
+            now = time.monotonic()
+            for namespace in self._cache_store:
+                self._prune_expired_cache_entries_locked(namespace, now)
+                stats = self._cache_stats[namespace]
+                snapshot[namespace] = {
+                    "ttl_seconds": self._cache_ttls.get(namespace, 0),
+                    "entries": len(self._cache_store[namespace]),
+                    "hits": stats["hits"],
+                    "misses": stats["misses"],
+                }
+        return snapshot
+
+    def _prune_expired_cache_entries_locked(self, namespace: str, now: float) -> None:
+        expired_keys = [
+            key
+            for key, payload in self._cache_store[namespace].items()
+            if payload.get("expires_at", 0.0) <= now
+        ]
+        for key in expired_keys:
+            self._cache_store[namespace].pop(key, None)
+
+    def _cache_get(self, namespace: str, cache_key: str) -> dict[str, Any] | None:
+        ttl_seconds = self._cache_ttls.get(namespace, 0)
+        if ttl_seconds <= 0:
+            return None
+
+        with self._cache_lock:
+            now = time.monotonic()
+            self._prune_expired_cache_entries_locked(namespace, now)
+            payload = self._cache_store[namespace].get(cache_key)
+            if payload is None:
+                self._cache_stats[namespace]["misses"] += 1
+                return None
+
+            self._cache_stats[namespace]["hits"] += 1
+            return copy.deepcopy(payload["value"])
+
+    def _cache_set(self, namespace: str, cache_key: str, value: dict[str, Any]) -> None:
+        ttl_seconds = self._cache_ttls.get(namespace, 0)
+        if ttl_seconds <= 0:
+            return
+
+        with self._cache_lock:
+            self._cache_store[namespace][cache_key] = {
+                "expires_at": time.monotonic() + ttl_seconds,
+                "value": copy.deepcopy(value),
+            }
+
+    def _build_cache_key(self, namespace: str, payload: dict[str, Any]) -> str:
+        serialized = json.dumps(
+            {
+                "namespace": namespace,
+                "payload": payload,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _execute_parallel(
+        self,
+        tasks: dict[str, Callable[[], Any]],
+        *,
+        max_workers: int | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Exception]]:
+        if not tasks:
+            return {}, {}
+
+        if len(tasks) == 1:
+            name, task = next(iter(tasks.items()))
+            try:
+                return {name: task()}, {}
+            except Exception as exc:  # pragma: no cover - defensive
+                return {}, {name: exc}
+
+        worker_count = min(max_workers or self.config.max_parallel_workers, len(tasks))
+        results: dict[str, Any] = {}
+        errors: dict[str, Exception] = {}
+        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="mysearch") as executor:
+            future_map: dict[Future[Any], str] = {
+                executor.submit(task): name
+                for name, task in tasks.items()
+            }
+            for future, name in future_map.items():
+                try:
+                    results[name] = future.result()
+                except Exception as exc:  # pragma: no cover - network/runtime dependent
+                    errors[name] = exc
+        return results, errors
+
+    def _raise_parallel_error(self, errors: dict[str, Exception], task_name: str) -> None:
+        error = errors.get(task_name)
+        if error is None:
+            return
+        if isinstance(error, MySearchError):
+            raise error
+        raise MySearchError(str(error))
+
+    def _should_cache_search(
+        self,
+        *,
+        decision: RouteDecision,
+        normalized_sources: list[str],
+    ) -> bool:
+        if self.config.search_cache_ttl_seconds <= 0:
+            return False
+        if "x" in normalized_sources:
+            return False
+        if decision.provider == "xai":
+            return False
+        return True
+
+    def _build_search_cache_key(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        resolved_intent: ResolvedSearchIntent,
+        resolved_strategy: SearchStrategy,
+        provider: ProviderName,
+        normalized_sources: list[str],
+        include_content: bool,
+        include_answer: bool,
+        include_domains: list[str] | None,
+        exclude_domains: list[str] | None,
+        decision: RouteDecision,
+    ) -> str:
+        return self._build_cache_key(
+            "search",
+            {
+                "query": query,
+                "mode": mode,
+                "intent": resolved_intent,
+                "strategy": resolved_strategy,
+                "provider": provider,
+                "normalized_sources": normalized_sources,
+                "include_content": include_content,
+                "include_answer": include_answer,
+                "include_domains": sorted(set(include_domains or [])),
+                "exclude_domains": sorted(set(exclude_domains or [])),
+                "route_provider": decision.provider,
+                "tavily_topic": decision.tavily_topic,
+                "firecrawl_categories": decision.firecrawl_categories or [],
+            },
+        )
+
+    def _build_extract_cache_key(
+        self,
+        *,
+        url: str,
+        formats: list[str],
+        only_main_content: bool,
+        provider: Literal["auto", "firecrawl", "tavily"],
+    ) -> str:
+        return self._build_cache_key(
+            "extract",
+            {
+                "url": url,
+                "formats": formats,
+                "only_main_content": only_main_content,
+                "provider": provider,
+            },
+        )
+
+    def _annotate_cache(
+        self,
+        result: dict[str, Any],
+        *,
+        namespace: str,
+        hit: bool,
+    ) -> dict[str, Any]:
+        annotated = copy.deepcopy(result)
+        cache_meta = dict(annotated.get("cache") or {})
+        cache_meta[namespace] = {
+            "hit": hit,
+            "ttl_seconds": self._cache_ttls.get(namespace, 0),
+        }
+        annotated["cache"] = cache_meta
+        return annotated
+
+    def _annotate_search_debug(
+        self,
+        result: dict[str, Any],
+        *,
+        provider: ProviderName,
+        normalized_sources: list[str],
+        resolved_intent: ResolvedSearchIntent,
+        resolved_strategy: SearchStrategy,
+        decision: RouteDecision,
+        include_content: bool,
+        include_answer: bool,
+        cache_hit: bool,
+    ) -> dict[str, Any]:
+        annotated = copy.deepcopy(result)
+        annotated["route_debug"] = {
+            "requested_provider": provider,
+            "route_provider": decision.provider,
+            "normalized_sources": normalized_sources,
+            "resolved_intent": resolved_intent,
+            "resolved_strategy": resolved_strategy,
+            "include_content": include_content,
+            "include_answer": include_answer,
+            "cache_hit": cache_hit,
+        }
+        return annotated
 
     def search(
         self,
@@ -134,35 +378,81 @@ class MySearchClient:
             allowed_x_handles=allowed_x_handles,
             excluded_x_handles=excluded_x_handles,
         )
-
-        if decision.provider == "hybrid":
-            web_result = self.search(
+        cacheable = self._should_cache_search(
+            decision=decision,
+            normalized_sources=normalized_sources,
+        )
+        cache_key = ""
+        if cacheable:
+            cache_key = self._build_search_cache_key(
                 query=query,
                 mode=mode,
-                intent=resolved_intent,
-                strategy=resolved_strategy,
-                provider="auto",
-                sources=["web"],
-                max_results=max_results,
+                resolved_intent=resolved_intent,
+                resolved_strategy=resolved_strategy,
+                provider=provider,
+                normalized_sources=normalized_sources,
                 include_content=include_content,
                 include_answer=include_answer,
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
+                decision=decision,
             )
-            social_result = self._search_xai(
-                query=query,
-                sources=["x"],
-                max_results=max_results,
-                allowed_x_handles=allowed_x_handles,
-                excluded_x_handles=excluded_x_handles,
-                from_date=from_date,
-                to_date=to_date,
-                include_x_images=include_x_images,
-                include_x_videos=include_x_videos,
+            cached_result = self._cache_get("search", cache_key)
+            if cached_result is not None:
+                cached_result = self._annotate_cache(
+                    cached_result,
+                    namespace="search",
+                    hit=True,
+                )
+                return self._annotate_search_debug(
+                    cached_result,
+                    provider=provider,
+                    normalized_sources=normalized_sources,
+                    resolved_intent=resolved_intent,
+                    resolved_strategy=resolved_strategy,
+                    decision=decision,
+                    include_content=include_content,
+                    include_answer=include_answer,
+                    cache_hit=True,
+                )
+
+        if decision.provider == "hybrid":
+            parallel_results, parallel_errors = self._execute_parallel(
+                {
+                    "web": lambda: self.search(
+                        query=query,
+                        mode=mode,
+                        intent=resolved_intent,
+                        strategy=resolved_strategy,
+                        provider="auto",
+                        sources=["web"],
+                        max_results=max_results,
+                        include_content=include_content,
+                        include_answer=include_answer,
+                        include_domains=include_domains,
+                        exclude_domains=exclude_domains,
+                    ),
+                    "social": lambda: self._search_xai(
+                        query=query,
+                        sources=["x"],
+                        max_results=max_results,
+                        allowed_x_handles=allowed_x_handles,
+                        excluded_x_handles=excluded_x_handles,
+                        from_date=from_date,
+                        to_date=to_date,
+                        include_x_images=include_x_images,
+                        include_x_videos=include_x_videos,
+                    ),
+                },
+                max_workers=2,
             )
+            self._raise_parallel_error(parallel_errors, "web")
+            self._raise_parallel_error(parallel_errors, "social")
+            web_result = parallel_results["web"]
+            social_result = parallel_results["social"]
             web_route = web_result.get("route", {}).get("selected", web_result.get("provider", "tavily"))
             social_route = social_result.get("provider", "xai")
-            return {
+            hybrid_result = {
                 "provider": "hybrid",
                 "intent": resolved_intent,
                 "strategy": resolved_strategy,
@@ -174,6 +464,18 @@ class MySearchClient:
                 "web": web_result,
                 "social": social_result,
             }
+            hybrid_result = self._annotate_search_debug(
+                hybrid_result,
+                provider=provider,
+                normalized_sources=normalized_sources,
+                resolved_intent=resolved_intent,
+                resolved_strategy=resolved_strategy,
+                decision=decision,
+                include_content=include_content,
+                include_answer=include_answer,
+                cache_hit=False,
+            )
+            return hybrid_result
 
         if self._should_blend_web_providers(
             decision=decision,
@@ -245,7 +547,24 @@ class MySearchClient:
             "selected": route_selected,
             "reason": route_reason,
         }
-        return result
+        if cacheable and cache_key:
+            self._cache_set("search", cache_key, result)
+        result = self._annotate_cache(
+            result,
+            namespace="search",
+            hit=False,
+        )
+        return self._annotate_search_debug(
+            result,
+            provider=provider,
+            normalized_sources=normalized_sources,
+            resolved_intent=resolved_intent,
+            resolved_strategy=resolved_strategy,
+            decision=decision,
+            include_content=include_content,
+            include_answer=include_answer,
+            cache_hit=False,
+        )
 
     def extract_url(
         self,
@@ -256,6 +575,19 @@ class MySearchClient:
         provider: Literal["auto", "firecrawl", "tavily"] = "auto",
     ) -> dict[str, Any]:
         formats = formats or ["markdown"]
+        cache_key = self._build_extract_cache_key(
+            url=url,
+            formats=formats,
+            only_main_content=only_main_content,
+            provider=provider,
+        )
+        cached_result = self._cache_get("extract", cache_key)
+        if cached_result is not None:
+            return self._annotate_cache(
+                cached_result,
+                namespace="extract",
+                hit=True,
+            )
         errors: list[str] = []
         firecrawl_warning = ""
 
@@ -267,15 +599,26 @@ class MySearchClient:
                     only_main_content=only_main_content,
                 )
                 if self._has_meaningful_extract_content(firecrawl_result):
-                    return firecrawl_result
+                    self._cache_set("extract", cache_key, firecrawl_result)
+                    return self._annotate_cache(
+                        firecrawl_result,
+                        namespace="extract",
+                        hit=False,
+                    )
 
                 firecrawl_warning = "firecrawl scrape returned empty content"
                 errors.append(firecrawl_warning)
 
                 if provider == "firecrawl":
-                    return self._annotate_extract_warning(
+                    result = self._annotate_extract_warning(
                         firecrawl_result,
                         warning=firecrawl_warning,
+                    )
+                    self._cache_set("extract", cache_key, result)
+                    return self._annotate_cache(
+                        result,
+                        namespace="extract",
+                        hit=False,
                     )
             except MySearchError as exc:
                 errors.append(f"firecrawl scrape failed: {exc}")
@@ -286,12 +629,23 @@ class MySearchClient:
             try:
                 tavily_result = self._extract_tavily(url=url)
                 if provider == "auto" and errors:
-                    return self._annotate_extract_fallback(
+                    result = self._annotate_extract_fallback(
                         tavily_result,
                         fallback_from="firecrawl",
                         fallback_reason=" | ".join(errors),
                     )
-                return tavily_result
+                    self._cache_set("extract", cache_key, result)
+                    return self._annotate_cache(
+                        result,
+                        namespace="extract",
+                        hit=False,
+                    )
+                self._cache_set("extract", cache_key, tavily_result)
+                return self._annotate_cache(
+                    tavily_result,
+                    namespace="extract",
+                    hit=False,
+                )
             except MySearchError as exc:
                 errors.append(f"tavily extract failed: {exc}")
                 if provider == "tavily":
@@ -318,19 +672,40 @@ class MySearchClient:
         to_date: str | None = None,
     ) -> dict[str, Any]:
         web_mode = "news" if mode == "news" else ("docs" if mode in {"docs", "github", "pdf"} else "web")
-        web_search = self.search(
-            query=query,
-            mode=web_mode,
-            intent=intent,
-            strategy=strategy,
-            provider="auto",
-            sources=["web"],
-            max_results=web_max_results,
-            include_content=False,
-            include_answer=True,
-            include_domains=include_domains,
-            exclude_domains=exclude_domains,
+        research_tasks: dict[str, Callable[[], Any]] = {
+            "web": lambda: self.search(
+                query=query,
+                mode=web_mode,
+                intent=intent,
+                strategy=strategy,
+                provider="auto",
+                sources=["web"],
+                max_results=web_max_results,
+                include_content=False,
+                include_answer=True,
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+            )
+        }
+        if include_social:
+            research_tasks["social"] = lambda: self.search(
+                query=query,
+                mode="social",
+                intent="status",
+                provider="auto",
+                sources=["x"],
+                max_results=social_max_results,
+                allowed_x_handles=allowed_x_handles,
+                excluded_x_handles=excluded_x_handles,
+                from_date=from_date,
+                to_date=to_date,
+            )
+        research_results, research_errors = self._execute_parallel(
+            research_tasks,
+            max_workers=2 if include_social else 1,
         )
+        self._raise_parallel_error(research_errors, "web")
+        web_search = research_results["web"]
 
         urls: list[str] = []
         if web_search.get("provider") == "hybrid":
@@ -347,32 +722,37 @@ class MySearchClient:
                 break
 
         pages: list[dict[str, Any]] = []
-        for url in urls:
-            try:
-                page = self.extract_url(url=url, formats=["markdown"], only_main_content=True)
+        page_tasks = {
+            f"page:{index}": (
+                lambda current_url=url: self.extract_url(
+                    url=current_url,
+                    formats=["markdown"],
+                    only_main_content=True,
+                )
+            )
+            for index, url in enumerate(urls)
+        }
+        page_results, page_errors = self._execute_parallel(
+            page_tasks,
+            max_workers=min(self.config.max_parallel_workers, max(1, len(page_tasks))),
+        )
+        for index, url in enumerate(urls):
+            task_name = f"page:{index}"
+            if task_name in page_results:
+                page = page_results[task_name]
                 page["excerpt"] = self._build_excerpt(page.get("content", ""))
                 pages.append(page)
-            except MySearchError as exc:
-                pages.append({"url": url, "error": str(exc)})
+            else:
+                error = page_errors.get(task_name)
+                pages.append({"url": url, "error": str(error) if error else "unknown error"})
 
         social: dict[str, Any] | None = None
         social_error = ""
         if include_social:
-            try:
-                social = self.search(
-                    query=query,
-                    mode="social",
-                    intent="status",
-                    provider="auto",
-                    sources=["x"],
-                    max_results=social_max_results,
-                    allowed_x_handles=allowed_x_handles,
-                    excluded_x_handles=excluded_x_handles,
-                    from_date=from_date,
-                    to_date=to_date,
-                )
-            except MySearchError as exc:
-                social_error = str(exc)
+            social = research_results.get("social")
+            social_exc = research_errors.get("social")
+            if social_exc is not None:
+                social_error = str(social_exc)
 
         web_provider = web_search.get("provider", "")
         social_provider = social.get("provider", "") if social else ""
@@ -624,44 +1004,47 @@ class MySearchClient:
         exclude_domains: list[str] | None,
     ) -> dict[str, Any]:
         if decision.provider == "tavily":
-            primary_result = self._search_tavily(
-                query=query,
-                max_results=max_results,
-                topic=decision.tavily_topic,
-                include_answer=include_answer,
-                include_content=include_content,
-                include_domains=include_domains,
-                exclude_domains=exclude_domains,
-            )
-            secondary_call = lambda: self._search_firecrawl(
-                query=query,
-                max_results=max_results,
-                categories=self._firecrawl_categories(mode, intent),
-                include_content=include_content or strategy == "deep",
-            )
+            tasks = {
+                "primary": lambda: self._search_tavily(
+                    query=query,
+                    max_results=max_results,
+                    topic=decision.tavily_topic,
+                    include_answer=include_answer,
+                    include_content=include_content,
+                    include_domains=include_domains,
+                    exclude_domains=exclude_domains,
+                ),
+                "secondary": lambda: self._search_firecrawl(
+                    query=query,
+                    max_results=max_results,
+                    categories=self._firecrawl_categories(mode, intent),
+                    include_content=include_content or strategy == "deep",
+                ),
+            }
         else:
-            primary_result = self._search_firecrawl(
-                query=query,
-                max_results=max_results,
-                categories=decision.firecrawl_categories or self._firecrawl_categories(mode, intent),
-                include_content=include_content or strategy == "deep",
-            )
-            secondary_call = lambda: self._search_tavily(
-                query=query,
-                max_results=max_results,
-                topic="news" if intent in {"news", "status"} else "general",
-                include_answer=include_answer,
-                include_content=False,
-                include_domains=include_domains,
-                exclude_domains=exclude_domains,
-            )
+            tasks = {
+                "primary": lambda: self._search_firecrawl(
+                    query=query,
+                    max_results=max_results,
+                    categories=decision.firecrawl_categories or self._firecrawl_categories(mode, intent),
+                    include_content=include_content or strategy == "deep",
+                ),
+                "secondary": lambda: self._search_tavily(
+                    query=query,
+                    max_results=max_results,
+                    topic="news" if intent in {"news", "status"} else "general",
+                    include_answer=include_answer,
+                    include_content=False,
+                    include_domains=include_domains,
+                    exclude_domains=exclude_domains,
+                ),
+            }
 
-        secondary_result: dict[str, Any] | None = None
-        secondary_error = ""
-        try:
-            secondary_result = secondary_call()
-        except MySearchError as exc:
-            secondary_error = str(exc)
+        blended_results, blended_errors = self._execute_parallel(tasks, max_workers=2)
+        self._raise_parallel_error(blended_errors, "primary")
+        primary_result = blended_results["primary"]
+        secondary_result = blended_results.get("secondary")
+        secondary_error = str(blended_errors["secondary"]) if "secondary" in blended_errors else ""
 
         merged = self._merge_search_payloads(
             primary_result=primary_result,
