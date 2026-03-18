@@ -169,6 +169,32 @@ OpenClaw 版 MySearch 本质上还是同一套能力，只是打成了 skill bun
 - `social`
   - 走 xAI 或兼容 `/social/search`
 
+## 版本与优化说明（v0.1.4）
+
+`mysearch@0.1.4` 已同步以下运行时优化：
+
+- 并行执行：
+  - 混合检索与 `research` 分支支持并行调用，减少总耗时。
+- 缓存能力：
+  - `search` 与 `extract` 增加 TTL 缓存。
+- 可观测性：
+  - 返回中新增 `route_debug` 与 `cache` 字段，便于定位路由和命中行为。
+- 健康信息增强：
+  - `health` 返回新增 `runtime`、`routing_defaults`、`cache`。
+
+配套环境变量：
+
+```env
+MYSEARCH_MAX_PARALLEL_WORKERS=4
+MYSEARCH_SEARCH_CACHE_TTL_SECONDS=30
+MYSEARCH_EXTRACT_CACHE_TTL_SECONDS=300
+```
+
+注意：
+
+- 若通过 `mysearch_openclaw.py` 每次单独执行命令，属于一次一进程，缓存不会跨命令持久。
+- 在 OpenClaw 常驻会话中，缓存才会体现连续命中。
+
 ## 安全建议
 
 这份 skill 的推荐安全边界很明确：
