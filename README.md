@@ -84,9 +84,15 @@ MySearch MCP / Codex Skill / OpenClaw Skill
 如果你暂时还没有 Proxy，也可以让 `mysearch/` 或 `openclaw/` 直接连官方
 provider。
 
-## 最新优化（v0.1.6）
+## 最新优化（v0.1.7）
 
-这次版本重点是继续收紧运行时稳定性，同时把 Social / X 的模型 fallback 正式做进运行时。
+这次版本重点是修正文档类 `balanced` 混合检索的排序偏差，避免官方文档被第三方页面抢掉前排，同时保留已有的稳定性与 Social / X fallback 优化。
+
+- 文档 / 资源类结果重排：
+  - `docs / github / pdf / resource / tutorial` 的 blended 结果现在会优先官方域名和官方文档路径。
+  - 显式传了 `include_domains` 时，会进一步把命中域名的结果稳定放到前面。
+  - `reddit / arxiv / researchgate / medium / youtube` 这类明显第三方页面不再轻易抢前几条。
+  - `citations` 会跟随重排后的结果顺序，避免前排已经修正但引用顺序还是旧的。
 
 - 路由与参数稳定性：
   - MCP 入口现在兼容单字符串形式的 `sources`、`include_domains`、`formats` 等参数。
@@ -112,7 +118,7 @@ provider。
 - 健康检查增强：
   - `mysearch_health` / `health` 现在会返回 `runtime`、`routing_defaults`、`cache`。
 - OpenClaw 同步：
-  - `openclaw` bundle 将随本次发布同步到 `mysearch@0.1.6`。
+  - `openclaw` bundle 将随本次发布同步到 `mysearch@0.1.7`。
 
 新增运行时参数：
 

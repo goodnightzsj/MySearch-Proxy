@@ -169,9 +169,15 @@ OpenClaw 版 MySearch 本质上还是同一套能力，只是打成了 skill bun
 - `social`
   - 走 xAI 或兼容 `/social/search`
 
-## 版本与优化说明（v0.1.6）
+## 版本与优化说明（v0.1.7）
 
-`mysearch@0.1.6` 已同步以下运行时优化：
+`mysearch@0.1.7` 已同步以下运行时优化：
+
+- 文档结果质量：
+  - `docs / github / pdf / resource / tutorial` 的混合结果现在会优先官方文档域名与文档路径。
+  - 显式传 `include_domains` 时，命中域名的结果会更稳定地排在前面。
+  - `reddit / arxiv / researchgate / medium / youtube` 这类第三方页面会被后置，不再轻易抢前排。
+  - `citations` 会跟随重排后的结果顺序，避免正文结果和引用顺序打架。
 
 - 路由稳定性：
   - 显式指定 provider 时，不再被 balanced 策略自动混成 hybrid。
