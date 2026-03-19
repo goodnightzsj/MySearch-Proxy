@@ -3954,13 +3954,28 @@ function flashButtonLabel(button, label) {
   }, 1400);
 }
 
+function clipboardWrite(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text);
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  try { document.execCommand('copy'); } catch (_) {}
+  document.body.removeChild(textarea);
+  return Promise.resolve();
+}
+
 function copyCode(elementId, button) {
   const text = document.getElementById(elementId).textContent;
-  navigator.clipboard.writeText(text).then(() => flashButtonLabel(button, '已复制'));
+  clipboardWrite(text).then(() => flashButtonLabel(button, '已复制'));
 }
 
 function copyText(value, button) {
-  navigator.clipboard.writeText(value).then(() => flashButtonLabel(button, '已复制'));
+  clipboardWrite(value).then(() => flashButtonLabel(button, '已复制'));
 }
 
 document.addEventListener('keydown', (event) => {
