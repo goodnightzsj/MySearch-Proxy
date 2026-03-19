@@ -10,6 +10,7 @@ import re
 import time
 from contextlib import asynccontextmanager
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 import uvicorn
@@ -40,6 +41,7 @@ UPSTREAM_RESPONSES_PATH = _normalize_path(
 )
 UPSTREAM_API_KEY = _env_str("SOCIAL_GATEWAY_UPSTREAM_API_KEY")
 MODEL = _env_str("SOCIAL_GATEWAY_MODEL", "grok-4.1-fast")
+FALLBACK_MODEL = _env_str("SOCIAL_GATEWAY_FALLBACK_MODEL", "grok-4.1-fast")
 GATEWAY_TOKEN = _env_str("SOCIAL_GATEWAY_TOKEN")
 ADMIN_BASE_URL = _env_str("SOCIAL_GATEWAY_ADMIN_BASE_URL") or _derive_admin_base_url(UPSTREAM_BASE_URL)
 ADMIN_VERIFY_PATH = _normalize_path(
@@ -56,6 +58,10 @@ ADMIN_TOKENS_PATH = _normalize_path(
 )
 ADMIN_APP_KEY = _env_str("SOCIAL_GATEWAY_ADMIN_APP_KEY")
 CACHE_TTL_SECONDS = max(5, int(_env_str("SOCIAL_GATEWAY_CACHE_TTL_SECONDS", "60")))
+try:
+    FALLBACK_MIN_RESULTS = max(1, int(_env_str("SOCIAL_GATEWAY_FALLBACK_MIN_RESULTS", "3")))
+except (TypeError, ValueError):
+    FALLBACK_MIN_RESULTS = 3
 SOCIAL_SEARCH_MODEL = MODEL
 
 http_client = httpx.AsyncClient(timeout=60)
@@ -303,6 +309,9 @@ async def resolve_gateway_state(force: bool = False) -> dict[str, Any]:
             "token_source": "not_configured",
             "error": "",
             "mode": "manual",
+            "model": MODEL,
+            "fallback_model": FALLBACK_MODEL,
+            "fallback_min_results": FALLBACK_MIN_RESULTS,
         }
 
         if state["admin_configured"]:
@@ -496,7 +505,126 @@ def normalize_result_item(item: Any) -> dict[str, str] | None:
     return result
 
 
-def build_upstream_payload(body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+SOCIAL_HOST_ALIASES = {
+    "x.com",
+    "www.x.com",
+    "twitter.com",
+    "www.twitter.com",
+    "mobile.x.com",
+    "mobile.twitter.com",
+}
+
+
+def looks_synthetic_social_status_id(status_id: str) -> bool:
+    digits = (status_id or "").strip()
+    if len(digits) < 12 or not digits.isdigit():
+        return False
+
+    repeated_sequences = [
+        "0123456789" * 4,
+        "1234567890" * 4,
+        "9876543210" * 4,
+        "0987654321" * 4,
+        "".join(f"{i}{i}" for i in range(10)) * 3,
+        "".join(f"{i}{i}" for i in range(9, -1, -1)) * 3,
+    ]
+    for sequence in repeated_sequences:
+        if digits in sequence or digits[:-1] in sequence:
+            return True
+
+    for size in range(1, 5):
+        pattern = digits[:size]
+        if pattern and (pattern * ((len(digits) // size) + 1))[: len(digits)] == digits:
+            return True
+    return False
+
+
+def normalize_social_match_url(url: str) -> str:
+    raw_url = (url or "").strip()
+    if not raw_url:
+        return ""
+    try:
+        parsed = urlparse(raw_url)
+    except Exception:
+        return ""
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+
+    host = parsed.netloc.lower()
+    path = re.sub(r"/+", "/", parsed.path or "/").rstrip("/")
+    if not path:
+        path = "/"
+
+    if host not in SOCIAL_HOST_ALIASES:
+        return ""
+
+    parts = [part for part in path.split("/") if part]
+    if len(parts) < 3 or parts[1].lower() != "status" or not parts[2].isdigit():
+        return ""
+    if looks_synthetic_social_status_id(parts[2]):
+        return ""
+    handle = parts[0].lstrip("@").lower()
+    return f"https://x.com/{handle}/status/{parts[2]}"
+
+
+def is_supported_social_result_url(url: str) -> bool:
+    return bool(normalize_social_match_url(url))
+
+
+def build_trusted_social_citations(payload: dict[str, Any]) -> list[dict[str, str]]:
+    citations: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in extract_upstream_citations(payload):
+        url = (item.get("url") or "").strip()
+        match_url = normalize_social_match_url(url)
+        if not match_url or match_url in seen:
+            continue
+        seen.add(match_url)
+        citations.append(
+            {
+                "title": (item.get("title") or "").strip(),
+                "url": url,
+                "match_url": match_url,
+            }
+        )
+    return citations
+
+
+def build_social_result(
+    citation: dict[str, str] | None = None,
+    matched: dict[str, str] | None = None,
+) -> dict[str, str]:
+    citation = citation or {}
+    matched = matched or {}
+    url = (citation.get("url") or matched.get("url") or "").strip()
+    title = (
+        citation.get("title")
+        or matched.get("title")
+        or matched.get("author")
+        or matched.get("handle")
+        or url
+    ).strip()
+    text = (matched.get("text") or "").strip()
+    content = (matched.get("content") or text).strip()
+    snippet = (matched.get("snippet") or text).strip()
+    author = (matched.get("author") or "").strip()
+    handle = (matched.get("handle") or "").strip().lstrip("@")
+    created_at = (matched.get("created_at") or "").strip()
+    why_relevant = (matched.get("why_relevant") or "").strip()
+    return {
+        "title": title,
+        "url": url,
+        "text": text,
+        "content": content,
+        "snippet": snippet,
+        "author": author,
+        "handle": handle,
+        "created_at": created_at,
+        "why_relevant": why_relevant,
+    }
+
+
+def build_upstream_payload(body: dict[str, Any], model: str | None = None) -> tuple[dict[str, Any], int]:
     query = (body.get("query") or "").strip()
     max_results = max(1, min(int(body.get("max_results") or 5), 10))
     tools: list[dict[str, Any]] = [{"type": "x_search"}]
@@ -525,7 +653,7 @@ def build_upstream_payload(body: dict[str, Any]) -> tuple[dict[str, Any], int]:
     )
     return (
         {
-            "model": MODEL,
+            "model": (model or MODEL).strip() or MODEL,
             "input": [{"role": "user", "content": prompt}],
             "tools": tools,
             "temperature": 0,
@@ -540,10 +668,232 @@ def build_social_search_upstream_payload(body: dict[str, Any]) -> dict[str, Any]
     return payload
 
 
+def count_social_results(payload: dict[str, Any] | None) -> int:
+    return len((payload or {}).get("results") or [])
+
+
+def count_social_citations(payload: dict[str, Any] | None) -> int:
+    return len((payload or {}).get("citations") or [])
+
+
+def build_social_attempt_summary(
+    model: str,
+    ok: bool,
+    *,
+    response: dict[str, Any] | None = None,
+    error: str = "",
+    status_code: int | None = None,
+    latency_ms: int | None = None,
+) -> dict[str, Any]:
+    attempt: dict[str, Any] = {
+        "model": model,
+        "ok": bool(ok),
+        "status_code": status_code,
+        "result_count": count_social_results(response),
+        "citation_count": count_social_citations(response),
+    }
+    if latency_ms is not None:
+        attempt["latency_ms"] = latency_ms
+    if error:
+        attempt["error"] = error
+    if response is not None:
+        attempt["response"] = response
+    return attempt
+
+
+def has_social_fallback(primary_model: str, fallback_model: str) -> bool:
+    primary = (primary_model or "").strip()
+    fallback = (fallback_model or "").strip()
+    return bool(primary and fallback and fallback != primary)
+
+
+def should_retry_social_with_fallback(
+    primary_model: str,
+    fallback_model: str,
+    response: dict[str, Any] | None,
+    min_results: int,
+) -> tuple[bool, str]:
+    if not has_social_fallback(primary_model, fallback_model):
+        return False, ""
+    threshold = max(1, int(min_results or 1))
+    if count_social_results(response) >= threshold:
+        return False, ""
+    return True, "result_count_below_threshold"
+
+
+def choose_preferred_social_attempt(
+    primary_attempt: dict[str, Any] | None,
+    fallback_attempt: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not fallback_attempt or not fallback_attempt.get("ok"):
+        return primary_attempt
+    if not primary_attempt or not primary_attempt.get("ok"):
+        return fallback_attempt
+
+    primary_count = int(primary_attempt.get("result_count") or 0)
+    fallback_count = int(fallback_attempt.get("result_count") or 0)
+    if fallback_count > primary_count:
+        return fallback_attempt
+
+    primary_citations = int(primary_attempt.get("citation_count") or 0)
+    fallback_citations = int(fallback_attempt.get("citation_count") or 0)
+    if fallback_count == primary_count and fallback_citations > primary_citations:
+        return fallback_attempt
+
+    return primary_attempt
+
+
+def build_social_route_metadata(
+    selected_attempt: dict[str, Any] | None,
+    attempts: list[dict[str, Any]],
+    *,
+    fallback_model: str,
+    fallback_reason: str,
+    fallback_min_results: int,
+) -> dict[str, Any]:
+    primary_model = attempts[0]["model"] if attempts else ""
+    selected_model = (selected_attempt or {}).get("model") or primary_model
+    route_attempts: list[dict[str, Any]] = []
+    for item in attempts:
+        route_item: dict[str, Any] = {
+            "model": item.get("model", ""),
+            "ok": bool(item.get("ok")),
+            "status_code": item.get("status_code"),
+            "result_count": int(item.get("result_count") or 0),
+            "citation_count": int(item.get("citation_count") or 0),
+        }
+        if item.get("latency_ms") is not None:
+            route_item["latency_ms"] = item["latency_ms"]
+        if item.get("error"):
+            route_item["error"] = item["error"]
+        route_attempts.append(route_item)
+
+    fallback_attempted = len(attempts) > 1
+    fallback_target = attempts[1]["model"] if fallback_attempted else (fallback_model or "").strip()
+    return {
+        "selected_model": selected_model,
+        "attempt_count": len(attempts),
+        "attempts": route_attempts,
+        "fallback": {
+            "configured": has_social_fallback(primary_model, fallback_model),
+            "triggered": fallback_attempted,
+            "used": bool(fallback_attempted and selected_model == fallback_target),
+            "reason": fallback_reason or "",
+            "threshold": max(1, int(fallback_min_results or 1)),
+            "from": primary_model,
+            "to": fallback_target,
+            "selected_model": selected_model,
+        },
+    }
+
+
+def attach_social_route_metadata(
+    response: dict[str, Any] | None,
+    selected_attempt: dict[str, Any] | None,
+    attempts: list[dict[str, Any]],
+    *,
+    fallback_model: str,
+    fallback_reason: str,
+    fallback_min_results: int,
+) -> dict[str, Any]:
+    payload = dict(response or {})
+    tool_usage = dict(payload.get("tool_usage") or {})
+    tool_usage["social_search_calls"] = len(attempts)
+    tool_usage["model"] = (selected_attempt or {}).get("model") or tool_usage.get("model") or ""
+    payload["tool_usage"] = tool_usage
+    payload["route"] = build_social_route_metadata(
+        selected_attempt,
+        attempts,
+        fallback_model=fallback_model,
+        fallback_reason=fallback_reason,
+        fallback_min_results=fallback_min_results,
+    )
+    return payload
+
+
+def extract_social_upstream_error(
+    upstream_body: dict[str, Any] | Any,
+    fallback_detail: str = "Social search failed",
+) -> str:
+    detail = ""
+    if isinstance(upstream_body, dict):
+        error = upstream_body.get("error") or {}
+        if isinstance(error, dict):
+            detail = error.get("message") or ""
+        if not detail:
+            detail = upstream_body.get("detail") or ""
+    if not detail:
+        detail = fallback_detail
+    return str(detail)[:300]
+
+
+async def execute_social_search_attempt(
+    query: str,
+    body: dict[str, Any],
+    state: dict[str, Any],
+    model: str,
+    max_results: int,
+) -> dict[str, Any]:
+    upstream_payload, _ = build_upstream_payload(body, model=model)
+    start = time.monotonic()
+    try:
+        response = await http_client.post(
+            f"{state['upstream_base_url']}{state['upstream_responses_path']}",
+            json=upstream_payload,
+            headers={"Authorization": f"Bearer {state['resolved_upstream_api_key']}"},
+        )
+    except Exception as exc:
+        latency_ms = int((time.monotonic() - start) * 1000)
+        return build_social_attempt_summary(
+            model,
+            False,
+            error=str(exc),
+            status_code=502,
+            latency_ms=latency_ms,
+        )
+
+    latency_ms = int((time.monotonic() - start) * 1000)
+    try:
+        upstream_body = response.json()
+    except Exception:
+        return build_social_attempt_summary(
+            model,
+            False,
+            error=response.text[:300] or "Upstream returned non-JSON",
+            status_code=502,
+            latency_ms=latency_ms,
+        )
+
+    if response.status_code >= 400:
+        return build_social_attempt_summary(
+            model,
+            False,
+            error=extract_social_upstream_error(upstream_body, str(upstream_body)[:300]),
+            status_code=response.status_code,
+            latency_ms=latency_ms,
+        )
+
+    normalized = normalize_search_response(
+        query,
+        upstream_body,
+        max_results,
+        model=model,
+    )
+    return build_social_attempt_summary(
+        model,
+        True,
+        response=normalized,
+        status_code=response.status_code,
+        latency_ms=latency_ms,
+    )
+
+
 def normalize_search_response(
     query: str,
     payload: dict[str, Any],
     max_results: int,
+    *,
+    model: str | None = None,
 ) -> dict[str, Any]:
     text = extract_response_text(payload)
     structured = extract_json_object(text)
@@ -552,50 +902,43 @@ def normalize_search_response(
     if not answer:
         answer = text
 
-    results: list[dict[str, str]] = []
+    trusted_citations = build_trusted_social_citations(payload)
+    trusted_map = {item["match_url"]: item for item in trusted_citations}
+    matched_results: dict[str, dict[str, str]] = {}
+    fallback_results: list[dict[str, str]] = []
+    seen_fallback: set[str] = set()
+
     for item in parsed_results or []:
         normalized = normalize_result_item(item)
         if normalized is None:
             continue
-        results.append(normalized)
-        if len(results) >= max_results:
+        match_url = normalize_social_match_url(normalized.get("url", ""))
+        if trusted_map:
+            if match_url and match_url in trusted_map and match_url not in matched_results:
+                matched_results[match_url] = normalized
+            continue
+        if not match_url or match_url in seen_fallback:
+            continue
+        seen_fallback.add(match_url)
+        fallback_results.append(normalized)
+        if len(fallback_results) >= max_results:
             break
 
-    citations: list[dict[str, str]] = []
-    seen_urls: set[str] = set()
-    for item in extract_upstream_citations(payload):
-        url = item.get("url", "")
-        if url and url in seen_urls:
-            continue
-        if url:
-            seen_urls.add(url)
-        citations.append({"title": item.get("title", ""), "url": url})
-
-    if citations:
-        existing_urls = {item.get("url", "") for item in results if item.get("url")}
-        for citation in citations:
-            url = citation.get("url", "")
-            if not url or url in existing_urls or len(results) >= max_results:
-                continue
-            results.append(
-                {
-                    "title": citation.get("title", "") or url,
-                    "url": url,
-                    "text": "",
-                    "content": "",
-                    "snippet": "",
-                    "author": "",
-                    "handle": "",
-                    "created_at": "",
-                    "why_relevant": "",
-                }
-            )
-            existing_urls.add(url)
+    if trusted_citations:
+        citations = [
+            {"title": item.get("title", ""), "url": item.get("url", "")}
+            for item in trusted_citations[:max_results]
+        ]
+        results = [
+            build_social_result(citation=item, matched=matched_results.get(item["match_url"]))
+            for item in trusted_citations[:max_results]
+        ]
     else:
+        results = fallback_results[:max_results]
         citations = [
             {"title": item.get("title", ""), "url": item.get("url", "")}
             for item in results
-            if item.get("url")
+            if is_supported_social_result_url(item.get("url", ""))
         ]
 
     return {
@@ -605,7 +948,7 @@ def normalize_search_response(
         "citations": citations,
         "tool_usage": {
             "social_search_calls": 1,
-            "model": payload.get("model") or MODEL,
+            "model": model or payload.get("model") or MODEL,
         },
         "raw_text": text,
     }
@@ -630,7 +973,9 @@ async def _build_health_payload() -> dict[str, Any]:
         "admin_verify_path": state["admin_verify_path"],
         "admin_config_path": state["admin_config_path"],
         "admin_tokens_path": state["admin_tokens_path"],
-        "model": MODEL,
+        "model": state["model"],
+        "fallback_model": state["fallback_model"],
+        "fallback_min_results": state["fallback_min_results"],
         "token_source": state["token_source"],
         "admin_configured": state["admin_configured"],
         "admin_connected": state["admin_connected"],
@@ -672,38 +1017,76 @@ async def social_search(request: Request) -> dict[str, Any]:
     verify_gateway_token(token_value, state["accepted_tokens"])
     if not state["resolved_upstream_api_key"]:
         raise HTTPException(status_code=503, detail="Missing social upstream API key")
-    upstream_payload, max_results = build_upstream_payload(body)
+    _, max_results = build_upstream_payload(body)
+    attempts = []
+    primary_attempt = await execute_social_search_attempt(
+        query,
+        body,
+        state,
+        state["model"],
+        max_results,
+    )
+    attempts.append(primary_attempt)
 
-    try:
-        response = await http_client.post(
-            f"{state['upstream_base_url']}{state['upstream_responses_path']}",
-            json=upstream_payload,
-            headers={"Authorization": f"Bearer {state['resolved_upstream_api_key']}"},
+    fallback_model = state.get("fallback_model", "")
+    fallback_min_results = state.get("fallback_min_results", FALLBACK_MIN_RESULTS)
+    fallback_reason = ""
+
+    if primary_attempt.get("ok"):
+        selected_attempt = primary_attempt
+        should_retry, fallback_reason = should_retry_social_with_fallback(
+            state["model"],
+            fallback_model,
+            primary_attempt.get("response"),
+            fallback_min_results,
         )
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        if should_retry:
+            fallback_attempt = await execute_social_search_attempt(
+                query,
+                body,
+                state,
+                fallback_model,
+                max_results,
+            )
+            attempts.append(fallback_attempt)
+            selected_attempt = choose_preferred_social_attempt(primary_attempt, fallback_attempt)
 
-    try:
-        upstream_body = response.json()
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=response.text[:300] or "Upstream returned non-JSON",
-        ) from exc
+        return attach_social_route_metadata(
+            selected_attempt.get("response"),
+            selected_attempt,
+            attempts,
+            fallback_model=fallback_model,
+            fallback_reason=fallback_reason,
+            fallback_min_results=fallback_min_results,
+        )
 
-    if response.status_code >= 400:
-        detail = ""
-        if isinstance(upstream_body, dict):
-            error = upstream_body.get("error") or {}
-            if isinstance(error, dict):
-                detail = error.get("message") or ""
-            if not detail:
-                detail = upstream_body.get("detail") or ""
-        if not detail:
-            detail = str(upstream_body)[:300]
-        raise HTTPException(status_code=response.status_code, detail=detail)
+    if has_social_fallback(state["model"], fallback_model):
+        fallback_reason = "upstream_error"
+        fallback_attempt = await execute_social_search_attempt(
+            query,
+            body,
+            state,
+            fallback_model,
+            max_results,
+        )
+        attempts.append(fallback_attempt)
+        if fallback_attempt.get("ok"):
+            return attach_social_route_metadata(
+                fallback_attempt.get("response"),
+                fallback_attempt,
+                attempts,
+                fallback_model=fallback_model,
+                fallback_reason=fallback_reason,
+                fallback_min_results=fallback_min_results,
+            )
+        detail = fallback_attempt.get("error") or primary_attempt.get("error") or "Social search failed"
+        status_code = fallback_attempt.get("status_code") or primary_attempt.get("status_code") or 502
+        raise HTTPException(status_code=status_code, detail=detail)
 
-    return normalize_search_response(query, upstream_body, max_results)
+    raise HTTPException(
+        status_code=primary_attempt.get("status_code") or 502,
+        detail=primary_attempt.get("error") or "Social search failed",
+    )
 
 
 def main() -> None:
