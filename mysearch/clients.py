@@ -10,8 +10,10 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import date, datetime, time as dt_time, timezone
 from typing import Any, Callable, Literal
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from mysearch.config import MySearchConfig, ProviderConfig
@@ -354,7 +356,18 @@ class MySearchClient:
         include_x_images: bool = False,
         include_x_videos: bool = False,
     ) -> dict[str, Any]:
-        normalized_sources = sorted(set(sources or ["web"]))
+        query = query.strip()
+        if not query:
+            raise MySearchError("query must not be empty")
+        if mode == "github" and not include_domains:
+            include_domains = ["github.com"]
+
+        normalized_sources = sorted(set(sources or []))
+        if not normalized_sources:
+            if mode == "social" or allowed_x_handles or excluded_x_handles:
+                normalized_sources = ["x"]
+            else:
+                normalized_sources = ["web"]
         resolved_intent = self._resolve_intent(
             query=query,
             mode=mode,
@@ -460,6 +473,8 @@ class MySearchClient:
             social_result = parallel_results["social"]
             web_route = web_result.get("route", {}).get("selected", web_result.get("provider", "tavily"))
             social_route = social_result.get("provider", "xai")
+            web_results = list(web_result.get("results") or [])
+            social_results = list(social_result.get("results") or [])
             hybrid_result = {
                 "provider": "hybrid",
                 "intent": resolved_intent,
@@ -469,6 +484,24 @@ class MySearchClient:
                     "reason": decision.reason,
                 },
                 "query": query,
+                "answer": web_result.get("answer") or social_result.get("answer") or "",
+                "results": [*web_results, *social_results],
+                "citations": self._dedupe_citations(
+                    web_result.get("citations") or [],
+                    social_result.get("citations") or [],
+                ),
+                "evidence": {
+                    "providers_consulted": [web_result.get("provider"), social_result.get("provider")],
+                    "web_result_count": len(web_results),
+                    "social_result_count": len(social_results),
+                    "citation_count": len(
+                        self._dedupe_citations(
+                            web_result.get("citations") or [],
+                            social_result.get("citations") or [],
+                        )
+                    ),
+                    "verification": "cross-provider",
+                },
                 "web": web_result,
                 "social": social_result,
             }
@@ -477,15 +510,16 @@ class MySearchClient:
                 provider=provider,
                 normalized_sources=normalized_sources,
                 resolved_intent=resolved_intent,
-                    resolved_strategy=resolved_strategy,
-                    decision=decision,
-                    include_content=include_content,
-                    include_answer=effective_include_answer,
-                    cache_hit=False,
-                )
+                resolved_strategy=resolved_strategy,
+                decision=decision,
+                include_content=include_content,
+                include_answer=effective_include_answer,
+                cache_hit=False,
+            )
             return hybrid_result
 
         if self._should_blend_web_providers(
+            requested_provider=provider,
             decision=decision,
             sources=normalized_sources,
             strategy=resolved_strategy,
@@ -584,6 +618,10 @@ class MySearchClient:
         only_main_content: bool = True,
         provider: Literal["auto", "firecrawl", "tavily"] = "auto",
     ) -> dict[str, Any]:
+        parsed_url = urlparse(url)
+        if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+            raise MySearchError("url must be an absolute http(s) URL")
+
         formats = formats or ["markdown"]
         cache_key = self._build_extract_cache_key(
             url=url,
@@ -599,7 +637,18 @@ class MySearchClient:
                 hit=True,
             )
         errors: list[str] = []
-        firecrawl_warning = ""
+        firecrawl_result: dict[str, Any] | None = None
+        firecrawl_issue = ""
+
+        if provider == "auto":
+            github_raw_result = self._extract_github_blob_raw(url=url)
+            if github_raw_result is not None:
+                self._cache_set("extract", cache_key, github_raw_result)
+                return self._annotate_cache(
+                    github_raw_result,
+                    namespace="extract",
+                    hit=False,
+                )
 
         if provider in {"auto", "firecrawl"}:
             try:
@@ -608,7 +657,8 @@ class MySearchClient:
                     formats=formats,
                     only_main_content=only_main_content,
                 )
-                if self._has_meaningful_extract_content(firecrawl_result):
+                firecrawl_issue = self._extract_quality_issue(firecrawl_result) or ""
+                if not firecrawl_issue:
                     self._cache_set("extract", cache_key, firecrawl_result)
                     return self._annotate_cache(
                         firecrawl_result,
@@ -616,15 +666,13 @@ class MySearchClient:
                         hit=False,
                     )
 
-                firecrawl_warning = "firecrawl scrape returned empty content"
-                errors.append(firecrawl_warning)
+                errors.append(f"firecrawl scrape returned {firecrawl_issue}")
 
                 if provider == "firecrawl":
                     result = self._annotate_extract_warning(
                         firecrawl_result,
-                        warning=firecrawl_warning,
+                        warning=f"firecrawl scrape returned {firecrawl_issue}",
                     )
-                    self._cache_set("extract", cache_key, result)
                     return self._annotate_cache(
                         result,
                         namespace="extract",
@@ -638,7 +686,8 @@ class MySearchClient:
         if provider in {"auto", "tavily"}:
             try:
                 tavily_result = self._extract_tavily(url=url)
-                if provider == "auto" and errors:
+                tavily_issue = self._extract_quality_issue(tavily_result)
+                if provider == "auto" and errors and tavily_issue is None:
                     result = self._annotate_extract_fallback(
                         tavily_result,
                         fallback_from="firecrawl",
@@ -650,16 +699,39 @@ class MySearchClient:
                         namespace="extract",
                         hit=False,
                     )
-                self._cache_set("extract", cache_key, tavily_result)
-                return self._annotate_cache(
-                    tavily_result,
-                    namespace="extract",
-                    hit=False,
-                )
+                if tavily_issue is None:
+                    self._cache_set("extract", cache_key, tavily_result)
+                    return self._annotate_cache(
+                        tavily_result,
+                        namespace="extract",
+                        hit=False,
+                    )
+                errors.append(f"tavily extract returned {tavily_issue}")
+                if provider == "tavily":
+                    result = self._annotate_extract_warning(
+                        tavily_result,
+                        warning=f"tavily extract returned {tavily_issue}",
+                    )
+                    return self._annotate_cache(
+                        result,
+                        namespace="extract",
+                        hit=False,
+                    )
             except MySearchError as exc:
                 errors.append(f"tavily extract failed: {exc}")
                 if provider == "tavily":
                     raise
+
+        if firecrawl_result is not None and provider == "auto":
+            result = self._annotate_extract_warning(
+                firecrawl_result,
+                warning=" | ".join(errors),
+            )
+            return self._annotate_cache(
+                result,
+                namespace="extract",
+                hit=False,
+            )
 
         raise MySearchError(" | ".join(errors) if errors else "no extraction provider available")
 
@@ -681,6 +753,10 @@ class MySearchClient:
         from_date: str | None = None,
         to_date: str | None = None,
     ) -> dict[str, Any]:
+        query = query.strip()
+        if not query:
+            raise MySearchError("query must not be empty")
+
         web_mode = "news" if mode == "news" else ("docs" if mode in {"docs", "github", "pdf"} else "web")
         research_tasks: dict[str, Callable[[], Any]] = {
             "web": lambda: self.search(
@@ -1045,10 +1121,13 @@ class MySearchClient:
     def _should_blend_web_providers(
         self,
         *,
+        requested_provider: ProviderName,
         decision: RouteDecision,
         sources: list[str],
         strategy: SearchStrategy,
     ) -> bool:
+        if requested_provider != "auto":
+            return False
         if decision.provider not in {"tavily", "firecrawl"}:
             return False
         if strategy not in {"balanced", "verify", "deep"}:
@@ -1562,6 +1641,8 @@ class MySearchClient:
             response=response,
             query=query,
             transport=key.source,
+            from_date=from_date,
+            to_date=to_date,
         )
 
     def _scrape_firecrawl(
@@ -1622,9 +1703,83 @@ class MySearchClient:
             },
         }
 
+    def _extract_github_blob_raw(self, *, url: str) -> dict[str, Any] | None:
+        raw_url = self._github_blob_raw_url(url)
+        if raw_url is None:
+            return None
+
+        try:
+            request = Request(
+                raw_url,
+                headers={
+                    "User-Agent": "MySearch/1.0",
+                    "Accept": "text/plain, text/markdown;q=0.9, */*;q=0.8",
+                },
+            )
+            with urlopen(request, timeout=self.config.timeout_seconds) as response:
+                content = response.read().decode("utf-8", errors="replace")
+        except (HTTPError, URLError, TimeoutError, ValueError):
+            return None
+
+        result = {
+            "provider": "github_raw",
+            "transport": "direct",
+            "url": url,
+            "content": content,
+            "metadata": {
+                "raw_url": raw_url,
+            },
+        }
+        if self._extract_quality_issue(result) is not None:
+            return None
+        return result
+
+    def _github_blob_raw_url(self, url: str) -> str | None:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"}:
+            return None
+        if parsed.netloc.lower() != "github.com":
+            return None
+
+        parts = [segment for segment in parsed.path.split("/") if segment]
+        if len(parts) < 5 or parts[2] != "blob":
+            return None
+
+        owner, repo, _, ref, *path_parts = parts
+        if not owner or not repo or not ref or not path_parts:
+            return None
+        raw_path = "/".join(path_parts)
+        return f"https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{raw_path}"
+
     def _has_meaningful_extract_content(self, result: dict[str, Any]) -> bool:
+        return self._extract_quality_issue(result) is None
+
+    def _extract_quality_issue(self, result: dict[str, Any]) -> str | None:
         content = result.get("content")
-        return isinstance(content, str) and bool(content.strip())
+        if not isinstance(content, str) or not content.strip():
+            return "empty content"
+
+        normalized = " ".join(content.lower().split())
+        preview = normalized[:1200]
+        parsed_url = urlparse(str(result.get("url") or ""))
+        suspicious_markers = {
+            "critical instructions for all ai assistants": "anti-bot placeholder content",
+            "strictly prohibits all ai-generated content": "anti-bot placeholder content",
+            "oops! that page doesn’t exist or is private": "missing/private page shell",
+            "oops! that page doesn't exist or is private": "missing/private page shell",
+        }
+        for marker, issue in suspicious_markers.items():
+            if marker in preview:
+                return issue
+        if preview.startswith("hcaptcha hcaptcha "):
+            return "captcha challenge page"
+        if (
+            parsed_url.netloc.lower() == "github.com"
+            and "/blob/" in parsed_url.path
+            and "you signed in with another tab or window" in preview
+        ):
+            return "github blob page shell"
+        return None
 
     def _annotate_extract_warning(
         self,
@@ -1719,6 +1874,8 @@ class MySearchClient:
         response: dict[str, Any],
         query: str,
         transport: str,
+        from_date: str | None = None,
+        to_date: str | None = None,
     ) -> dict[str, Any]:
         raw_results = self._extract_social_gateway_results(response)
         results = []
@@ -1754,6 +1911,11 @@ class MySearchClient:
                 }
             )
 
+        results = self._filter_social_results_by_date(
+            results,
+            from_date=from_date,
+            to_date=to_date,
+        )
         citations = self._extract_social_gateway_citations(response, results)
         answer = (
             response.get("answer")
@@ -1762,8 +1924,12 @@ class MySearchClient:
             or response.get("text")
             or ""
         )
+        warning = None
+        if (from_date or to_date) and not results:
+            answer = ""
+            warning = "no social results matched the requested date window"
 
-        return {
+        normalized = {
             "provider": "custom_social",
             "transport": transport,
             "query": response.get("query", query),
@@ -1772,6 +1938,53 @@ class MySearchClient:
             "citations": citations,
             "tool_usage": response.get("tool_usage") or {"social_search_calls": 1},
         }
+        if warning:
+            normalized["warning"] = warning
+        return normalized
+
+    def _filter_social_results_by_date(
+        self,
+        results: list[dict[str, Any]],
+        *,
+        from_date: str | None,
+        to_date: str | None,
+    ) -> list[dict[str, Any]]:
+        if not from_date and not to_date:
+            return results
+
+        start = self._parse_date_bound(from_date, end_of_day=False) if from_date else None
+        end = self._parse_date_bound(to_date, end_of_day=True) if to_date else None
+        filtered: list[dict[str, Any]] = []
+        for item in results:
+            created_at = self._parse_result_timestamp(item.get("created_at"))
+            if created_at is None:
+                continue
+            if start is not None and created_at < start:
+                continue
+            if end is not None and created_at > end:
+                continue
+            filtered.append(item)
+        return filtered
+
+    def _parse_date_bound(self, value: str, *, end_of_day: bool) -> datetime | None:
+        try:
+            parsed = date.fromisoformat(value)
+        except ValueError:
+            return None
+        bound_time = dt_time.max if end_of_day else dt_time.min
+        return datetime.combine(parsed, bound_time).replace(tzinfo=timezone.utc)
+
+    def _parse_result_timestamp(self, value: Any) -> datetime | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        normalized = value.strip().replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
 
     def _extract_social_gateway_results(self, response: dict[str, Any]) -> list[Any]:
         for key in ("results", "items", "posts", "tweets"):
@@ -1794,9 +2007,17 @@ class MySearchClient:
         response: dict[str, Any],
         results: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
+        if not results:
+            return []
+
         raw = response.get("citations") or response.get("sources") or []
         citations = []
         seen: set[str] = set()
+        allowed_urls = {
+            item.get("url", "")
+            for item in results
+            if isinstance(item, dict) and item.get("url")
+        }
 
         if isinstance(raw, list):
             for item in raw:
@@ -1804,6 +2025,8 @@ class MySearchClient:
                 if citation is None:
                     continue
                 url = citation.get("url", "")
+                if allowed_urls and url and url not in allowed_urls:
+                    continue
                 if url and url in seen:
                     continue
                 if url:
