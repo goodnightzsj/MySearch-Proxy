@@ -1213,6 +1213,17 @@ class MySearchClient:
             secondary_result=secondary_result,
             max_results=max_results,
         )
+        if self._should_rerank_resource_results(mode=mode, intent=intent):
+            merged["results"] = self._rerank_resource_results(
+                query=query,
+                mode=mode,
+                results=merged["results"],
+                include_domains=include_domains,
+            )
+            merged["citations"] = self._align_citations_with_results(
+                results=merged["results"],
+                citations=merged["citations"],
+            )
         providers_consulted = [primary_result.get("provider", "")]
         if secondary_result:
             providers_consulted.append(secondary_result.get("provider", ""))
@@ -2206,6 +2217,136 @@ class MySearchClient:
             "matched_results": matched_results,
         }
 
+    def _should_rerank_resource_results(
+        self,
+        *,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+    ) -> bool:
+        return mode in {"docs", "github", "pdf"} or intent in {"resource", "tutorial"}
+
+    def _rerank_resource_results(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        results: list[dict[str, Any]],
+        include_domains: list[str] | None,
+    ) -> list[dict[str, Any]]:
+        if len(results) < 2:
+            return results
+
+        query_tokens = self._query_brand_tokens(query)
+        ranked = sorted(
+            enumerate(results),
+            key=lambda pair: (
+                self._resource_result_rank(
+                    mode=mode,
+                    item=pair[1],
+                    query_tokens=query_tokens,
+                    include_domains=include_domains,
+                ),
+                -pair[0],
+            ),
+            reverse=True,
+        )
+        return [dict(pair[1]) for pair in ranked]
+
+    def _resource_result_rank(
+        self,
+        *,
+        mode: SearchMode,
+        item: dict[str, Any],
+        query_tokens: list[str],
+        include_domains: list[str] | None,
+    ) -> tuple[int, int, int, int, int, int, int, int, int, int, int]:
+        url = item.get("url", "")
+        hostname = self._result_hostname(item)
+        registered_domain = self._registered_domain(hostname)
+        title_text = (item.get("title") or "").lower()
+        include_match = int(
+            bool(include_domains)
+            and any(self._domain_matches(hostname, domain) for domain in include_domains or [])
+        )
+        host_brand_match = int(
+            any(token in hostname or token in registered_domain for token in query_tokens)
+        )
+        title_brand_match = int(any(token in title_text for token in query_tokens))
+        docs_shape_match = int(
+            self._looks_like_resource_result(
+                url=url,
+                hostname=hostname,
+                title_text=title_text,
+                mode=mode,
+            )
+        )
+        github_bonus = int(
+            mode == "github"
+            and hostname in {"github.com", "raw.githubusercontent.com"}
+        )
+        pdf_bonus = int(mode == "pdf" and self._looks_like_pdf_url(url))
+        non_third_party = int(
+            not self._is_obvious_third_party_resource(
+                hostname=hostname,
+                registered_domain=registered_domain,
+                mode=mode,
+            )
+        )
+        matched_provider_count = len(item.get("matched_providers") or [])
+        content_score, snippet_score, title_score = self._result_quality_score(item)
+        return (
+            include_match,
+            github_bonus,
+            pdf_bonus,
+            host_brand_match,
+            docs_shape_match,
+            non_third_party,
+            title_brand_match,
+            matched_provider_count,
+            content_score,
+            snippet_score,
+            title_score,
+        )
+
+    def _align_citations_with_results(
+        self,
+        *,
+        results: list[dict[str, Any]],
+        citations: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        synthesized = [
+            {"title": item.get("title", ""), "url": item.get("url", "")}
+            for item in results
+            if item.get("url")
+        ]
+        normalized = self._dedupe_citations(citations, synthesized)
+        citations_by_url = {
+            item.get("url", ""): item
+            for item in normalized
+            if item.get("url")
+        }
+
+        ordered: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for result in results:
+            url = result.get("url", "")
+            citation = citations_by_url.get(url)
+            if citation is None:
+                continue
+            dedupe_key = self._citation_dedupe_key(citation)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            ordered.append(citation)
+
+        for citation in normalized:
+            dedupe_key = self._citation_dedupe_key(citation)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            ordered.append(citation)
+        return ordered
+
     def _dedupe_citations(self, *citation_lists: list[dict[str, Any]]) -> list[dict[str, Any]]:
         deduped: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -2225,6 +2366,13 @@ class MySearchClient:
                 deduped.append(citation)
         return deduped
 
+    def _citation_dedupe_key(self, item: dict[str, Any]) -> str:
+        return (
+            item.get("url")
+            or item.get("title")
+            or json.dumps(item, ensure_ascii=False, sort_keys=True)
+        )
+
     def _result_dedupe_key(self, item: dict[str, Any]) -> str:
         url = (item.get("url") or "").strip().lower()
         if url:
@@ -2238,6 +2386,177 @@ class MySearchClient:
         snippet = item.get("snippet") or ""
         title = item.get("title") or ""
         return (len(content), len(snippet), len(title))
+
+    def _result_hostname(self, item: dict[str, Any]) -> str:
+        url = (item.get("url") or "").strip()
+        if not url:
+            return ""
+        return self._clean_hostname(urlparse(url).netloc)
+
+    def _clean_hostname(self, hostname: str) -> str:
+        cleaned = hostname.lower().strip().strip(".")
+        if cleaned.startswith("www."):
+            return cleaned[4:]
+        return cleaned
+
+    def _registered_domain(self, hostname: str) -> str:
+        cleaned = self._clean_hostname(hostname)
+        if not cleaned:
+            return ""
+        parts = cleaned.split(".")
+        if len(parts) <= 2:
+            return cleaned
+        if (
+            len(parts) >= 3
+            and len(parts[-1]) == 2
+            and parts[-2] in {"ac", "co", "com", "edu", "gov", "net", "org"}
+        ):
+            return ".".join(parts[-3:])
+        return ".".join(parts[-2:])
+
+    def _domain_matches(self, hostname: str, domain: str) -> bool:
+        cleaned_host = self._clean_hostname(hostname)
+        cleaned_domain = self._clean_hostname(domain)
+        return bool(cleaned_host) and bool(cleaned_domain) and (
+            cleaned_host == cleaned_domain or cleaned_host.endswith(f".{cleaned_domain}")
+        )
+
+    def _query_brand_tokens(self, query: str) -> list[str]:
+        stopwords = {
+            "a",
+            "an",
+            "and",
+            "api",
+            "apis",
+            "best",
+            "changelog",
+            "compare",
+            "comparison",
+            "developer",
+            "developers",
+            "docs",
+            "documentation",
+            "for",
+            "github",
+            "guide",
+            "how",
+            "manual",
+            "pricing",
+            "reference",
+            "release",
+            "releases",
+            "sdk",
+            "status",
+            "the",
+            "tutorial",
+            "vs",
+            "with",
+            "价格",
+            "发布",
+            "对比",
+            "接口",
+            "教程",
+            "文档",
+            "更新日志",
+        }
+        tokens: list[str] = []
+        for token in re.findall(r"[a-z0-9][a-z0-9._-]{1,}", query.lower()):
+            if token in stopwords or token.isdigit():
+                continue
+            if len(token) < 3:
+                continue
+            tokens.append(token)
+        return tokens
+
+    def _looks_like_resource_result(
+        self,
+        *,
+        url: str,
+        hostname: str,
+        title_text: str,
+        mode: SearchMode,
+    ) -> bool:
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+        hostname_labels = [item for item in hostname.split(".") if item]
+        docs_keywords = (
+            "/api",
+            "/changelog",
+            "/docs",
+            "/documentation",
+            "/guide",
+            "/guides",
+            "/manual",
+            "/pricing",
+            "/readme",
+            "/reference",
+            "/references",
+        )
+        title_keywords = (
+            "api reference",
+            "changelog",
+            "docs",
+            "documentation",
+            "guide",
+            "manual",
+            "pricing",
+            "readme",
+            "reference",
+        )
+        hostname_keywords = {
+            "api",
+            "developer",
+            "developers",
+            "docs",
+            "help",
+            "platform",
+            "reference",
+            "support",
+        }
+        if mode == "github" and hostname in {"github.com", "raw.githubusercontent.com"}:
+            return True
+        if mode == "pdf" and self._looks_like_pdf_url(url):
+            return True
+        return (
+            any(part in hostname_keywords for part in hostname_labels)
+            or any(keyword in path for keyword in docs_keywords)
+            or any(keyword in title_text for keyword in title_keywords)
+        )
+
+    def _looks_like_pdf_url(self, url: str) -> bool:
+        return urlparse(url).path.lower().endswith(".pdf")
+
+    def _is_obvious_third_party_resource(
+        self,
+        *,
+        hostname: str,
+        registered_domain: str,
+        mode: SearchMode,
+    ) -> bool:
+        if mode == "github" and hostname in {"github.com", "raw.githubusercontent.com"}:
+            return False
+        third_party_domains = {
+            "arxiv.org",
+            "dev.to",
+            "facebook.com",
+            "hashnode.dev",
+            "hashnode.com",
+            "linkedin.com",
+            "medium.com",
+            "news.ycombinator.com",
+            "quora.com",
+            "reddit.com",
+            "researchgate.net",
+            "stackexchange.com",
+            "stackoverflow.com",
+            "substack.com",
+            "towardsdatascience.com",
+            "twitter.com",
+            "x.com",
+            "youtube.com",
+            "youtu.be",
+        }
+        return registered_domain in third_party_domains
 
     def _describe_provider(
         self,

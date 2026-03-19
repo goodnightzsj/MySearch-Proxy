@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from mysearch.clients import MySearchClient
+from mysearch.clients import MySearchClient, RouteDecision
 
 
 class _FakeResponse:
@@ -106,6 +106,175 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["fallback"]["from"], "firecrawl")
         self.assertEqual(result["fallback"]["to"], "tavily")
         self.assertEqual(len(result["results"]), 1)
+
+    def test_docs_blended_search_reranks_official_results_ahead_of_third_party(self) -> None:
+        client = MySearchClient()
+        official_url = "https://platform.openai.com/docs/api-reference/responses"
+        reddit_url = "https://www.reddit.com/r/OpenAI/comments/example"
+        arxiv_url = "https://arxiv.org/abs/2401.00001"
+
+        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "OpenAI Responses API docs discussion",
+                    "url": reddit_url,
+                    "snippet": "Reddit thread about the Responses API",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "Responses | OpenAI API Reference",
+                    "url": official_url,
+                    "snippet": "Official OpenAI Responses API reference",
+                    "content": "",
+                },
+            ],
+            "citations": [
+                {"title": "OpenAI Responses API docs discussion", "url": reddit_url},
+                {"title": "Responses | OpenAI API Reference", "url": official_url},
+            ],
+        }
+        client._search_firecrawl = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "firecrawl",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "firecrawl",
+                    "source": "web",
+                    "title": "Attention Is All You Need for OpenAI responses",
+                    "url": arxiv_url,
+                    "snippet": "Paper result that should not outrank official docs",
+                    "content": "",
+                },
+                {
+                    "provider": "firecrawl",
+                    "source": "web",
+                    "title": "Responses | OpenAI API Reference",
+                    "url": official_url,
+                    "snippet": "Official OpenAI Responses API reference",
+                    "content": "Request and response schema details",
+                },
+            ],
+            "citations": [
+                {"title": "Attention Is All You Need for OpenAI responses", "url": arxiv_url},
+                {"title": "Responses | OpenAI API Reference", "url": official_url},
+            ],
+        }
+
+        result = client._search_web_blended(
+            query="OpenAI Responses API docs",
+            mode="docs",
+            intent="resource",
+            strategy="balanced",
+            decision=RouteDecision(provider="tavily", reason="test", tavily_topic="general"),
+            max_results=5,
+            include_content=False,
+            include_answer=False,
+            include_domains=None,
+            exclude_domains=None,
+        )
+
+        self.assertEqual(result["results"][0]["url"], official_url)
+        self.assertEqual(result["citations"][0]["url"], official_url)
+        self.assertIn(reddit_url, [item["url"] for item in result["results"][1:]])
+        self.assertIn(arxiv_url, [item["url"] for item in result["results"][1:]])
+
+    def test_docs_blended_search_prioritizes_include_domains(self) -> None:
+        client = MySearchClient()
+        official_url = "https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering"
+        medium_url = "https://medium.com/@writer/anthropic-prompting-notes"
+        youtube_url = "https://www.youtube.com/watch?v=anthropic-docs"
+
+        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "Anthropic prompt engineering notes",
+                    "url": medium_url,
+                    "snippet": "Third-party write-up",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "Prompt engineering - Anthropic",
+                    "url": official_url,
+                    "snippet": "Official Anthropic docs",
+                    "content": "",
+                },
+            ],
+            "citations": [
+                {"title": "Anthropic prompt engineering notes", "url": medium_url},
+                {"title": "Prompt engineering - Anthropic", "url": official_url},
+            ],
+        }
+        client._search_firecrawl = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "firecrawl",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "firecrawl",
+                    "source": "web",
+                    "title": "Anthropic docs overview video",
+                    "url": youtube_url,
+                    "snippet": "Third-party video recap",
+                    "content": "",
+                },
+                {
+                    "provider": "firecrawl",
+                    "source": "web",
+                    "title": "Prompt engineering - Anthropic",
+                    "url": official_url,
+                    "snippet": "Official Anthropic docs",
+                    "content": "Official prompt engineering guidance",
+                },
+            ],
+            "citations": [
+                {"title": "Anthropic docs overview video", "url": youtube_url},
+                {"title": "Prompt engineering - Anthropic", "url": official_url},
+            ],
+        }
+
+        result = client._search_web_blended(
+            query="Anthropic prompt engineering docs",
+            mode="docs",
+            intent="resource",
+            strategy="balanced",
+            decision=RouteDecision(provider="tavily", reason="test", tavily_topic="general"),
+            max_results=5,
+            include_content=False,
+            include_answer=False,
+            include_domains=["anthropic.com"],
+            exclude_domains=None,
+        )
+
+        urls = [item["url"] for item in result["results"]]
+        first_non_anthropic = next(
+            index for index, url in enumerate(urls) if "anthropic.com" not in url
+        )
+        first_anthropic = next(
+            index for index, url in enumerate(urls) if "anthropic.com" in url
+        )
+
+        self.assertEqual(result["results"][0]["url"], official_url)
+        self.assertEqual(result["citations"][0]["url"], official_url)
+        self.assertLess(first_anthropic, first_non_anthropic)
 
 
 if __name__ == "__main__":
