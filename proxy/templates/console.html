@@ -2409,6 +2409,11 @@ textarea:focus {
                 <div class="hint">用于 `x_search` 请求的默认模型名。</div>
               </div>
               <div class="settings-field">
+                <label for="settings-social-fallback-model">Fallback 模型</label>
+                <input type="text" id="settings-social-fallback-model" placeholder="grok-4.1-fast">
+                <div class="hint">当主模型结果太少或请求失败时，自动补一轮的候选模型。</div>
+              </div>
+              <div class="settings-field">
                 <label for="settings-social-admin-base-url">grok2api 后台地址</label>
                 <input type="text" id="settings-social-admin-base-url" placeholder="https://media.example.com">
                 <div class="hint">推荐填后台根地址，系统会自动拉 `config` 和 `tokens`。</div>
@@ -2453,6 +2458,11 @@ textarea:focus {
                   <label for="settings-social-cache-ttl-seconds">缓存秒数</label>
                   <input type="text" id="settings-social-cache-ttl-seconds" placeholder="60">
                   <div class="hint">控制后台状态缓存多久刷新一次，最小 5 秒。</div>
+                </div>
+                <div class="settings-field full-width">
+                  <label for="settings-social-fallback-min-results">Fallback 阈值</label>
+                  <input type="text" id="settings-social-fallback-min-results" placeholder="3">
+                  <div class="hint">主模型结果数低于这个值时，会自动尝试 fallback 模型，最小 1。</div>
                 </div>
               </div>
             </details>
@@ -3032,7 +3042,9 @@ function fillSettingsForm(settings) {
   document.getElementById('settings-social-admin-config-path').value = social.admin_config_path || '/v1/admin/config';
   document.getElementById('settings-social-admin-tokens-path').value = social.admin_tokens_path || '/v1/admin/tokens';
   document.getElementById('settings-social-model').value = social.model || 'grok-4.1-fast';
+  document.getElementById('settings-social-fallback-model').value = social.fallback_model || 'grok-4.1-fast';
   document.getElementById('settings-social-cache-ttl-seconds').value = String(social.cache_ttl_seconds || 60);
+  document.getElementById('settings-social-fallback-min-results').value = String(social.fallback_min_results || 3);
 
   document.getElementById('settings-social-admin-app-key').value = '';
   document.getElementById('settings-social-upstream-api-key').value = '';
@@ -3047,6 +3059,8 @@ function fillSettingsForm(settings) {
 
   const bits = [
     `当前模式：${socialModeLabel(social.mode || 'manual')}`,
+    social.model ? `主模型：${social.model}` : '',
+    social.fallback_model ? `Fallback：${social.fallback_model} (< ${social.fallback_min_results || 3})` : '',
     social.token_source ? `Token 来源：${social.token_source}` : '',
     social.admin_connected ? '后台连通正常' : '',
   ].filter(Boolean);
@@ -3923,7 +3937,9 @@ async function saveSocialSettings(event) {
     admin_config_path: document.getElementById('settings-social-admin-config-path').value.trim(),
     admin_tokens_path: document.getElementById('settings-social-admin-tokens-path').value.trim(),
     model: document.getElementById('settings-social-model').value.trim(),
+    fallback_model: document.getElementById('settings-social-fallback-model').value.trim(),
     cache_ttl_seconds: document.getElementById('settings-social-cache-ttl-seconds').value.trim(),
+    fallback_min_results: document.getElementById('settings-social-fallback-min-results').value.trim(),
   };
 
   const adminAppKey = document.getElementById('settings-social-admin-app-key').value.trim();

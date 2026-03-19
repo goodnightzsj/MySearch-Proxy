@@ -84,9 +84,9 @@ MySearch MCP / Codex Skill / OpenClaw Skill
 如果你暂时还没有 Proxy，也可以让 `mysearch/` 或 `openclaw/` 直接连官方
 provider。
 
-## 最新优化（v0.1.5）
+## 最新优化（v0.1.6）
 
-这次版本重点是继续收紧运行时稳定性，减少“看起来成功、其实内容不对”的情况。
+这次版本重点是继续收紧运行时稳定性，同时把 Social / X 的模型 fallback 正式做进运行时。
 
 - 路由与参数稳定性：
   - MCP 入口现在兼容单字符串形式的 `sources`、`include_domains`、`formats` 等参数。
@@ -97,6 +97,10 @@ provider。
   - GitHub 公开仓库 `blob` 页面在 `auto` 模式下会优先改写到 raw 地址直接抓正文。
 - 社交结果一致性：
   - 日期过滤后如果没有命中，`results / citations / answer` 会保持一致，不再残留旧内容。
+- Social / X fallback：
+  - `social/search` 现在支持主模型结果过少或上游报错时自动 fallback。
+  - 返回里新增 `route` 元信息，能直接看到实际选中的模型、fallback 是否触发，以及每轮尝试结果数。
+  - 推荐线上配置改为：主模型 `grok-3-mini`，fallback `grok-4.1-fast`，阈值 `3`。
 
 - 并行执行优化：
   - `search` 的混合分支和 `research` 工作流支持并行请求，减少长尾等待。
@@ -108,7 +112,7 @@ provider。
 - 健康检查增强：
   - `mysearch_health` / `health` 现在会返回 `runtime`、`routing_defaults`、`cache`。
 - OpenClaw 同步：
-  - `openclaw` bundle 将随本次发布同步到 `mysearch@0.1.5`。
+  - `openclaw` bundle 将随本次发布同步到 `mysearch@0.1.6`。
 
 新增运行时参数：
 

@@ -169,9 +169,9 @@ OpenClaw 版 MySearch 本质上还是同一套能力，只是打成了 skill bun
 - `social`
   - 走 xAI 或兼容 `/social/search`
 
-## 版本与优化说明（v0.1.5）
+## 版本与优化说明（v0.1.6）
 
-`mysearch@0.1.5` 已同步以下运行时优化：
+`mysearch@0.1.6` 已同步以下运行时优化：
 
 - 路由稳定性：
   - 显式指定 provider 时，不再被 balanced 策略自动混成 hybrid。
@@ -180,6 +180,9 @@ OpenClaw 版 MySearch 本质上还是同一套能力，只是打成了 skill bun
   - `auto` 模式可识别验证码页、GitHub blob 页面壳，并针对公开 GitHub blob 优先抓 raw 正文。
 - 社交结果一致性：
   - 日期过滤后若没有命中，`results / citations / answer` 会保持一致。
+- Social / X fallback：
+  - `social/search` 支持主模型结果太少或上游失败时自动 fallback。
+  - 返回新增 `route` 字段，可直接查看主模型、fallback 模型和每轮尝试结果。
 
 - 并行执行：
   - 混合检索与 `research` 分支支持并行调用，减少总耗时。
