@@ -78,6 +78,34 @@ ENV_KEYS=(
   MYSEARCH_XAI_MODEL
 )
 
+load_existing_codex_mysearch_env() {
+  local config_path="${CODEX_HOME:-$HOME/.codex}/config.toml"
+  [[ -f "$config_path" ]] || return 0
+
+  while IFS='=' read -r key value; do
+    if [[ -z "${!key-}" ]]; then
+      export "$key=$value"
+    fi
+  done < <(
+    "$PYTHON_BIN" - <<'PY' "$config_path" "${ENV_KEYS[@]}"
+from pathlib import Path
+import sys
+import tomllib
+
+config_path = Path(sys.argv[1])
+keys = sys.argv[2:]
+data = tomllib.loads(config_path.read_text(encoding="utf-8"))
+env = ((data.get("mcp_servers") or {}).get("mysearch") or {}).get("env") or {}
+for key in keys:
+    value = env.get(key)
+    if isinstance(value, str) and value.strip():
+        print(f"{key}={value}")
+PY
+  )
+}
+
+load_existing_codex_mysearch_env
+
 CLAUDE_ENV_ARGS=(-e "PYTHONPATH=$ROOT_DIR")
 CODEX_ENV_ARGS=(--env "PYTHONPATH=$ROOT_DIR")
 
