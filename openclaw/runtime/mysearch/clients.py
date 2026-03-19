@@ -583,6 +583,17 @@ class MySearchClient:
         route_reason = decision.reason
         if result.get("provider") == "hybrid" and resolved_strategy in {"balanced", "verify", "deep"}:
             route_reason = f"{route_reason}；strategy={resolved_strategy} 已启用 Tavily + Firecrawl 交叉检索"
+        fallback = result.get("fallback")
+        if isinstance(fallback, dict):
+            fallback_from = str(fallback.get("from", "")).strip()
+            fallback_to = str(fallback.get("to", "")).strip()
+            fallback_reason = str(fallback.get("reason", "")).strip()
+            parts = [part for part in [fallback_from, fallback_to] if part]
+            transition = " -> ".join(parts)
+            if transition:
+                route_reason = f"{route_reason}；{transition} fallback"
+            if fallback_reason:
+                route_reason = f"{route_reason}（{fallback_reason}）"
 
         route_selected = result.pop("route_selected", result.get("provider", decision.provider))
         result["intent"] = resolved_intent
@@ -1323,6 +1334,16 @@ class MySearchClient:
                 [result.get("results", []) for result in per_domain_results],
                 max_results=max_results,
             )
+            if not merged_results:
+                fallback_result = self._search_firecrawl_domain_fallback(
+                    query=query,
+                    max_results=max_results,
+                    include_content=include_content,
+                    include_domains=include_domains,
+                    exclude_domains=exclude_domains,
+                )
+                if fallback_result is not None:
+                    return fallback_result
             return {
                 "provider": "firecrawl",
                 "transport": per_domain_results[0].get("transport", "env") if per_domain_results else "env",
@@ -1342,6 +1363,58 @@ class MySearchClient:
             categories=categories,
             include_content=include_content,
         )
+
+    def _search_firecrawl_domain_fallback(
+        self,
+        *,
+        query: str,
+        max_results: int,
+        include_content: bool,
+        include_domains: list[str],
+        exclude_domains: list[str] | None,
+    ) -> dict[str, Any] | None:
+        if not self.keyring.has_provider("tavily"):
+            return None
+
+        fallback_result = self._search_tavily(
+            query=query,
+            max_results=max_results,
+            topic="general",
+            include_answer=False,
+            include_content=include_content,
+            include_domains=include_domains,
+            exclude_domains=exclude_domains,
+        )
+        if not fallback_result.get("results"):
+            return None
+
+        return {
+            "provider": "hybrid",
+            "route_selected": "firecrawl+tavily",
+            "query": query,
+            "answer": fallback_result.get("answer", ""),
+            "results": fallback_result.get("results", []),
+            "citations": fallback_result.get("citations", []),
+            "primary_search": {
+                "provider": "firecrawl",
+                "query": query,
+                "results": [],
+                "citations": [],
+            },
+            "secondary_search": fallback_result,
+            "secondary_error": "",
+            "evidence": {
+                "providers_consulted": ["firecrawl", fallback_result.get("provider", "tavily")],
+                "matched_results": 0,
+                "citation_count": len(fallback_result.get("citations", [])),
+                "verification": "fallback",
+            },
+            "fallback": {
+                "from": "firecrawl",
+                "to": "tavily",
+                "reason": "firecrawl returned 0 results for domain-filtered search",
+            },
+        }
 
     def _search_firecrawl_once(
         self,
@@ -1704,52 +1777,68 @@ class MySearchClient:
         }
 
     def _extract_github_blob_raw(self, *, url: str) -> dict[str, Any] | None:
-        raw_url = self._github_blob_raw_url(url)
-        if raw_url is None:
+        raw_urls = self._github_blob_raw_urls(url)
+        if not raw_urls:
             return None
 
-        try:
-            request = Request(
-                raw_url,
-                headers={
-                    "User-Agent": "MySearch/1.0",
-                    "Accept": "text/plain, text/markdown;q=0.9, */*;q=0.8",
+        for raw_url in raw_urls:
+            try:
+                request = Request(
+                    raw_url,
+                    headers={
+                        "User-Agent": "MySearch/1.0",
+                        "Accept": "text/plain, text/markdown;q=0.9, */*;q=0.8",
+                    },
+                )
+                with urlopen(request, timeout=self.config.timeout_seconds) as response:
+                    content = response.read().decode("utf-8", errors="replace")
+            except (HTTPError, URLError, TimeoutError, ValueError):
+                continue
+
+            result = {
+                "provider": "github_raw",
+                "transport": "direct",
+                "url": url,
+                "content": content,
+                "metadata": {
+                    "raw_url": raw_url,
                 },
-            )
-            with urlopen(request, timeout=self.config.timeout_seconds) as response:
-                content = response.read().decode("utf-8", errors="replace")
-        except (HTTPError, URLError, TimeoutError, ValueError):
-            return None
-
-        result = {
-            "provider": "github_raw",
-            "transport": "direct",
-            "url": url,
-            "content": content,
-            "metadata": {
-                "raw_url": raw_url,
-            },
-        }
-        if self._extract_quality_issue(result) is not None:
-            return None
-        return result
+            }
+            if self._extract_quality_issue(result) is not None:
+                continue
+            return result
+        return None
 
     def _github_blob_raw_url(self, url: str) -> str | None:
+        raw_urls = self._github_blob_raw_urls(url)
+        if not raw_urls:
+            return None
+        return raw_urls[0]
+
+    def _github_blob_raw_urls(self, url: str) -> list[str]:
         parsed = urlparse(url)
         if parsed.scheme not in {"http", "https"}:
-            return None
+            return []
         if parsed.netloc.lower() != "github.com":
-            return None
+            return []
 
         parts = [segment for segment in parsed.path.split("/") if segment]
         if len(parts) < 5 or parts[2] != "blob":
-            return None
+            return []
 
         owner, repo, _, ref, *path_parts = parts
         if not owner or not repo or not ref or not path_parts:
-            return None
+            return []
         raw_path = "/".join(path_parts)
-        return f"https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{raw_path}"
+        refs = [ref]
+        if ref == "main":
+            refs.append("master")
+        elif ref == "master":
+            refs.append("main")
+        return [
+            f"https://raw.githubusercontent.com/{owner}/{repo}/{candidate_ref}/{raw_path}"
+            for candidate_ref in refs
+        ]
 
     def _has_meaningful_extract_content(self, result: dict[str, Any]) -> bool:
         return self._extract_quality_issue(result) is None
