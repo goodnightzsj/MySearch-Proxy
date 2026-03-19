@@ -84,9 +84,19 @@ MySearch MCP / Codex Skill / OpenClaw Skill
 如果你暂时还没有 Proxy，也可以让 `mysearch/` 或 `openclaw/` 直接连官方
 provider。
 
-## 最新优化（v0.1.4）
+## 最新优化（v0.1.5）
 
-这次版本重点不是“加一个新 provider”，而是把运行时稳定性和可观测性补齐。
+这次版本重点是继续收紧运行时稳定性，减少“看起来成功、其实内容不对”的情况。
+
+- 路由与参数稳定性：
+  - MCP 入口现在兼容单字符串形式的 `sources`、`include_domains`、`formats` 等参数。
+  - 显式指定 `provider` 时，不会再被 `balanced` 策略偷偷混成 `hybrid`。
+- 抓取质量修复：
+  - `extract_url(auto)` 现在会识别更多假正文，并按需回退。
+  - 已覆盖 `linux.do` anti-bot 提示、验证码挑战页、GitHub blob 页面壳等场景。
+  - GitHub 公开仓库 `blob` 页面在 `auto` 模式下会优先改写到 raw 地址直接抓正文。
+- 社交结果一致性：
+  - 日期过滤后如果没有命中，`results / citations / answer` 会保持一致，不再残留旧内容。
 
 - 并行执行优化：
   - `search` 的混合分支和 `research` 工作流支持并行请求，减少长尾等待。
@@ -98,7 +108,7 @@ provider。
 - 健康检查增强：
   - `mysearch_health` / `health` 现在会返回 `runtime`、`routing_defaults`、`cache`。
 - OpenClaw 同步：
-  - `openclaw` bundle 已同步 runtime 改动，ClawHub 版本为 `mysearch@0.1.4`。
+  - `openclaw` bundle 将随本次发布同步到 `mysearch@0.1.5`。
 
 新增运行时参数：
 

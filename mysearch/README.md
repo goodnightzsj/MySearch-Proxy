@@ -259,7 +259,7 @@ MYSEARCH_PROXY_BASE_URL=
 MYSEARCH_PROXY_API_KEY=
 ```
 
-### 运行时优化参数（v0.1.4+）
+### 运行时优化参数（v0.1.5+）
 
 ```env
 MYSEARCH_MAX_PARALLEL_WORKERS=4
