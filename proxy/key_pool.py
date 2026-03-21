@@ -42,11 +42,6 @@ class ServiceKeyPool:
         service = normalize_service(service)
         update_key_usage(key_id, success)
         if not success:
-            with self._lock:
-                self._keys[service] = [
-                    key for key in self._keys[service]
-                    if key["id"] != key_id or key.get("consecutive_fails", 0) < 2
-                ]
             self.reload(service)
 
 

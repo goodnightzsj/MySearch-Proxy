@@ -122,6 +122,7 @@ class MySearchClient:
             "search": {"hits": 0, "misses": 0},
             "extract": {"hits": 0, "misses": 0},
         }
+        self._cache_max_entries = 256
         self._provider_probe_ttl_seconds = 300
         self._provider_probe_cache: dict[str, dict[str, Any]] = {}
 
@@ -218,8 +219,15 @@ class MySearchClient:
             return
 
         with self._cache_lock:
-            self._cache_store[namespace][cache_key] = {
-                "expires_at": time.monotonic() + ttl_seconds,
+            now = time.monotonic()
+            store = self._cache_store[namespace]
+            if len(store) >= self._cache_max_entries:
+                self._prune_expired_cache_entries_locked(namespace, now)
+            if len(store) >= self._cache_max_entries:
+                oldest_key = min(store, key=lambda k: store[k].get("expires_at", 0.0))
+                store.pop(oldest_key, None)
+            store[cache_key] = {
+                "expires_at": now + ttl_seconds,
                 "value": copy.deepcopy(value),
             }
 
@@ -261,7 +269,7 @@ class MySearchClient:
             }
             for future, name in future_map.items():
                 try:
-                    results[name] = future.result()
+                    results[name] = future.result(timeout=self.config.timeout_seconds + 5)
                 except Exception as exc:  # pragma: no cover - network/runtime dependent
                     errors[name] = exc
         return results, errors
@@ -909,7 +917,7 @@ class MySearchClient:
         providers_consulted = [item for item in [web_provider, social_provider] if item]
         citations = self._dedupe_citations(
             web_search.get("citations") or [],
-            social.get("citations") or [] if social else [],
+            (social.get("citations") or []) if social else [],
         )
 
         return {
@@ -2022,7 +2030,7 @@ class MySearchClient:
             "critical instructions for all ai assistants": "anti-bot placeholder content",
             "strictly prohibits all ai-generated content": "anti-bot placeholder content",
             "oops! that page doesn’t exist or is private": "missing/private page shell",
-            "oops! that page doesn't exist or is private": "missing/private page shell",
+            "oops! that page doesn\u2019t exist or is private": "missing/private page shell",
         }
         for marker, issue in suspicious_markers.items():
             if marker in preview:
@@ -2337,6 +2345,8 @@ class MySearchClient:
         while len(merged_keys) < max_results and sequences:
             progressed = False
             for seq_index, sequence in enumerate(sequences):
+                if len(merged_keys) >= max_results:
+                    break
                 while indexes[seq_index] < len(sequence):
                     dedupe_key = sequence[indexes[seq_index]]
                     indexes[seq_index] += 1
@@ -2365,7 +2375,7 @@ class MySearchClient:
 
         citations = self._dedupe_citations(
             primary_result.get("citations") or [],
-            secondary_result.get("citations") or [] if secondary_result else [],
+            (secondary_result.get("citations") or []) if secondary_result else [],
         )
         return {
             "results": results,
