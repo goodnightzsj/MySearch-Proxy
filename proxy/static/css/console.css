@@ -705,19 +705,59 @@ tr:last-child td { border-bottom: none; }
 
 @media (max-width: 1024px) {
   .hero-lanes { grid-template-columns: repeat(2, 1fr); }
-  .hero-main { grid-template-columns: 1fr; }
+  .hero-main { grid-template-columns: 1fr 340px; }
   .hero-focus { padding: 24px; }
   .summary-strip { grid-template-columns: repeat(3, 1fr); }
-  .settings-panel-grid { grid-template-columns: 1fr; }
+  .settings-panel-grid { grid-template-columns: 1fr 340px; }
   .credit-strip { flex-direction: column; align-items: flex-start; }
 }
 @media (max-width: 768px) {
-  .hero-lanes { grid-template-columns: 1fr; }
+  .hero-lanes { grid-template-columns: 1fr 340px; }
   .container { padding: 20px 16px; }
   .hero, .switcher-shell, .service-head, .service-body { padding: 24px; }
   .summary-strip { grid-template-columns: 1fr 1fr; gap: 12px; }
-  .section-grid { grid-template-columns: 1fr; gap: 16px; }
-  .service-toggle-grid { grid-template-columns: 1fr; }
-  .settings-fields { grid-template-columns: 1fr; }
+  .section-grid { grid-template-columns: 1fr 340px; gap: 16px; }
+  .service-toggle-grid { grid-template-columns: 1fr 340px; }
+  .settings-fields { grid-template-columns: 1fr 340px; }
   .integration-summary { flex-direction: column; gap: 12px; }
+}
+
+/* Toast Notifications */
+.toast-root {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  pointer-events: none;
+}
+.toast {
+  background: var(--surface-strong);
+  color: var(--text);
+  padding: 12px 20px;
+  border-radius: 12px;
+  box-shadow: var(--shadow-lg);
+  border: 1px solid var(--border);
+  font-size: 14px;
+  font-weight: 500;
+  animation: toast-slide-in 0.3s ease forwards;
+  pointer-events: auto;
+}
+.toast-success { border-left: 4px solid var(--ok); }
+.toast-error { border-left: 4px solid var(--danger); }
+.toast-warn { border-left: 4px solid var(--warn); }
+.toast-info { border-left: 4px solid var(--primary); }
+
+@keyframes toast-slide-in {
+  from { opacity: 0; transform: translateX(40px) scale(0.95); }
+  to { opacity: 1; transform: translateX(0) scale(1); }
+}
+.toast-fade-out {
+  animation: toast-slide-out 0.3s ease forwards;
+}
+@keyframes toast-slide-out {
+  from { opacity: 1; transform: translateX(0) scale(1); }
+  to { opacity: 0; transform: translateX(40px) scale(0.95); }
 }
