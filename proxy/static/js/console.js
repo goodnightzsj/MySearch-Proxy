@@ -497,7 +497,7 @@ function renderMySearchQuickstart(mysearch, social) {
               <tbody id="tokens-body-mysearch"></tbody>
             </table>
           </div>
-        </div>
+        </details>
       </div>
     </div>
   `;
@@ -682,8 +682,8 @@ function renderServiceShells() {
                   </thead>
                   <tbody id="tokens-body-${service}"></tbody>
                 </table>
-              </div>
-            </div>
+          </div>
+        </details>
           </div>
 
           <div class="subcard">
@@ -716,8 +716,8 @@ function renderServiceShells() {
                 </thead>
                 <tbody id="keys-body-${service}"></tbody>
               </table>
-            </div>
           </div>
+        </details>
         </div>
       </section>
     `;
