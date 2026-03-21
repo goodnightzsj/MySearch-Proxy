@@ -28,6 +28,17 @@
         <h1>把搜索基础设施<br>做成真正可交付的工作台</h1>
         <p class="hero-intro">MySearch 把 Tavily、Exa、Firecrawl 和 Social / X 统一成一套可被 Codex、Claude Code 和团队 Agent 直接调用的搜索入口。使用者拿到后，不需要自己维护多套 provider、兼容网关和结果结构，也不需要每次手动判断这一轮该用网页搜索、正文抓取还是社交舆情。</p>
 
+        
+        <aside class="hero-focus" id="hero-focus">
+          <div class="hero-focus-kicker">当前工作台</div>
+          <div class="hero-focus-name">等待数据</div>
+          <div class="hero-focus-status">尚未同步</div>
+          <div class="hero-focus-desc">刷新后会显示当前工作台的模式、额度、Token 状态和最近同步信息。</div>
+          <div class="hero-focus-actions">
+            <button type="button" class="btn btn-ghost" onclick="scrollToCurrentPanel()">定位当前工作台</button>
+            <button type="button" class="btn btn-ghost" onclick="scrollToQuickstart()">MySearch 接入</button>
+          </div>
+        </aside>
         <div class="hero-usage-grid">
           <div class="hero-usage-card">
             <strong>统一入口</strong>

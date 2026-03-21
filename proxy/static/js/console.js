@@ -1,3 +1,16 @@
+
+function showToast(message, type = 'info') {
+  const root = document.getElementById('toast-root');
+  if (!root) return;
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  toast.textContent = message;
+  root.appendChild(toast);
+  setTimeout(() => {
+    toast.classList.add('toast-fade-out');
+    setTimeout(() => toast.remove(), 300);
+  }, 3000);
+}
 const STORAGE_KEY = 'multi_service_proxy_pwd';
 const LEGACY_STORAGE_KEY = 'tavily_proxy_pwd';
 const ACTIVE_SERVICE_KEY = 'multi_service_proxy_active_service';
@@ -1209,7 +1222,7 @@ function renderTokens(service, tokens) {
     const stats = token.stats || {};
     return `
       <tr>
-        <td class="mono">${escapeHtml(token.token)}</td>
+        <td class="mono">${maskToken(token.token)}</td>
         <td>${escapeHtml(token.name || '-')}</td>
         <td>${renderTokenQuota(token)}</td>
         <td class="table-note">
@@ -1390,7 +1403,7 @@ async function importKeys(service) {
   const result = await api('POST', '/api/keys', { service, file: text });
   textarea.value = '';
   document.getElementById(`import-wrap-${service}`).classList.add('hidden');
-  alert(`已导入 ${result.imported || 0} 个 ${SERVICE_META[service].label} Key`);
+  showToast(`已导入 ${result.imported || 0} 个 ${SERVICE_META[service].label} Key`, 'success');
   await refresh({ force: true });
 }
 
@@ -1407,7 +1420,7 @@ async function toggleKey(id, active) {
 
 async function syncUsage(service, force) {
   if (SERVICE_META[service]?.syncSupported === false) {
-    alert(SERVICE_META[service].quotaSource);
+    showToast(SERVICE_META[service].quotaSource, 'warn');
     return;
   }
   const button = document.getElementById(`sync-btn-${service}`);
@@ -1418,7 +1431,7 @@ async function syncUsage(service, force) {
     await api('POST', '/api/usage/sync', { service, force });
     await refresh({ force: true });
   } catch (error) {
-    alert(`同步 ${SERVICE_META[service].label} 额度失败: ${error.message}`);
+    showToast(`同步 ${SERVICE_META[service].label} 额度失败: ${error.message}`, 'error');
     button.disabled = false;
     button.textContent = originalText;
   }
@@ -1619,4 +1632,34 @@ function setActiveSettingsTab(tabName) {
     panel.classList.toggle('hidden', panel.dataset.settingsPanel !== tabName);
     panel.classList.toggle('is-active', panel.dataset.settingsPanel === tabName);
   });
+}
+
+
+function maskToken(token) {
+  if (!token) return '';
+  if (token.length <= 12) return '****';
+  return token.slice(0, 5) + '****' + token.slice(-4);
+}
+
+
+async function saveTavilySettings(event) {
+  event?.preventDefault?.();
+  const body = {
+    mode: document.getElementById('settings-tavily-mode').value,
+    upstream_base_url: document.getElementById('settings-tavily-upstream-base-url').value.trim(),
+    upstream_search_path: document.getElementById('settings-tavily-upstream-search-path').value.trim(),
+    upstream_extract_path: document.getElementById('settings-tavily-upstream-extract-path').value.trim(),
+  };
+  const upstreamApiKey = document.getElementById('settings-tavily-upstream-api-key').value.trim();
+  if (upstreamApiKey) body.upstream_api_key = upstreamApiKey;
+
+  try {
+    const payload = await api('PUT', '/api/settings/tavily', body);
+    latestSettings = payload || {};
+    fillSettingsForm(latestSettings);
+    setStatus('settings-tavily-status', 'Tavily 设置已保存。');
+    await refresh({ force: true });
+  } catch (error) {
+    setStatus('settings-tavily-status', `保存失败：${error.message}`, true);
+  }
 }
