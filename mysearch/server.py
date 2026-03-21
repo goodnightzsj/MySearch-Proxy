@@ -161,10 +161,6 @@ def build_mcp(config: MySearchConfig) -> tuple[MySearchClient, FastMCP]:
     return client, mcp
 
 
-CONFIG = MySearchConfig.from_env()
-CLIENT, mcp = build_mcp(CONFIG)
-
-
 def main(
     *,
     transport: MCPTransport = "stdio",
@@ -175,14 +171,15 @@ def main(
     streamable_http_path: str | None = None,
     stateless_http: bool | None = None,
 ) -> None:
+    base_config = MySearchConfig.from_env()
     config = replace(
-        CONFIG,
-        mcp_host=host or CONFIG.mcp_host,
-        mcp_port=port or CONFIG.mcp_port,
-        mcp_mount_path=mount_path or CONFIG.mcp_mount_path,
-        mcp_sse_path=sse_path or CONFIG.mcp_sse_path,
-        mcp_streamable_http_path=streamable_http_path or CONFIG.mcp_streamable_http_path,
-        mcp_stateless_http=CONFIG.mcp_stateless_http if stateless_http is None else stateless_http,
+        base_config,
+        mcp_host=host if host is not None else base_config.mcp_host,
+        mcp_port=port if port is not None else base_config.mcp_port,
+        mcp_mount_path=mount_path if mount_path is not None else base_config.mcp_mount_path,
+        mcp_sse_path=sse_path if sse_path is not None else base_config.mcp_sse_path,
+        mcp_streamable_http_path=streamable_http_path if streamable_http_path is not None else base_config.mcp_streamable_http_path,
+        mcp_stateless_http=base_config.mcp_stateless_http if stateless_http is None else stateless_http,
     )
     _, server = build_mcp(config)
     server.run(transport=transport, mount_path=config.mcp_mount_path)

@@ -118,7 +118,10 @@ def _get_int(name: str, default: int) -> int:
     value = os.getenv(name)
     if value is None or not value.strip():
         return default
-    return int(value.strip())
+    try:
+        return int(value.strip())
+    except (ValueError, TypeError):
+        return default
 
 
 def _get_bool(name: str, default: bool = False) -> bool:

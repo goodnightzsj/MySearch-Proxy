@@ -1644,6 +1644,11 @@ def startup():
     db.init_db()
 
 
+@app.on_event("shutdown")
+async def shutdown():
+    await http_client.aclose()
+
+
 # ═══ Tavily 代理端点 ═══
 
 @app.post("/api/search")
