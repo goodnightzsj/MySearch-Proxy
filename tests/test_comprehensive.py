@@ -228,6 +228,7 @@ class RoutingTests(unittest.TestCase):
             "provider": "auto",
             "sources": ["web"],
             "include_content": False,
+            "include_domains": None,
             "allowed_x_handles": None,
             "excluded_x_handles": None,
         }
@@ -248,6 +249,22 @@ class RoutingTests(unittest.TestCase):
         client = _make_client()
         decision = self._route(client, provider="exa")
         self.assertEqual(decision.provider, "exa")
+
+    def test_docs_query_with_restricted_domain_prefers_firecrawl(self) -> None:
+        client = _make_client(tavily_keys=["tv"], firecrawl_keys=["fc"])
+        client._probe_provider_status = lambda provider, key_count: {  # type: ignore[method-assign]
+            "status": "ok",
+            "error": "",
+            "checked_at": "2026-03-22T00:00:00+00:00",
+        }
+        decision = self._route(
+            client,
+            query="linux.do MCP 配置",
+            mode="docs",
+            intent="resource",
+            include_domains=["linux.do"],
+        )
+        self.assertEqual(decision.provider, "firecrawl")
 
     def test_explicit_xai_provider(self) -> None:
         client = _make_client()

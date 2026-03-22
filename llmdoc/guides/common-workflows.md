@@ -29,9 +29,10 @@
 ## 4. 排查搜索行为
 
 1. 先跑 `mysearch_health`，确认 provider 是否可用，而不是只看 key 有没有填。来源：mysearch/server.py:156, README.md:105
-2. 再看 `route` 与 `route_debug`，判断是显式 provider、生效的 intent/strategy，还是 blended/hybrid 路由。当前 docs/resource 默认不再自动 blended；如果你看见 `route_debug.domain_filter_mode=site_query_retry`，说明 Tavily 的官方域约束已经进入了 `site:` 形式重试。来源：mysearch/clients.py:359, mysearch/clients.py:651, mysearch/clients.py:1459
-3. 文档类查询要分清“页面发现”和“正文抓取”是两个阶段；正文异常先查 Firecrawl，再看 Tavily/Exa fallback。纯 `pricing/价格` 这类官方价格题当前不再默认按 docs/resource 路由，除非 query 里还显式带了 `docs`、`documentation`、`manual` 之类文档信号。来源：mysearch/clients.py:1023, mysearch/clients.py:677, mysearch/clients.py:3423
-4. 如果问题出在团队共享链路，而不是本地 runtime，就把排查重心切到 `proxy/` 的 key 池、token、usage sync 和 social gateway 配置。遇到“后台地址和 app key 都已配置，但 Social / X token 统计还是 0”时，先确认上游 `/v1/admin/tokens` 返回结构是否带 envelope；当前控制台已经兼容 `{tokens:{...}}`、`{data:{...}}`、`{items:[...]}`，所以这种现象通常说明进程还没重启到新代码，或者后台返回的并不是这组 admin 语义。来源：proxy/README.md:27, proxy/server.py:189, proxy/server.py:736, proxy/database.py:179
+2. 再看 `route` 与 `route_debug`，判断是显式 provider、生效的 intent/strategy，还是 blended/hybrid 路由。当前 docs/resource 默认不再自动 blended；如果你看见 `route_debug.domain_filter_mode=site_query_retry`，说明 Tavily 的官方域约束已经进入了 `site:` 形式重试，而且第二轮已经改成“放宽 provider 侧过滤、再在客户端做域名筛选”，不再把同一层 `include_domains` 直接重放给上游。`route_debug` 里现在还会带 `requested_max_results` 和 `candidate_max_results`，表示 `strategy` 是否扩大了候选池预算。来源：mysearch/clients.py:359, mysearch/clients.py:651, mysearch/clients.py:1013, mysearch/clients.py:1484
+3. 文档类查询要分清“页面发现”和“正文抓取”是两个阶段；正文异常先查 Firecrawl，再看 Tavily/Exa fallback。纯 `pricing/价格` 这类官方价格题当前不再默认按 docs/resource 路由，除非 query 里还显式带了 `docs`、`documentation`、`manual` 之类文档信号。对于 `linux.do`、`zhihu.com`、`medium.com` 这类受限 / 社区域名，如果又叠加 docs/resource 语义，运行时现在会优先把页面发现切到 Firecrawl。来源：mysearch/clients.py:1023, mysearch/clients.py:1101, mysearch/clients.py:677, mysearch/clients.py:3489
+4. 如果结果本身看起来“搜到了，但不够可信”，直接看 `evidence`。当前搜索结果已经统一补了 `source_diversity`、`source_domains`、`official_source_count`、`confidence` 和 `conflicts`；docs/resource 下如果只有单 provider、单域名或官方/第三方混排，会在这里直接暴露风险，而不是只靠人工扫链接。来源：mysearch/clients.py:1040, mysearch/clients.py:1064, mysearch/clients.py:3089
+5. 如果问题出在团队共享链路，而不是本地 runtime，就把排查重心切到 `proxy/` 的 key 池、token、usage sync 和 social gateway 配置。遇到“后台地址和 app key 都已配置，但 Social / X token 统计还是 0”时，先确认上游 `/v1/admin/tokens` 返回结构是否带 envelope；当前控制台已经兼容 `{tokens:{...}}`、`{data:{...}}`、`{items:[...]}`，所以这种现象通常说明进程还没重启到新代码，或者后台返回的并不是这组 admin 语义。来源：proxy/README.md:27, proxy/server.py:189, proxy/server.py:736, proxy/database.py:179
 
 ## 5. 什么时候改哪里
 

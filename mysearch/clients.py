@@ -383,6 +383,8 @@ class MySearchClient:
         include_content: bool,
         include_answer: bool,
         cache_hit: bool,
+        requested_max_results: int | None = None,
+        candidate_max_results: int | None = None,
     ) -> dict[str, Any]:
         annotated = copy.deepcopy(result)
         annotated["route_debug"] = {
@@ -395,6 +397,10 @@ class MySearchClient:
             "include_answer": include_answer,
             "cache_hit": cache_hit,
         }
+        if requested_max_results is not None:
+            annotated["route_debug"]["requested_max_results"] = requested_max_results
+        if candidate_max_results is not None:
+            annotated["route_debug"]["candidate_max_results"] = candidate_max_results
         return annotated
 
     def search(
@@ -458,8 +464,17 @@ class MySearchClient:
             provider=provider,
             sources=normalized_sources,
             include_content=include_content,
+            include_domains=include_domains,
             allowed_x_handles=allowed_x_handles,
             excluded_x_handles=excluded_x_handles,
+        )
+        candidate_max_results = self._candidate_result_budget(
+            requested_max_results=max_results,
+            strategy=resolved_strategy,
+            mode=mode,
+            intent=resolved_intent,
+            include_domains=include_domains,
+            route_provider=decision.provider,
         )
         cacheable = self._should_cache_search(
             decision=decision,
@@ -497,6 +512,8 @@ class MySearchClient:
                     include_content=include_content,
                     include_answer=effective_include_answer,
                     cache_hit=True,
+                    requested_max_results=max_results,
+                    candidate_max_results=candidate_max_results,
                 )
 
         if decision.provider == "hybrid":
@@ -567,6 +584,13 @@ class MySearchClient:
                 "web": web_result,
                 "social": social_result,
             }
+            hybrid_result = self._augment_evidence_summary(
+                hybrid_result,
+                query=query,
+                mode=mode,
+                intent=resolved_intent,
+                include_domains=include_domains,
+            )
             hybrid_result = self._annotate_search_debug(
                 hybrid_result,
                 provider=provider,
@@ -577,6 +601,8 @@ class MySearchClient:
                 include_content=include_content,
                 include_answer=effective_include_answer,
                 cache_hit=False,
+                requested_max_results=max_results,
+                candidate_max_results=candidate_max_results,
             )
             return hybrid_result
 
@@ -595,7 +621,7 @@ class MySearchClient:
                 intent=resolved_intent,
                 strategy=resolved_strategy,
                 decision=decision,
-                max_results=max_results,
+                max_results=candidate_max_results,
                 include_content=include_content,
                 include_answer=effective_include_answer,
                 include_domains=include_domains,
@@ -604,7 +630,7 @@ class MySearchClient:
         elif decision.provider == "tavily":
             result = self._search_tavily(
                 query=query,
-                max_results=max_results,
+                max_results=candidate_max_results,
                 topic=decision.tavily_topic,
                 include_answer=effective_include_answer,
                 include_content=include_content,
@@ -614,7 +640,7 @@ class MySearchClient:
         elif decision.provider == "firecrawl":
             result = self._search_firecrawl(
                 query=query,
-                max_results=max_results,
+                max_results=candidate_max_results,
                 categories=decision.firecrawl_categories or [],
                 include_content=include_content or mode in {"docs", "research", "github", "pdf"},
                 include_domains=include_domains,
@@ -623,7 +649,7 @@ class MySearchClient:
         elif decision.provider == "exa":
             result = self._search_exa(
                 query=query,
-                max_results=max_results,
+                max_results=candidate_max_results,
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
                 include_content=include_content,
@@ -644,6 +670,27 @@ class MySearchClient:
             )
         else:
             raise MySearchError(f"Unsupported route decision: {decision.provider}")
+
+        if self._should_rerank_resource_results(mode=mode, intent=resolved_intent):
+            reranked_results = self._rerank_resource_results(
+                query=query,
+                mode=mode,
+                results=list(result.get("results") or []),
+                include_domains=include_domains,
+            )
+            result["results"] = reranked_results
+            result["citations"] = self._align_citations_with_results(
+                results=reranked_results,
+                citations=list(result.get("citations") or []),
+            )
+        result = self._trim_search_payload(result, max_results=max_results)
+        result = self._augment_evidence_summary(
+            result,
+            query=query,
+            mode=mode,
+            intent=resolved_intent,
+            include_domains=include_domains,
+        )
 
         route_reason = decision.reason
         if result.get("provider") == "hybrid" and resolved_strategy in {"balanced", "verify", "deep"}:
@@ -690,6 +737,8 @@ class MySearchClient:
             include_content=include_content,
             include_answer=effective_include_answer,
             cache_hit=False,
+            requested_max_results=max_results,
+            candidate_max_results=candidate_max_results,
         )
 
     def extract_url(
@@ -955,6 +1004,104 @@ class MySearchClient:
             ],
         }
 
+    def _candidate_result_budget(
+        self,
+        *,
+        requested_max_results: int,
+        strategy: SearchStrategy,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        include_domains: list[str] | None,
+        route_provider: str,
+    ) -> int:
+        if route_provider == "xai":
+            return requested_max_results
+
+        budget = requested_max_results
+        strategy_floor = {
+            "fast": requested_max_results,
+            "balanced": min(max(requested_max_results * 2, requested_max_results + 2), 10),
+            "verify": min(max(requested_max_results * 3, requested_max_results + 4), 15),
+            "deep": min(max(requested_max_results * 4, requested_max_results + 6), 20),
+        }
+        budget = max(budget, strategy_floor.get(strategy, requested_max_results))
+
+        if include_domains or self._should_rerank_resource_results(mode=mode, intent=intent):
+            budget = max(budget, min(max(requested_max_results * 2, requested_max_results + 3), 12))
+
+        return max(requested_max_results, budget)
+
+    def _trim_search_payload(self, result: dict[str, Any], *, max_results: int) -> dict[str, Any]:
+        trimmed = dict(result)
+        results = list(trimmed.get("results") or [])[:max_results]
+        trimmed["results"] = results
+        trimmed["citations"] = self._align_citations_with_results(
+            results=results,
+            citations=list(trimmed.get("citations") or []),
+        )
+        return trimmed
+
+    def _augment_evidence_summary(
+        self,
+        result: dict[str, Any],
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        include_domains: list[str] | None,
+    ) -> dict[str, Any]:
+        enriched = dict(result)
+        evidence = dict(enriched.get("evidence") or {})
+        results = list(enriched.get("results") or [])
+        citations = list(enriched.get("citations") or [])
+        providers_consulted = [
+            item
+            for item in (
+                evidence.get("providers_consulted")
+                or [enriched.get("provider", "")]
+            )
+            if item
+        ]
+        evidence.setdefault("providers_consulted", providers_consulted)
+        evidence.setdefault(
+            "verification",
+            "cross-provider" if len(set(providers_consulted)) > 1 else "single-provider",
+        )
+        evidence.setdefault("citation_count", len(citations))
+
+        source_domains = self._collect_source_domains(results=results, citations=citations)
+        official_source_count = self._count_official_resource_results(
+            query=query,
+            mode=mode,
+            intent=intent,
+            results=results,
+            include_domains=include_domains,
+        )
+        conflicts = self._detect_evidence_conflicts(
+            mode=mode,
+            intent=intent,
+            results=results,
+            include_domains=include_domains,
+            source_domains=source_domains,
+            official_source_count=official_source_count,
+            providers_consulted=providers_consulted,
+        )
+        evidence["source_diversity"] = len(source_domains)
+        evidence["source_domains"] = source_domains[:5]
+        evidence["official_source_count"] = official_source_count
+        evidence["confidence"] = self._estimate_search_confidence(
+            mode=mode,
+            intent=intent,
+            result_count=len(results),
+            source_domain_count=len(source_domains),
+            official_source_count=official_source_count,
+            verification=str(evidence.get("verification") or "single-provider"),
+            conflicts=conflicts,
+        )
+        evidence["conflicts"] = conflicts
+        enriched["evidence"] = evidence
+        return enriched
+
     def _should_request_search_answer(
         self,
         *,
@@ -988,6 +1135,7 @@ class MySearchClient:
         provider: ProviderName,
         sources: list[str] | None,
         include_content: bool,
+        include_domains: list[str] | None,
         allowed_x_handles: list[str] | None,
         excluded_x_handles: list[str] | None,
     ) -> RouteDecision:
@@ -1036,6 +1184,25 @@ class MySearchClient:
                 provider="xai",
                 reason="检测到 X handle 过滤条件",
                 sources=["x"],
+            )
+
+        if (
+            include_domains
+            and self._domains_prefer_firecrawl_discovery(include_domains)
+            and self._provider_can_serve(self.config.firecrawl)
+            and (
+                mode in {"docs", "github", "pdf"}
+                or intent in {"resource", "tutorial"}
+                or self._looks_like_docs_query(query_lower)
+            )
+        ):
+            return RouteDecision(
+                provider="firecrawl",
+                reason="检测到受限 / 社区域名，优先用 Firecrawl 做站内发现",
+                firecrawl_categories=self._firecrawl_categories(
+                    "docs" if mode not in {"github", "pdf"} else mode,
+                    intent,
+                ),
             )
 
         if mode in {"docs", "github", "pdf"}:
@@ -1159,6 +1326,30 @@ class MySearchClient:
             reason="普通网页检索默认走 Tavily",
             tavily_topic="general",
         )
+
+    def _domains_prefer_firecrawl_discovery(self, include_domains: list[str] | None) -> bool:
+        if not include_domains:
+            return False
+        firecrawl_preferred_domains = {
+            "dev.to",
+            "juejin.cn",
+            "linux.do",
+            "medium.com",
+            "mp.weixin.qq.com",
+            "notion.site",
+            "notion.so",
+            "substack.com",
+            "weixin.qq.com",
+            "zhihu.com",
+        }
+        for domain in include_domains:
+            cleaned_domain = self._clean_hostname(domain)
+            if any(
+                self._domain_matches(cleaned_domain, preferred)
+                for preferred in firecrawl_preferred_domains
+            ):
+                return True
+        return False
 
     def _resolve_intent(
         self,
@@ -1481,11 +1672,22 @@ class MySearchClient:
                 topic=topic,
                 include_answer=False,
                 include_content=include_content,
+                include_domains=None,
+                exclude_domains=exclude_domains,
+            )
+            filtered_results = self._filter_results_by_domains(
+                domain_result.get("results", []),
                 include_domains=[domain],
                 exclude_domains=exclude_domains,
             )
-            if not domain_result.get("results"):
+            if not filtered_results:
                 continue
+            domain_result = dict(domain_result)
+            domain_result["results"] = filtered_results
+            domain_result["citations"] = self._align_citations_with_results(
+                results=filtered_results,
+                citations=list(domain_result.get("citations") or []),
+            )
             per_domain_results.append(domain_result)
             retried_domains.append(domain)
 
@@ -2648,7 +2850,7 @@ class MySearchClient:
         item: dict[str, Any],
         query_tokens: list[str],
         include_domains: list[str] | None,
-    ) -> tuple[int, int, int, int, int, int, int, int, int, int, int]:
+    ) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int]:
         url = item.get("url", "")
         hostname = self._result_hostname(item)
         registered_domain = self._registered_domain(hostname)
@@ -2684,6 +2886,7 @@ class MySearchClient:
         official_resource_match = int(
             self._is_probably_official_resource_result(
                 mode=mode,
+                hostname=hostname,
                 include_match=bool(include_match),
                 host_brand_match=bool(host_brand_match),
                 title_brand_match=bool(title_brand_match),
@@ -2712,6 +2915,7 @@ class MySearchClient:
         self,
         *,
         mode: SearchMode,
+        hostname: str,
         include_match: bool,
         host_brand_match: bool,
         title_brand_match: bool,
@@ -2726,7 +2930,12 @@ class MySearchClient:
             return False
         if not docs_shape_match:
             return False
-        return host_brand_match or title_brand_match
+        official_host_surface = any(
+            part in {"api", "developer", "developers", "docs", "help", "platform", "reference", "support"}
+            for part in hostname.split(".")
+            if part
+        )
+        return host_brand_match or (title_brand_match and official_host_surface)
 
     def _align_citations_with_results(
         self,
@@ -2977,6 +3186,126 @@ class MySearchClient:
             "youtu.be",
         }
         return registered_domain in third_party_domains
+
+    def _collect_source_domains(
+        self,
+        *,
+        results: list[dict[str, Any]],
+        citations: list[dict[str, Any]],
+    ) -> list[str]:
+        domains: list[str] = []
+        seen: set[str] = set()
+        for item in [*results, *citations]:
+            if not isinstance(item, dict):
+                continue
+            hostname = self._result_hostname(item)
+            registered_domain = self._registered_domain(hostname)
+            if not registered_domain or registered_domain in seen:
+                continue
+            seen.add(registered_domain)
+            domains.append(registered_domain)
+        return domains
+
+    def _count_official_resource_results(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        results: list[dict[str, Any]],
+        include_domains: list[str] | None,
+    ) -> int:
+        if not self._should_rerank_resource_results(mode=mode, intent=intent):
+            return 0
+        query_tokens = self._query_brand_tokens(query)
+        official_count = 0
+        for item in results:
+            hostname = self._result_hostname(item)
+            registered_domain = self._registered_domain(hostname)
+            title_text = (item.get("title") or "").lower()
+            include_match = bool(
+                include_domains
+                and any(self._domain_matches(hostname, domain) for domain in include_domains)
+            )
+            host_brand_match = any(
+                token in hostname or token in registered_domain for token in query_tokens
+            )
+            title_brand_match = any(token in title_text for token in query_tokens)
+            docs_shape_match = self._looks_like_resource_result(
+                url=item.get("url", ""),
+                hostname=hostname,
+                title_text=title_text,
+                mode=mode,
+            )
+            non_third_party = not self._is_obvious_third_party_resource(
+                hostname=hostname,
+                registered_domain=registered_domain,
+                mode=mode,
+            )
+            if self._is_probably_official_resource_result(
+                mode=mode,
+                hostname=hostname,
+                include_match=include_match,
+                host_brand_match=host_brand_match,
+                title_brand_match=title_brand_match,
+                docs_shape_match=docs_shape_match,
+                non_third_party=non_third_party,
+            ):
+                official_count += 1
+        return official_count
+
+    def _detect_evidence_conflicts(
+        self,
+        *,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        results: list[dict[str, Any]],
+        include_domains: list[str] | None,
+        source_domains: list[str],
+        official_source_count: int,
+        providers_consulted: list[str],
+    ) -> list[str]:
+        conflicts: list[str] = []
+        if len(source_domains) <= 1 and len(results) > 1:
+            conflicts.append("low-source-diversity")
+        if len(set(providers_consulted)) <= 1 and len(source_domains) <= 1 and results:
+            conflicts.append("single-provider-single-domain")
+        if self._should_rerank_resource_results(mode=mode, intent=intent):
+            if results and official_source_count <= 0:
+                conflicts.append("official-source-not-confirmed")
+            elif results and official_source_count < len(results):
+                conflicts.append("mixed-official-and-third-party")
+            if include_domains and not results:
+                conflicts.append("domain-filter-returned-empty")
+        return conflicts
+
+    def _estimate_search_confidence(
+        self,
+        *,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        result_count: int,
+        source_domain_count: int,
+        official_source_count: int,
+        verification: str,
+        conflicts: list[str],
+    ) -> str:
+        if result_count <= 0:
+            return "low"
+        if self._should_rerank_resource_results(mode=mode, intent=intent):
+            if official_source_count > 0 and "official-source-not-confirmed" not in conflicts:
+                if (
+                    verification == "cross-provider"
+                    or (source_domain_count >= 2 and "mixed-official-and-third-party" not in conflicts)
+                ):
+                    return "high"
+                return "medium"
+            return "medium" if source_domain_count >= 2 else "low"
+        if verification == "cross-provider" and source_domain_count >= 2:
+            return "high"
+        if source_domain_count >= 2:
+            return "medium"
+        return "low" if conflicts else "medium"
 
     def _describe_provider(
         self,
