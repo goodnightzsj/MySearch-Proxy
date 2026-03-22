@@ -287,10 +287,10 @@ class MySearchClientTests(unittest.TestCase):
 
     def test_tavily_domain_filtered_search_retries_with_site_query(self) -> None:
         client = MySearchClient()
-        calls: list[str] = []
+        calls: list[dict[str, object]] = []
 
         def fake_search_tavily_once(**kwargs):  # type: ignore[no-untyped-def]
-            calls.append(kwargs["query"])
+            calls.append(dict(kwargs))
             if kwargs["query"] == "OpenAI Responses API docs":
                 return {
                     "provider": "tavily",
@@ -313,12 +313,24 @@ class MySearchClientTests(unittest.TestCase):
                         "url": "https://platform.openai.com/docs/api-reference/responses",
                         "snippet": "Official OpenAI docs",
                         "content": "",
+                    },
+                    {
+                        "provider": "tavily",
+                        "source": "web",
+                        "title": "Community recap",
+                        "url": "https://example.com/openai-responses-guide",
+                        "snippet": "Third-party article",
+                        "content": "",
                     }
                 ],
                 "citations": [
                     {
                         "title": "Responses | OpenAI API Reference",
                         "url": "https://platform.openai.com/docs/api-reference/responses",
+                    },
+                    {
+                        "title": "Community recap",
+                        "url": "https://example.com/openai-responses-guide",
                     }
                 ],
             }
@@ -335,14 +347,15 @@ class MySearchClientTests(unittest.TestCase):
             exclude_domains=None,
         )
 
-        self.assertEqual(len(result["results"]), 1)
         self.assertEqual(
             result["results"][0]["url"],
             "https://platform.openai.com/docs/api-reference/responses",
         )
+        self.assertEqual(len(result["results"]), 1)
         self.assertEqual(result["route_debug"]["domain_filter_mode"], "site_query_retry")
         self.assertEqual(result["route_debug"]["retried_include_domains"], ["openai.com"])
-        self.assertEqual(calls[1], "site:openai.com OpenAI Responses API docs")
+        self.assertEqual(calls[1]["query"], "site:openai.com OpenAI Responses API docs")
+        self.assertIsNone(calls[1]["include_domains"])
 
     def test_tavily_domain_filtered_search_falls_back_to_firecrawl(self) -> None:
         client = MySearchClient()
@@ -636,11 +649,63 @@ class MySearchClientTests(unittest.TestCase):
             provider="auto",
             sources=["web"],
             include_content=False,
+            include_domains=None,
             allowed_x_handles=None,
             excluded_x_handles=None,
         )
 
         self.assertEqual(decision.provider, "firecrawl")
+
+    def test_search_reranks_direct_docs_results_to_official_first(self) -> None:
+        client = MySearchClient()
+        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "Playwright test.step Guide",
+                    "url": "https://www.checklyhq.com/blog/playwright-test-step-guide/",
+                    "snippet": "Third-party guide",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "test.step | Playwright",
+                    "url": "https://playwright.dev/docs/api/class-test",
+                    "snippet": "Official Playwright docs",
+                    "content": "",
+                },
+            ],
+            "citations": [
+                {
+                    "title": "Playwright test.step Guide",
+                    "url": "https://www.checklyhq.com/blog/playwright-test-step-guide/",
+                },
+                {
+                    "title": "test.step | Playwright",
+                    "url": "https://playwright.dev/docs/api/class-test",
+                },
+            ],
+        }
+
+        result = client.search(
+            query="Playwright test.step docs",
+            mode="docs",
+            strategy="fast",
+            provider="tavily",
+            include_answer=False,
+        )
+
+        self.assertEqual(result["results"][0]["url"], "https://playwright.dev/docs/api/class-test")
+        self.assertEqual(result["citations"][0]["url"], "https://playwright.dev/docs/api/class-test")
+        self.assertEqual(result["evidence"]["official_source_count"], 1)
+        self.assertEqual(result["evidence"]["confidence"], "medium")
+        self.assertIn("mixed-official-and-third-party", result["evidence"]["conflicts"])
 
 
 if __name__ == "__main__":
