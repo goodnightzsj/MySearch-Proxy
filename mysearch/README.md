@@ -166,6 +166,40 @@ docker compose up -d
 - `SSE`
   - `http://127.0.0.1:8000/sse`
 
+如果你部署的是单容器 `mysearch-stack`，容器会同时对外提供 `9874` 控制台和 `8000/mcp`；`mysearch` 自己仍然通过容器内 `127.0.0.1:9874` 回连 Proxy。
+
+部署完成后，如果你要让 `Codex` 直接使用这个远程 MCP，最小 `~/.codex/config.toml` 配置是：
+
+```toml
+[mcp_servers.mysearch]
+type = "http"
+url = "http://127.0.0.1:8000/mcp"
+```
+
+如果你部署在远程主机：
+
+```toml
+[mcp_servers.mysearch]
+type = "http"
+url = "https://mysearch.example.com/mcp"
+```
+
+如果你的远程入口额外套了 Bearer 鉴权，可以继续写成：
+
+```toml
+[mcp_servers.mysearch]
+type = "http"
+url = "https://mysearch.example.com/mcp"
+headers = { Authorization = "Bearer YOUR_MCP_TOKEN" }
+```
+
+加完配置后重启 `Codex`，再验收：
+
+```bash
+codex mcp get mysearch
+python3 skill/scripts/check_mysearch.py --health-only
+```
+
 如果你只想单独构建 `mysearch` 镜像，也可以：
 
 ```bash

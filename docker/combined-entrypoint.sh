@@ -3,6 +3,7 @@ set -euo pipefail
 
 export PYTHONPATH="${PYTHONPATH:-/app}"
 export MYSEARCH_PROXY_BASE_URL="${MYSEARCH_PROXY_BASE_URL:-http://127.0.0.1:9874}"
+export MYSEARCH_PROXY_HOST="${MYSEARCH_PROXY_HOST:-0.0.0.0}"
 
 cleanup() {
   local exit_code=$?
@@ -18,7 +19,7 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-python -m uvicorn proxy.server:app --host 127.0.0.1 --port 9874 &
+python -m uvicorn proxy.server:app --host "${MYSEARCH_PROXY_HOST}" --port 9874 &
 PROXY_PID=$!
 
 if [[ -z "${MYSEARCH_PROXY_API_KEY:-}" && -n "${MYSEARCH_PROXY_BOOTSTRAP_TOKEN:-}" ]]; then

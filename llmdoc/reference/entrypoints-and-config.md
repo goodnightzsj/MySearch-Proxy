@@ -67,6 +67,47 @@
 - `MYSEARCH_TAVILY_MODE=gateway`
   - 配合 `MYSEARCH_TAVILY_GATEWAY_BASE_URL`、`MYSEARCH_TAVILY_GATEWAY_TOKEN`
 
+## 部署后给 Codex 的远程 MCP 配置
+
+如果你部署的是单容器 `mysearch-stack`，或者已经把 `proxy + mysearch` compose 跑起来，对 `Codex` 来说真正要接入的是 `mysearch` 暴露出来的远程 MCP，而不是 `proxy` 控制台本身。
+
+最小 `~/.codex/config.toml`：
+
+```toml
+[mcp_servers.mysearch]
+type = "http"
+url = "http://127.0.0.1:8000/mcp"
+```
+
+远程主机：
+
+```toml
+[mcp_servers.mysearch]
+type = "http"
+url = "https://mysearch.example.com/mcp"
+```
+
+如果远程入口前面还有 Bearer：
+
+```toml
+[mcp_servers.mysearch]
+type = "http"
+url = "https://mysearch.example.com/mcp"
+headers = { Authorization = "Bearer YOUR_MCP_TOKEN" }
+```
+
+这里要明确区分：
+
+- `proxy` 控制台默认还是 `http://host:9874`
+- `Codex` 要接的是 `mysearch` MCP，默认是 `http://host:8000/mcp`
+- `MYSEARCH_PROXY_API_KEY` 是 `mysearch` 去访问 `proxy` 时用的内部 token，不是 `Codex` 自己必须填写到 MCP 配置里的字段
+
+部署后的最小验收顺序：
+
+1. 重启 `Codex`
+2. `codex mcp get mysearch`
+3. `python3 skill/scripts/check_mysearch.py --health-only`
+
 ## OpenClaw wrapper
 
 OpenClaw 侧也是 host-config-first，但入口不同：
