@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import io
 import os
+import sys
 import threading
 import time
 import unittest
@@ -17,6 +18,10 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from unittest.mock import patch
 from urllib.error import HTTPError
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from mysearch.clients import (
     MySearchClient,
@@ -465,6 +470,42 @@ class BlendingDecisionTests(unittest.TestCase):
             strategy="balanced",
         ))
 
+    def test_no_blend_for_docs_mode(self) -> None:
+        client = _make_client(tavily_keys=["k"], firecrawl_keys=["k"])
+        self.assertFalse(client._should_blend_web_providers(
+            requested_provider="auto",
+            decision=RouteDecision(provider="tavily", reason="test"),
+            sources=["web"],
+            strategy="balanced",
+            mode="docs",
+            intent="resource",
+            include_domains=None,
+        ))
+
+    def test_no_blend_for_resource_intent(self) -> None:
+        client = _make_client(tavily_keys=["k"], firecrawl_keys=["k"])
+        self.assertFalse(client._should_blend_web_providers(
+            requested_provider="auto",
+            decision=RouteDecision(provider="tavily", reason="test"),
+            sources=["web"],
+            strategy="balanced",
+            mode="auto",
+            intent="resource",
+            include_domains=None,
+        ))
+
+    def test_no_blend_when_include_domains_present(self) -> None:
+        client = _make_client(tavily_keys=["k"], firecrawl_keys=["k"])
+        self.assertFalse(client._should_blend_web_providers(
+            requested_provider="auto",
+            decision=RouteDecision(provider="tavily", reason="test"),
+            sources=["web"],
+            strategy="balanced",
+            mode="auto",
+            intent="factual",
+            include_domains=["openai.com"],
+        ))
+
     def test_blend_when_conditions_met(self) -> None:
         client = _make_client(tavily_keys=["k"], firecrawl_keys=["k"])
         self.assertTrue(client._should_blend_web_providers(
@@ -472,6 +513,9 @@ class BlendingDecisionTests(unittest.TestCase):
             decision=RouteDecision(provider="tavily", reason="test"),
             sources=["web"],
             strategy="balanced",
+            mode="auto",
+            intent="factual",
+            include_domains=None,
         ))
 
 

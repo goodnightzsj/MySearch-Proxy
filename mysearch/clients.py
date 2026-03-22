@@ -585,6 +585,9 @@ class MySearchClient:
             decision=decision,
             sources=normalized_sources,
             strategy=resolved_strategy,
+            mode=mode,
+            intent=resolved_intent,
+            include_domains=include_domains,
         ):
             result = self._search_web_blended(
                 query=query,
@@ -1220,6 +1223,9 @@ class MySearchClient:
         decision: RouteDecision,
         sources: list[str],
         strategy: SearchStrategy,
+        mode: SearchMode = "auto",
+        intent: ResolvedSearchIntent = "factual",
+        include_domains: list[str] | None = None,
     ) -> bool:
         if requested_provider != "auto":
             return False
@@ -1228,6 +1234,12 @@ class MySearchClient:
         if strategy not in {"balanced", "verify", "deep"}:
             return False
         if "x" in sources:
+            return False
+        if include_domains:
+            return False
+        if mode in {"docs", "github", "pdf"}:
+            return False
+        if intent in {"resource", "tutorial"}:
             return False
         return self._provider_can_serve(self.config.tavily) and self._provider_can_serve(
             self.config.firecrawl
@@ -1343,6 +1355,55 @@ class MySearchClient:
         include_domains: list[str] | None,
         exclude_domains: list[str] | None,
     ) -> dict[str, Any]:
+        include_domains = [item.strip() for item in (include_domains or []) if item and item.strip()]
+        exclude_domains = [item.strip() for item in (exclude_domains or []) if item and item.strip()]
+
+        response = self._search_tavily_once(
+            query=query,
+            max_results=max_results,
+            topic=topic,
+            include_answer=include_answer,
+            include_content=include_content,
+            include_domains=include_domains,
+            exclude_domains=exclude_domains,
+        )
+        if response.get("results") or not include_domains:
+            return response
+
+        retry_response = self._search_tavily_domain_retry(
+            query=query,
+            max_results=max_results,
+            topic=topic,
+            include_content=include_content,
+            include_domains=include_domains,
+            exclude_domains=exclude_domains,
+        )
+        if retry_response is not None:
+            return retry_response
+
+        fallback_response = self._search_tavily_domain_fallback(
+            query=query,
+            max_results=max_results,
+            include_content=include_content,
+            include_domains=include_domains,
+            exclude_domains=exclude_domains,
+        )
+        if fallback_response is not None:
+            return fallback_response
+
+        return response
+
+    def _search_tavily_once(
+        self,
+        *,
+        query: str,
+        max_results: int,
+        topic: str,
+        include_answer: bool,
+        include_content: bool,
+        include_domains: list[str] | None,
+        exclude_domains: list[str] | None,
+    ) -> dict[str, Any]:
         provider = self.config.tavily
         key = self._get_key_or_raise(provider)
         payload: dict[str, Any] = {
@@ -1365,6 +1426,23 @@ class MySearchClient:
             payload=payload,
             key=key.key,
         )
+        results = [
+            {
+                "provider": "tavily",
+                "source": "web",
+                "title": item.get("title", ""),
+                "url": item.get("url", ""),
+                "snippet": item.get("content", ""),
+                "content": item.get("raw_content", "") if include_content else "",
+                "score": item.get("score"),
+            }
+            for item in response.get("results", [])
+        ]
+        filtered_results = self._filter_results_by_domains(
+            results,
+            include_domains=include_domains,
+            exclude_domains=exclude_domains,
+        )
         return {
             "provider": "tavily",
             "transport": key.source,
@@ -1372,23 +1450,161 @@ class MySearchClient:
             "answer": response.get("answer", ""),
             "request_id": response.get("request_id", ""),
             "response_time": response.get("response_time"),
-            "results": [
-                {
-                    "provider": "tavily",
-                    "source": "web",
-                    "title": item.get("title", ""),
-                    "url": item.get("url", ""),
-                    "snippet": item.get("content", ""),
-                    "content": item.get("raw_content", "") if include_content else "",
-                    "score": item.get("score"),
-                }
-                for item in response.get("results", [])
-            ],
+            "results": filtered_results,
             "citations": [
                 {"title": item.get("title", ""), "url": item.get("url", "")}
-                for item in response.get("results", [])
+                for item in filtered_results
                 if item.get("url")
             ],
+        }
+
+    def _search_tavily_domain_retry(
+        self,
+        *,
+        query: str,
+        max_results: int,
+        topic: str,
+        include_content: bool,
+        include_domains: list[str],
+        exclude_domains: list[str] | None,
+    ) -> dict[str, Any] | None:
+        per_domain_results = []
+        retried_domains: list[str] = []
+        for domain in include_domains:
+            domain_result = self._search_tavily_once(
+                query=self._build_firecrawl_domain_query(
+                    query=query,
+                    include_domain=domain,
+                    exclude_domains=exclude_domains,
+                ),
+                max_results=max_results,
+                topic=topic,
+                include_answer=False,
+                include_content=include_content,
+                include_domains=[domain],
+                exclude_domains=exclude_domains,
+            )
+            if not domain_result.get("results"):
+                continue
+            per_domain_results.append(domain_result)
+            retried_domains.append(domain)
+
+        if not per_domain_results:
+            return None
+
+        merged_results = self._merge_ranked_results(
+            [result.get("results", []) for result in per_domain_results],
+            max_results=max_results,
+        )
+        citations = self._align_citations_with_results(
+            results=merged_results,
+            citations=self._dedupe_citations(
+                *[result.get("citations", []) for result in per_domain_results]
+            ),
+        )
+        return {
+            "provider": "tavily",
+            "transport": per_domain_results[0].get("transport", "env"),
+            "query": query,
+            "answer": "",
+            "request_id": "",
+            "response_time": None,
+            "results": merged_results,
+            "citations": citations,
+            "route_debug": {
+                "domain_filter_mode": "site_query_retry",
+                "retried_include_domains": retried_domains,
+            },
+        }
+
+    def _search_tavily_domain_fallback(
+        self,
+        *,
+        query: str,
+        max_results: int,
+        include_content: bool,
+        include_domains: list[str],
+        exclude_domains: list[str] | None,
+    ) -> dict[str, Any] | None:
+        if not self._provider_can_serve(self.config.firecrawl):
+            return None
+
+        categories = (
+            self._firecrawl_categories("docs", "resource")
+            if self._looks_like_docs_query(query.lower()) or self._looks_like_tutorial_query(query.lower())
+            else []
+        )
+        per_domain_results = []
+        citations = []
+        seen_urls: set[str] = set()
+        for domain in include_domains:
+            domain_result = self._search_firecrawl_once(
+                query=self._build_firecrawl_domain_query(
+                    query=query,
+                    include_domain=domain,
+                    exclude_domains=exclude_domains,
+                ),
+                max_results=max_results,
+                categories=categories,
+                include_content=include_content,
+            )
+            if not domain_result.get("results"):
+                retry_result = self._search_firecrawl_domain_retry(
+                    query=query,
+                    max_results=max_results,
+                    categories=categories,
+                    include_content=include_content,
+                    include_domain=domain,
+                    exclude_domains=exclude_domains,
+                )
+                if retry_result is not None:
+                    domain_result = retry_result
+            per_domain_results.append(domain_result)
+            for item in domain_result.get("results", []):
+                url = item.get("url", "")
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                citations.append({"title": item.get("title", ""), "url": url})
+
+        merged_results = self._merge_ranked_results(
+            [result.get("results", []) for result in per_domain_results],
+            max_results=max_results,
+        )
+        if not merged_results:
+            return None
+
+        return {
+            "provider": "hybrid",
+            "route_selected": "tavily+firecrawl",
+            "query": query,
+            "answer": "",
+            "results": merged_results,
+            "citations": citations[:max_results],
+            "primary_search": {
+                "provider": "tavily",
+                "query": query,
+                "results": [],
+                "citations": [],
+            },
+            "secondary_search": {
+                "provider": "firecrawl",
+                "query": query,
+                "results": merged_results,
+                "citations": citations[:max_results],
+            },
+            "secondary_error": "",
+            "evidence": {
+                "providers_consulted": ["tavily", "firecrawl"],
+                "matched_results": 0,
+                "citation_count": len(citations[:max_results]),
+                "verification": "fallback",
+            },
+            "fallback": {
+                "from": "tavily",
+                "to": "firecrawl",
+                "reason": "tavily returned 0 results for domain-filtered search",
+            },
         }
 
     def _search_firecrawl(
@@ -2465,10 +2681,21 @@ class MySearchClient:
                 mode=mode,
             )
         )
+        official_resource_match = int(
+            self._is_probably_official_resource_result(
+                mode=mode,
+                include_match=bool(include_match),
+                host_brand_match=bool(host_brand_match),
+                title_brand_match=bool(title_brand_match),
+                docs_shape_match=bool(docs_shape_match),
+                non_third_party=bool(non_third_party),
+            )
+        )
         matched_provider_count = len(item.get("matched_providers") or [])
         content_score, snippet_score, title_score = self._result_quality_score(item)
         return (
             include_match,
+            official_resource_match,
             github_bonus,
             pdf_bonus,
             host_brand_match,
@@ -2480,6 +2707,26 @@ class MySearchClient:
             snippet_score,
             title_score,
         )
+
+    def _is_probably_official_resource_result(
+        self,
+        *,
+        mode: SearchMode,
+        include_match: bool,
+        host_brand_match: bool,
+        title_brand_match: bool,
+        docs_shape_match: bool,
+        non_third_party: bool,
+    ) -> bool:
+        if include_match:
+            return True
+        if mode in {"github", "pdf"}:
+            return True
+        if not non_third_party:
+            return False
+        if not docs_shape_match:
+            return False
+        return host_brand_match or title_brand_match
 
     def _align_citations_with_results(
         self,
@@ -3176,13 +3423,11 @@ class MySearchClient:
             "documentation",
             "api reference",
             "changelog",
-            "pricing",
             "readme",
             "github",
             "manual",
             "文档",
             "接口",
-            "价格",
             "更新日志",
         ]
         return any(keyword in query_lower for keyword in keywords)

@@ -30,6 +30,21 @@ class _FakeResponse:
 
 
 class MySearchClientTests(unittest.TestCase):
+    def test_pricing_keywords_alone_do_not_trigger_docs_mode(self) -> None:
+        client = MySearchClient()
+
+        self.assertFalse(client._looks_like_docs_query("openai pricing"))
+        self.assertFalse(client._looks_like_docs_query("苹果 m4 macbook air 价格"))
+        self.assertEqual(
+            client._resolve_intent(
+                query="苹果 M4 MacBook Air 国行价格 官方",
+                mode="auto",
+                intent="auto",
+                sources=["web"],
+            ),
+            "factual",
+        )
+
     def test_request_json_auth_error_mentions_rejected_key(self) -> None:
         client = MySearchClient()
         provider = client.config.tavily
@@ -270,6 +285,120 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["provider"], "firecrawl")
         self.assertEqual(result["results"], [])
 
+    def test_tavily_domain_filtered_search_retries_with_site_query(self) -> None:
+        client = MySearchClient()
+        calls: list[str] = []
+
+        def fake_search_tavily_once(**kwargs):  # type: ignore[no-untyped-def]
+            calls.append(kwargs["query"])
+            if kwargs["query"] == "OpenAI Responses API docs":
+                return {
+                    "provider": "tavily",
+                    "transport": "env",
+                    "query": kwargs["query"],
+                    "answer": "",
+                    "results": [],
+                    "citations": [],
+                }
+            return {
+                "provider": "tavily",
+                "transport": "env",
+                "query": kwargs["query"],
+                "answer": "",
+                "results": [
+                    {
+                        "provider": "tavily",
+                        "source": "web",
+                        "title": "Responses | OpenAI API Reference",
+                        "url": "https://platform.openai.com/docs/api-reference/responses",
+                        "snippet": "Official OpenAI docs",
+                        "content": "",
+                    }
+                ],
+                "citations": [
+                    {
+                        "title": "Responses | OpenAI API Reference",
+                        "url": "https://platform.openai.com/docs/api-reference/responses",
+                    }
+                ],
+            }
+
+        client._search_tavily_once = fake_search_tavily_once  # type: ignore[method-assign]
+
+        result = client._search_tavily(
+            query="OpenAI Responses API docs",
+            max_results=5,
+            topic="general",
+            include_answer=False,
+            include_content=False,
+            include_domains=["openai.com"],
+            exclude_domains=None,
+        )
+
+        self.assertEqual(len(result["results"]), 1)
+        self.assertEqual(
+            result["results"][0]["url"],
+            "https://platform.openai.com/docs/api-reference/responses",
+        )
+        self.assertEqual(result["route_debug"]["domain_filter_mode"], "site_query_retry")
+        self.assertEqual(result["route_debug"]["retried_include_domains"], ["openai.com"])
+        self.assertEqual(calls[1], "site:openai.com OpenAI Responses API docs")
+
+    def test_tavily_domain_filtered_search_falls_back_to_firecrawl(self) -> None:
+        client = MySearchClient()
+        client.keyring.has_provider = lambda provider: provider == "firecrawl"  # type: ignore[method-assign]
+        client._probe_provider_status = lambda provider, key_count: {  # type: ignore[method-assign]
+            "status": "ok",
+            "error": "",
+            "checked_at": "2026-03-20T00:00:00+00:00",
+        }
+        client._search_tavily_once = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [],
+            "citations": [],
+        }
+        client._search_firecrawl_once = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "firecrawl",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "firecrawl",
+                    "source": "web",
+                    "title": "Responses | OpenAI API Reference",
+                    "url": "https://platform.openai.com/docs/api-reference/responses",
+                    "snippet": "Official OpenAI docs",
+                    "content": "",
+                }
+            ],
+            "citations": [
+                {
+                    "title": "Responses | OpenAI API Reference",
+                    "url": "https://platform.openai.com/docs/api-reference/responses",
+                }
+            ],
+        }
+
+        result = client._search_tavily(
+            query="OpenAI Responses API docs",
+            max_results=5,
+            topic="general",
+            include_answer=False,
+            include_content=False,
+            include_domains=["openai.com"],
+            exclude_domains=None,
+        )
+
+        self.assertEqual(result["provider"], "hybrid")
+        self.assertEqual(result["route_selected"], "tavily+firecrawl")
+        self.assertEqual(result["fallback"]["from"], "tavily")
+        self.assertEqual(result["fallback"]["to"], "firecrawl")
+        self.assertEqual(len(result["results"]), 1)
+
     def test_docs_blended_search_reranks_official_results_ahead_of_third_party(self) -> None:
         client = MySearchClient()
         official_url = "https://platform.openai.com/docs/api-reference/responses"
@@ -447,18 +576,18 @@ class MySearchClientTests(unittest.TestCase):
             "checked_at": "2026-03-20T00:00:00+00:00",
         }
         client._route_search = lambda **kwargs: RouteDecision(  # type: ignore[method-assign]
-            provider="firecrawl",
-            reason="文档类查询优先 Firecrawl",
-            firecrawl_categories=["technical"],
+            provider="tavily",
+            reason="普通网页检索默认走 Tavily",
+            tavily_topic="general",
         )
-        client._search_firecrawl = lambda **kwargs: {  # type: ignore[method-assign]
-            "provider": "firecrawl",
+        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
             "transport": "env",
             "query": kwargs["query"],
             "answer": "",
             "results": [
                 {
-                    "provider": "firecrawl",
+                    "provider": "tavily",
                     "source": "web",
                     "title": "Official docs",
                     "url": "https://docs.example.com/page",
@@ -469,25 +598,25 @@ class MySearchClientTests(unittest.TestCase):
             "citations": [{"title": "Official docs", "url": "https://docs.example.com/page"}],
         }
 
-        def fail_tavily(**kwargs):  # type: ignore[no-untyped-def]
+        def fail_firecrawl(**kwargs):  # type: ignore[no-untyped-def]
             raise MySearchHTTPError(
-                provider="tavily",
+                provider="firecrawl",
                 status_code=401,
                 detail="The account associated with this API key has been deactivated.",
                 url="https://example.com/search",
             )
 
-        client._search_tavily = fail_tavily  # type: ignore[method-assign]
+        client._search_firecrawl = fail_firecrawl  # type: ignore[method-assign]
 
         result = client.search(
-            query="example docs",
-            mode="docs",
+            query="example search",
+            mode="auto",
             strategy="balanced",
             provider="auto",
             include_answer=False,
         )
 
-        self.assertEqual(result["provider"], "firecrawl")
+        self.assertEqual(result["provider"], "tavily")
         self.assertIn("secondary provider issue", result["route"]["reason"])
         self.assertIn("configured but the API key was rejected", result["route"]["reason"])
 
