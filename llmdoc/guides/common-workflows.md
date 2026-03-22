@@ -8,7 +8,7 @@
 
 ## 2. 部署 proxy-first 链路
 
-1. 现在最省事的部署方式是单容器镜像 `mysearch-stack`：直接暴露 `9874` 和 `8000` 两个端口，容器内部同时启动 `proxy` 与 `mysearch`，`mysearch` 再通过容器内回环地址访问 Proxy。来源：README.md:194, Dockerfile.stack:1, docker/combined-entrypoint.sh:1
+1. 现在最省事的部署方式是单容器镜像 `mysearch-stack`：直接暴露 `9874` 和 `8000` 两个端口，容器内部同时启动 `proxy` 与 `mysearch`，`proxy` 默认对外监听 `9874`，`mysearch` 再通过容器内回环地址访问 Proxy。来源：README.md:194, Dockerfile.stack:1, docker/combined-entrypoint.sh:1
 2. 如果你更看重服务边界清晰，仓库根目录的 `docker-compose.yml` 仍然提供“两服务一套 stack”：`proxy` 与 `mysearch` 在同一个 compose 网络里启动，`mysearch` 默认通过 `MYSEARCH_PROXY_BASE_URL=http://proxy:9874` 回连同 stack 内的 Proxy。来源：docker-compose.yml:1
 3. 不管是单容器还是 compose，两种部署现在都不再要求你手动先创建 `mysp-` token。`proxy` 只要配置了 `MYSEARCH_PROXY_BOOTSTRAP_TOKEN`，就会启用受限的 `/api/internal/mysearch/token`，`mysearch` 启动脚本会自动用同一个 bootstrap token 去创建或复用自己的专用 `mysp-` token。初始化时你只需要登录控制台补 provider 配置和 usage sync。来源：proxy/server.py:680, proxy/server.py:2702, mysearch/docker-entrypoint.sh:1, mysearch/scripts/bootstrap_proxy_token.py:1
 4. 如果你希望镜像自动发布到 Docker Hub，当前仓库的 `.github/workflows/docker-publish.yml` 已经从单镜像流程扩成三镜像 matrix。它参考 `code/program/todo-list/.github/workflows/docker-publish.yml` 的结构，但会先跑 `python -m unittest discover -s tests`、`py_compile` 和 `node --check proxy/static/js/console.js`，再分别对 `proxy`、`mysearch` 与 `stack` 做 buildx 多架构构建；pull request 只验证构建，push 到 `main` 或打 `v*` tag 时才真正发布镜像。默认镜像名分别是 `DOCKERHUB_USERNAME/mysearch-proxy`、`DOCKERHUB_USERNAME/mysearch-mcp` 与 `DOCKERHUB_USERNAME/mysearch-stack`，也可以用 `DOCKERHUB_IMAGE_NAME_PROXY` / `DOCKERHUB_IMAGE_NAME_MYSEARCH` / `DOCKERHUB_IMAGE_NAME_STACK` 覆盖。来源：.github/workflows/docker-publish.yml:1

@@ -216,6 +216,8 @@ docker run -d \
 - `proxy` 控制台：`http://localhost:9874`
 - `mysearch` MCP：`http://localhost:8000/mcp`
 
+单容器镜像里，`proxy` 默认对外监听 `9874`，`mysearch` 默认对外监听 `8000/mcp`；`mysearch` 自己仍然通过容器内 `127.0.0.1:9874` 访问 Proxy。
+
 这条链路里不再需要手动先创建 `mysp-` token。容器启动时会通过受限 bootstrap 接口自动创建或复用一个 `mysearch` 代理 token，再交给同容器里的 `mysearch` 运行时使用。
 
 ### 路线 C：一套 compose 部署 `proxy + mysearch`
