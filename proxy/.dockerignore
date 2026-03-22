@@ -1,7 +1,16 @@
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
+*.db
 *.sqlite
 *.sqlite3
+.DS_Store
 data/
 .env
+.env.*
+.venv/
+venv/
+README.md
+README_EN.md
+docker-compose.yml
