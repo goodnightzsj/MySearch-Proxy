@@ -24,6 +24,7 @@ from key_pool import pool
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin")
 ADMIN_SESSION_COOKIE = os.environ.get("ADMIN_SESSION_COOKIE", "mysearch_proxy_session")
 ADMIN_SESSION_MAX_AGE = max(300, int(os.environ.get("ADMIN_SESSION_MAX_AGE", "2592000")))
+MYSEARCH_PROXY_BOOTSTRAP_TOKEN = os.environ.get("MYSEARCH_PROXY_BOOTSTRAP_TOKEN", "").strip()
 TAVILY_API_BASE = "https://api.tavily.com"
 TAVILY_SEARCH_PATH = "/search"
 TAVILY_EXTRACT_PATH = "/extract"
@@ -665,6 +666,21 @@ def verify_admin(request: Request):
     password = request.headers.get("X-Admin-Password", "")
     pwd = get_admin_password()
     if auth == f"Bearer {pwd}" or password == pwd or has_valid_admin_session(request):
+        return True
+    raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def verify_mysearch_bootstrap(request: Request):
+    expected = MYSEARCH_PROXY_BOOTSTRAP_TOKEN.strip()
+    if not expected:
+        raise HTTPException(status_code=404, detail="Bootstrap endpoint is disabled")
+
+    provided = request.headers.get("X-Bootstrap-Token", "").strip()
+    auth = request.headers.get("Authorization", "").strip()
+    if auth.startswith("Bearer "):
+        provided = auth[7:].strip() or provided
+
+    if provided and hmac.compare_digest(provided, expected):
         return True
     raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -1414,6 +1430,16 @@ async def build_mysearch_dashboard():
         "token_count": len(tokens),
         "overview": overview,
     }
+
+
+def issue_mysearch_bootstrap_token(name: str) -> tuple[dict, bool]:
+    normalized_name = (name or "").strip() or "docker-mysearch"
+    existing = db.get_token_by_name(normalized_name, service="mysearch")
+    if existing:
+        return dict(existing), False
+    created = db.create_token(normalized_name, service="mysearch")
+    reset_stats_cache()
+    return dict(created), True
 
 
 async def build_social_dashboard():
@@ -2693,6 +2719,24 @@ async def list_tokens(request: Request, _=Depends(verify_admin)):
     for token in tokens:
         token["stats"] = db.get_usage_stats(token_id=token["id"], service=token["service"])
     return {"tokens": tokens}
+
+
+@app.post("/api/internal/mysearch/token")
+async def bootstrap_mysearch_token(request: Request, _=Depends(verify_mysearch_bootstrap)):
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            body = {}
+    except Exception:
+        body = {}
+    token, created = issue_mysearch_bootstrap_token(body.get("name", ""))
+    return {
+        "ok": True,
+        "created": created,
+        "token": token["token"],
+        "token_name": token["name"],
+        "service": token["service"],
+    }
 
 
 @app.post("/api/tokens")
