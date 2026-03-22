@@ -26,6 +26,7 @@
 - `proxy/server.py:1877`
   - 控制台页面入口。
 - 运行方式见 `proxy/README.md:144`、`proxy/README.md:166`、`proxy/README.md:173` 与 `proxy/Dockerfile:7`。
+- 自动化镜像发布入口见 `.github/workflows/docker-publish.yml:1`。当前 workflow 只构建 `proxy/` 容器，不会把整个仓库打成单镜像；Docker build context 固定为 `./proxy`，并依赖 `proxy/.dockerignore:1` 排除本地数据库和缓存文件。
 
 ### OpenClaw wrapper 入口
 
