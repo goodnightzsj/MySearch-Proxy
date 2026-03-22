@@ -374,6 +374,18 @@ def get_token_by_value(token_value):
         conn.close()
 
 
+def get_token_by_name(name, service="tavily"):
+    service = normalize_token_service(service)
+    conn = get_conn()
+    try:
+        return conn.execute(
+            "SELECT * FROM tokens WHERE service = ? AND name = ? ORDER BY id LIMIT 1",
+            (service, name),
+        ).fetchone()
+    finally:
+        conn.close()
+
+
 def delete_token(token_id):
     conn = get_conn()
     try:

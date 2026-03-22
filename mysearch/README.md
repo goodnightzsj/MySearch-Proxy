@@ -148,6 +148,50 @@ python3 -m venv venv
 - 如果本机有 `codex` 或 `claude` 命令，就自动注册 `mysearch` MCP
 - 如果宿主已有 `mysearch` config，会直接复用其中的 `MYSEARCH_*`
 
+## 作为 Docker MCP 服务运行
+
+如果你已经把仓库根目录的一套 compose 跑起来：
+
+```bash
+cd /path/to/MySearch-Proxy
+docker compose up -d
+```
+
+这时 `mysearch` 会通过 `MYSEARCH_PROXY_BOOTSTRAP_TOKEN` 自动从 `proxy` 申请或复用自己的 `mysp-` token，不再要求你手动先创建 MySearch 通用 token 才能拉起远程 MCP。
+
+默认远程 MCP 地址：
+
+- `streamableHTTP`
+  - `http://127.0.0.1:8000/mcp`
+- `SSE`
+  - `http://127.0.0.1:8000/sse`
+
+如果你只想单独构建 `mysearch` 镜像，也可以：
+
+```bash
+docker build -t mysearch-mcp ./mysearch
+docker run --rm -p 8000:8000 \
+  -e MYSEARCH_PROXY_BASE_URL=http://<your-proxy-host>:9874 \
+  -e MYSEARCH_PROXY_API_KEY=mysp-... \
+  mysearch-mcp
+```
+
+如果你更看重“部署最简单”，还可以直接跑单容器镜像：
+
+```bash
+docker run -d \
+  --name mysearch-stack \
+  --restart unless-stopped \
+  -p 9874:9874 \
+  -p 8000:8000 \
+  -e ADMIN_PASSWORD=change-me \
+  -e MYSEARCH_PROXY_BOOTSTRAP_TOKEN=change-me-bootstrap-token \
+  -v $(pwd)/mysearch-proxy-data:/app/proxy/data \
+  skernelx/mysearch-stack:latest
+```
+
+这个镜像会在同一容器里同时启动 `proxy` 和 `mysearch`，并通过内部 bootstrap 接口自动创建或复用 `mysearch` 专用 token。
+
 ## 推荐验收
 
 ### 1. 看 MCP 是否注册成功
