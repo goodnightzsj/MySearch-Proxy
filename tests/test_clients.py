@@ -1090,14 +1090,14 @@ class MySearchClientTests(unittest.TestCase):
             results=[
                 {
                     "provider": "tavily",
-                    "title": "OpenAI latest rollout update",
-                    "url": "https://www.theverge.com/ai/123/openai-update",
-                    "snippet": "News article",
+                    "title": "Responses API errors when using background mode - IsDown",
+                    "url": "https://isdown.app/status/openai/incidents/554117-responses-api-errors-when-using-background-mode",
+                    "snippet": "Aggregator incident page",
                     "content": "",
                 },
                 {
                     "provider": "tavily",
-                    "title": "OpenAI Status",
+                    "title": "Responses API errors when using background mode - OpenAI Status",
                     "url": "https://status.openai.com/incidents/abc123",
                     "snippet": "Incident details",
                     "content": "",
@@ -1133,6 +1133,69 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertEqual(reranked[0]["url"], "https://playwright.dev/docs/api/class-teststepinfo")
+
+    def test_pdf_verify_blend_promotes_exact_paper_page(self) -> None:
+        client = MySearchClient()
+        client._provider_can_serve = lambda provider: provider.name in {"tavily", "firecrawl"}  # type: ignore[method-assign]
+        client._search_firecrawl = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "firecrawl",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "firecrawl",
+                    "source": "web",
+                    "title": "DeepSeek-R1 Thoughtology",
+                    "url": "https://arxiv.org/pdf/2504.07128",
+                    "snippet": "Related paper",
+                    "content": "",
+                }
+            ],
+            "citations": [{"title": "DeepSeek-R1 Thoughtology", "url": "https://arxiv.org/pdf/2504.07128"}],
+        }
+        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning",
+                    "url": "https://arxiv.org/abs/2501.12948",
+                    "snippet": "The exact paper page",
+                    "content": "",
+                }
+            ],
+            "citations": [
+                {
+                    "title": "DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning",
+                    "url": "https://arxiv.org/abs/2501.12948",
+                }
+            ],
+        }
+
+        result = client._search_web_blended(
+            query="DeepSeek R1 paper pdf",
+            mode="pdf",
+            intent="resource",
+            strategy="verify",
+            decision=RouteDecision(
+                provider="firecrawl",
+                reason="pdf primary",
+                firecrawl_categories=("pdf",),
+                result_profile="resource",
+            ),
+            max_results=4,
+            include_content=False,
+            include_answer=False,
+            include_domains=None,
+            exclude_domains=None,
+        )
+
+        self.assertEqual(result["results"][0]["url"], "https://arxiv.org/abs/2501.12948")
 
     def test_resolve_research_plan_adapts_docs_and_news_budgets(self) -> None:
         client = MySearchClient()
@@ -1350,6 +1413,57 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertIn("Key findings from retrieved sources:", result["research_summary"])
         self.assertIn("Primary finding", result["research_summary"])
+
+    def test_research_anchors_web_discovery_to_tavily_for_generic_queries(self) -> None:
+        client = MySearchClient()
+        search_calls: list[dict[str, object]] = []
+
+        def fake_search(**kwargs):  # type: ignore[no-untyped-def]
+            search_calls.append(kwargs)
+            return {
+                "provider": "tavily",
+                "intent": "exploratory",
+                "strategy": "deep",
+                "answer": "",
+                "results": [
+                    {
+                        "title": "Primary result",
+                        "url": "https://example.com/primary",
+                        "snippet": "Primary result",
+                        "content": "",
+                    }
+                ],
+                "citations": [{"title": "Primary result", "url": "https://example.com/primary"}],
+                "evidence": {
+                    "providers_consulted": ["tavily"],
+                    "verification": "single-provider",
+                    "citation_count": 1,
+                    "source_diversity": 1,
+                    "source_domains": ["example.com"],
+                    "official_source_count": 0,
+                    "official_mode": "off",
+                    "confidence": "medium",
+                    "conflicts": [],
+                },
+            }
+
+        client.search = fake_search  # type: ignore[method-assign]
+        client.extract_url = lambda **kwargs: {  # type: ignore[method-assign]
+            "url": kwargs["url"],
+            "provider": "firecrawl",
+            "content": "content",
+            "cache": {"extract": {"hit": False, "ttl_seconds": 300}},
+        }
+        client.research(
+            query="best search MCP server 2026",
+            mode="web",
+            strategy="deep",
+            include_social=False,
+            scrape_top_n=1,
+        )
+
+        self.assertTrue(search_calls)
+        self.assertEqual(search_calls[0]["provider"], "tavily")
 
 
 if __name__ == "__main__":

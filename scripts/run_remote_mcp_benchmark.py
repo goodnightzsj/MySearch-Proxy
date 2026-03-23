@@ -86,7 +86,7 @@ def map_mysearch_mode(row: dict[str, str]) -> str:
         return "github"
     if domain == "PDF":
         return "pdf"
-    if domain in {"新闻", "技术动态 / status"}:
+    if domain == "新闻":
         return "news"
     return "web"
 
