@@ -30,6 +30,43 @@ class _FakeResponse:
 
 
 class MySearchClientTests(unittest.TestCase):
+    def test_parse_result_timestamp_supports_rfc822(self) -> None:
+        client = MySearchClient()
+
+        parsed = client._parse_result_timestamp("Sun, 22 Mar 2026 20:43:36 GMT")
+
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed.isoformat(), "2026-03-22T20:43:36+00:00")
+
+    def test_news_rerank_prefers_newer_rfc822_result(self) -> None:
+        client = MySearchClient()
+        results = [
+            {
+                "provider": "exa",
+                "title": "Older entertainment hit",
+                "url": "https://deadline.com/2026/03/older-entertainment-hit",
+                "published_date": "2026-03-09T00:00:00.000Z",
+            },
+            {
+                "provider": "tavily",
+                "title": "Newer entertainment hit",
+                "url": "https://fortune.com/2026/03/22/newer-entertainment-hit/",
+                "published_date": "Sun, 22 Mar 2026 20:43:36 GMT",
+                "snippet": "Fresh box office update",
+            },
+        ]
+
+        ranked = client._rerank_general_results(
+            query="2026 highest grossing movie opening weekend",
+            result_profile="news",
+            results=results,
+            include_domains=None,
+        )
+
+        self.assertEqual(ranked[0]["provider"], "tavily")
+        self.assertEqual(ranked[0]["title"], "Newer entertainment hit")
+
     def test_pricing_keywords_alone_do_not_trigger_docs_mode(self) -> None:
         client = MySearchClient()
 
