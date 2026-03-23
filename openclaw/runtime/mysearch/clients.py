@@ -169,6 +169,7 @@ _MODE_PROVIDER_POLICY: dict[str, SearchRoutePolicy] = {
         fallback_chain=("tavily", "exa"),
         firecrawl_categories=("pdf",),
         result_profile="resource",
+        allow_exa_rescue=True,
     ),
     "content": SearchRoutePolicy(
         key="content",
@@ -2476,19 +2477,95 @@ class MySearchClient:
             return False
         if result.get("fallback"):
             return False
-        if include_domains or self._resolve_official_result_mode(
+        query_lower = query.lower()
+        strict_official = self._resolve_official_result_mode(
             query=query,
             mode=mode,
             intent=intent,
             include_domains=include_domains,
-        ) == "strict":
+        ) == "strict"
+        rescue_sensitive_query = mode == "pdf" or self._looks_like_pricing_query(query_lower)
+        if (include_domains or strict_official) and not rescue_sensitive_query:
             return False
         results = list(result.get("results") or [])
-        if len(results) >= min(max_results, 3):
+        sparse_results = len(results) < min(max_results, 3)
+        weak_results = self._result_set_looks_weak_for_exa_rescue(
+            query=query,
+            mode=mode,
+            result=result,
+        )
+        if not sparse_results and not weak_results:
             return False
-        query_terms = re.findall(r"[a-z0-9\u4e00-\u9fff]+", query.lower())
+        if rescue_sensitive_query:
+            return True
+        query_terms = re.findall(r"[a-z0-9\u4e00-\u9fff]+", query_lower)
         long_tail_signal = len(query_terms) >= 6 or len(query) >= 48
-        return mode == "news" or intent in {"comparison", "exploratory", "tutorial"} or long_tail_signal
+        return sparse_results and (
+            mode == "news" or intent in {"comparison", "exploratory", "tutorial"} or long_tail_signal
+        )
+
+    def _result_set_looks_weak_for_exa_rescue(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        result: dict[str, Any],
+    ) -> bool:
+        results = list(result.get("results") or [])
+        if not results:
+            return True
+        if mode == "pdf":
+            return not self._has_strong_pdf_match(query=query, results=results)
+        if self._looks_like_pricing_query(query.lower()):
+            return not self._has_canonical_pricing_result(results)
+        return False
+
+    def _has_strong_pdf_match(
+        self,
+        *,
+        query: str,
+        results: list[dict[str, Any]],
+    ) -> bool:
+        query_tokens = self._query_brand_tokens(query)
+        precision_tokens = self._query_precision_tokens(query)
+        paper_tokens = self._paper_query_subject_tokens(
+            query=query,
+            query_tokens=query_tokens,
+            precision_tokens=precision_tokens,
+        )
+        for item in results[:3]:
+            url = item.get("url", "")
+            hostname = self._result_hostname(item)
+            path = urlparse(url).path.lower()
+            title_text = (item.get("title") or "").lower()
+            path_hits, total_hits = self._query_precision_hit_counts(
+                hostname=hostname,
+                path=path,
+                title_text=title_text,
+                query_tokens=precision_tokens,
+            )
+            named_paper = self._looks_like_primary_named_paper_result(
+                title_text=title_text,
+                query_tokens=paper_tokens,
+            )
+            paper_shape = self._looks_like_pdf_url(url) or any(
+                marker in path for marker in ("/abs/", "/html/")
+            )
+            if named_paper and paper_shape:
+                return True
+            if paper_shape and total_hits >= min(max(len(paper_tokens), 2), 3):
+                return True
+            if hostname == "arxiv.org" and path_hits >= 2 and paper_shape:
+                return True
+        return False
+
+    def _has_canonical_pricing_result(self, results: list[dict[str, Any]]) -> bool:
+        for item in results[:5]:
+            hostname = self._result_hostname(item)
+            path = urlparse(item.get("url", "")).path.lower()
+            if self._looks_like_canonical_pricing_result(hostname=hostname, path=path):
+                return True
+        return False
 
     def _apply_exa_rescue(
         self,
@@ -2546,7 +2623,7 @@ class MySearchClient:
             "fallback": {
                 "from": primary_result.get("provider", "unknown"),
                 "to": "exa",
-                "reason": "primary provider returned sparse results; Exa rescue engaged",
+                "reason": "primary provider returned sparse or weak results; Exa rescue engaged",
             },
         }
 
@@ -3534,7 +3611,19 @@ class MySearchClient:
             filtered.append(dict(item))
         return filtered
 
-    def _exa_search_type(self, query: str) -> str:
+    def _exa_search_type(
+        self,
+        query: str,
+        *,
+        mode: str = "",
+        intent: str = "",
+        include_domains: list[str] | None = None,
+    ) -> str:
+        query_lower = query.lower()
+        if self._looks_like_pricing_query(query_lower) and (
+            include_domains or mode in {"web", "docs"} or intent in {"factual", "resource"}
+        ):
+            return "keyword"
         exact_signals = re.findall(
             r'[A-Z][a-zA-Z]+\.[a-zA-Z_]+|[a-z_]{2,}\.[a-z_]+\(|::\w+|#\w+|v\d+\.\d+',
             query,
@@ -3567,7 +3656,12 @@ class MySearchClient:
     ) -> dict[str, Any]:
         provider = self.config.exa
         key = self._get_key_or_raise(provider)
-        search_type = self._exa_search_type(query)
+        search_type = self._exa_search_type(
+            query,
+            mode=mode,
+            intent=intent,
+            include_domains=include_domains,
+        )
         payload: dict[str, Any] = {
             "query": query,
             "type": search_type,
@@ -4787,7 +4881,7 @@ class MySearchClient:
 
     def _looks_like_pricing_result(self, *, url: str, hostname: str, title_text: str) -> bool:
         path = urlparse(url).path.lower()
-        if hostname.startswith("shop."):
+        if hostname.startswith("shop.") and "/product/" not in path:
             return True
         pricing_markers = (
             "/pricing",
@@ -4803,7 +4897,10 @@ class MySearchClient:
 
     def _looks_like_canonical_pricing_result(self, *, hostname: str, path: str) -> bool:
         normalized_path = path.rstrip("/")
-        if hostname.startswith("shop.") and ("/shop/buy" in normalized_path or "/buy-" in normalized_path):
+        path_segments = [segment for segment in normalized_path.split("/") if segment]
+        if ("/shop/buy" in normalized_path or "/buy-" in normalized_path) and len(path_segments) <= 3:
+            return True
+        if hostname.startswith("shop.") and "/product/" not in normalized_path and len(path_segments) <= 3:
             return True
         if "pricing" in normalized_path and "/docs/" not in normalized_path and not hostname.startswith("developers."):
             return True

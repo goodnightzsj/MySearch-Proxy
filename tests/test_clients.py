@@ -1126,6 +1126,83 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["fallback"]["to"], "exa")
         self.assertEqual(result["results"][0]["url"], "https://exa.example.com/two")
 
+    def test_search_pdf_verify_uses_exa_rescue_for_weak_results(self) -> None:
+        client = MySearchClient()
+        client._provider_can_serve = lambda provider: provider.name in {"firecrawl", "exa"}  # type: ignore[method-assign]
+        client._search_firecrawl = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "firecrawl",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "firecrawl",
+                    "source": "web",
+                    "title": "DeepSeek-R1 Thoughtology",
+                    "url": "https://arxiv.org/pdf/2504.07128",
+                    "snippet": "Related paper",
+                    "content": "",
+                },
+                {
+                    "provider": "firecrawl",
+                    "source": "web",
+                    "title": "Another paper",
+                    "url": "https://arxiv.org/pdf/2505.12625",
+                    "snippet": "Other paper",
+                    "content": "",
+                },
+                {
+                    "provider": "firecrawl",
+                    "source": "web",
+                    "title": "Paper three",
+                    "url": "https://arxiv.org/pdf/2503.11486",
+                    "snippet": "Third paper",
+                    "content": "",
+                },
+            ],
+            "citations": [
+                {"title": "DeepSeek-R1 Thoughtology", "url": "https://arxiv.org/pdf/2504.07128"},
+                {"title": "Another paper", "url": "https://arxiv.org/pdf/2505.12625"},
+                {"title": "Paper three", "url": "https://arxiv.org/pdf/2503.11486"},
+            ],
+        }
+        client._search_exa = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "exa",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "exa",
+                    "source": "web",
+                    "title": "DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning",
+                    "url": "https://arxiv.org/abs/2501.12948",
+                    "snippet": "Exact paper page",
+                    "content": "",
+                }
+            ],
+            "citations": [
+                {
+                    "title": "DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning",
+                    "url": "https://arxiv.org/abs/2501.12948",
+                }
+            ],
+        }
+
+        result = client.search(
+            query="DeepSeek R1 paper pdf",
+            mode="pdf",
+            strategy="verify",
+            max_results=3,
+            provider="auto",
+            include_domains=["arxiv.org"],
+            include_answer=False,
+        )
+
+        self.assertEqual(result["provider"], "hybrid")
+        self.assertEqual(result["fallback"]["to"], "exa")
+        self.assertEqual(result["results"][0]["url"], "https://arxiv.org/abs/2501.12948")
+
     def test_rerank_general_news_prefers_mainstream_article_shape(self) -> None:
         client = MySearchClient()
 
@@ -1183,6 +1260,33 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertEqual(reranked[0]["url"], "https://openai.com/api/pricing/")
+
+    def test_rerank_general_web_prefers_canonical_buy_page_over_sku_detail(self) -> None:
+        client = MySearchClient()
+
+        reranked = client._rerank_general_results(
+            query="MacBook Air M5 国行价格 官方",
+            result_profile="web",
+            include_domains=["apple.com.cn"],
+            results=[
+                {
+                    "provider": "exa",
+                    "title": "13 英寸 MacBook Air - 银色",
+                    "url": "https://www.apple.com.cn/shop/buy-mac/macbook-air/13-%E8%8B%B1%E5%AF%B8-m5-%E8%8A%AF%E7%89%87-8-%E6%A0%B8-gpu-16gb-%E7%BB%9F%E4%B8%80%E5%86%85%E5%AD%98-256gb-ssd-%E5%AD%98%E5%82%A8%E9%93%B6%E8%89%B2",
+                    "snippet": "SKU detail page",
+                    "content": "",
+                },
+                {
+                    "provider": "exa",
+                    "title": "购买 MacBook Air",
+                    "url": "https://www.apple.com.cn/shop/buy-mac/macbook-air",
+                    "snippet": "Canonical buy page",
+                    "content": "",
+                },
+            ],
+        )
+
+        self.assertEqual(reranked[0]["url"], "https://www.apple.com.cn/shop/buy-mac/macbook-air")
 
     def test_rerank_general_web_prefers_status_page_for_status_queries(self) -> None:
         client = MySearchClient()
@@ -1389,6 +1493,34 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertTrue(firecrawl_calls)
         self.assertTrue(firecrawl_calls[0]["include_content"])
+
+    def test_exa_search_uses_keyword_mode_for_official_pricing_query(self) -> None:
+        client = MySearchClient()
+        request_payloads: list[dict[str, object]] = []
+
+        client._get_key_or_raise = lambda provider: type(  # type: ignore[method-assign]
+            "FakeKey",
+            (),
+            {"key": "test-key", "source": "env"},
+        )()
+
+        def fake_request_json(**kwargs):  # type: ignore[no-untyped-def]
+            request_payloads.append(dict(kwargs["payload"]))
+            return {"results": []}
+
+        client._request_json = fake_request_json  # type: ignore[method-assign]
+
+        client._search_exa(
+            query="MacBook Air M5 国行价格 官方",
+            max_results=5,
+            include_domains=["apple.com.cn"],
+            exclude_domains=None,
+            include_content=False,
+            mode="web",
+            intent="factual",
+        )
+
+        self.assertEqual(request_payloads[0]["type"], "keyword")
 
     def test_search_verify_conflicts_trigger_xai_arbitration(self) -> None:
         client = MySearchClient()
