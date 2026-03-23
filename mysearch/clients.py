@@ -4418,13 +4418,8 @@ class MySearchClient:
     ) -> bool:
         if len(query_tokens) < 2:
             return False
-        normalized_title = re.sub(r"[^a-z0-9]+", " ", title_text).strip()
-        compact_title = re.sub(r"[^a-z0-9]+", "", title_text)
-        subject = " ".join(query_tokens[:2])
-        compact_subject = "".join(query_tokens[:2])
-        return normalized_title.startswith(f"{subject} :") or compact_title.startswith(
-            f"{compact_subject}:"
-        )
+        subject_pattern = r"[\s\-_]*".join(re.escape(token) for token in query_tokens[:2])
+        return re.match(rf"^\s*{subject_pattern}\s*:", title_text) is not None
 
     def _is_probably_official_resource_result(
         self,
@@ -4694,7 +4689,7 @@ class MySearchClient:
         for token in re.findall(r"[a-z0-9][a-z0-9._-]{1,}", query.lower()):
             if token in stopwords or token.isdigit():
                 continue
-            if len(token) < 3:
+            if len(token) < 3 and not self._is_mixed_alnum_short_token(token):
                 continue
             tokens.append(token)
         return tokens
@@ -4733,13 +4728,20 @@ class MySearchClient:
             for candidate in candidates:
                 if candidate in stopwords or candidate.isdigit():
                     continue
-                if len(candidate) < 3:
+                if len(candidate) < 3 and not self._is_mixed_alnum_short_token(candidate):
                     continue
                 if candidate in seen:
                     continue
                 seen.add(candidate)
                 precision_tokens.append(candidate)
         return precision_tokens
+
+    def _is_mixed_alnum_short_token(self, token: str) -> bool:
+        return (
+            len(token) == 2
+            and any(ch.isalpha() for ch in token)
+            and any(ch.isdigit() for ch in token)
+        )
 
     def _query_precision_hit_counts(
         self,
