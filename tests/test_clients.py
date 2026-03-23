@@ -119,6 +119,17 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertIn("Incentivizing Reasoning Capability", ranked[0]["title"])
 
+    def test_pdf_query_tokenization_keeps_short_model_suffix(self) -> None:
+        client = MySearchClient()
+
+        brand_tokens = client._query_brand_tokens("DeepSeek R1 paper pdf")
+        precision_tokens = client._query_precision_tokens("DeepSeek R1 paper pdf")
+        subject_tokens = client._paper_query_subject_tokens(brand_tokens, precision_tokens)
+
+        self.assertIn("r1", brand_tokens)
+        self.assertIn("r1", precision_tokens)
+        self.assertEqual(subject_tokens[:2], ["deepseek", "r1"])
+
     def test_pricing_keywords_alone_do_not_trigger_docs_mode(self) -> None:
         client = MySearchClient()
 
