@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from fastapi.testclient import TestClient
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROXY_ROOT = REPO_ROOT / "proxy"
@@ -115,6 +117,16 @@ class ProxyTavilySettingsTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["request_target"], "http://127.0.0.1:8787/api/tavily/search")
         self.assertIn("/api/tavily", result["detail"])
+
+    def test_console_pages_render_successfully(self) -> None:
+        with TestClient(self.module.app) as client:
+            response = client.get("/")
+            mysearch_response = client.get("/mysearch")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("text/html", response.headers.get("content-type", ""))
+        self.assertEqual(mysearch_response.status_code, 200)
+        self.assertIn("text/html", mysearch_response.headers.get("content-type", ""))
 
 
 if __name__ == "__main__":
