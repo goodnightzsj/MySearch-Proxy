@@ -1405,6 +1405,65 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(result["results"][0]["url"], "https://arxiv.org/abs/2501.12948")
 
+    def test_pdf_verify_blend_falls_back_to_exa_when_primary_and_secondary_fail(self) -> None:
+        client = MySearchClient()
+        client._provider_can_serve = lambda provider: provider.name in {"tavily", "firecrawl", "exa"}  # type: ignore[method-assign]
+        client._search_firecrawl = lambda **kwargs: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            MySearchError("firecrawl quota exhausted")
+        )
+        client._search_tavily = lambda **kwargs: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            MySearchError("tavily upstream failed")
+        )
+        client._search_exa = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "exa",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "exa",
+                    "source": "web",
+                    "title": "DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning",
+                    "url": "https://arxiv.org/abs/2501.12948",
+                    "snippet": "Exact paper page",
+                    "content": "",
+                }
+            ],
+            "citations": [
+                {
+                    "title": "DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning",
+                    "url": "https://arxiv.org/abs/2501.12948",
+                }
+            ],
+            "evidence": {
+                "providers_consulted": ["exa"],
+                "verification": "single-provider",
+            },
+        }
+
+        result = client._search_web_blended(
+            query="DeepSeek R1 paper pdf",
+            mode="pdf",
+            intent="resource",
+            strategy="verify",
+            decision=RouteDecision(
+                provider="firecrawl",
+                reason="pdf primary",
+                firecrawl_categories=("pdf",),
+                result_profile="resource",
+                allow_exa_rescue=True,
+            ),
+            max_results=4,
+            include_content=False,
+            include_answer=False,
+            include_domains=["arxiv.org"],
+            exclude_domains=None,
+        )
+
+        self.assertEqual(result["provider"], "exa")
+        self.assertEqual(result["fallback"]["to"], "exa")
+        self.assertEqual(result["results"][0]["url"], "https://arxiv.org/abs/2501.12948")
+
     def test_resolve_research_plan_adapts_docs_and_news_budgets(self) -> None:
         client = MySearchClient()
 

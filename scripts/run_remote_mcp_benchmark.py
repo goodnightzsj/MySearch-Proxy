@@ -205,12 +205,16 @@ import urllib.request
 def parse_mcp_payload(raw):
     text = raw.decode(errors="replace") if isinstance(raw, bytes) else raw
     text = text.strip()
+    if not text:
+        return {}
     if text.startswith("event:") or "\ndata:" in text:
         data_lines = []
         for line in text.splitlines():
             if line.startswith("data:"):
                 data_lines.append(line[len("data:"):].strip())
         text = "\n".join(data_lines).strip()
+    if not text:
+        return {}
     return json.loads(text)
 
 
