@@ -2933,6 +2933,7 @@ class MySearchClient:
         blended_results, blended_errors = self._execute_parallel(tasks, max_workers=len(tasks))
         primary_failed = "primary" in blended_errors
         secondary_failed = "secondary" in blended_errors
+        exa_supplement = blended_results.get("exa_supplement")
 
         if primary_failed and not secondary_failed:
             primary_result = blended_results["secondary"]
@@ -2944,6 +2945,18 @@ class MySearchClient:
             secondary_result = None
             secondary_error = ""
         elif primary_failed and secondary_failed:
+            if exa_supplement and exa_supplement.get("results"):
+                exa_only = dict(exa_supplement)
+                exa_only["route_selected"] = "exa"
+                exa_only["fallback"] = {
+                    "from": decision.provider,
+                    "to": "exa",
+                    "reason": "primary and secondary providers failed; Exa supplement engaged",
+                }
+                exa_only["secondary_error"] = str(blended_errors["secondary"])[:200]
+                exa_only.setdefault("evidence", {})["providers_consulted"] = ["exa"]
+                exa_only["evidence"]["verification"] = "fallback"
+                return exa_only
             primary_err = str(blended_errors["primary"])[:150]
             secondary_err = str(blended_errors["secondary"])[:150]
             raise MySearchError(
@@ -2960,7 +2973,6 @@ class MySearchClient:
             secondary_result=secondary_result,
             max_results=max_results,
         )
-        exa_supplement = blended_results.get("exa_supplement")
         if exa_supplement and exa_supplement.get("results"):
             merged = self._merge_search_payloads(
                 primary_result=merged,
