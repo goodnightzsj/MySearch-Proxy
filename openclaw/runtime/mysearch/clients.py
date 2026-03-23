@@ -12,6 +12,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass as _dataclass
 from datetime import date, datetime, time as dt_time, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Literal
 from urllib.error import HTTPError as UrlHTTPError
 from urllib.parse import urlparse, urlunparse
@@ -4094,7 +4095,10 @@ class MySearchClient:
         try:
             parsed = datetime.fromisoformat(normalized)
         except ValueError:
-            return None
+            try:
+                parsed = parsedate_to_datetime(value.strip())
+            except (TypeError, ValueError, IndexError):
+                return None
         if parsed.tzinfo is None:
             return parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc)
