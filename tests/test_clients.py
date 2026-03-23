@@ -95,6 +95,30 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertIn("Split", ranked[0]["title"])
 
+    def test_pdf_rerank_prefers_primary_named_paper_over_derivative_variants(self) -> None:
+        client = MySearchClient()
+        results = [
+            {
+                "provider": "tavily",
+                "title": "DeepSeek-R1 Thoughtology: Let's think about LLM ...",
+                "url": "https://arxiv.org/abs/2504.07128",
+            },
+            {
+                "provider": "tavily",
+                "title": "DeepSeek-R1: Incentivizing Reasoning Capability in LLMs ...",
+                "url": "https://arxiv.org/html/2501.12948v1",
+            },
+        ]
+
+        ranked = client._rerank_resource_results(
+            query="DeepSeek R1 paper pdf",
+            mode="pdf",
+            results=results,
+            include_domains=None,
+        )
+
+        self.assertIn("Incentivizing Reasoning Capability", ranked[0]["title"])
+
     def test_pricing_keywords_alone_do_not_trigger_docs_mode(self) -> None:
         client = MySearchClient()
 
