@@ -803,8 +803,8 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["results"][0]["url"], "https://playwright.dev/docs/api/class-test")
         self.assertEqual(result["citations"][0]["url"], "https://playwright.dev/docs/api/class-test")
         self.assertEqual(result["evidence"]["official_source_count"], 1)
-        self.assertEqual(result["evidence"]["confidence"], "medium")
-        self.assertIn("mixed-official-and-third-party", result["evidence"]["conflicts"])
+        self.assertEqual(result["evidence"]["confidence"], "high")
+        self.assertNotIn("mixed-official-and-third-party", result["evidence"]["conflicts"])
 
     def test_search_strict_official_mode_filters_to_official_results(self) -> None:
         client = MySearchClient()
@@ -945,6 +945,145 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["evidence"]["official_source_count"], 1)
         self.assertTrue(result["evidence"]["official_filter_applied"])
         self.assertNotIn("strict-official-unmet", result["evidence"]["conflicts"])
+
+    def test_docs_mode_enters_strict_resource_policy(self) -> None:
+        client = MySearchClient()
+
+        mode = client._resolve_official_result_mode(
+            query="Next.js generateMetadata",
+            mode="docs",
+            intent="resource",
+            include_domains=None,
+        )
+
+        self.assertEqual(mode, "strict")
+
+    def test_search_uses_exa_rescue_for_sparse_web_results(self) -> None:
+        client = MySearchClient()
+        client._provider_can_serve = lambda provider: True  # type: ignore[method-assign]
+        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "Sparse result",
+                    "url": "https://example.com/one",
+                    "snippet": "Only one result",
+                    "content": "",
+                }
+            ],
+            "citations": [
+                {"title": "Sparse result", "url": "https://example.com/one"},
+            ],
+        }
+        client._search_exa = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "exa",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "exa",
+                    "source": "web",
+                    "title": "Long tail reference",
+                    "url": "https://exa.example.com/two",
+                    "snippet": "Recovered long-tail source",
+                    "content": "",
+                },
+                {
+                    "provider": "exa",
+                    "source": "web",
+                    "title": "Another result",
+                    "url": "https://exa.example.com/three",
+                    "snippet": "Recovered another source",
+                    "content": "",
+                },
+            ],
+            "citations": [
+                {"title": "Long tail reference", "url": "https://exa.example.com/two"},
+                {"title": "Another result", "url": "https://exa.example.com/three"},
+            ],
+        }
+
+        result = client.search(
+            query="best open source vector database comparison for offline agents",
+            mode="web",
+            strategy="fast",
+            provider="tavily",
+            max_results=3,
+            include_answer=False,
+        )
+
+        self.assertEqual(result["provider"], "hybrid")
+        self.assertEqual(result["fallback"]["to"], "exa")
+        self.assertEqual(result["results"][0]["url"], "https://exa.example.com/two")
+
+    def test_rerank_general_news_prefers_mainstream_article_shape(self) -> None:
+        client = MySearchClient()
+
+        reranked = client._rerank_general_results(
+            query="2026 oscar winners",
+            result_profile="news",
+            include_domains=None,
+            results=[
+                {
+                    "provider": "tavily",
+                    "title": "Oscars 2026 winners list",
+                    "url": "https://news-aggregate.example.com/oscars-winners",
+                    "snippet": "aggregated summary",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Oscars 2026 winners list",
+                    "url": "https://www.latimes.com/entertainment-arts/awards/story/2026-03-15/oscars-2026-winners-list-full-results",
+                    "snippet": "Los Angeles Times coverage",
+                    "content": "",
+                    "published_date": "2026-03-15T09:00:00+00:00",
+                },
+            ],
+        )
+
+        self.assertEqual(
+            reranked[0]["url"],
+            "https://www.latimes.com/entertainment-arts/awards/story/2026-03-15/oscars-2026-winners-list-full-results",
+        )
+
+    def test_resolve_research_plan_adapts_docs_and_news_budgets(self) -> None:
+        client = MySearchClient()
+
+        docs_plan = client._resolve_research_plan(
+            query="OpenAI pricing official",
+            mode="docs",
+            intent="resource",
+            strategy="balanced",
+            web_max_results=5,
+            social_max_results=5,
+            scrape_top_n=4,
+            include_social=True,
+            include_domains=None,
+        )
+        news_plan = client._resolve_research_plan(
+            query="2026 oscars winners",
+            mode="news",
+            intent="news",
+            strategy="deep",
+            web_max_results=5,
+            social_max_results=2,
+            scrape_top_n=3,
+            include_social=True,
+            include_domains=None,
+        )
+
+        self.assertEqual(docs_plan["web_mode"], "docs")
+        self.assertEqual(docs_plan["scrape_top_n"], 2)
+        self.assertGreaterEqual(news_plan["web_max_results"], 6)
+        self.assertGreaterEqual(news_plan["social_max_results"], 4)
+        self.assertGreaterEqual(news_plan["scrape_top_n"], 4)
 
 
 if __name__ == "__main__":

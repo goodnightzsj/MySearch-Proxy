@@ -296,12 +296,13 @@ class RoutingTests(unittest.TestCase):
         decision = self._route(client, mode="docs", include_content=True)
         self.assertEqual(decision.provider, "firecrawl")
 
-    def test_docs_mode_without_content_and_tavily_available_routes_to_tavily(self) -> None:
-        client = _make_client(tavily_keys=["key1"])
+    def test_docs_mode_without_content_routes_to_firecrawl(self) -> None:
+        client = _make_client(tavily_keys=["key1"], firecrawl_keys=["fc"])
         decision = self._route(client, mode="docs", include_content=False)
-        self.assertEqual(decision.provider, "tavily")
+        self.assertEqual(decision.provider, "firecrawl")
+        self.assertEqual(decision.fallback_chain, ["tavily"])
 
-    def test_docs_fallback_to_exa_when_tavily_and_firecrawl_unavailable(self) -> None:
+    def test_docs_route_keeps_firecrawl_primary_even_when_keys_missing(self) -> None:
         client = _make_client(
             tavily_keys=[],
             firecrawl_keys=[],
@@ -309,6 +310,7 @@ class RoutingTests(unittest.TestCase):
         )
         decision = self._route(client, mode="docs", include_content=False)
         self.assertEqual(decision.provider, "exa")
+        self.assertIsNone(decision.fallback_chain)
 
     def test_news_mode_routes_to_tavily(self) -> None:
         client = _make_client(tavily_keys=["key1"])
@@ -325,17 +327,20 @@ class RoutingTests(unittest.TestCase):
         client = _make_client(tavily_keys=[], exa_keys=["exa-key"])
         decision = self._route(client, mode="web")
         self.assertEqual(decision.provider, "exa")
+        self.assertEqual(decision.fallback_chain, ["firecrawl"])
 
     def test_github_mode_routes_to_docs_path(self) -> None:
         """GitHub mode should follow docs routing path."""
         client = _make_client(tavily_keys=["key"])
         decision = self._route(client, mode="github", include_content=False)
-        self.assertEqual(decision.provider, "tavily")
+        self.assertEqual(decision.provider, "firecrawl")
+        self.assertEqual(decision.fallback_chain, ["tavily"])
 
     def test_pdf_mode_routes_to_docs_path(self) -> None:
         client = _make_client(tavily_keys=["key"])
         decision = self._route(client, mode="pdf", include_content=False)
-        self.assertEqual(decision.provider, "tavily")
+        self.assertEqual(decision.provider, "firecrawl")
+        self.assertEqual(decision.fallback_chain, ["tavily"])
 
     def test_include_content_routes_to_firecrawl(self) -> None:
         client = _make_client()
@@ -521,6 +526,18 @@ class BlendingDecisionTests(unittest.TestCase):
             mode="auto",
             intent="factual",
             include_domains=["openai.com"],
+        ))
+
+    def test_no_blend_for_news_profile(self) -> None:
+        client = _make_client(tavily_keys=["k"], firecrawl_keys=["k"])
+        self.assertFalse(client._should_blend_web_providers(
+            requested_provider="auto",
+            decision=RouteDecision(provider="tavily", reason="test", result_profile="news"),
+            sources=["web"],
+            strategy="balanced",
+            mode="news",
+            intent="news",
+            include_domains=None,
         ))
 
     def test_blend_when_conditions_met(self) -> None:

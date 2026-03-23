@@ -309,14 +309,24 @@ MySearch 不是单一 provider 的壳。
   - 优先 Tavily
 - `docs / github / pdf`
   - 优先 Firecrawl
-- 补充网页发现
-  - 可回退 Exa
+- `pricing / changelog / 官方文档`
+  - 仍按 Firecrawl / 官方结果优先处理，不为凑数默认混入第三方页面
+- 补充网页发现 / 长尾资料
+  - Exa 只做补位，不做默认主搜
 - `social`
   - 走 xAI 或 compatible `/social/search`
 - `extract_url`
   - Firecrawl 优先，Tavily 回退
 - `research`
-  - 搜索 + 抓取 + 可选 social 补充
+  - 一轮小 research：搜索发现 + 正文抓取 + 可选 social 补充
+
+补充约束：
+
+- `web` 与 `news` 使用不同排序口径：
+  - `web` 更看官方性、页面相关性
+  - `news` 更看时效、媒体质量与事件一致性
+- `official / 官方 / 官网`、`docs / pricing / changelog` 一类查询会进入更严格的官方结果模式；如果官方域结果不足，会明确说明，而不是默认拿第三方结果补齐
+- Exa 只在 Tavily / Firecrawl 结果不足、长尾语义查询或显式 fallback 场景下介入
 
 ## Intent 和 Strategy
 
@@ -341,13 +351,13 @@ MySearch 不是单一 provider 的壳。
 适合记忆的简单规则：
 
 - 想快一点：
-  - `fast`
+  - `fast`：单 provider，最小候选池
 - 想稳一点：
-  - `balanced`
+  - `balanced`：主 provider 为主，按模式补少量候选
 - 想多做交叉验证：
-  - `verify`
+  - `verify`：扩大候选池并交叉验证，必要时启用 Exa 补位
 - 想做小研究：
-  - `deep`
+  - `deep`：更偏 `research` 的较大候选池与更多正文抓取
 
 ## 关键环境变量
 
