@@ -67,6 +67,34 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(ranked[0]["provider"], "tavily")
         self.assertEqual(ranked[0]["title"], "Newer entertainment hit")
 
+    def test_news_rerank_prefers_query_relevant_story_over_generic_newer_article(self) -> None:
+        client = MySearchClient()
+        results = [
+            {
+                "provider": "tavily",
+                "title": "Bowen Yang & Matt Rogers Strike New Deal For Las Culturistas",
+                "url": "https://deadline.com/2026/03/bowen-yang-matt-rogers-las-culturistas-new-deal-iheartmedia-1236762675/",
+                "published_date": "Mon, 23 Mar 2026 13:00:00 GMT",
+                "snippet": "A new podcast distribution agreement.",
+            },
+            {
+                "provider": "tavily",
+                "title": "Barry Keoghan Reveals He Hid From Online Hate After Sabrina Carpenter Split",
+                "url": "https://www.tmz.com/2026/03/21/barry-keoghan-talks-online-haters/",
+                "published_date": "Sat, 21 Mar 2026 15:54:42 GMT",
+                "snippet": "The actor addressed breakup rumors after the split.",
+            },
+        ]
+
+        ranked = client._rerank_general_results(
+            query="latest celebrity breakup rumors 2026",
+            result_profile="news",
+            results=results,
+            include_domains=None,
+        )
+
+        self.assertIn("Split", ranked[0]["title"])
+
     def test_pricing_keywords_alone_do_not_trigger_docs_mode(self) -> None:
         client = MySearchClient()
 

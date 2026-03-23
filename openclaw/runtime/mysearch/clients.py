@@ -2591,7 +2591,11 @@ class MySearchClient:
         include_domains: list[str] | None,
     ) -> tuple[int, int, int, int, int, int, int, int]:
         if result_profile == "news":
-            return self._news_result_rank(item=item, include_domains=include_domains)
+            return self._news_result_rank(
+                query=query,
+                item=item,
+                include_domains=include_domains,
+            )
         return self._web_result_rank(
             query=query,
             item=item,
@@ -2601,10 +2605,21 @@ class MySearchClient:
     def _news_result_rank(
         self,
         *,
+        query: str,
         item: dict[str, Any],
         include_domains: list[str] | None,
-    ) -> tuple[int, int, int, int, int, int, int, int]:
+    ) -> tuple[int, int, int, int, int, int, int, int, int, int]:
         hostname = self._result_hostname(item)
+        path = urlparse(item.get("url", "")).path.lower()
+        title_text = (item.get("title") or "").lower()
+        snippet_text = (item.get("snippet") or "").lower()
+        content_text = (item.get("content") or "").lower()
+        path_precision_hits, total_precision_hits = self._query_precision_hit_counts(
+            hostname=hostname,
+            path=path,
+            title_text=f"{title_text} {snippet_text} {content_text}",
+            query_tokens=self._query_precision_tokens(query),
+        )
         include_match = int(
             bool(include_domains)
             and any(self._domain_matches(hostname, domain) for domain in include_domains or [])
@@ -2616,6 +2631,8 @@ class MySearchClient:
         content_score, snippet_score, title_score = self._result_quality_score(item)
         return (
             include_match,
+            path_precision_hits,
+            total_precision_hits,
             mainstream,
             article_shape,
             has_timestamp,
