@@ -4343,6 +4343,13 @@ class MySearchClient:
                 for marker in ("/abs/", "/html/")
             )
         )
+        primary_named_paper_bonus = int(
+            mode == "pdf"
+            and self._looks_like_primary_named_paper_result(
+                title_text=(item.get("title") or "").lower(),
+                query_tokens=self._paper_query_subject_tokens(query_tokens, precision_tokens),
+            )
+        )
         non_third_party = int(flags["non_third_party"])
         official_resource_match = int(
             self._is_probably_official_resource_result(
@@ -4369,6 +4376,7 @@ class MySearchClient:
         return (
             include_match,
             official_resource_match,
+            primary_named_paper_bonus,
             paper_landing_bonus,
             path_precision_hits,
             total_precision_hits,
@@ -4383,6 +4391,39 @@ class MySearchClient:
             content_score,
             snippet_score,
             title_score,
+        )
+
+    def _paper_query_subject_tokens(
+        self,
+        query_tokens: list[str],
+        precision_tokens: list[str],
+    ) -> list[str]:
+        subject_tokens: list[str] = []
+        seen: set[str] = set()
+        for token in [*query_tokens, *precision_tokens]:
+            cleaned = token.strip().lower()
+            if cleaned in seen or cleaned in {"paper", "pdf"}:
+                continue
+            if len(cleaned) < 2:
+                continue
+            seen.add(cleaned)
+            subject_tokens.append(cleaned)
+        return subject_tokens[:3]
+
+    def _looks_like_primary_named_paper_result(
+        self,
+        *,
+        title_text: str,
+        query_tokens: list[str],
+    ) -> bool:
+        if len(query_tokens) < 2:
+            return False
+        normalized_title = re.sub(r"[^a-z0-9]+", " ", title_text).strip()
+        compact_title = re.sub(r"[^a-z0-9]+", "", title_text)
+        subject = " ".join(query_tokens[:2])
+        compact_subject = "".join(query_tokens[:2])
+        return normalized_title.startswith(f"{subject} :") or compact_title.startswith(
+            f"{compact_subject}:"
         )
 
     def _is_probably_official_resource_result(
