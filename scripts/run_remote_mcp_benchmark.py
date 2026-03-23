@@ -197,6 +197,8 @@ REMOTE_SCRIPT = r"""
 import base64
 import json
 import sys
+import time
+import urllib.error
 import urllib.request
 
 
@@ -282,6 +284,35 @@ class MCPClient:
         self.headers.update(headers or {})
         self.session_id = None
 
+    def _post(self, payload, headers, timeout, retries=4):
+        data = json.dumps(payload).encode()
+        last_error = None
+        for attempt in range(retries):
+            req = urllib.request.Request(self.url, data=data, headers=headers, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    return resp.headers, parse_mcp_payload(resp.read())
+            except urllib.error.HTTPError as exc:
+                body = ""
+                try:
+                    body = exc.read().decode(errors="replace")
+                except Exception:
+                    body = ""
+                last_error = RuntimeError(f"HTTP {exc.code}: {body[:300]}")
+                if exc.code in {429, 500, 502, 503, 504} and attempt + 1 < retries:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                raise last_error
+            except Exception as exc:
+                last_error = exc
+                if attempt + 1 < retries:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                raise
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("unreachable post retry state")
+
     def initialize(self):
         payload = {
             "jsonrpc": "2.0",
@@ -293,17 +324,13 @@ class MCPClient:
                 "clientInfo": {"name": "remote-bench", "version": "0.1"},
             },
         }
-        req = urllib.request.Request(self.url, data=json.dumps(payload).encode(), headers=self.headers, method="POST")
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            self.session_id = resp.headers.get("mcp-session-id")
-            _ = parse_mcp_payload(resp.read())
+        headers, _ = self._post(payload, self.headers, timeout=20, retries=5)
+        self.session_id = headers.get("mcp-session-id")
         notif_headers = dict(self.headers)
         if self.session_id:
             notif_headers["mcp-session-id"] = self.session_id
         notif = {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}
-        req2 = urllib.request.Request(self.url, data=json.dumps(notif).encode(), headers=notif_headers, method="POST")
-        with urllib.request.urlopen(req2, timeout=20) as resp2:
-            _ = resp2.read()
+        self._post(notif, notif_headers, timeout=20, retries=5)
 
     def call_tool(self, tool_name, arguments):
         headers = dict(self.headers)
@@ -315,9 +342,8 @@ class MCPClient:
             "method": "tools/call",
             "params": {"name": tool_name, "arguments": arguments},
         }
-        req = urllib.request.Request(self.url, data=json.dumps(payload).encode(), headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            return parse_mcp_payload(resp.read())
+        _, response_payload = self._post(payload, headers, timeout=120, retries=4)
+        return response_payload
 
 
 payload = json.loads(base64.b64decode(sys.argv[1]).decode())
