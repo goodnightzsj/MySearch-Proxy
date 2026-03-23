@@ -6,9 +6,11 @@ import random
 import re
 import sqlite3
 import string
+import threading
 from datetime import datetime, timezone
 
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(__file__), "data", "proxy.db")
+_thread_local = threading.local()
 SUPPORTED_SERVICES = ("tavily", "firecrawl", "exa")
 TOKEN_SERVICES = SUPPORTED_SERVICES + ("mysearch",)
 TOKEN_PREFIX = {
@@ -56,11 +58,19 @@ def get_db_path():
 
 
 def get_conn():
+    conn = getattr(_thread_local, "conn", None)
+    if conn is not None:
+        try:
+            conn.execute("SELECT 1")
+            return conn
+        except sqlite3.ProgrammingError:
+            _thread_local.conn = None
     db_path = get_db_path()
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    _thread_local.conn = conn
     return conn
 
 
@@ -124,7 +134,7 @@ def init_db():
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_service_created ON usage_logs(service, created_at)")
     conn.commit()
-    conn.close()
+    pass  # connection reused via thread-local
 
 
 def _table_columns(conn, table_name):
@@ -170,7 +180,7 @@ def get_setting(key, default=None):
         row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
         return row["value"] if row else default
     finally:
-        conn.close()
+        pass  # connection reused via thread-local
 
 
 def set_setting(key, value):
@@ -179,7 +189,7 @@ def set_setting(key, value):
         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
         conn.commit()
     finally:
-        conn.close()
+        pass  # connection reused via thread-local
 
 
 # ═══ API Keys ═══
@@ -195,7 +205,7 @@ def add_key(key, email="", service="tavily"):
         conn.commit()
         return conn.execute("SELECT * FROM api_keys WHERE key = ?", (key,)).fetchone()
     finally:
-        conn.close()
+        pass  # connection reused via thread-local
 
 
 def get_all_keys(service=None):
@@ -203,7 +213,7 @@ def get_all_keys(service=None):
     try:
         return _query_all(conn, "api_keys", service)
     finally:
-        conn.close()
+        pass  # connection reused via thread-local
 
 
 def get_key_by_id(key_id):
@@ -211,7 +221,7 @@ def get_key_by_id(key_id):
     try:
         return conn.execute("SELECT * FROM api_keys WHERE id = ?", (key_id,)).fetchone()
     finally:
-        conn.close()
+        pass  # connection reused via thread-local
 
 
 def get_active_keys(service=None):
@@ -226,7 +236,7 @@ def get_active_keys(service=None):
         sql += " ORDER BY id"
         return conn.execute(sql, params).fetchall()
     finally:
-        conn.close()
+        pass  # connection reused via thread-local
 
 
 def update_key_usage(key_id, success):
@@ -248,7 +258,7 @@ def update_key_usage(key_id, success):
                 conn.execute("UPDATE api_keys SET active = 0 WHERE id = ?", (key_id,))
         conn.commit()
     finally:
-        conn.close()
+        pass  # connection reused via thread-local
 
 
 def toggle_key(key_id, active):
@@ -257,7 +267,7 @@ def toggle_key(key_id, active):
         conn.execute("UPDATE api_keys SET active = ?, consecutive_fails = 0 WHERE id = ?", (active, key_id))
         conn.commit()
     finally:
-        conn.close()
+        pass  # connection reused via thread-local
 
 
 def delete_key(key_id):
@@ -266,14 +276,14 @@ def delete_key(key_id):
         conn.execute("DELETE FROM api_keys WHERE id = ?", (key_id,))
         conn.commit()
     finally:
-        conn.close()
+        pass  # connection reused via thread-local
 
 
 def import_keys_from_text(text, service="tavily"):
     """从批量文本导入不同服务的 key。"""
     service = normalize_service(service)
     pattern = KEY_PATTERNS[service]
-    count = 0
+    rows = []
     for line in text.strip().splitlines():
         line = line.strip()
         if not line:
@@ -284,9 +294,16 @@ def import_keys_from_text(text, service="tavily"):
         key = match.group(1)
         parts = line.split(",")
         email = parts[0].strip() if len(parts) >= 3 else ""
-        add_key(key, email, service=service)
-        count += 1
-    return count
+        rows.append((service, key, email))
+    if not rows:
+        return 0
+    conn = get_conn()
+    conn.executemany(
+        "INSERT OR IGNORE INTO api_keys (service, key, email) VALUES (?, ?, ?)",
+        rows,
+    )
+    conn.commit()
+    return len(rows)
 
 
 def update_key_remote_usage(
@@ -331,7 +348,7 @@ def update_key_remote_usage(
         )
         conn.commit()
     finally:
-        conn.close()
+        pass  # connection reused via thread-local
 
 
 def update_key_remote_usage_error(key_id, error_message):
@@ -343,7 +360,7 @@ def update_key_remote_usage_error(key_id, error_message):
         )
         conn.commit()
     finally:
-        conn.close()
+        pass  # connection reused via thread-local
 
 
 # ═══ Tokens ═══
@@ -360,7 +377,7 @@ def create_token(name="", service="tavily"):
         conn.commit()
         return conn.execute("SELECT * FROM tokens WHERE token = ?", (token,)).fetchone()
     finally:
-        conn.close()
+        pass  # connection reused via thread-local
 
 
 def get_all_tokens(service=None):
@@ -369,7 +386,7 @@ def get_all_tokens(service=None):
         where_sql, params = _service_where(service, normalize_token_service)
         return conn.execute(f"SELECT * FROM tokens{where_sql} ORDER BY id", params).fetchall()
     finally:
-        conn.close()
+        pass  # connection reused via thread-local
 
 
 def get_token_by_value(token_value):
@@ -377,7 +394,7 @@ def get_token_by_value(token_value):
     try:
         return conn.execute("SELECT * FROM tokens WHERE token = ?", (token_value,)).fetchone()
     finally:
-        conn.close()
+        pass  # connection reused via thread-local
 
 
 def get_token_by_name(name, service="tavily"):
@@ -389,7 +406,7 @@ def get_token_by_name(name, service="tavily"):
             (service, name),
         ).fetchone()
     finally:
-        conn.close()
+        pass  # connection reused via thread-local
 
 
 def delete_token(token_id):
@@ -398,7 +415,7 @@ def delete_token(token_id):
         conn.execute("DELETE FROM tokens WHERE id = ?", (token_id,))
         conn.commit()
     finally:
-        conn.close()
+        pass  # connection reused via thread-local
 
 
 # ═══ Usage Logs ═══
@@ -416,7 +433,7 @@ def log_usage(token_id, api_key_id, endpoint, success, latency_ms, service="tavi
         )
         conn.commit()
     finally:
-        conn.close()
+        pass  # connection reused via thread-local
 
 
 def get_usage_stats(token_id=None, service=None):
@@ -453,7 +470,7 @@ def get_usage_stats(token_id=None, service=None):
             "month_count": count("created_at >= ?", [month]),
         }
     finally:
-        conn.close()
+        pass  # connection reused via thread-local
 
 
 def check_quota(token_id, hourly_limit, daily_limit, monthly_limit, service=None):

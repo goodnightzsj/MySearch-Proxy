@@ -13,9 +13,9 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass as _dataclass
 from datetime import date, datetime, time as dt_time, timezone
 from typing import Any, Callable, Literal
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse, urlunparse
-from urllib.request import Request, urlopen
+
+import httpx
 
 from mysearch.config import MySearchConfig, ProviderConfig
 from mysearch.keyring import MySearchKeyRing
@@ -133,7 +133,7 @@ _MODE_PROVIDER_POLICY: dict[str, SearchRoutePolicy] = {
     "news": SearchRoutePolicy(
         key="news",
         provider="tavily",
-        fallback_chain=("exa",),
+        fallback_chain=("firecrawl", "exa"),
         tavily_topic="news",
         result_profile="news",
         allow_exa_rescue=True,
@@ -206,19 +206,54 @@ class MySearchClient:
         self._cache_max_entries = 256
         self._provider_probe_ttl_seconds = 300
         self._provider_probe_cache: dict[str, dict[str, Any]] = {}
+        self._http = httpx.Client(
+            timeout=httpx.Timeout(self.config.timeout_seconds, connect=10.0),
+            follow_redirects=True,
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            headers={"User-Agent": "MySearch/0.2"},
+        )
 
     def health(self) -> dict[str, Any]:
         keyring_info = self.keyring.describe()
         cache = self._cache_health()
-        providers = {
-            "tavily": self._describe_provider(self.config.tavily, keyring_info["tavily"]),
-            "firecrawl": self._describe_provider(
-                self.config.firecrawl,
-                keyring_info["firecrawl"],
-            ),
-            "exa": self._describe_provider(self.config.exa, keyring_info["exa"]),
-            "xai": self._describe_provider(self.config.xai, keyring_info["xai"]),
+        provider_names = ["tavily", "firecrawl", "exa", "xai"]
+        provider_configs = {
+            "tavily": self.config.tavily,
+            "firecrawl": self.config.firecrawl,
+            "exa": self.config.exa,
+            "xai": self.config.xai,
         }
+        probe_results, _ = self._execute_parallel(
+            {
+                name: (
+                    lambda n=name: self._probe_provider_status(
+                        provider_configs[n],
+                        int(keyring_info[n]["count"]),
+                    )
+                )
+                for name in provider_names
+            },
+            max_workers=4,
+        )
+        providers = {}
+        for name in provider_names:
+            status = probe_results.get(name, {"status": "network_error", "error": "probe failed", "checked_at": ""})
+            info = keyring_info[name]
+            cfg = provider_configs[name]
+            providers[name] = {
+                "base_url": cfg.base_url,
+                "alternate_base_urls": cfg.alternate_base_urls,
+                "provider_mode": cfg.provider_mode,
+                "auth_mode": cfg.auth_mode,
+                "paths": cfg.default_paths,
+                "search_mode": cfg.search_mode,
+                "keys_file": str(cfg.keys_file or ""),
+                "available_keys": info["count"],
+                "sources": info["sources"],
+                "live_status": status["status"],
+                "live_error": status["error"],
+                "last_checked_at": status["checked_at"],
+            }
         return {
             "server_name": self.config.server_name,
             "timeout_seconds": self.config.timeout_seconds,
@@ -285,14 +320,17 @@ class MySearchClient:
 
         with self._cache_lock:
             now = time.monotonic()
-            self._prune_expired_cache_entries_locked(namespace, now)
             payload = self._cache_store[namespace].get(cache_key)
             if payload is None:
                 self._cache_stats[namespace]["misses"] += 1
                 return None
+            if payload.get("expires_at", 0.0) <= now:
+                self._cache_store[namespace].pop(cache_key, None)
+                self._cache_stats[namespace]["misses"] += 1
+                return None
 
             self._cache_stats[namespace]["hits"] += 1
-            return copy.deepcopy(payload["value"])
+            return json.loads(json.dumps(payload["value"]))
 
     def _cache_set(self, namespace: str, cache_key: str, value: dict[str, Any]) -> None:
         ttl_seconds = self._cache_ttls.get(namespace, 0)
@@ -309,7 +347,7 @@ class MySearchClient:
                 store.pop(oldest_key, None)
             store[cache_key] = {
                 "expires_at": now + ttl_seconds,
-                "value": copy.deepcopy(value),
+                "value": json.loads(json.dumps(value)),
             }
 
     def _build_cache_key(self, namespace: str, payload: dict[str, Any]) -> str:
@@ -436,14 +474,13 @@ class MySearchClient:
         namespace: str,
         hit: bool,
     ) -> dict[str, Any]:
-        annotated = copy.deepcopy(result)
-        cache_meta = dict(annotated.get("cache") or {})
+        cache_meta = dict(result.get("cache") or {})
         cache_meta[namespace] = {
             "hit": hit,
             "ttl_seconds": self._cache_ttls.get(namespace, 0),
         }
-        annotated["cache"] = cache_meta
-        return annotated
+        result["cache"] = cache_meta
+        return result
 
     def _annotate_search_debug(
         self,
@@ -460,8 +497,7 @@ class MySearchClient:
         requested_max_results: int | None = None,
         candidate_max_results: int | None = None,
     ) -> dict[str, Any]:
-        annotated = copy.deepcopy(result)
-        annotated["route_debug"] = {
+        result["route_debug"] = {
             "requested_provider": provider,
             "route_provider": decision.provider,
             "normalized_sources": normalized_sources,
@@ -472,17 +508,17 @@ class MySearchClient:
             "cache_hit": cache_hit,
         }
         if requested_max_results is not None:
-            annotated["route_debug"]["requested_max_results"] = requested_max_results
+            result["route_debug"]["requested_max_results"] = requested_max_results
         if candidate_max_results is not None:
-            annotated["route_debug"]["candidate_max_results"] = candidate_max_results
-        evidence = annotated.get("evidence") or {}
+            result["route_debug"]["candidate_max_results"] = candidate_max_results
+        evidence = result.get("evidence") or {}
         if evidence.get("official_mode"):
-            annotated["route_debug"]["official_mode"] = evidence.get("official_mode")
+            result["route_debug"]["official_mode"] = evidence.get("official_mode")
         if "official_filter_applied" in evidence:
-            annotated["route_debug"]["official_filter_applied"] = bool(
+            result["route_debug"]["official_filter_applied"] = bool(
                 evidence.get("official_filter_applied")
             )
-        return annotated
+        return result
 
     def search(
         self,
@@ -505,6 +541,7 @@ class MySearchClient:
         include_x_images: bool = False,
         include_x_videos: bool = False,
     ) -> dict[str, Any]:
+        # --- Phase 1: resolve parameters ---
         query = query.strip()
         if not query:
             raise MySearchError("query must not be empty")
@@ -557,6 +594,8 @@ class MySearchClient:
             include_domains=include_domains,
             route_provider=decision.provider,
         )
+
+        # --- Phase 2: cache check ---
         cacheable = self._should_cache_search(
             decision=decision,
             normalized_sources=normalized_sources,
@@ -597,74 +636,26 @@ class MySearchClient:
                     candidate_max_results=candidate_max_results,
                 )
 
+        # --- Phase 3: execute ---
         if decision.provider == "hybrid":
-            parallel_results, parallel_errors = self._execute_parallel(
-                {
-                    "web": lambda: self.search(
-                        query=query,
-                        mode=mode,
-                        intent=resolved_intent,
-                        strategy=resolved_strategy,
-                        provider="auto",
-                        sources=["web"],
-                        max_results=max_results,
-                        include_content=include_content,
-                        include_answer=effective_include_answer,
-                        include_domains=include_domains,
-                        exclude_domains=exclude_domains,
-                    ),
-                    "social": lambda: self._search_xai(
-                        query=query,
-                        sources=["x"],
-                        max_results=max_results,
-                        allowed_x_handles=allowed_x_handles,
-                        excluded_x_handles=excluded_x_handles,
-                        from_date=from_date,
-                        to_date=to_date,
-                        include_x_images=include_x_images,
-                        include_x_videos=include_x_videos,
-                    ),
-                },
-                max_workers=2,
+            hybrid_result = self._search_hybrid(
+                query=query,
+                mode=mode,
+                resolved_intent=resolved_intent,
+                resolved_strategy=resolved_strategy,
+                decision=decision,
+                max_results=max_results,
+                include_content=include_content,
+                effective_include_answer=effective_include_answer,
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+                allowed_x_handles=allowed_x_handles,
+                excluded_x_handles=excluded_x_handles,
+                from_date=from_date,
+                to_date=to_date,
+                include_x_images=include_x_images,
+                include_x_videos=include_x_videos,
             )
-            self._raise_parallel_error(parallel_errors, "web")
-            self._raise_parallel_error(parallel_errors, "social")
-            web_result = parallel_results["web"]
-            social_result = parallel_results["social"]
-            web_route = web_result.get("route", {}).get("selected", web_result.get("provider", "tavily"))
-            social_route = social_result.get("provider", "xai")
-            web_results = list(web_result.get("results") or [])
-            social_results = list(social_result.get("results") or [])
-            hybrid_result = {
-                "provider": "hybrid",
-                "intent": resolved_intent,
-                "strategy": resolved_strategy,
-                "route": {
-                    "selected": f"{web_route}+{social_route}",
-                    "reason": decision.reason,
-                },
-                "query": query,
-                "answer": web_result.get("answer") or social_result.get("answer") or "",
-                "results": [*web_results, *social_results],
-                "citations": self._dedupe_citations(
-                    web_result.get("citations") or [],
-                    social_result.get("citations") or [],
-                ),
-                "evidence": {
-                    "providers_consulted": [web_result.get("provider"), social_result.get("provider")],
-                    "web_result_count": len(web_results),
-                    "social_result_count": len(social_results),
-                    "citation_count": len(
-                        self._dedupe_citations(
-                            web_result.get("citations") or [],
-                            social_result.get("citations") or [],
-                        )
-                    ),
-                    "verification": "cross-provider",
-                },
-                "web": web_result,
-                "social": social_result,
-            }
             hybrid_result = self._augment_evidence_summary(
                 hybrid_result,
                 query=query,
@@ -672,7 +663,7 @@ class MySearchClient:
                 intent=resolved_intent,
                 include_domains=include_domains,
             )
-            hybrid_result = self._annotate_search_debug(
+            return self._annotate_search_debug(
                 hybrid_result,
                 provider=provider,
                 normalized_sources=normalized_sources,
@@ -685,7 +676,6 @@ class MySearchClient:
                 requested_max_results=max_results,
                 candidate_max_results=candidate_max_results,
             )
-            return hybrid_result
 
         if self._should_blend_web_providers(
             requested_provider=provider,
@@ -720,6 +710,8 @@ class MySearchClient:
                 include_content=include_content,
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
+                strategy=resolved_strategy,
+                from_date=from_date,
             )
             if fallback_info:
                 result["fallback"] = fallback_info
@@ -740,6 +732,162 @@ class MySearchClient:
         else:
             raise MySearchError(f"Unsupported route decision: {decision.provider}")
 
+        # --- Phase 4: postprocess ---
+        result = self._postprocess_search(
+            result=result,
+            query=query,
+            mode=mode,
+            provider=provider,
+            resolved_intent=resolved_intent,
+            resolved_strategy=resolved_strategy,
+            decision=decision,
+            normalized_sources=normalized_sources,
+            include_content=include_content,
+            effective_include_answer=effective_include_answer,
+            include_domains=include_domains,
+            exclude_domains=exclude_domains,
+            max_results=max_results,
+            candidate_max_results=candidate_max_results,
+            cacheable=cacheable,
+            cache_key=cache_key,
+            from_date=from_date,
+            to_date=to_date,
+        )
+        return result
+
+    def _search_hybrid(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        resolved_intent: str,
+        resolved_strategy: str,
+        decision: RouteDecision,
+        max_results: int,
+        include_content: bool,
+        effective_include_answer: bool,
+        include_domains: list[str] | None,
+        exclude_domains: list[str] | None,
+        allowed_x_handles: list[str] | None,
+        excluded_x_handles: list[str] | None,
+        from_date: str | None,
+        to_date: str | None,
+        include_x_images: bool,
+        include_x_videos: bool,
+    ) -> dict[str, Any]:
+        use_xai_unified = (
+            resolved_strategy == "fast"
+            and self.config.xai.search_mode == "official"
+            and self._provider_can_serve(self.config.xai)
+            and not allowed_x_handles
+            and not excluded_x_handles
+        )
+
+        if use_xai_unified:
+            unified_result = self._search_xai(
+                query=query,
+                sources=["web", "x"],
+                max_results=max_results,
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+                from_date=from_date,
+                to_date=to_date,
+                include_x_images=include_x_images,
+                include_x_videos=include_x_videos,
+            )
+            web_result = unified_result
+            social_result = unified_result
+        else:
+            parallel_results, parallel_errors = self._execute_parallel(
+                {
+                    "web": lambda: self.search(
+                        query=query,
+                        mode=mode,
+                        intent=resolved_intent,
+                        strategy=resolved_strategy,
+                        provider="auto",
+                        sources=["web"],
+                        max_results=max_results,
+                        include_content=include_content,
+                        include_answer=effective_include_answer,
+                        include_domains=include_domains,
+                        exclude_domains=exclude_domains,
+                    ),
+                    "social": lambda: self._search_xai(
+                        query=query,
+                        sources=["x"],
+                        max_results=max_results,
+                        allowed_x_handles=allowed_x_handles,
+                        excluded_x_handles=excluded_x_handles,
+                        from_date=from_date,
+                        to_date=to_date,
+                        include_x_images=include_x_images,
+                        include_x_videos=include_x_videos,
+                    ),
+                },
+                max_workers=2,
+            )
+            self._raise_parallel_error(parallel_errors, "web")
+            self._raise_parallel_error(parallel_errors, "social")
+            web_result = parallel_results["web"]
+            social_result = parallel_results["social"]
+        web_route = web_result.get("route", {}).get("selected", web_result.get("provider", "tavily"))
+        social_route = social_result.get("provider", "xai")
+        web_results = list(web_result.get("results") or [])
+        social_results = list(social_result.get("results") or [])
+        return {
+            "provider": "hybrid",
+            "intent": resolved_intent,
+            "strategy": resolved_strategy,
+            "route": {
+                "selected": f"{web_route}+{social_route}",
+                "reason": decision.reason,
+            },
+            "query": query,
+            "answer": web_result.get("answer") or social_result.get("answer") or "",
+            "results": [*web_results, *social_results],
+            "citations": self._dedupe_citations(
+                web_result.get("citations") or [],
+                social_result.get("citations") or [],
+            ),
+            "evidence": {
+                "providers_consulted": [web_result.get("provider"), social_result.get("provider")],
+                "web_result_count": len(web_results),
+                "social_result_count": len(social_results),
+                "citation_count": len(
+                    self._dedupe_citations(
+                        web_result.get("citations") or [],
+                        social_result.get("citations") or [],
+                    )
+                ),
+                "verification": "cross-provider",
+            },
+            "web": web_result,
+            "social": social_result,
+        }
+
+    def _postprocess_search(
+        self,
+        *,
+        result: dict[str, Any],
+        query: str,
+        mode: SearchMode,
+        provider: ProviderName,
+        resolved_intent: str,
+        resolved_strategy: str,
+        decision: RouteDecision,
+        normalized_sources: list[str],
+        include_content: bool,
+        effective_include_answer: bool,
+        include_domains: list[str] | None,
+        exclude_domains: list[str] | None,
+        max_results: int,
+        candidate_max_results: int,
+        cacheable: bool,
+        cache_key: str,
+        from_date: str | None = None,
+        to_date: str | None = None,
+    ) -> dict[str, Any]:
         if self._should_attempt_exa_rescue(
             query=query,
             mode=mode,
@@ -756,7 +904,35 @@ class MySearchClient:
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
                 include_content=include_content,
+                mode=mode,
+                intent=resolved_intent,
+                from_date=from_date,
+                to_date=to_date,
             )
+
+        should_supplement_answer = (
+            not (result.get("answer") or "").strip()
+            and decision.provider != "xai"
+            and self._provider_can_serve(self.config.xai)
+            and self.config.xai.search_mode == "official"
+            and (
+                resolved_intent == "comparison"
+                or resolved_strategy in {"verify", "deep"}
+            )
+        )
+        if should_supplement_answer:
+            try:
+                xai_supplement = self._search_xai(
+                    query=query,
+                    sources=["web"],
+                    max_results=3,
+                )
+                xai_answer = (xai_supplement.get("answer") or "").strip()
+                if xai_answer:
+                    result["answer"] = xai_answer
+                    result.setdefault("evidence", {})["answer_source"] = "xai"
+            except MySearchError:
+                pass
 
         if self._should_rerank_resource_results(mode=mode, intent=resolved_intent):
             reranked_results = self._rerank_resource_results(
@@ -797,6 +973,51 @@ class MySearchClient:
             intent=resolved_intent,
             include_domains=include_domains,
         )
+
+        if (
+            (result.get("evidence") or {}).get("confidence") == "low"
+            and resolved_strategy not in {"fast"}
+            and decision.provider not in {"exa", "xai"}
+            and not result.get("fallback")
+            and not include_domains
+            and self._provider_can_serve(self.config.exa)
+        ):
+            try:
+                exa_boost = self._search_exa(
+                    query=query,
+                    max_results=max_results,
+                    include_domains=None,
+                    exclude_domains=exclude_domains,
+                    include_content=False,
+                    mode=mode,
+                    intent=resolved_intent,
+                    from_date=from_date,
+                    to_date=to_date,
+                )
+                if exa_boost.get("results"):
+                    merged = self._merge_search_payloads(
+                        primary_result=result,
+                        secondary_result=exa_boost,
+                        max_results=max_results,
+                    )
+                    result["results"] = merged["results"]
+                    result["citations"] = merged["citations"]
+                    result.setdefault("evidence", {})["low_confidence_exa_boost"] = True
+                    result = self._augment_evidence_summary(
+                        result,
+                        query=query,
+                        mode=mode,
+                        intent=resolved_intent,
+                        include_domains=include_domains,
+                    )
+            except MySearchError:
+                pass
+
+        evidence = result.get("evidence") or {}
+        conflicts = evidence.get("conflicts") or []
+        if "low-source-diversity" in conflicts and resolved_strategy in {"fast", "balanced"}:
+            evidence["retry_hint"] = "consider strategy=verify for broader source diversity"
+            result["evidence"] = evidence
 
         route_reason = decision.reason
         if result.get("provider") == "hybrid" and resolved_strategy in {"balanced", "verify", "deep"}:
@@ -959,6 +1180,43 @@ class MySearchClient:
                 if provider == "tavily":
                     raise
 
+        if provider == "auto" and self._provider_can_serve(self.config.exa):
+            try:
+                exa_extract = self._search_exa(
+                    query=url,
+                    max_results=1,
+                    include_domains=None,
+                    exclude_domains=None,
+                    include_content=True,
+                )
+                exa_results = exa_extract.get("results") or []
+                if exa_results:
+                    best = max(exa_results, key=lambda r: len(r.get("content") or ""))
+                    content = (best.get("content") or "").strip()
+                    if content and len(content) >= 100:
+                        exa_result = {
+                            "provider": "exa",
+                            "transport": exa_extract.get("transport", ""),
+                            "url": url,
+                            "content": content,
+                            "metadata": {"exa_url": best.get("url", "")},
+                        }
+                        issue = self._extract_quality_issue(exa_result)
+                        if issue is None:
+                            exa_result = self._annotate_extract_fallback(
+                                exa_result,
+                                fallback_from="firecrawl+tavily",
+                                fallback_reason=" | ".join(errors),
+                            )
+                            self._cache_set("extract", cache_key, exa_result)
+                            return self._annotate_cache(
+                                exa_result,
+                                namespace="extract",
+                                hit=False,
+                            )
+            except MySearchError:
+                pass
+
         if firecrawl_result is not None and provider == "auto":
             result = self._annotate_extract_warning(
                 firecrawl_result,
@@ -1017,6 +1275,9 @@ class MySearchClient:
             include_social=include_social,
             include_domains=include_domains,
         )
+        discovery_include_content = research_plan["web_mode"] in {"docs"} and self._provider_can_serve(
+            self.config.firecrawl
+        )
         research_tasks: dict[str, Callable[[], Any]] = {
             "web": lambda: self.search(
                 query=query,
@@ -1026,7 +1287,7 @@ class MySearchClient:
                 provider="auto",
                 sources=["web"],
                 max_results=research_plan["web_max_results"],
-                include_content=False,
+                include_content=discovery_include_content,
                 include_answer=True,
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
@@ -1053,6 +1314,7 @@ class MySearchClient:
         web_search = research_results["web"]
 
         urls: list[str] = []
+        prefetched_content: dict[str, str] = {}
         if web_search.get("provider") == "hybrid":
             candidate_results = web_search.get("results") or web_search.get("web", {}).get("results", [])
         else:
@@ -1063,19 +1325,36 @@ class MySearchClient:
             if not url or url in urls:
                 continue
             urls.append(url)
+            content = (result.get("content") or "").strip()
+            if content and len(content) >= 200:
+                prefetched_content[url] = content
             if len(urls) >= research_plan["scrape_top_n"]:
                 break
 
+        if len(urls) < research_plan["scrape_top_n"] and include_social:
+            social_search = research_results.get("social")
+            if social_search and not research_errors.get("social"):
+                for social_item in social_search.get("results") or []:
+                    social_url = (social_item.get("url") or "").strip()
+                    if not social_url or social_url in urls:
+                        continue
+                    parsed = urlparse(social_url)
+                    if parsed.netloc and not parsed.netloc.endswith(("x.com", "twitter.com")):
+                        urls.append(social_url)
+                        if len(urls) >= research_plan["scrape_top_n"]:
+                            break
+
         pages: list[dict[str, Any]] = []
+        urls_to_scrape = [url for url in urls if url not in prefetched_content]
         page_tasks = {
-            f"page:{index}": (
+            f"page:{urls.index(url)}": (
                 lambda current_url=url: self.extract_url(
                     url=current_url,
                     formats=["markdown"],
                     only_main_content=True,
                 )
             )
-            for index, url in enumerate(urls)
+            for url in urls_to_scrape
         }
         page_results, page_errors = self._execute_parallel(
             page_tasks,
@@ -1083,7 +1362,15 @@ class MySearchClient:
         )
         for index, url in enumerate(urls):
             task_name = f"page:{index}"
-            if task_name in page_results:
+            if url in prefetched_content:
+                page = {
+                    "provider": "discovery_prefetch",
+                    "url": url,
+                    "content": prefetched_content[url],
+                    "excerpt": self._build_excerpt(prefetched_content[url]),
+                }
+                pages.append(page)
+            elif task_name in page_results:
                 page = page_results[task_name]
                 page["excerpt"] = self._build_excerpt(page.get("content", ""))
                 pages.append(page)
@@ -1120,6 +1407,22 @@ class MySearchClient:
             research_plan=research_plan,
         )
 
+        research_summary = ""
+        if (
+            resolved_strategy == "deep"
+            and self.config.xai.search_mode == "official"
+            and self._provider_can_serve(self.config.xai)
+        ):
+            try:
+                summary_result = self._search_xai(
+                    query=f"Summarize key findings about: {query}",
+                    sources=["web"],
+                    max_results=3,
+                )
+                research_summary = (summary_result.get("answer") or "").strip()
+            except MySearchError:
+                pass
+
         return {
             "provider": "hybrid",
             "query": query,
@@ -1131,6 +1434,7 @@ class MySearchClient:
             "social_error": social_error,
             "citations": citations,
             "evidence": evidence,
+            "research_summary": research_summary,
             "notes": [
                 "默认用 Tavily 做发现，Firecrawl 做正文抓取，X 搜索走 xAI Responses API",
                 "如果某个 provider 没配 key，会保留错误并尽量返回其余部分",
@@ -1857,6 +2161,8 @@ class MySearchClient:
         include_content: bool,
         include_domains: list[str] | None,
         exclude_domains: list[str] | None,
+        strategy: str = "fast",
+        from_date: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         chain = [primary_provider, *(decision.fallback_chain or [])]
         last_error: Exception | None = None
@@ -1873,6 +2179,8 @@ class MySearchClient:
                     include_content=include_content,
                     include_domains=include_domains,
                     exclude_domains=exclude_domains,
+                    strategy=strategy,
+                    from_date=from_date,
                 )
                 fallback_info = None
                 if provider_name != primary_provider:
@@ -1890,6 +2198,24 @@ class MySearchClient:
                 continue
         raise MySearchError(f"All providers failed for query '{query[:80]}': {last_error}")
 
+    @staticmethod
+    def _infer_tavily_days(
+        intent: str,
+        from_date: str | None = None,
+    ) -> int | None:
+        if from_date:
+            try:
+                delta = date.today() - date.fromisoformat(from_date[:10])
+                if delta.days > 0:
+                    return delta.days
+            except (ValueError, TypeError):
+                pass
+        if intent in {"status"}:
+            return 3
+        if intent in {"news"}:
+            return 7
+        return None
+
     def _dispatch_single_provider(
         self,
         *,
@@ -1903,6 +2229,8 @@ class MySearchClient:
         include_content: bool,
         include_domains: list[str] | None,
         exclude_domains: list[str] | None,
+        strategy: str = "fast",
+        from_date: str | None = None,
     ) -> dict[str, Any]:
         if provider_name == "tavily":
             return self._search_tavily(
@@ -1913,13 +2241,15 @@ class MySearchClient:
                 include_content=include_content,
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
+                strategy=strategy,
+                days=self._infer_tavily_days(intent, from_date),
             )
         if provider_name == "firecrawl":
             return self._search_firecrawl(
                 query=query,
                 max_results=max_results,
                 categories=decision.firecrawl_categories or self._firecrawl_categories(mode, intent),
-                include_content=include_content or mode in {"docs", "research", "github", "pdf"},
+                include_content=include_content or mode in {"docs", "research", "github", "pdf"} or intent == "tutorial",
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
             )
@@ -1930,6 +2260,9 @@ class MySearchClient:
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
                 include_content=include_content,
+                mode=mode,
+                intent=intent,
+                from_date=from_date,
             )
         raise MySearchError(f"Unknown provider: {provider_name}")
 
@@ -1975,6 +2308,10 @@ class MySearchClient:
         include_domains: list[str] | None,
         exclude_domains: list[str] | None,
         include_content: bool,
+        mode: str = "",
+        intent: str = "",
+        from_date: str | None = None,
+        to_date: str | None = None,
     ) -> dict[str, Any]:
         exa_result = self._search_exa(
             query=query,
@@ -1982,6 +2319,10 @@ class MySearchClient:
             include_domains=include_domains,
             exclude_domains=exclude_domains,
             include_content=include_content,
+            mode=mode,
+            intent=intent,
+            from_date=from_date,
+            to_date=to_date,
         )
         if not exa_result.get("results"):
             return primary_result
@@ -2118,6 +2459,7 @@ class MySearchClient:
         title_brand_match = int(any(token in title_text for token in query_tokens))
         non_aggregator = int(not self._is_obvious_web_aggregator(registered_domain))
         matched_provider_count = len(item.get("matched_providers") or [])
+        cross_provider_boost = min(matched_provider_count, 3)
         content_score, snippet_score, title_score = self._result_quality_score(item)
         return (
             include_match,
@@ -2125,7 +2467,7 @@ class MySearchClient:
             host_brand_match,
             title_brand_match,
             non_aggregator,
-            matched_provider_count,
+            cross_provider_boost,
             content_score,
             max(snippet_score, title_score),
         )
@@ -2228,7 +2570,18 @@ class MySearchClient:
                 ),
             }
 
-        blended_results, blended_errors = self._execute_parallel(tasks, max_workers=2)
+        if strategy in {"verify", "deep"} and self._provider_can_serve(self.config.exa):
+            tasks["exa_supplement"] = lambda: self._search_exa(
+                query=query,
+                max_results=min(max_results, 3),
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+                include_content=False,
+                mode=mode,
+                intent=intent,
+            )
+
+        blended_results, blended_errors = self._execute_parallel(tasks, max_workers=len(tasks))
         primary_failed = "primary" in blended_errors
         secondary_failed = "secondary" in blended_errors
 
@@ -2258,20 +2611,26 @@ class MySearchClient:
             secondary_result=secondary_result,
             max_results=max_results,
         )
-        if self._should_rerank_resource_results(mode=mode, intent=intent):
-            merged["results"] = self._rerank_resource_results(
-                query=query,
-                mode=mode,
-                results=merged["results"],
-                include_domains=include_domains,
+        exa_supplement = blended_results.get("exa_supplement")
+        if exa_supplement and exa_supplement.get("results"):
+            merged = self._merge_search_payloads(
+                primary_result=merged,
+                secondary_result=exa_supplement,
+                max_results=max_results,
             )
-            merged["citations"] = self._align_citations_with_results(
-                results=merged["results"],
-                citations=merged["citations"],
-            )
+        # rerank is handled by the caller (search()), skip here to avoid double rerank
         providers_consulted = [primary_result.get("provider", "")]
         if secondary_result:
             providers_consulted.append(secondary_result.get("provider", ""))
+        if exa_supplement:
+            providers_consulted.append("exa")
+
+        if secondary_result:
+            verification = "cross-provider"
+        elif secondary_error:
+            verification = "single-provider-secondary-failed"
+        else:
+            verification = "single-provider"
 
         return {
             "provider": "hybrid" if secondary_result else primary_result.get("provider", decision.provider),
@@ -2284,7 +2643,7 @@ class MySearchClient:
                 "providers_consulted": [item for item in providers_consulted if item],
                 "matched_results": merged["matched_results"],
                 "citation_count": len(merged["citations"]),
-                "verification": "cross-provider" if secondary_result else "single-provider",
+                "verification": verification,
             },
             "primary_search": primary_result,
             "secondary_search": secondary_result,
@@ -2301,6 +2660,8 @@ class MySearchClient:
         include_content: bool,
         include_domains: list[str] | None,
         exclude_domains: list[str] | None,
+        strategy: str = "fast",
+        days: int | None = None,
     ) -> dict[str, Any]:
         include_domains = [item.strip() for item in (include_domains or []) if item and item.strip()]
         exclude_domains = [item.strip() for item in (exclude_domains or []) if item and item.strip()]
@@ -2313,6 +2674,8 @@ class MySearchClient:
             include_content=include_content,
             include_domains=include_domains,
             exclude_domains=exclude_domains,
+            strategy=strategy,
+            days=days,
         )
         if response.get("results") or not include_domains:
             return response
@@ -2350,17 +2713,21 @@ class MySearchClient:
         include_content: bool,
         include_domains: list[str] | None,
         exclude_domains: list[str] | None,
+        strategy: str = "fast",
+        days: int | None = None,
     ) -> dict[str, Any]:
         provider = self.config.tavily
         key = self._get_key_or_raise(provider)
         payload: dict[str, Any] = {
             "query": query,
             "max_results": max_results,
-            "search_depth": "advanced" if include_content else "basic",
+            "search_depth": "advanced" if include_content or strategy in {"verify", "deep"} else "basic",
             "topic": topic,
             "include_answer": include_answer,
             "include_raw_content": include_content,
         }
+        if days and days > 0:
+            payload["days"] = days
         if include_domains:
             payload["include_domains"] = include_domains
         if exclude_domains:
@@ -2787,7 +3154,8 @@ class MySearchClient:
         )
         data = response.get("data") or {}
         results = []
-        for source_name in ("web", "news"):
+        source_order = ("news", "web") if "news" in categories else ("web", "news")
+        for source_name in source_order:
             for item in data.get(source_name, []) or []:
                 results.append(
                     {
@@ -2885,6 +3253,24 @@ class MySearchClient:
             filtered.append(dict(item))
         return filtered
 
+    def _exa_search_type(self, query: str) -> str:
+        exact_signals = re.findall(
+            r'[A-Z][a-zA-Z]+\.[a-zA-Z_]+|[a-z_]{2,}\.[a-z_]+\(|::\w+|#\w+|v\d+\.\d+',
+            query,
+        )
+        if exact_signals:
+            return "keyword"
+        return "neural"
+
+    def _exa_category(self, mode: str, intent: str) -> str:
+        if mode == "github" or intent == "resource":
+            return "github"
+        if mode == "news" or intent in {"news", "status"}:
+            return "news"
+        if mode == "pdf" or intent == "tutorial":
+            return "research paper"
+        return ""
+
     def _search_exa(
         self,
         *,
@@ -2893,15 +3279,29 @@ class MySearchClient:
         include_domains: list[str] | None,
         exclude_domains: list[str] | None,
         include_content: bool,
+        mode: str = "",
+        intent: str = "",
+        from_date: str | None = None,
+        to_date: str | None = None,
     ) -> dict[str, Any]:
         provider = self.config.exa
         key = self._get_key_or_raise(provider)
+        search_type = self._exa_search_type(query)
         payload: dict[str, Any] = {
             "query": query,
+            "type": search_type,
             "numResults": max_results,
         }
+        exa_category = self._exa_category(mode, intent)
+        if exa_category:
+            payload["category"] = exa_category
         if include_content:
             payload["text"] = True
+        payload["highlights"] = True
+        if from_date:
+            payload["startPublishedDate"] = from_date
+        if to_date:
+            payload["endPublishedDate"] = to_date
         if include_domains:
             payload["includeDomains"] = include_domains
         if exclude_domains:
@@ -2919,8 +3319,10 @@ class MySearchClient:
         for item in raw_results:
             if not isinstance(item, dict):
                 continue
+            highlights = item.get("highlights") or []
             snippet = (
-                item.get("snippet")
+                " … ".join(highlights) if highlights
+                else item.get("snippet")
                 or item.get("text")
                 or item.get("summary")
                 or item.get("highlight")
@@ -3148,16 +3550,13 @@ class MySearchClient:
 
         for raw_url in raw_urls:
             try:
-                request = Request(
+                response = self._http.get(
                     raw_url,
-                    headers={
-                        "User-Agent": "MySearch/1.0",
-                        "Accept": "text/plain, text/markdown;q=0.9, */*;q=0.8",
-                    },
+                    headers={"Accept": "text/plain, text/markdown;q=0.9, */*;q=0.8"},
                 )
-                with urlopen(request, timeout=self.config.timeout_seconds) as response:
-                    content = response.read().decode("utf-8", errors="replace")
-            except (HTTPError, URLError, TimeoutError, ValueError):
+                response.raise_for_status()
+                content = response.text
+            except (httpx.HTTPError, ValueError):
                 continue
 
             result = {
@@ -4214,30 +4613,23 @@ class MySearchClient:
 
         url = f"{(base_url or provider.base_url)}{path}"
         headers.setdefault("Content-Type", "application/json")
-        headers.setdefault("User-Agent", "MySearch/0.2")
-        request_body = None
-        if method.upper() != "GET":
-            request_body = json.dumps(body).encode("utf-8")
-        request = Request(
-            url,
-            data=request_body,
-            headers=headers,
-            method=method.upper(),
-        )
+        effective_timeout = timeout_seconds or self.config.timeout_seconds
 
         try:
-            with urlopen(request, timeout=timeout_seconds or self.config.timeout_seconds) as response:
-                status_code = response.status
-                response_text = response.read().decode("utf-8", errors="replace")
-        except HTTPError as exc:
-            status_code = exc.code
-            response_text = exc.read().decode("utf-8", errors="replace")
-        except TimeoutError as exc:
-            effective_timeout = timeout_seconds or self.config.timeout_seconds
+            response = self._http.request(
+                method.upper(),
+                url,
+                json=body if method.upper() != "GET" else None,
+                headers=headers,
+                timeout=effective_timeout,
+            )
+            status_code = response.status_code
+            response_text = response.text
+        except httpx.TimeoutException as exc:
             raise MySearchError(
                 f"{provider.name} request timeout after {effective_timeout}s: {url}"
             ) from exc
-        except (URLError, OSError) as exc:
+        except httpx.HTTPError as exc:
             raise MySearchError(f"{provider.name} network error: {exc}") from exc
 
         try:
@@ -4270,20 +4662,17 @@ class MySearchClient:
         url: str,
         timeout_seconds: int | None = None,
     ) -> tuple[int, str]:
-        request = Request(
-            url,
-            headers={
-                "User-Agent": "MySearch/0.2",
-                "Accept": "text/html,application/json;q=0.9,*/*;q=0.8",
-            },
-            method="GET",
-        )
+        effective_timeout = timeout_seconds or self.config.timeout_seconds
         try:
-            with urlopen(request, timeout=timeout_seconds or self.config.timeout_seconds) as response:
-                return response.status, response.read().decode("utf-8", errors="replace")
-        except HTTPError as exc:
-            return exc.code, exc.read().decode("utf-8", errors="replace")
-        except (URLError, OSError) as exc:
+            response = self._http.get(
+                url,
+                headers={"Accept": "text/html,application/json;q=0.9,*/*;q=0.8"},
+                timeout=effective_timeout,
+            )
+            return response.status_code, response.text
+        except httpx.TimeoutException as exc:
+            return 0, ""
+        except httpx.HTTPError as exc:
             raise MySearchError(str(exc)) from exc
 
     def _xai_probe_model(self) -> str:
@@ -4651,6 +5040,8 @@ class MySearchClient:
             return ["github"]
         if mode == "pdf":
             return ["pdf"]
+        if mode == "news" or intent in {"news", "status"}:
+            return ["news"]
         if mode in {"docs", "research"} or intent in {"resource", "tutorial"}:
             return ["research"]
         return []

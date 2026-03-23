@@ -207,6 +207,10 @@ def _provider_path(
 def _get_tavily_mode(proxy_base_url: str) -> TavilyMode:
     explicit = _get_str("MYSEARCH_TAVILY_MODE")
     if explicit:
+        if explicit not in ("official", "gateway"):
+            raise ValueError(
+                f"MYSEARCH_TAVILY_MODE must be 'official' or 'gateway', got '{explicit}'"
+            )
         return explicit  # type: ignore[return-value]
     if _get_str(
         "MYSEARCH_TAVILY_GATEWAY_BASE_URL",
