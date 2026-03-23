@@ -634,33 +634,21 @@ class MySearchClient:
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
             )
-        elif decision.provider == "tavily":
-            result = self._search_tavily(
+        elif decision.provider in {"tavily", "firecrawl", "exa"}:
+            result, fallback_info = self._search_with_fallback(
+                primary_provider=decision.provider,
                 query=query,
                 max_results=candidate_max_results,
-                topic=decision.tavily_topic,
+                mode=mode,
+                intent=resolved_intent,
+                decision=decision,
                 include_answer=effective_include_answer,
                 include_content=include_content,
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
             )
-        elif decision.provider == "firecrawl":
-            result = self._search_firecrawl(
-                query=query,
-                max_results=candidate_max_results,
-                categories=decision.firecrawl_categories or [],
-                include_content=include_content or mode in {"docs", "research", "github", "pdf"},
-                include_domains=include_domains,
-                exclude_domains=exclude_domains,
-            )
-        elif decision.provider == "exa":
-            result = self._search_exa(
-                query=query,
-                max_results=candidate_max_results,
-                include_domains=include_domains,
-                exclude_domains=exclude_domains,
-                include_content=include_content,
-            )
+            if fallback_info:
+                result["fallback"] = fallback_info
         elif decision.provider == "xai":
             result = self._search_xai(
                 query=query,
@@ -1664,6 +1652,101 @@ class MySearchClient:
             self.config.firecrawl
         )
 
+    _SEARCH_FALLBACK_CHAIN: dict[str, list[str]] = {
+        "tavily": ["exa", "firecrawl"],
+        "firecrawl": ["exa", "tavily"],
+        "exa": ["firecrawl", "tavily"],
+    }
+
+    def _search_with_fallback(
+        self,
+        *,
+        primary_provider: str,
+        query: str,
+        max_results: int,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        decision: RouteDecision,
+        include_answer: bool,
+        include_content: bool,
+        include_domains: list[str] | None,
+        exclude_domains: list[str] | None,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        chain = [primary_provider, *self._SEARCH_FALLBACK_CHAIN.get(primary_provider, [])]
+        last_error: Exception | None = None
+        for provider_name in chain:
+            try:
+                result = self._dispatch_single_provider(
+                    provider_name=provider_name,
+                    query=query,
+                    max_results=max_results,
+                    mode=mode,
+                    intent=intent,
+                    decision=decision,
+                    include_answer=include_answer,
+                    include_content=include_content,
+                    include_domains=include_domains,
+                    exclude_domains=exclude_domains,
+                )
+                fallback_info = None
+                if provider_name != primary_provider:
+                    fallback_info = {
+                        "from": primary_provider,
+                        "to": provider_name,
+                        "reason": str(last_error)[:200] if last_error else "primary provider failed",
+                    }
+                return result, fallback_info
+            except MySearchError as exc:
+                last_error = exc
+                continue
+            except Exception as exc:
+                last_error = MySearchError(f"{provider_name}: {exc}")
+                continue
+        raise MySearchError(f"All providers failed for query '{query[:80]}': {last_error}")
+
+    def _dispatch_single_provider(
+        self,
+        *,
+        provider_name: str,
+        query: str,
+        max_results: int,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        decision: RouteDecision,
+        include_answer: bool,
+        include_content: bool,
+        include_domains: list[str] | None,
+        exclude_domains: list[str] | None,
+    ) -> dict[str, Any]:
+        if provider_name == "tavily":
+            return self._search_tavily(
+                query=query,
+                max_results=max_results,
+                topic=decision.tavily_topic,
+                include_answer=include_answer,
+                include_content=include_content,
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+            )
+        if provider_name == "firecrawl":
+            return self._search_firecrawl(
+                query=query,
+                max_results=max_results,
+                categories=decision.firecrawl_categories or self._firecrawl_categories(mode, intent),
+                include_content=include_content or mode in {"docs", "research", "github", "pdf"},
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+            )
+        if provider_name == "exa":
+            return self._search_exa(
+                query=query,
+                max_results=max_results,
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+                include_content=include_content,
+            )
+        raise MySearchError(f"Unknown provider: {provider_name}")
+
     def _search_web_blended(
         self,
         *,
@@ -1720,10 +1803,29 @@ class MySearchClient:
             }
 
         blended_results, blended_errors = self._execute_parallel(tasks, max_workers=2)
-        self._raise_parallel_error(blended_errors, "primary")
-        primary_result = blended_results["primary"]
-        secondary_result = blended_results.get("secondary")
-        secondary_error = str(blended_errors["secondary"]) if "secondary" in blended_errors else ""
+        primary_failed = "primary" in blended_errors
+        secondary_failed = "secondary" in blended_errors
+
+        if primary_failed and not secondary_failed:
+            primary_result = blended_results["secondary"]
+            primary_result["fallback"] = {
+                "from": decision.provider,
+                "to": primary_result.get("provider", "unknown"),
+                "reason": str(blended_errors["primary"])[:200],
+            }
+            secondary_result = None
+            secondary_error = ""
+        elif primary_failed and secondary_failed:
+            primary_err = str(blended_errors["primary"])[:150]
+            secondary_err = str(blended_errors["secondary"])[:150]
+            raise MySearchError(
+                f"Blended search failed: primary ({decision.provider}): {primary_err}; "
+                f"secondary: {secondary_err}"
+            )
+        else:
+            primary_result = blended_results["primary"]
+            secondary_result = blended_results.get("secondary")
+            secondary_error = str(blended_errors["secondary"]) if secondary_failed else ""
 
         merged = self._merge_search_payloads(
             primary_result=primary_result,
@@ -2888,7 +2990,9 @@ class MySearchClient:
         try:
             parsed = date.fromisoformat(value)
         except ValueError:
-            return None
+            raise MySearchError(
+                f"Invalid date format: '{value}'. Use ISO format YYYY-MM-DD."
+            )
         bound_time = dt_time.max if end_of_day else dt_time.min
         return datetime.combine(parsed, bound_time).replace(tzinfo=timezone.utc)
 
@@ -3693,8 +3797,13 @@ class MySearchClient:
         except HTTPError as exc:
             status_code = exc.code
             response_text = exc.read().decode("utf-8", errors="replace")
+        except TimeoutError as exc:
+            effective_timeout = timeout_seconds or self.config.timeout_seconds
+            raise MySearchError(
+                f"{provider.name} request timeout after {effective_timeout}s: {url}"
+            ) from exc
         except (URLError, OSError) as exc:
-            raise MySearchError(str(exc)) from exc
+            raise MySearchError(f"{provider.name} network error: {exc}") from exc
 
         try:
             data = json.loads(response_text)

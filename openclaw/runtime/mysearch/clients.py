@@ -618,6 +618,9 @@ class MySearchClient:
             decision=decision,
             sources=normalized_sources,
             strategy=resolved_strategy,
+            mode=mode,
+            intent=resolved_intent,
+            include_domains=include_domains,
         ):
             result = self._search_web_blended(
                 query=query,
@@ -631,33 +634,21 @@ class MySearchClient:
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
             )
-        elif decision.provider == "tavily":
-            result = self._search_tavily(
+        elif decision.provider in {"tavily", "firecrawl", "exa"}:
+            result, fallback_info = self._search_with_fallback(
+                primary_provider=decision.provider,
                 query=query,
                 max_results=candidate_max_results,
-                topic=decision.tavily_topic,
+                mode=mode,
+                intent=resolved_intent,
+                decision=decision,
                 include_answer=effective_include_answer,
                 include_content=include_content,
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
             )
-        elif decision.provider == "firecrawl":
-            result = self._search_firecrawl(
-                query=query,
-                max_results=candidate_max_results,
-                categories=decision.firecrawl_categories or [],
-                include_content=include_content or mode in {"docs", "research", "github", "pdf"},
-                include_domains=include_domains,
-                exclude_domains=exclude_domains,
-            )
-        elif decision.provider == "exa":
-            result = self._search_exa(
-                query=query,
-                max_results=candidate_max_results,
-                include_domains=include_domains,
-                exclude_domains=exclude_domains,
-                include_content=include_content,
-            )
+            if fallback_info:
+                result["fallback"] = fallback_info
         elif decision.provider == "xai":
             result = self._search_xai(
                 query=query,
@@ -1362,7 +1353,7 @@ class MySearchClient:
                 return RouteDecision(
                     provider="tavily",
                     reason="显式指定 Tavily",
-                    tavily_topic="news" if mode == "news" else "general",
+                    tavily_topic="news" if mode == "news" or intent in {"news", "status"} else "general",
                 )
             if provider == "firecrawl":
                 return RouteDecision(
@@ -1515,16 +1506,26 @@ class MySearchClient:
             )
 
         if mode == "research":
-            if not self._provider_can_serve(self.config.tavily) and self._provider_can_serve(
-                self.config.exa
-            ):
+            if self._provider_can_serve(self.config.tavily):
+                return RouteDecision(
+                    provider="tavily",
+                    reason="research 模式先用 Tavily 做发现，再按策略决定是否扩展验证",
+                    tavily_topic="general",
+                )
+            if self._provider_can_serve(self.config.exa):
                 return RouteDecision(
                     provider="exa",
                     reason="Tavily 未配置，research 发现阶段回退到 Exa",
                 )
+            if self._provider_can_serve(self.config.firecrawl):
+                return RouteDecision(
+                    provider="firecrawl",
+                    reason="Tavily / Exa 未配置，research 发现阶段回退到 Firecrawl",
+                    firecrawl_categories=self._firecrawl_categories(mode, intent),
+                )
             return RouteDecision(
                 provider="tavily",
-                reason="research 模式先用 Tavily 做发现，再按策略决定是否扩展验证",
+                reason="research 模式默认走 Tavily（无可用替代）",
                 tavily_topic="general",
             )
 
@@ -1629,6 +1630,9 @@ class MySearchClient:
         decision: RouteDecision,
         sources: list[str],
         strategy: SearchStrategy,
+        mode: SearchMode = "auto",
+        intent: ResolvedSearchIntent = "factual",
+        include_domains: list[str] | None = None,
     ) -> bool:
         if requested_provider != "auto":
             return False
@@ -1638,9 +1642,110 @@ class MySearchClient:
             return False
         if "x" in sources:
             return False
+        if include_domains:
+            return False
+        if mode in {"docs", "github", "pdf"}:
+            return False
+        if intent in {"resource", "tutorial"}:
+            return False
         return self._provider_can_serve(self.config.tavily) and self._provider_can_serve(
             self.config.firecrawl
         )
+
+    _SEARCH_FALLBACK_CHAIN: dict[str, list[str]] = {
+        "tavily": ["exa", "firecrawl"],
+        "firecrawl": ["exa", "tavily"],
+        "exa": ["firecrawl", "tavily"],
+    }
+
+    def _search_with_fallback(
+        self,
+        *,
+        primary_provider: str,
+        query: str,
+        max_results: int,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        decision: RouteDecision,
+        include_answer: bool,
+        include_content: bool,
+        include_domains: list[str] | None,
+        exclude_domains: list[str] | None,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        chain = [primary_provider, *self._SEARCH_FALLBACK_CHAIN.get(primary_provider, [])]
+        last_error: Exception | None = None
+        for provider_name in chain:
+            try:
+                result = self._dispatch_single_provider(
+                    provider_name=provider_name,
+                    query=query,
+                    max_results=max_results,
+                    mode=mode,
+                    intent=intent,
+                    decision=decision,
+                    include_answer=include_answer,
+                    include_content=include_content,
+                    include_domains=include_domains,
+                    exclude_domains=exclude_domains,
+                )
+                fallback_info = None
+                if provider_name != primary_provider:
+                    fallback_info = {
+                        "from": primary_provider,
+                        "to": provider_name,
+                        "reason": str(last_error)[:200] if last_error else "primary provider failed",
+                    }
+                return result, fallback_info
+            except MySearchError as exc:
+                last_error = exc
+                continue
+            except Exception as exc:
+                last_error = MySearchError(f"{provider_name}: {exc}")
+                continue
+        raise MySearchError(f"All providers failed for query '{query[:80]}': {last_error}")
+
+    def _dispatch_single_provider(
+        self,
+        *,
+        provider_name: str,
+        query: str,
+        max_results: int,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        decision: RouteDecision,
+        include_answer: bool,
+        include_content: bool,
+        include_domains: list[str] | None,
+        exclude_domains: list[str] | None,
+    ) -> dict[str, Any]:
+        if provider_name == "tavily":
+            return self._search_tavily(
+                query=query,
+                max_results=max_results,
+                topic=decision.tavily_topic,
+                include_answer=include_answer,
+                include_content=include_content,
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+            )
+        if provider_name == "firecrawl":
+            return self._search_firecrawl(
+                query=query,
+                max_results=max_results,
+                categories=decision.firecrawl_categories or self._firecrawl_categories(mode, intent),
+                include_content=include_content or mode in {"docs", "research", "github", "pdf"},
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+            )
+        if provider_name == "exa":
+            return self._search_exa(
+                query=query,
+                max_results=max_results,
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+                include_content=include_content,
+            )
+        raise MySearchError(f"Unknown provider: {provider_name}")
 
     def _search_web_blended(
         self,
@@ -1698,10 +1803,29 @@ class MySearchClient:
             }
 
         blended_results, blended_errors = self._execute_parallel(tasks, max_workers=2)
-        self._raise_parallel_error(blended_errors, "primary")
-        primary_result = blended_results["primary"]
-        secondary_result = blended_results.get("secondary")
-        secondary_error = str(blended_errors["secondary"]) if "secondary" in blended_errors else ""
+        primary_failed = "primary" in blended_errors
+        secondary_failed = "secondary" in blended_errors
+
+        if primary_failed and not secondary_failed:
+            primary_result = blended_results["secondary"]
+            primary_result["fallback"] = {
+                "from": decision.provider,
+                "to": primary_result.get("provider", "unknown"),
+                "reason": str(blended_errors["primary"])[:200],
+            }
+            secondary_result = None
+            secondary_error = ""
+        elif primary_failed and secondary_failed:
+            primary_err = str(blended_errors["primary"])[:150]
+            secondary_err = str(blended_errors["secondary"])[:150]
+            raise MySearchError(
+                f"Blended search failed: primary ({decision.provider}): {primary_err}; "
+                f"secondary: {secondary_err}"
+            )
+        else:
+            primary_result = blended_results["primary"]
+            secondary_result = blended_results.get("secondary")
+            secondary_error = str(blended_errors["secondary"]) if secondary_failed else ""
 
         merged = self._merge_search_payloads(
             primary_result=primary_result,
@@ -1752,6 +1876,55 @@ class MySearchClient:
         include_domains: list[str] | None,
         exclude_domains: list[str] | None,
     ) -> dict[str, Any]:
+        include_domains = [item.strip() for item in (include_domains or []) if item and item.strip()]
+        exclude_domains = [item.strip() for item in (exclude_domains or []) if item and item.strip()]
+
+        response = self._search_tavily_once(
+            query=query,
+            max_results=max_results,
+            topic=topic,
+            include_answer=include_answer,
+            include_content=include_content,
+            include_domains=include_domains,
+            exclude_domains=exclude_domains,
+        )
+        if response.get("results") or not include_domains:
+            return response
+
+        retry_response = self._search_tavily_domain_retry(
+            query=query,
+            max_results=max_results,
+            topic=topic,
+            include_content=include_content,
+            include_domains=include_domains,
+            exclude_domains=exclude_domains,
+        )
+        if retry_response is not None:
+            return retry_response
+
+        fallback_response = self._search_tavily_domain_fallback(
+            query=query,
+            max_results=max_results,
+            include_content=include_content,
+            include_domains=include_domains,
+            exclude_domains=exclude_domains,
+        )
+        if fallback_response is not None:
+            return fallback_response
+
+        return response
+
+    def _search_tavily_once(
+        self,
+        *,
+        query: str,
+        max_results: int,
+        topic: str,
+        include_answer: bool,
+        include_content: bool,
+        include_domains: list[str] | None,
+        exclude_domains: list[str] | None,
+    ) -> dict[str, Any]:
         provider = self.config.tavily
         key = self._get_key_or_raise(provider)
         payload: dict[str, Any] = {
@@ -1774,6 +1947,23 @@ class MySearchClient:
             payload=payload,
             key=key.key,
         )
+        results = [
+            {
+                "provider": "tavily",
+                "source": "web",
+                "title": item.get("title", ""),
+                "url": item.get("url", ""),
+                "snippet": item.get("content", ""),
+                "content": item.get("raw_content", "") if include_content else "",
+                "score": item.get("score"),
+            }
+            for item in response.get("results", [])
+        ]
+        filtered_results = self._filter_results_by_domains(
+            results,
+            include_domains=include_domains,
+            exclude_domains=exclude_domains,
+        )
         return {
             "provider": "tavily",
             "transport": key.source,
@@ -1781,23 +1971,172 @@ class MySearchClient:
             "answer": response.get("answer", ""),
             "request_id": response.get("request_id", ""),
             "response_time": response.get("response_time"),
-            "results": [
-                {
-                    "provider": "tavily",
-                    "source": "web",
-                    "title": item.get("title", ""),
-                    "url": item.get("url", ""),
-                    "snippet": item.get("content", ""),
-                    "content": item.get("raw_content", "") if include_content else "",
-                    "score": item.get("score"),
-                }
-                for item in response.get("results", [])
-            ],
+            "results": filtered_results,
             "citations": [
                 {"title": item.get("title", ""), "url": item.get("url", "")}
-                for item in response.get("results", [])
+                for item in filtered_results
                 if item.get("url")
             ],
+        }
+
+    def _search_tavily_domain_retry(
+        self,
+        *,
+        query: str,
+        max_results: int,
+        topic: str,
+        include_content: bool,
+        include_domains: list[str],
+        exclude_domains: list[str] | None,
+    ) -> dict[str, Any] | None:
+        per_domain_results = []
+        retried_domains: list[str] = []
+        for domain in include_domains:
+            domain_result = self._search_tavily_once(
+                query=self._build_firecrawl_domain_query(
+                    query=query,
+                    include_domain=domain,
+                    exclude_domains=exclude_domains,
+                ),
+                max_results=max_results,
+                topic=topic,
+                include_answer=False,
+                include_content=include_content,
+                include_domains=None,
+                exclude_domains=exclude_domains,
+            )
+            filtered_results = self._filter_results_by_domains(
+                domain_result.get("results", []),
+                include_domains=[domain],
+                exclude_domains=exclude_domains,
+            )
+            if not filtered_results:
+                continue
+            domain_result = dict(domain_result)
+            domain_result["results"] = filtered_results
+            domain_result["citations"] = self._align_citations_with_results(
+                results=filtered_results,
+                citations=list(domain_result.get("citations") or []),
+            )
+            per_domain_results.append(domain_result)
+            retried_domains.append(domain)
+
+        if not per_domain_results:
+            return None
+
+        merged_results = self._merge_ranked_results(
+            [result.get("results", []) for result in per_domain_results],
+            max_results=max_results,
+        )
+        citations = self._align_citations_with_results(
+            results=merged_results,
+            citations=self._dedupe_citations(
+                *[result.get("citations", []) for result in per_domain_results]
+            ),
+        )
+        return {
+            "provider": "tavily",
+            "transport": per_domain_results[0].get("transport", "env"),
+            "query": query,
+            "answer": "",
+            "request_id": "",
+            "response_time": None,
+            "results": merged_results,
+            "citations": citations,
+            "route_debug": {
+                "domain_filter_mode": "site_query_retry",
+                "retried_include_domains": retried_domains,
+            },
+        }
+
+    def _search_tavily_domain_fallback(
+        self,
+        *,
+        query: str,
+        max_results: int,
+        include_content: bool,
+        include_domains: list[str],
+        exclude_domains: list[str] | None,
+    ) -> dict[str, Any] | None:
+        if not self._provider_can_serve(self.config.firecrawl):
+            return None
+
+        categories = (
+            self._firecrawl_categories("docs", "resource")
+            if self._looks_like_docs_query(query.lower()) or self._looks_like_tutorial_query(query.lower())
+            else []
+        )
+        per_domain_results = []
+        citations = []
+        seen_urls: set[str] = set()
+        for domain in include_domains:
+            domain_result = self._search_firecrawl_once(
+                query=self._build_firecrawl_domain_query(
+                    query=query,
+                    include_domain=domain,
+                    exclude_domains=exclude_domains,
+                ),
+                max_results=max_results,
+                categories=categories,
+                include_content=include_content,
+            )
+            if not domain_result.get("results"):
+                retry_result = self._search_firecrawl_domain_retry(
+                    query=query,
+                    max_results=max_results,
+                    categories=categories,
+                    include_content=include_content,
+                    include_domain=domain,
+                    exclude_domains=exclude_domains,
+                )
+                if retry_result is not None:
+                    domain_result = retry_result
+            per_domain_results.append(domain_result)
+            for item in domain_result.get("results", []):
+                url = item.get("url", "")
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                citations.append({"title": item.get("title", ""), "url": url})
+
+        merged_results = self._merge_ranked_results(
+            [result.get("results", []) for result in per_domain_results],
+            max_results=max_results,
+        )
+        if not merged_results:
+            return None
+
+        return {
+            "provider": "hybrid",
+            "route_selected": "tavily+firecrawl",
+            "query": query,
+            "answer": "",
+            "results": merged_results,
+            "citations": citations[:max_results],
+            "primary_search": {
+                "provider": "tavily",
+                "query": query,
+                "results": [],
+                "citations": [],
+            },
+            "secondary_search": {
+                "provider": "firecrawl",
+                "query": query,
+                "results": merged_results,
+                "citations": citations[:max_results],
+            },
+            "secondary_error": "",
+            "evidence": {
+                "providers_consulted": ["tavily", "firecrawl"],
+                "matched_results": 0,
+                "citation_count": len(citations[:max_results]),
+                "verification": "fallback",
+            },
+            "fallback": {
+                "from": "tavily",
+                "to": "firecrawl",
+                "reason": "tavily returned 0 results for domain-filtered search",
+            },
         }
 
     def _search_firecrawl(
@@ -2651,7 +2990,9 @@ class MySearchClient:
         try:
             parsed = date.fromisoformat(value)
         except ValueError:
-            return None
+            raise MySearchError(
+                f"Invalid date format: '{value}'. Use ISO format YYYY-MM-DD."
+            )
         bound_time = dt_time.max if end_of_day else dt_time.min
         return datetime.combine(parsed, bound_time).replace(tzinfo=timezone.utc)
 
@@ -3456,8 +3797,13 @@ class MySearchClient:
         except HTTPError as exc:
             status_code = exc.code
             response_text = exc.read().decode("utf-8", errors="replace")
+        except TimeoutError as exc:
+            effective_timeout = timeout_seconds or self.config.timeout_seconds
+            raise MySearchError(
+                f"{provider.name} request timeout after {effective_timeout}s: {url}"
+            ) from exc
         except (URLError, OSError) as exc:
-            raise MySearchError(str(exc)) from exc
+            raise MySearchError(f"{provider.name} network error: {exc}") from exc
 
         try:
             data = json.loads(response_text)
@@ -3737,7 +4083,7 @@ class MySearchClient:
                     key=key,
                     timeout_seconds=timeout_seconds,
                 )
-            except MySearchHTTPError:
+            except MySearchHTTPError as exc:
                 self._probe_xai_official_via_responses(
                     provider=provider,
                     key=key,
@@ -3875,18 +4221,27 @@ class MySearchClient:
         return []
 
     def _looks_like_news_query(self, query_lower: str) -> bool:
-        keywords = [
+        # 中文关键词：直接 substring 匹配
+        cn_keywords = ["刚刚", "最新", "新闻", "动态"]
+        if any(kw in query_lower for kw in cn_keywords):
+            return True
+        # 英文关键词：排除常见技术搭配的误判
+        # "breaking changes" / "latest version" 等不是新闻查询
+        tech_negatives = [
+            "breaking change", "breaking update",
+            "latest version", "latest release", "latest docs",
+            "latest commit", "latest tag",
+        ]
+        if any(neg in query_lower for neg in tech_negatives):
+            return False
+        en_keywords = [
             "latest",
             "breaking",
             "news",
             "today",
             "this week",
-            "刚刚",
-            "最新",
-            "新闻",
-            "动态",
         ]
-        return any(keyword in query_lower for keyword in keywords)
+        return any(keyword in query_lower for keyword in en_keywords)
 
     def _looks_like_status_query(self, query_lower: str) -> bool:
         keywords = [
@@ -3937,13 +4292,11 @@ class MySearchClient:
             "documentation",
             "api reference",
             "changelog",
-            "pricing",
             "readme",
             "github",
             "manual",
             "文档",
             "接口",
-            "价格",
             "更新日志",
         ]
         return any(keyword in query_lower for keyword in keywords)
