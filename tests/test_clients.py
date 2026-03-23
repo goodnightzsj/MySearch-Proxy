@@ -1085,6 +1085,142 @@ class MySearchClientTests(unittest.TestCase):
         self.assertGreaterEqual(news_plan["social_max_results"], 4)
         self.assertGreaterEqual(news_plan["scrape_top_n"], 4)
 
+    def test_firecrawl_primary_verify_requests_content(self) -> None:
+        client = MySearchClient()
+        firecrawl_calls: list[dict[str, object]] = []
+
+        def fake_firecrawl(**kwargs):  # type: ignore[no-untyped-def]
+            firecrawl_calls.append(kwargs)
+            return {
+                "provider": "firecrawl",
+                "transport": "env",
+                "query": kwargs["query"],
+                "answer": "",
+                "results": [
+                    {
+                        "provider": "firecrawl",
+                        "source": "web",
+                        "title": "OpenAI Pricing",
+                        "url": "https://openai.com/api/pricing/",
+                        "snippet": "Official pricing",
+                        "content": "Official pricing content" if kwargs["include_content"] else "",
+                    }
+                ],
+                "citations": [
+                    {"title": "OpenAI Pricing", "url": "https://openai.com/api/pricing/"}
+                ],
+            }
+
+        client._search_firecrawl = fake_firecrawl  # type: ignore[method-assign]
+        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [],
+            "citations": [],
+        }
+
+        client._search_web_blended(
+            query="OpenAI pricing official",
+            mode="docs",
+            intent="resource",
+            strategy="verify",
+            decision=RouteDecision(
+                provider="firecrawl",
+                reason="docs primary",
+                firecrawl_categories=("research",),
+                result_profile="resource",
+            ),
+            max_results=3,
+            include_content=False,
+            include_answer=False,
+            include_domains=["openai.com"],
+            exclude_domains=None,
+        )
+
+        self.assertTrue(firecrawl_calls)
+        self.assertTrue(firecrawl_calls[0]["include_content"])
+
+    def test_search_verify_conflicts_trigger_xai_arbitration(self) -> None:
+        client = MySearchClient()
+        client._provider_can_serve = lambda provider: True  # type: ignore[method-assign]
+        client.config.xai.search_mode = "official"
+        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "Update note",
+                    "url": "https://updates.example.com/post-a",
+                    "snippet": "Provider A",
+                    "content": "",
+                }
+            ],
+            "citations": [{"title": "Update note", "url": "https://updates.example.com/post-a"}],
+        }
+        client._search_firecrawl = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "firecrawl",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "firecrawl",
+                    "source": "web",
+                    "title": "Update note mirror",
+                    "url": "https://blog.updates.example.com/post-b",
+                    "snippet": "Provider B",
+                    "content": "Mirror content" if kwargs.get("include_content") else "",
+                }
+            ],
+            "citations": [
+                {"title": "Update note mirror", "url": "https://blog.updates.example.com/post-b"}
+            ],
+        }
+        client._search_xai = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "xai",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "The mirror post is newer but both sources describe the same rollout.",
+            "results": [
+                {
+                    "provider": "xai",
+                    "source": "web",
+                    "title": "Arbitration source",
+                    "url": "https://news.example.com/rollout",
+                    "snippet": "",
+                    "content": "",
+                }
+            ],
+            "citations": [
+                {"title": "Arbitration source", "url": "https://news.example.com/rollout"},
+                {"title": "Second source", "url": "https://another.example.com/rollout"},
+            ],
+        }
+
+        result = client.search(
+            query="vendor rollout status",
+            mode="web",
+            strategy="verify",
+            provider="auto",
+            include_answer=False,
+            max_results=5,
+        )
+
+        self.assertEqual(result["evidence"]["arbitration_source"], "xai")
+        self.assertEqual(
+            result["evidence"]["xai_arbitration_summary"],
+            "The mirror post is newer but both sources describe the same rollout.",
+        )
+        self.assertEqual(result["evidence"]["xai_arbitration_confidence"], "high")
+        self.assertEqual(result["evidence"]["answer_source"], "xai_arbitration")
+        self.assertIn("low-source-diversity", result["evidence"]["conflicts"])
+
 
 if __name__ == "__main__":
     unittest.main()

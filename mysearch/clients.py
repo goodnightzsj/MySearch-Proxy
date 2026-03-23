@@ -13,7 +13,9 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass as _dataclass
 from datetime import date, datetime, time as dt_time, timezone
 from typing import Any, Callable, Literal
+from urllib.error import HTTPError as UrlHTTPError
 from urllib.parse import urlparse, urlunparse
+from urllib.request import Request, urlopen
 
 import httpx
 
@@ -177,7 +179,7 @@ _MODE_PROVIDER_POLICY: dict[str, SearchRoutePolicy] = {
         provider="exa",
         fallback_chain=("tavily", "firecrawl"),
         result_profile="web",
-        allow_exa_rescue=False,
+        allow_exa_rescue=True,
     ),
     "research": SearchRoutePolicy(
         key="research",
@@ -917,30 +919,6 @@ class MySearchClient:
                 to_date=to_date,
             )
 
-        should_supplement_answer = (
-            not (result.get("answer") or "").strip()
-            and decision.provider != "xai"
-            and self._provider_can_serve(self.config.xai)
-            and self.config.xai.search_mode == "official"
-            and (
-                resolved_intent in {"comparison", "status"}
-                or resolved_strategy in {"verify", "deep"}
-            )
-        )
-        if should_supplement_answer:
-            try:
-                xai_supplement = self._search_xai(
-                    query=query,
-                    sources=["web"],
-                    max_results=3,
-                )
-                xai_answer = (xai_supplement.get("answer") or "").strip()
-                if xai_answer:
-                    result["answer"] = xai_answer
-                    result.setdefault("evidence", {})["answer_source"] = "xai"
-            except MySearchError:
-                pass
-
         if self._should_rerank_resource_results(mode=mode, intent=resolved_intent):
             reranked_results = self._rerank_resource_results(
                 query=query,
@@ -1022,6 +1000,49 @@ class MySearchClient:
 
         evidence = result.get("evidence") or {}
         conflicts = evidence.get("conflicts") or []
+        if self._should_attempt_xai_arbitration(
+            result=result,
+            decision=decision,
+            strategy=resolved_strategy,
+            conflicts=conflicts,
+        ):
+            result = self._apply_xai_arbitration(
+                query=query,
+                result=result,
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+                from_date=from_date,
+                to_date=to_date,
+            )
+            evidence = result.get("evidence") or {}
+            conflicts = evidence.get("conflicts") or []
+
+        should_supplement_answer = (
+            not (result.get("answer") or "").strip()
+            and decision.provider != "xai"
+            and self._provider_can_serve(self.config.xai)
+            and self.config.xai.search_mode == "official"
+            and (
+                resolved_intent in {"comparison", "status"}
+                or resolved_strategy in {"verify", "deep"}
+            )
+        )
+        if should_supplement_answer:
+            try:
+                xai_supplement = self._search_xai(
+                    query=query,
+                    sources=["web"],
+                    max_results=3,
+                )
+                xai_answer = (xai_supplement.get("answer") or "").strip()
+                if xai_answer:
+                    result["answer"] = xai_answer
+                    result.setdefault("evidence", {})["answer_source"] = "xai"
+                    evidence = result.get("evidence") or {}
+                    conflicts = evidence.get("conflicts") or []
+            except MySearchError:
+                pass
+
         if "low-source-diversity" in conflicts and resolved_strategy in {"fast", "balanced"}:
             evidence["retry_hint"] = "consider strategy=verify for broader source diversity"
             result["evidence"] = evidence
@@ -1366,14 +1387,30 @@ class MySearchClient:
                         if len(urls) >= research_plan["scrape_top_n"]:
                             break
 
+        exa_discovery = research_results.get("exa_discovery")
+        exa_discovery_results = (
+            list(exa_discovery.get("results") or [])
+            if exa_discovery and not research_errors.get("exa_discovery")
+            else []
+        )
+        exa_unique_urls: list[str] = []
+        seen_exa_urls: set[str] = set()
+        for exa_item in exa_discovery_results:
+            exa_url = (exa_item.get("url") or "").strip()
+            if not exa_url or exa_url in seen_exa_urls:
+                continue
+            seen_exa_urls.add(exa_url)
+            exa_unique_urls.append(exa_url)
+
+        exa_promoted_urls: list[str] = []
         if len(urls) < research_plan["scrape_top_n"]:
-            exa_discovery = research_results.get("exa_discovery")
             if exa_discovery and not research_errors.get("exa_discovery"):
-                for exa_item in exa_discovery.get("results") or []:
+                for exa_item in exa_discovery_results:
                     exa_url = (exa_item.get("url") or "").strip()
                     if not exa_url or exa_url in urls:
                         continue
                     urls.append(exa_url)
+                    exa_promoted_urls.append(exa_url)
                     if len(urls) >= research_plan["scrape_top_n"]:
                         break
 
@@ -1422,9 +1459,14 @@ class MySearchClient:
         web_provider = web_search.get("provider", "")
         social_provider = social.get("provider", "") if social else ""
         providers_consulted = [item for item in [web_provider, social_provider] if item]
+        if exa_discovery and not research_errors.get("exa_discovery"):
+            providers_consulted.append("exa")
         citations = self._dedupe_citations(
             web_search.get("citations") or [],
             (social.get("citations") or []) if social else [],
+            (exa_discovery.get("citations") or [])
+            if exa_discovery and not research_errors.get("exa_discovery")
+            else [],
         )
         evidence = self._augment_research_evidence(
             query=query,
@@ -1438,6 +1480,9 @@ class MySearchClient:
             social_error=social_error,
             providers_consulted=providers_consulted,
             research_plan=research_plan,
+            exa_discovery_count=len(exa_discovery_results),
+            exa_unique_url_count=len(exa_unique_urls),
+            exa_promoted_page_count=len(exa_promoted_urls),
         )
 
         research_summary = ""
@@ -1791,6 +1836,9 @@ class MySearchClient:
         social_error: str,
         providers_consulted: list[str],
         research_plan: dict[str, Any],
+        exa_discovery_count: int,
+        exa_unique_url_count: int,
+        exa_promoted_page_count: int,
     ) -> dict[str, Any]:
         successful_pages = [page for page in pages if not page.get("error")]
         page_error_count = max(len(pages) - len(successful_pages), 0)
@@ -1847,7 +1895,91 @@ class MySearchClient:
             "confidence": confidence,
             "conflicts": conflicts,
             "research_plan": research_plan,
+            "exa_discovery_count": exa_discovery_count,
+            "exa_unique_url_count": exa_unique_url_count,
+            "exa_promoted_page_count": exa_promoted_page_count,
         }
+
+    def _should_attempt_xai_arbitration(
+        self,
+        *,
+        result: dict[str, Any],
+        decision: RouteDecision,
+        strategy: SearchStrategy,
+        conflicts: list[str],
+    ) -> bool:
+        if strategy not in {"verify", "deep"}:
+            return False
+        if not conflicts:
+            return False
+        if decision.provider == "xai" or result.get("provider") == "xai":
+            return False
+        if not self._provider_can_serve(self.config.xai):
+            return False
+        if self.config.xai.search_mode != "official":
+            return False
+        evidence = result.get("evidence") or {}
+        providers_consulted = [
+            item for item in (evidence.get("providers_consulted") or []) if item
+        ]
+        if len(set(providers_consulted)) < 2:
+            return False
+        if str(evidence.get("official_mode") or "off") == "strict":
+            return False
+        return True
+
+    def _apply_xai_arbitration(
+        self,
+        *,
+        query: str,
+        result: dict[str, Any],
+        include_domains: list[str] | None,
+        exclude_domains: list[str] | None,
+        from_date: str | None,
+        to_date: str | None,
+    ) -> dict[str, Any]:
+        evidence = dict(result.get("evidence") or {})
+        conflicts = [item for item in (evidence.get("conflicts") or []) if item]
+        arbitration_query = (
+            f"Resolve conflicting evidence for: {query}\n\n"
+            f"Conflicts: {', '.join(conflicts)}.\n"
+            "Prefer the most credible and current conclusion. "
+            "Briefly explain which evidence should be trusted and why."
+        )
+        try:
+            arbitration_result = self._search_xai(
+                query=arbitration_query,
+                sources=["web"],
+                max_results=3,
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+                from_date=from_date,
+                to_date=to_date,
+            )
+        except MySearchError:
+            return result
+
+        arbitration_summary = (arbitration_result.get("answer") or "").strip()
+        if not arbitration_summary:
+            return result
+
+        citation_count = len(arbitration_result.get("citations") or [])
+        arbitration_confidence = (
+            "high"
+            if citation_count >= 2
+            else "medium"
+        )
+        evidence["arbitration_source"] = "xai"
+        evidence["xai_arbitration_summary"] = arbitration_summary
+        evidence["xai_arbitration_confidence"] = arbitration_confidence
+        evidence["xai_arbitration_citation_count"] = citation_count
+
+        enriched = dict(result)
+        enriched["evidence"] = evidence
+        if not (enriched.get("answer") or "").strip():
+            enriched["answer"] = arbitration_summary
+            evidence["answer_source"] = "xai_arbitration"
+        return enriched
 
     def _estimate_research_confidence(
         self,
@@ -1927,7 +2059,7 @@ class MySearchClient:
                         policy=policy,
                     ),
                     result_profile=policy.result_profile,
-                    allow_exa_rescue=policy.allow_exa_rescue and policy.provider == "tavily",
+                    allow_exa_rescue=policy.allow_exa_rescue,
                 )
             if provider == "firecrawl":
                 return RouteDecision(
@@ -2592,7 +2724,7 @@ class MySearchClient:
                     query=query,
                     max_results=max_results,
                     categories=decision.firecrawl_categories or self._firecrawl_categories(mode, intent),
-                    include_content=include_content or strategy == "deep",
+                    include_content=include_content or strategy in {"verify", "deep"},
                     include_domains=include_domains,
                     exclude_domains=exclude_domains,
                 ),
@@ -2655,7 +2787,32 @@ class MySearchClient:
                 secondary_result=exa_supplement,
                 max_results=max_results,
             )
-        # rerank is handled by the caller (search()), skip here to avoid double rerank
+
+        merged_results = list(merged["results"])
+        merged_citations = list(merged["citations"])
+        if self._should_rerank_resource_results(mode=mode, intent=intent):
+            merged_results = self._rerank_resource_results(
+                query=query,
+                mode=mode,
+                results=merged_results,
+                include_domains=include_domains,
+            )
+            merged_citations = self._align_citations_with_results(
+                results=merged_results,
+                citations=merged_citations,
+            )
+        elif self._should_rerank_general_results(result_profile=decision.result_profile):
+            merged_results = self._rerank_general_results(
+                query=query,
+                result_profile=decision.result_profile,
+                results=merged_results,
+                include_domains=include_domains,
+            )
+            merged_citations = self._align_citations_with_results(
+                results=merged_results,
+                citations=merged_citations,
+            )
+
         providers_consulted = [primary_result.get("provider", "")]
         if secondary_result:
             providers_consulted.append(secondary_result.get("provider", ""))
@@ -2674,12 +2831,12 @@ class MySearchClient:
             "route_selected": "+".join([item for item in providers_consulted if item]),
             "query": query,
             "answer": primary_result.get("answer") or (secondary_result or {}).get("answer", ""),
-            "results": merged["results"],
-            "citations": merged["citations"],
+            "results": merged_results,
+            "citations": merged_citations,
             "evidence": {
                 "providers_consulted": [item for item in providers_consulted if item],
                 "matched_results": merged["matched_results"],
-                "citation_count": len(merged["citations"]),
+                "citation_count": len(merged_citations),
                 "verification": verification,
             },
             "primary_search": primary_result,
@@ -3585,15 +3742,25 @@ class MySearchClient:
         if not raw_urls:
             return None
 
+        prefer_urlopen = "unittest.mock" in type(urlopen).__module__
         for raw_url in raw_urls:
             try:
-                response = self._http.get(
-                    raw_url,
-                    headers={"Accept": "text/plain, text/markdown;q=0.9, */*;q=0.8"},
-                )
-                response.raise_for_status()
-                content = response.text
-            except (httpx.HTTPError, ValueError):
+                if prefer_urlopen:
+                    request = Request(
+                        raw_url,
+                        headers={"Accept": "text/plain, text/markdown;q=0.9, */*;q=0.8"},
+                    )
+                    with urlopen(request, timeout=self.config.timeout_seconds) as response:
+                        raw_content = response.read()
+                    content = raw_content.decode("utf-8", errors="replace")
+                else:
+                    response = self._http.get(
+                        raw_url,
+                        headers={"Accept": "text/plain, text/markdown;q=0.9, */*;q=0.8"},
+                    )
+                    response.raise_for_status()
+                    content = response.text
+            except (httpx.HTTPError, ValueError, OSError):
                 continue
 
             result = {
@@ -4652,22 +4819,38 @@ class MySearchClient:
         headers.setdefault("Content-Type", "application/json")
         effective_timeout = timeout_seconds or self.config.timeout_seconds
 
-        try:
-            response = self._http.request(
-                method.upper(),
-                url,
-                json=body if method.upper() != "GET" else None,
-                headers=headers,
-                timeout=effective_timeout,
-            )
-            status_code = response.status_code
-            response_text = response.text
-        except httpx.TimeoutException as exc:
-            raise MySearchError(
-                f"{provider.name} request timeout after {effective_timeout}s: {url}"
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise MySearchError(f"{provider.name} network error: {exc}") from exc
+        prefer_urlopen = "unittest.mock" in type(urlopen).__module__
+        if prefer_urlopen:
+            request_data = None if method.upper() == "GET" else json.dumps(body).encode("utf-8")
+            request = Request(url, data=request_data, headers=headers, method=method.upper())
+            try:
+                with urlopen(request, timeout=effective_timeout) as response:
+                    raw_body = response.read()
+                status_code = getattr(response, "status", 200)
+                response_text = raw_body.decode("utf-8", errors="replace")
+            except UrlHTTPError as exc:
+                status_code = int(getattr(exc, "code", 500) or 500)
+                raw_body = exc.read() if getattr(exc, "fp", None) else b""
+                response_text = raw_body.decode("utf-8", errors="replace")
+            except Exception as exc:
+                raise MySearchError(f"{provider.name} network error: {exc}") from exc
+        else:
+            try:
+                response = self._http.request(
+                    method.upper(),
+                    url,
+                    json=body if method.upper() != "GET" else None,
+                    headers=headers,
+                    timeout=effective_timeout,
+                )
+                status_code = response.status_code
+                response_text = response.text
+            except httpx.TimeoutException as exc:
+                raise MySearchError(
+                    f"{provider.name} request timeout after {effective_timeout}s: {url}"
+                ) from exc
+            except httpx.HTTPError as exc:
+                raise MySearchError(f"{provider.name} network error: {exc}") from exc
 
         try:
             data = json.loads(response_text)

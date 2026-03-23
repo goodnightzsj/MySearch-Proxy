@@ -1203,6 +1203,112 @@ class ErrorHandlingTests(unittest.TestCase):
         self.assertEqual(result["evidence"]["confidence"], "high")
         self.assertEqual(result["evidence"]["source_domains"], ["openai.com"])
 
+    def test_research_evidence_counts_exa_discovery_and_promoted_pages(self) -> None:
+        client = _make_client(exa_keys=["exa-test"])
+
+        def fake_search(**kwargs):  # type: ignore[no-untyped-def]
+            if kwargs["mode"] == "social":
+                return {
+                    "provider": "xai",
+                    "intent": "status",
+                    "strategy": "deep",
+                    "results": [],
+                    "citations": [],
+                    "evidence": {
+                        "providers_consulted": ["xai"],
+                        "verification": "single-provider",
+                        "citation_count": 0,
+                        "source_diversity": 0,
+                        "source_domains": [],
+                        "official_source_count": 0,
+                        "official_mode": "off",
+                        "confidence": "medium",
+                        "conflicts": [],
+                    },
+                }
+            return {
+                "provider": "tavily",
+                "intent": "resource",
+                "strategy": "deep",
+                "results": [
+                    {
+                        "title": "Primary page",
+                        "url": "https://docs.example.com/primary",
+                        "snippet": "Primary source",
+                        "content": "",
+                    }
+                ],
+                "citations": [
+                    {"title": "Primary page", "url": "https://docs.example.com/primary"}
+                ],
+                "evidence": {
+                    "providers_consulted": ["tavily"],
+                    "verification": "single-provider",
+                    "citation_count": 1,
+                    "source_diversity": 1,
+                    "source_domains": ["example.com"],
+                    "official_source_count": 1,
+                    "official_mode": "strict",
+                    "confidence": "high",
+                    "conflicts": [],
+                },
+            }
+
+        client.search = fake_search  # type: ignore[method-assign]
+        client._search_exa = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "exa",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "exa",
+                    "source": "web",
+                    "title": "Primary page duplicate",
+                    "url": "https://docs.example.com/primary",
+                    "snippet": "duplicate",
+                    "content": "",
+                },
+                {
+                    "provider": "exa",
+                    "source": "web",
+                    "title": "Supplemental page",
+                    "url": "https://blog.example.com/secondary",
+                    "snippet": "supplement",
+                    "content": "",
+                },
+            ],
+            "citations": [
+                {"title": "Primary page duplicate", "url": "https://docs.example.com/primary"},
+                {"title": "Supplemental page", "url": "https://blog.example.com/secondary"},
+            ],
+        }
+        client.extract_url = lambda **kwargs: {  # type: ignore[method-assign]
+            "url": kwargs["url"],
+            "provider": "firecrawl",
+            "content": f"content for {kwargs['url']}",
+            "cache": {"extract": {"hit": False, "ttl_seconds": 300}},
+        }
+        client.config.xai.search_mode = "compatible"
+
+        result = client.research(
+            query="example rollout deep research",
+            mode="web",
+            strategy="deep",
+            include_social=False,
+            scrape_top_n=2,
+        )
+
+        self.assertIn("exa", result["evidence"]["providers_consulted"])
+        self.assertEqual(result["evidence"]["exa_discovery_count"], 2)
+        self.assertEqual(result["evidence"]["exa_unique_url_count"], 2)
+        self.assertEqual(result["evidence"]["exa_promoted_page_count"], 1)
+        self.assertIn(
+            {"title": "Supplemental page", "url": "https://blog.example.com/secondary"},
+            result["citations"],
+        )
+        self.assertEqual(result["evidence"]["page_count"], 2)
+
 
 # ===========================================================================
 # 11  Search source normalization
