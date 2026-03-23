@@ -106,6 +106,80 @@ class RouteDecision:
     tavily_topic: str = "general"
     firecrawl_categories: list[str] | None = None
     sources: list[str] | None = None
+    fallback_chain: list[str] | None = None
+    result_profile: Literal["off", "web", "news", "resource"] = "off"
+    allow_exa_rescue: bool = False
+
+
+@dataclass(slots=True)
+class SearchRoutePolicy:
+    key: str
+    provider: str
+    fallback_chain: tuple[str, ...] = ()
+    tavily_topic: str = "general"
+    firecrawl_categories: tuple[str, ...] = ()
+    result_profile: Literal["off", "web", "news", "resource"] = "off"
+    allow_exa_rescue: bool = False
+
+
+_MODE_PROVIDER_POLICY: dict[str, SearchRoutePolicy] = {
+    "web": SearchRoutePolicy(
+        key="web",
+        provider="tavily",
+        fallback_chain=("exa", "firecrawl"),
+        result_profile="web",
+        allow_exa_rescue=True,
+    ),
+    "news": SearchRoutePolicy(
+        key="news",
+        provider="tavily",
+        fallback_chain=("exa",),
+        tavily_topic="news",
+        result_profile="news",
+        allow_exa_rescue=True,
+    ),
+    "docs": SearchRoutePolicy(
+        key="docs",
+        provider="firecrawl",
+        fallback_chain=("tavily", "exa"),
+        firecrawl_categories=("research",),
+        result_profile="resource",
+    ),
+    "github": SearchRoutePolicy(
+        key="github",
+        provider="firecrawl",
+        fallback_chain=("exa", "tavily"),
+        firecrawl_categories=("github",),
+        result_profile="resource",
+    ),
+    "pdf": SearchRoutePolicy(
+        key="pdf",
+        provider="firecrawl",
+        fallback_chain=("tavily", "exa"),
+        firecrawl_categories=("pdf",),
+        result_profile="resource",
+    ),
+    "content": SearchRoutePolicy(
+        key="content",
+        provider="firecrawl",
+        fallback_chain=("tavily", "exa"),
+        result_profile="resource",
+    ),
+    "resource": SearchRoutePolicy(
+        key="resource",
+        provider="firecrawl",
+        fallback_chain=("tavily", "exa"),
+        firecrawl_categories=("research",),
+        result_profile="resource",
+    ),
+    "research": SearchRoutePolicy(
+        key="research",
+        provider="tavily",
+        fallback_chain=("exa", "firecrawl"),
+        result_profile="web",
+        allow_exa_rescue=True,
+    ),
+}
 
 
 class MySearchClient:
@@ -666,10 +740,40 @@ class MySearchClient:
         else:
             raise MySearchError(f"Unsupported route decision: {decision.provider}")
 
+        if self._should_attempt_exa_rescue(
+            query=query,
+            mode=mode,
+            intent=resolved_intent,
+            decision=decision,
+            result=result,
+            max_results=max_results,
+            include_domains=include_domains,
+        ):
+            result = self._apply_exa_rescue(
+                query=query,
+                primary_result=result,
+                max_results=candidate_max_results,
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+                include_content=include_content,
+            )
+
         if self._should_rerank_resource_results(mode=mode, intent=resolved_intent):
             reranked_results = self._rerank_resource_results(
                 query=query,
                 mode=mode,
+                results=list(result.get("results") or []),
+                include_domains=include_domains,
+            )
+            result["results"] = reranked_results
+            result["citations"] = self._align_citations_with_results(
+                results=reranked_results,
+                citations=list(result.get("citations") or []),
+            )
+        elif self._should_rerank_general_results(result_profile=decision.result_profile):
+            reranked_results = self._rerank_general_results(
+                query=query,
+                result_profile=decision.result_profile,
                 results=list(result.get("results") or []),
                 include_domains=include_domains,
             )
@@ -889,17 +993,39 @@ class MySearchClient:
         query = query.strip()
         if not query:
             raise MySearchError("query must not be empty")
-
-        web_mode = "news" if mode == "news" else ("docs" if mode in {"docs", "github", "pdf"} else "web")
+        resolved_intent = self._resolve_intent(
+            query=query,
+            mode=mode,
+            intent=intent,
+            sources=["web"],
+        )
+        resolved_strategy = self._resolve_strategy(
+            mode=mode,
+            intent=resolved_intent,
+            strategy=strategy,
+            sources=["web"],
+            include_content=False,
+        )
+        research_plan = self._resolve_research_plan(
+            query=query,
+            mode=mode,
+            intent=resolved_intent,
+            strategy=resolved_strategy,
+            web_max_results=web_max_results,
+            social_max_results=social_max_results,
+            scrape_top_n=scrape_top_n,
+            include_social=include_social,
+            include_domains=include_domains,
+        )
         research_tasks: dict[str, Callable[[], Any]] = {
             "web": lambda: self.search(
                 query=query,
-                mode=web_mode,
-                intent=intent,
-                strategy=strategy,
+                mode=research_plan["web_mode"],
+                intent=resolved_intent,
+                strategy=resolved_strategy,
                 provider="auto",
                 sources=["web"],
-                max_results=web_max_results,
+                max_results=research_plan["web_max_results"],
                 include_content=False,
                 include_answer=True,
                 include_domains=include_domains,
@@ -913,7 +1039,7 @@ class MySearchClient:
                 intent="status",
                 provider="auto",
                 sources=["x"],
-                max_results=social_max_results,
+                max_results=research_plan["social_max_results"],
                 allowed_x_handles=allowed_x_handles,
                 excluded_x_handles=excluded_x_handles,
                 from_date=from_date,
@@ -937,7 +1063,7 @@ class MySearchClient:
             if not url or url in urls:
                 continue
             urls.append(url)
-            if len(urls) >= scrape_top_n:
+            if len(urls) >= research_plan["scrape_top_n"]:
                 break
 
         pages: list[dict[str, Any]] = []
@@ -991,13 +1117,14 @@ class MySearchClient:
             social=social,
             social_error=social_error,
             providers_consulted=providers_consulted,
+            research_plan=research_plan,
         )
 
         return {
             "provider": "hybrid",
             "query": query,
-            "intent": web_search.get("intent", intent if intent != "auto" else "factual"),
-            "strategy": web_search.get("strategy", strategy if strategy != "auto" else "fast"),
+            "intent": web_search.get("intent", resolved_intent),
+            "strategy": web_search.get("strategy", resolved_strategy),
             "web_search": web_search,
             "pages": pages,
             "social_search": social,
@@ -1008,6 +1135,50 @@ class MySearchClient:
                 "默认用 Tavily 做发现，Firecrawl 做正文抓取，X 搜索走 xAI Responses API",
                 "如果某个 provider 没配 key，会保留错误并尽量返回其余部分",
             ],
+        }
+
+    def _resolve_research_plan(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        strategy: SearchStrategy,
+        web_max_results: int,
+        social_max_results: int,
+        scrape_top_n: int,
+        include_social: bool,
+        include_domains: list[str] | None,
+    ) -> dict[str, Any]:
+        web_mode = "news" if mode == "news" else ("docs" if mode in {"docs", "github", "pdf"} else "web")
+        planned_web_max = web_max_results
+        planned_social_max = social_max_results if include_social else 0
+        planned_scrape_top_n = scrape_top_n
+
+        if mode in {"docs", "github", "pdf"} or self._should_use_strict_resource_policy(
+            query=query,
+            mode=mode,
+            intent=intent,
+            include_domains=include_domains,
+        ):
+            planned_web_max = max(planned_web_max, 4)
+            planned_scrape_top_n = max(1, min(planned_scrape_top_n, 2))
+        elif mode == "news" or intent in {"news", "status"}:
+            planned_web_max = min(max(planned_web_max, 6), 8)
+            planned_scrape_top_n = min(max(planned_scrape_top_n, 4), 5)
+            if include_social:
+                planned_social_max = min(max(planned_social_max, 4), 6)
+        elif intent in {"comparison", "exploratory"} or strategy in {"verify", "deep"}:
+            planned_web_max = min(max(planned_web_max, 6), 10)
+            planned_scrape_top_n = min(max(planned_scrape_top_n, 4), 5)
+            if include_social:
+                planned_social_max = min(max(planned_social_max, 3), 5)
+
+        return {
+            "web_mode": web_mode,
+            "web_max_results": planned_web_max,
+            "social_max_results": planned_social_max,
+            "scrape_top_n": planned_scrape_top_n,
         }
 
     def _candidate_result_budget(
@@ -1127,13 +1298,39 @@ class MySearchClient:
         intent: ResolvedSearchIntent,
         include_domains: list[str] | None,
     ) -> str:
-        if include_domains:
-            return "strict"
-        if self._looks_like_official_query(query):
+        if self._should_use_strict_resource_policy(
+            query=query,
+            mode=mode,
+            intent=intent,
+            include_domains=include_domains,
+        ):
             return "strict"
         if self._should_rerank_resource_results(mode=mode, intent=intent):
             return "standard"
         return "off"
+
+    def _should_use_strict_resource_policy(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        include_domains: list[str] | None,
+    ) -> bool:
+        query_lower = query.lower()
+        if include_domains:
+            return True
+        if mode in {"docs", "github", "pdf"}:
+            return True
+        if self._looks_like_official_query(query):
+            return True
+        if self._looks_like_pricing_query(query_lower):
+            return True
+        if self._looks_like_changelog_query(query_lower):
+            return True
+        if intent in {"resource", "tutorial"} and self._looks_like_docs_query(query_lower):
+            return True
+        return False
 
     def _looks_like_official_query(self, query: str) -> bool:
         query_lower = query.lower()
@@ -1149,6 +1346,33 @@ class MySearchClient:
             "官方文档",
         )
         return any(marker in query for marker in official_markers)
+
+    def _looks_like_pricing_query(self, query_lower: str) -> bool:
+        keywords = [
+            "price",
+            "pricing",
+            "plans",
+            "subscription",
+            "费用",
+            "套餐",
+            "定价",
+            "价格",
+            "售价",
+        ]
+        return any(keyword in query_lower for keyword in keywords)
+
+    def _looks_like_changelog_query(self, query_lower: str) -> bool:
+        keywords = [
+            "changelog",
+            "release notes",
+            "what's new",
+            "whats new",
+            "更新日志",
+            "发布说明",
+            "变更日志",
+            "版本更新",
+        ]
+        return any(keyword in query_lower for keyword in keywords)
 
     def _apply_official_resource_policy(
         self,
@@ -1229,6 +1453,7 @@ class MySearchClient:
         social: dict[str, Any] | None,
         social_error: str,
         providers_consulted: list[str],
+        research_plan: dict[str, Any],
     ) -> dict[str, Any]:
         successful_pages = [page for page in pages if not page.get("error")]
         page_error_count = max(len(pages) - len(successful_pages), 0)
@@ -1284,6 +1509,7 @@ class MySearchClient:
             "search_confidence": str(web_evidence.get("confidence") or "low"),
             "confidence": confidence,
             "conflicts": conflicts,
+            "research_plan": research_plan,
         }
 
     def _estimate_research_confidence(
@@ -1346,31 +1572,54 @@ class MySearchClient:
         excluded_x_handles: list[str] | None,
     ) -> RouteDecision:
         normalized_sources = sorted(set(sources or ["web"]))
-        query_lower = query.lower()
+        policy = self._route_policy_for_request(
+            query=query,
+            mode=mode,
+            intent=intent,
+            include_content=include_content,
+        )
 
         if provider != "auto":
             if provider == "tavily":
                 return RouteDecision(
                     provider="tavily",
                     reason="显式指定 Tavily",
-                    tavily_topic="news" if mode == "news" or intent in {"news", "status"} else "general",
+                    tavily_topic=policy.tavily_topic,
+                    fallback_chain=self._explicit_provider_fallback_chain(
+                        provider=provider,
+                        policy=policy,
+                    ),
+                    result_profile=policy.result_profile,
+                    allow_exa_rescue=policy.allow_exa_rescue and policy.provider == "tavily",
                 )
             if provider == "firecrawl":
                 return RouteDecision(
                     provider="firecrawl",
                     reason="显式指定 Firecrawl",
-                    firecrawl_categories=self._firecrawl_categories(mode, intent),
+                    firecrawl_categories=list(policy.firecrawl_categories)
+                    or self._firecrawl_categories(mode, intent),
+                    fallback_chain=self._explicit_provider_fallback_chain(
+                        provider=provider,
+                        policy=policy,
+                    ),
+                    result_profile=policy.result_profile,
                 )
             if provider == "exa":
                 return RouteDecision(
                     provider="exa",
                     reason="显式指定 Exa",
+                    fallback_chain=self._explicit_provider_fallback_chain(
+                        provider=provider,
+                        policy=policy,
+                    ),
+                    result_profile=policy.result_profile,
                 )
             if provider == "xai":
                 return RouteDecision(
                     provider="xai",
                     reason="显式指定 xAI/X 搜索",
                     sources=normalized_sources,
+                    result_profile="off",
                 )
 
         if normalized_sources == ["web", "x"] or (
@@ -1383,6 +1632,7 @@ class MySearchClient:
                 provider="xai",
                 reason="社交舆情 / X 搜索更适合走 xAI",
                 sources=["x"],
+                result_profile="off",
             )
 
         if allowed_x_handles or excluded_x_handles:
@@ -1390,158 +1640,23 @@ class MySearchClient:
                 provider="xai",
                 reason="检测到 X handle 过滤条件",
                 sources=["x"],
+                result_profile="off",
             )
-
-        if (
-            include_domains
-            and self._domains_prefer_firecrawl_discovery(include_domains)
-            and self._provider_can_serve(self.config.firecrawl)
-            and (
-                mode in {"docs", "github", "pdf"}
-                or intent in {"resource", "tutorial"}
-                or self._looks_like_docs_query(query_lower)
-            )
-        ):
-            return RouteDecision(
-                provider="firecrawl",
-                reason="检测到受限 / 社区域名，优先用 Firecrawl 做站内发现",
-                firecrawl_categories=self._firecrawl_categories(
-                    "docs" if mode not in {"github", "pdf"} else mode,
-                    intent,
-                ),
-            )
-
-        if mode in {"docs", "github", "pdf"}:
-            if include_content:
-                if not self._provider_can_serve(self.config.firecrawl) and self._provider_can_serve(
-                    self.config.exa
-                ):
-                    return RouteDecision(
-                        provider="exa",
-                        reason="Firecrawl 未配置，文档正文查询回退到 Exa",
-                    )
-                return RouteDecision(
-                    provider="firecrawl",
-                    reason="文档正文查询优先走 Firecrawl",
-                    firecrawl_categories=self._firecrawl_categories(mode, intent),
-                )
-            if self._provider_can_serve(self.config.tavily):
-                return RouteDecision(
-                    provider="tavily",
-                    reason="文档类查询先用 Tavily 做官方页面发现，正文再交给 Firecrawl",
-                    tavily_topic="general",
-                )
-            if not self._provider_can_serve(self.config.firecrawl) and self._provider_can_serve(
-                self.config.exa
-            ):
-                return RouteDecision(
-                    provider="exa",
-                    reason="Firecrawl 未配置，文档类查询回退到 Exa",
-                )
-            return RouteDecision(
-                provider="firecrawl",
-                reason="文档 / GitHub / PDF 内容优先走 Firecrawl",
-                firecrawl_categories=self._firecrawl_categories(mode, intent),
-            )
-
-        if include_content:
-            if not self._provider_can_serve(self.config.firecrawl) and self._provider_can_serve(
-                self.config.exa
-            ):
-                return RouteDecision(
-                    provider="exa",
-                    reason="Firecrawl 未配置，正文查询回退到 Exa",
-                )
-            return RouteDecision(
-                provider="firecrawl",
-                reason="请求里需要正文内容，优先用 Firecrawl search + scrape",
-                firecrawl_categories=self._firecrawl_categories(mode, intent),
-            )
-
-        if intent in {"news", "status"} or mode == "news" or self._looks_like_news_query(query_lower):
-            if not self._provider_can_serve(self.config.tavily) and self._provider_can_serve(
-                self.config.exa
-            ):
-                return RouteDecision(
-                    provider="exa",
-                    reason="Tavily 未配置，新闻 / 状态类查询回退到 Exa",
-                )
-            return RouteDecision(
-                provider="tavily",
-                reason="状态 / 新闻类查询默认走 Tavily",
-                tavily_topic="news",
-            )
-
-        if intent == "resource" or self._looks_like_docs_query(query_lower):
-            if include_content:
-                if not self._provider_can_serve(self.config.firecrawl) and self._provider_can_serve(
-                    self.config.exa
-                ):
-                    return RouteDecision(
-                        provider="exa",
-                        reason="Firecrawl 未配置，resource 正文查询回退到 Exa",
-                    )
-                return RouteDecision(
-                    provider="firecrawl",
-                    reason="resource / docs 正文查询优先走 Firecrawl",
-                    firecrawl_categories=self._firecrawl_categories("docs", intent),
-                )
-            if self._provider_can_serve(self.config.tavily):
-                return RouteDecision(
-                    provider="tavily",
-                    reason="resource / docs 查询先用 Tavily 做页面发现，正文再交给 Firecrawl",
-                    tavily_topic="general",
-                )
-            if not self._provider_can_serve(self.config.firecrawl) and self._provider_can_serve(
-                self.config.exa
-            ):
-                return RouteDecision(
-                    provider="exa",
-                    reason="Firecrawl 未配置，resource / docs 类查询回退到 Exa",
-                )
-            return RouteDecision(
-                provider="firecrawl",
-                reason="resource / docs 类查询优先走 Firecrawl",
-                firecrawl_categories=self._firecrawl_categories("docs", intent),
-            )
-
-        if mode == "research":
-            if self._provider_can_serve(self.config.tavily):
-                return RouteDecision(
-                    provider="tavily",
-                    reason="research 模式先用 Tavily 做发现，再按策略决定是否扩展验证",
-                    tavily_topic="general",
-                )
-            if self._provider_can_serve(self.config.exa):
-                return RouteDecision(
-                    provider="exa",
-                    reason="Tavily 未配置，research 发现阶段回退到 Exa",
-                )
-            if self._provider_can_serve(self.config.firecrawl):
-                return RouteDecision(
-                    provider="firecrawl",
-                    reason="Tavily / Exa 未配置，research 发现阶段回退到 Firecrawl",
-                    firecrawl_categories=self._firecrawl_categories(mode, intent),
-                )
-            return RouteDecision(
-                provider="tavily",
-                reason="research 模式默认走 Tavily（无可用替代）",
-                tavily_topic="general",
-            )
-
-        if not self._provider_can_serve(self.config.tavily) and self._provider_can_serve(
-            self.config.exa
-        ):
-            return RouteDecision(
-                provider="exa",
-                reason="Tavily 未配置，普通网页检索回退到 Exa",
-            )
-
-        return RouteDecision(
-            provider="tavily",
-            reason="普通网页检索默认走 Tavily",
-            tavily_topic="general",
-        )
+        if policy.key in {"docs", "resource"} and include_domains and self._domains_prefer_firecrawl_discovery(include_domains):
+            reason = "检测到受限 / 社区域名，优先用 Firecrawl 做站内发现"
+        elif policy.key in {"docs", "github", "pdf"}:
+            reason = "文档 / GitHub / PDF 默认走 Firecrawl，页面发现与正文抓取保持一致"
+        elif policy.key == "content":
+            reason = "请求里需要正文内容，优先走 Firecrawl"
+        elif policy.key == "news":
+            reason = "状态 / 新闻类查询默认走 Tavily"
+        elif policy.key == "resource":
+            reason = "resource / docs 查询默认走 Firecrawl"
+        elif policy.key == "research":
+            reason = "research 发现阶段默认走 Tavily"
+        else:
+            reason = "普通网页检索默认走 Tavily"
+        return self._decision_from_policy(policy=policy, reason=reason)
 
     def _domains_prefer_firecrawl_discovery(self, include_domains: list[str] | None) -> bool:
         if not include_domains:
@@ -1623,6 +1738,81 @@ class MySearchClient:
             return "balanced"
         return "fast"
 
+    def _route_policy_for_request(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        include_content: bool,
+    ) -> SearchRoutePolicy:
+        query_lower = query.lower()
+        if mode == "research":
+            return _MODE_PROVIDER_POLICY["research"]
+        if include_content:
+            return _MODE_PROVIDER_POLICY["content"]
+        if mode in {"docs", "github", "pdf"}:
+            return _MODE_PROVIDER_POLICY[mode]
+        if intent in {"resource", "tutorial"} or self._looks_like_docs_query(query_lower):
+            return _MODE_PROVIDER_POLICY["resource"]
+        if intent in {"news", "status"} or mode == "news" or self._looks_like_news_query(query_lower):
+            return _MODE_PROVIDER_POLICY["news"]
+        return _MODE_PROVIDER_POLICY["web"]
+
+    def _decision_from_policy(
+        self,
+        *,
+        policy: SearchRoutePolicy,
+        reason: str,
+        sources: list[str] | None = None,
+    ) -> RouteDecision:
+        provider, fallback_chain = self._resolve_available_policy_chain(policy=policy)
+        return RouteDecision(
+            provider=provider,
+            reason=reason,
+            tavily_topic=policy.tavily_topic,
+            firecrawl_categories=list(policy.firecrawl_categories) or None,
+            sources=sources,
+            fallback_chain=fallback_chain,
+            result_profile=policy.result_profile,
+            allow_exa_rescue=policy.allow_exa_rescue,
+        )
+
+    def _resolve_available_policy_chain(
+        self,
+        *,
+        policy: SearchRoutePolicy,
+    ) -> tuple[ProviderName, list[str] | None]:
+        ordered: list[ProviderName] = [policy.provider, *policy.fallback_chain]
+        available: list[ProviderName] = []
+        for provider_name in ordered:
+            config = self._provider_config_for_name(provider_name)
+            if self._provider_can_serve(config):
+                available.append(provider_name)
+        if not available:
+            return policy.provider, list(policy.fallback_chain) or None
+        return available[0], list(available[1:]) or None
+
+    def _provider_config_for_name(self, provider_name: ProviderName) -> ProviderConfig:
+        if provider_name == "tavily":
+            return self.config.tavily
+        if provider_name == "firecrawl":
+            return self.config.firecrawl
+        if provider_name == "exa":
+            return self.config.exa
+        return self.config.xai
+
+    def _explicit_provider_fallback_chain(
+        self,
+        *,
+        provider: ProviderName,
+        policy: SearchRoutePolicy,
+    ) -> list[str] | None:
+        if provider == "xai":
+            return None
+        chain = [item for item in policy.fallback_chain if item != provider]
+        return list(chain) or None
+
     def _should_blend_web_providers(
         self,
         *,
@@ -1642,6 +1832,8 @@ class MySearchClient:
             return False
         if "x" in sources:
             return False
+        if mode == "news" or intent in {"news", "status"}:
+            return False
         if include_domains:
             return False
         if mode in {"docs", "github", "pdf"}:
@@ -1651,12 +1843,6 @@ class MySearchClient:
         return self._provider_can_serve(self.config.tavily) and self._provider_can_serve(
             self.config.firecrawl
         )
-
-    _SEARCH_FALLBACK_CHAIN: dict[str, list[str]] = {
-        "tavily": ["exa", "firecrawl"],
-        "firecrawl": ["exa", "tavily"],
-        "exa": ["firecrawl", "tavily"],
-    }
 
     def _search_with_fallback(
         self,
@@ -1672,7 +1858,7 @@ class MySearchClient:
         include_domains: list[str] | None,
         exclude_domains: list[str] | None,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
-        chain = [primary_provider, *self._SEARCH_FALLBACK_CHAIN.get(primary_provider, [])]
+        chain = [primary_provider, *(decision.fallback_chain or [])]
         last_error: Exception | None = None
         for provider_name in chain:
             try:
@@ -1746,6 +1932,246 @@ class MySearchClient:
                 include_content=include_content,
             )
         raise MySearchError(f"Unknown provider: {provider_name}")
+
+    def _should_attempt_exa_rescue(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        decision: RouteDecision,
+        result: dict[str, Any],
+        max_results: int,
+        include_domains: list[str] | None,
+    ) -> bool:
+        if not decision.allow_exa_rescue:
+            return False
+        if not self._provider_can_serve(self.config.exa):
+            return False
+        if result.get("provider") in {"exa", "xai"}:
+            return False
+        if result.get("fallback"):
+            return False
+        if include_domains or self._resolve_official_result_mode(
+            query=query,
+            mode=mode,
+            intent=intent,
+            include_domains=include_domains,
+        ) == "strict":
+            return False
+        results = list(result.get("results") or [])
+        if len(results) >= min(max_results, 3):
+            return False
+        query_terms = re.findall(r"[a-z0-9\u4e00-\u9fff]+", query.lower())
+        long_tail_signal = len(query_terms) >= 6 or len(query) >= 48
+        return mode == "news" or intent in {"comparison", "exploratory", "tutorial"} or long_tail_signal
+
+    def _apply_exa_rescue(
+        self,
+        *,
+        query: str,
+        primary_result: dict[str, Any],
+        max_results: int,
+        include_domains: list[str] | None,
+        exclude_domains: list[str] | None,
+        include_content: bool,
+    ) -> dict[str, Any]:
+        exa_result = self._search_exa(
+            query=query,
+            max_results=max_results,
+            include_domains=include_domains,
+            exclude_domains=exclude_domains,
+            include_content=include_content,
+        )
+        if not exa_result.get("results"):
+            return primary_result
+
+        merged = self._merge_search_payloads(
+            primary_result=primary_result,
+            secondary_result=exa_result,
+            max_results=max_results,
+        )
+        return {
+            "provider": "hybrid",
+            "route_selected": f"{primary_result.get('provider', 'unknown')}+exa",
+            "query": query,
+            "answer": primary_result.get("answer") or exa_result.get("answer", ""),
+            "results": merged["results"],
+            "citations": merged["citations"],
+            "evidence": {
+                "providers_consulted": [
+                    item
+                    for item in [primary_result.get("provider"), exa_result.get("provider")]
+                    if item
+                ],
+                "matched_results": merged["matched_results"],
+                "citation_count": len(merged["citations"]),
+                "verification": "fallback",
+            },
+            "primary_search": primary_result,
+            "secondary_search": exa_result,
+            "secondary_error": "",
+            "fallback": {
+                "from": primary_result.get("provider", "unknown"),
+                "to": "exa",
+                "reason": "primary provider returned sparse results; Exa rescue engaged",
+            },
+        }
+
+    def _should_rerank_general_results(
+        self,
+        *,
+        result_profile: str,
+    ) -> bool:
+        return result_profile in {"web", "news"}
+
+    def _rerank_general_results(
+        self,
+        *,
+        query: str,
+        result_profile: Literal["web", "news"],
+        results: list[dict[str, Any]],
+        include_domains: list[str] | None,
+    ) -> list[dict[str, Any]]:
+        if len(results) < 2:
+            return results
+        ranked = sorted(
+            enumerate(results),
+            key=lambda pair: (
+                self._general_result_rank(
+                    query=query,
+                    result_profile=result_profile,
+                    item=pair[1],
+                    include_domains=include_domains,
+                ),
+                -pair[0],
+            ),
+            reverse=True,
+        )
+        return [dict(pair[1]) for pair in ranked]
+
+    def _general_result_rank(
+        self,
+        *,
+        query: str,
+        result_profile: Literal["web", "news"],
+        item: dict[str, Any],
+        include_domains: list[str] | None,
+    ) -> tuple[int, int, int, int, int, int, int, int]:
+        if result_profile == "news":
+            return self._news_result_rank(item=item, include_domains=include_domains)
+        return self._web_result_rank(
+            query=query,
+            item=item,
+            include_domains=include_domains,
+        )
+
+    def _news_result_rank(
+        self,
+        *,
+        item: dict[str, Any],
+        include_domains: list[str] | None,
+    ) -> tuple[int, int, int, int, int, int, int, int]:
+        hostname = self._result_hostname(item)
+        include_match = int(
+            bool(include_domains)
+            and any(self._domain_matches(hostname, domain) for domain in include_domains or [])
+        )
+        mainstream = int(self._is_mainstream_news_domain(hostname))
+        article_shape = int(self._looks_like_news_article_result(item))
+        has_timestamp = int(self._result_published_timestamp(item) is not None)
+        timestamp_score = int(self._result_published_timestamp(item) or 0)
+        content_score, snippet_score, title_score = self._result_quality_score(item)
+        return (
+            include_match,
+            mainstream,
+            article_shape,
+            has_timestamp,
+            timestamp_score,
+            content_score,
+            snippet_score,
+            title_score,
+        )
+
+    def _web_result_rank(
+        self,
+        *,
+        query: str,
+        item: dict[str, Any],
+        include_domains: list[str] | None,
+    ) -> tuple[int, int, int, int, int, int, int, int]:
+        hostname = self._result_hostname(item)
+        registered_domain = self._registered_domain(hostname)
+        title_text = (item.get("title") or "").lower()
+        query_tokens = self._query_brand_tokens(query)
+        include_match = int(
+            bool(include_domains)
+            and any(self._domain_matches(hostname, domain) for domain in include_domains or [])
+        )
+        registered_domain_label_match = int(
+            self._registered_domain_label_matches(
+                registered_domain=registered_domain,
+                query_tokens=query_tokens,
+            )
+        )
+        host_brand_match = int(any(token in hostname for token in query_tokens))
+        title_brand_match = int(any(token in title_text for token in query_tokens))
+        non_aggregator = int(not self._is_obvious_web_aggregator(registered_domain))
+        matched_provider_count = len(item.get("matched_providers") or [])
+        content_score, snippet_score, title_score = self._result_quality_score(item)
+        return (
+            include_match,
+            registered_domain_label_match,
+            host_brand_match,
+            title_brand_match,
+            non_aggregator,
+            matched_provider_count,
+            content_score,
+            max(snippet_score, title_score),
+        )
+
+    def _result_published_timestamp(self, item: dict[str, Any]) -> float | None:
+        for field in ("published_date", "publishedDate", "created_at"):
+            parsed = self._parse_result_timestamp(item.get(field))
+            if parsed is not None:
+                return parsed.timestamp()
+        return None
+
+    def _is_mainstream_news_domain(self, hostname: str) -> bool:
+        registered_domain = self._registered_domain(hostname)
+        mainstream_domains = {
+            "apnews.com",
+            "bbc.com",
+            "bloomberg.com",
+            "cnn.com",
+            "ft.com",
+            "latimes.com",
+            "nytimes.com",
+            "reuters.com",
+            "theguardian.com",
+            "theverge.com",
+            "washingtonpost.com",
+            "wsj.com",
+            "xinhuanet.com",
+        }
+        return registered_domain in mainstream_domains
+
+    def _looks_like_news_article_result(self, item: dict[str, Any]) -> bool:
+        path = urlparse(item.get("url", "")).path.lower()
+        return any(
+            marker in path
+            for marker in ("/news/", "/story/", "/stories/", "/article/", "/articles/", "/202")
+        )
+
+    def _is_obvious_web_aggregator(self, registered_domain: str) -> bool:
+        return registered_domain in {
+            "linkedin.com",
+            "medium.com",
+            "quora.com",
+            "reddit.com",
+            "researchgate.net",
+            "stackoverflow.com",
+        }
 
     def _search_web_blended(
         self,
@@ -1956,6 +2382,11 @@ class MySearchClient:
                 "snippet": item.get("content", ""),
                 "content": item.get("raw_content", "") if include_content else "",
                 "score": item.get("score"),
+                "published_date": item.get("published_date")
+                or item.get("publishedDate")
+                or item.get("published_at")
+                or item.get("publishedAt")
+                or "",
             }
             for item in response.get("results", [])
         ]
@@ -2366,6 +2797,10 @@ class MySearchClient:
                         "url": item.get("url", ""),
                         "snippet": item.get("description", "") or item.get("markdown", ""),
                         "content": item.get("markdown", "") if include_content else "",
+                        "published_date": item.get("publishedDate")
+                        or item.get("published_date")
+                        or item.get("published_at")
+                        or "",
                     }
                 )
 
