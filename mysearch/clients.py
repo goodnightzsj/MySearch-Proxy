@@ -172,6 +172,13 @@ _MODE_PROVIDER_POLICY: dict[str, SearchRoutePolicy] = {
         firecrawl_categories=("research",),
         result_profile="resource",
     ),
+    "exploratory": SearchRoutePolicy(
+        key="exploratory",
+        provider="exa",
+        fallback_chain=("tavily", "firecrawl"),
+        result_profile="web",
+        allow_exa_rescue=False,
+    ),
     "research": SearchRoutePolicy(
         key="research",
         provider="tavily",
@@ -916,7 +923,7 @@ class MySearchClient:
             and self._provider_can_serve(self.config.xai)
             and self.config.xai.search_mode == "official"
             and (
-                resolved_intent == "comparison"
+                resolved_intent in {"comparison", "status"}
                 or resolved_strategy in {"verify", "deep"}
             )
         )
@@ -1306,9 +1313,24 @@ class MySearchClient:
                 from_date=from_date,
                 to_date=to_date,
             )
+        if resolved_strategy == "deep" and self._provider_can_serve(self.config.exa):
+            exa_category = self._exa_category(
+                research_plan["web_mode"], resolved_intent,
+            )
+            research_tasks["exa_discovery"] = lambda: self._search_exa(
+                query=query,
+                max_results=research_plan["web_max_results"],
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+                include_content=False,
+                mode=research_plan["web_mode"],
+                intent=resolved_intent,
+                from_date=from_date,
+                to_date=to_date,
+            )
         research_results, research_errors = self._execute_parallel(
             research_tasks,
-            max_workers=2 if include_social else 1,
+            max_workers=len(research_tasks),
         )
         self._raise_parallel_error(research_errors, "web")
         web_search = research_results["web"]
@@ -1343,6 +1365,17 @@ class MySearchClient:
                         urls.append(social_url)
                         if len(urls) >= research_plan["scrape_top_n"]:
                             break
+
+        if len(urls) < research_plan["scrape_top_n"]:
+            exa_discovery = research_results.get("exa_discovery")
+            if exa_discovery and not research_errors.get("exa_discovery"):
+                for exa_item in exa_discovery.get("results") or []:
+                    exa_url = (exa_item.get("url") or "").strip()
+                    if not exa_url or exa_url in urls:
+                        continue
+                    urls.append(exa_url)
+                    if len(urls) >= research_plan["scrape_top_n"]:
+                        break
 
         pages: list[dict[str, Any]] = []
         urls_to_scrape = [url for url in urls if url not in prefetched_content]
@@ -2061,6 +2094,8 @@ class MySearchClient:
             return _MODE_PROVIDER_POLICY["resource"]
         if intent in {"news", "status"} or mode == "news" or self._looks_like_news_query(query_lower):
             return _MODE_PROVIDER_POLICY["news"]
+        if intent in {"exploratory", "comparison"} and self._provider_can_serve(self.config.exa):
+            return _MODE_PROVIDER_POLICY["exploratory"]
         return _MODE_PROVIDER_POLICY["web"]
 
     def _decision_from_policy(
@@ -2137,7 +2172,9 @@ class MySearchClient:
         if "x" in sources:
             return False
         if mode == "news" or intent in {"news", "status"}:
-            return False
+            return strategy in {"verify", "deep"} and self._provider_can_serve(
+                self.config.tavily
+            ) and self._provider_can_serve(self.config.firecrawl)
         if include_domains:
             return False
         if mode in {"docs", "github", "pdf"}:
@@ -2544,7 +2581,7 @@ class MySearchClient:
                     query=query,
                     max_results=max_results,
                     categories=self._firecrawl_categories(mode, intent),
-                    include_content=include_content or strategy == "deep",
+                    include_content=include_content or strategy in {"verify", "deep"},
                     include_domains=include_domains,
                     exclude_domains=exclude_domains,
                 ),
@@ -2563,7 +2600,7 @@ class MySearchClient:
                     query=query,
                     max_results=max_results,
                     topic="news" if intent in {"news", "status"} else "general",
-                    include_answer=include_answer,
+                    include_answer=True,
                     include_content=False,
                     include_domains=include_domains,
                     exclude_domains=exclude_domains,

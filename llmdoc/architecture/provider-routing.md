@@ -4,25 +4,26 @@
 
 ## 角色分工
 
-- **Tavily**：普通网页发现、新闻、快速答案的默认入口。`search_depth` 会随 `strategy` 自动切换（`verify`/`deep` 用 `advanced`）。news/status 查询自动传 `days` 做时间限制。
-- **Firecrawl**：文档、GitHub、PDF、pricing、changelog 与正文抓取的主入口。news category 已补全。`data.news` / `data.web` 分区会按 intent 优先排序。tutorial intent 发现阶段自动带 `include_content`。
-- **Exa**：语义搜索与多样化补位。`type` 会自适应 `neural`（语义）/ `keyword`（精确标识符）。支持 `category`（github/news/research paper）、`highlights`（语义高亮 snippet）、`startPublishedDate`/`endPublishedDate`。在 `verify`/`deep` 策略下作为第三方参与 blended 交叉验证，在 `confidence=low` 时自动补搜，在 `extract_url` Firecrawl+Tavily 双失败时做第三道 fallback。
-- **xAI / compatible social gateway**：X / Social 搜索与舆情路径。official 模式下 `strategy=fast` 的 hybrid 请求会用 xAI 单次 web+x 联合搜索。`comparison` intent 和 `verify`/`deep` 策略无 answer 时自动补充 xAI answer。research `deep` 策略生成 `research_summary`。
+- **Tavily**：普通网页发现、新闻、快速答案的默认入口。`search_depth` 会随 `strategy` 自动切换（`verify`/`deep` 用 `advanced`）。news/status 查询自动传 `days` 做时间限制。blended 中即使做 secondary 也保留 `include_answer=True`，确保 answer 不丢失。
+- **Firecrawl**：文档、GitHub、PDF、pricing、changelog 与正文抓取的主入口。news category 已补全。`data.news` / `data.web` 分区会按 intent 优先排序。tutorial intent 发现阶段自动带 `include_content`。blended secondary 在 `verify`/`deep` 策略下均带正文，支持正文级交叉验证。
+- **Exa**：语义搜索与多样化发现。`type` 会自适应 `neural`（语义）/ `keyword`（精确标识符）。支持 `category`（github/news/research paper）、`highlights`（语义高亮 snippet）、`startPublishedDate`/`endPublishedDate`。**`exploratory`/`comparison` intent 且 Exa 可用时提升为 primary provider**（fallback `Tavily -> Firecrawl`）。在 `verify`/`deep` 策略下作为第三方参与 blended 交叉验证，在 `confidence=low` 时自动补搜，在 `extract_url` Firecrawl+Tavily 双失败时做第三道 fallback。research `deep` 策略下作为第三路并行发现源。
+- **xAI / compatible social gateway**：X / Social 搜索与舆情路径。official 模式下 `strategy=fast` 的 hybrid 请求会用 xAI 单次 web+x 联合搜索。`comparison`/`status` intent 和 `verify`/`deep` 策略无 answer 时自动补充 xAI answer。research `deep` 策略生成 `research_summary`。
 
 ## 默认路由矩阵
 
 | 场景 | 默认 provider | 回退链 | 备注 |
 | --- | --- | --- | --- |
 | `mode=web` | Tavily | `Tavily -> Exa -> Firecrawl` | `verify`/`deep` 时 blended 含 Exa 三方交叉 |
-| `mode=news` / `intent=status/news` | Tavily | `Tavily -> Firecrawl -> Exa` | 自动 `days` 限时；Firecrawl news category |
+| `mode=news` / `intent=status/news` | Tavily | `Tavily -> Firecrawl -> Exa` | 自动 `days` 限时；`verify`/`deep` 时允许 Tavily+Firecrawl blended |
 | `mode=docs` | Firecrawl | `Firecrawl -> Tavily -> Exa` | 结果走官方优先重排 |
 | `mode=github` | Firecrawl | `Firecrawl -> Exa -> Tavily` | GitHub 按资源类严格模式 |
 | `mode=pdf` | Firecrawl | `Firecrawl -> Tavily -> Exa` | PDF 按资源类严格模式 |
 | `intent=resource/tutorial` | Firecrawl | `Firecrawl -> Tavily -> Exa` | tutorial 自动带 `include_content` |
+| `intent=exploratory/comparison` | **Exa** | `Exa -> Tavily -> Firecrawl` | Exa 可用时提权；neural search 语义多样性优势 |
 | `include_content=true` | Firecrawl | `Firecrawl -> Tavily -> Exa` | — |
 | `mode=social` / X handle | xAI | 不走 Tavily/Firecrawl | — |
 | `web + x` hybrid | 并行 | `strategy=fast` + xAI official → 单次联合请求；否则并行 Tavily+xAI | — |
-| `research` | Tavily 发现 + Firecrawl 抓取 | docs 模式 Firecrawl 发现阶段带正文；social URL 纳入 scrape | `deep` 策略生成 xAI `research_summary` |
+| `research` | Tavily 发现 + Firecrawl 抓取 | docs 模式 Firecrawl 发现阶段带正文；social URL 纳入 scrape；`deep` 策略 Exa 并行第三发现源 | `deep` 策略生成 xAI `research_summary` |
 | `extract_url(auto)` | Firecrawl scrape | → Tavily extract → Exa `text=true` | 三级 fallback |
 
 ## Provider 协作机制
@@ -33,8 +34,12 @@
 |----------|--------|-----------|-----|-----|
 | `fast` | 单 provider；`search_depth=basic` | 单 provider | 仅 rescue | hybrid 用 xAI 单次联合 |
 | `balanced` | `search_depth=basic`；blended primary/secondary | 参与 blended | 仅 rescue | — |
-| `verify` | `search_depth=advanced`；blended | 参与 blended | **三方交叉验证** | 补 answer |
-| `deep` | `search_depth=advanced`；blended | 参与 blended | **三方交叉验证** | 补 answer + research summary |
+| `verify` | `search_depth=advanced`；blended | 参与 blended（**带正文**） | **三方交叉验证** | 补 answer（含 status intent） |
+| `deep` | `search_depth=advanced`；blended | 参与 blended（**带正文**） | **三方交叉验证** + research 并行发现 | 补 answer + research summary |
+
+### news blending
+
+`verify`/`deep` 策略下，news 和 status 场景也允许 Tavily+Firecrawl blended，利用两者 news 来源覆盖互补。`fast`/`balanced` 策略下仍走单 provider。
 
 ### 结果质量闭环
 
@@ -51,7 +56,7 @@
 
 ### xAI answer 补充
 
-- `comparison` intent 无 answer → xAI `web_search` 生成对比摘要
+- `comparison`/`status` intent 无 answer → xAI `web_search` 生成摘要
 - `verify`/`deep` 策略无 answer → xAI `web_search` 补充
 - evidence 标记 `answer_source: xai`
 
@@ -59,7 +64,7 @@
 
 | Exa 参数 | 使用方式 |
 |----------|---------|
-| `type: neural` | 默认语义查询 |
+| `type: neural` | 默认语义查询；exploratory/comparison intent 下作为 primary |
 | `type: keyword` | 精确标识符（类名、API 路径、版本号）自动切换 |
 | `category` | `github` / `news` / `research paper`，映射自 mode/intent |
 | `highlights` | 默认启用，优先作为 snippet 来源 |
@@ -72,7 +77,7 @@
 
 ## research 工作流
 
-1. 并行：web 发现（docs 模式 Firecrawl 带正文预取） + social 搜索
-2. 选 URL（web 发现 + social 里的非 x.com 文章 URL 补位）
+1. 并行：web 发现（docs 模式 Firecrawl 带正文预取） + social 搜索 + Exa 并行发现（`deep` 策略）
+2. 选 URL（web 发现 + Exa 发现补位 + social 里的非 x.com 文章 URL 补位）
 3. 已预取的跳过 scrape，其余并行 `extract_url`
 4. 证据汇总 + 可选 xAI research summary（deep 策略）
