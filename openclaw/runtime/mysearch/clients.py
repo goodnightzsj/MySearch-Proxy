@@ -1320,7 +1320,7 @@ class MySearchClient:
                 mode=research_plan["web_mode"],
                 intent=resolved_intent,
                 strategy=resolved_strategy,
-                provider="auto",
+                provider="tavily" if research_plan["web_mode"] in {"web", "news"} else "auto",
                 sources=["web"],
                 max_results=research_plan["web_max_results"],
                 include_content=discovery_include_content,
@@ -2324,6 +2324,10 @@ class MySearchClient:
             return strategy in {"verify", "deep"} and self._provider_can_serve(
                 self.config.tavily
             ) and self._provider_can_serve(self.config.firecrawl)
+        if mode == "pdf":
+            return strategy in {"verify", "deep"} and self._provider_can_serve(
+                self.config.tavily
+            ) and self._provider_can_serve(self.config.firecrawl)
         if include_domains:
             return False
         if mode in {"docs", "github", "pdf"}:
@@ -2626,7 +2630,7 @@ class MySearchClient:
         query: str,
         item: dict[str, Any],
         include_domains: list[str] | None,
-    ) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int]:
+    ) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int, int, int]:
         hostname = self._result_hostname(item)
         registered_domain = self._registered_domain(hostname)
         url = item.get("url", "")
@@ -2657,9 +2661,17 @@ class MySearchClient:
             self._looks_like_status_query(query_lower)
             and self._looks_like_status_result(url=url, hostname=hostname, title_text=title_text)
         )
+        canonical_status_page_match = int(
+            self._looks_like_status_query(query_lower)
+            and self._looks_like_canonical_status_result(hostname=hostname, path=path)
+        )
         pricing_page_match = int(
             self._looks_like_pricing_query(query_lower)
             and self._looks_like_pricing_result(url=url, hostname=hostname, title_text=title_text)
+        )
+        canonical_pricing_page_match = int(
+            self._looks_like_pricing_query(query_lower)
+            and self._looks_like_canonical_pricing_result(hostname=hostname, path=path)
         )
         non_aggregator = int(not self._is_obvious_web_aggregator(registered_domain))
         matched_provider_count = len(item.get("matched_providers") or [])
@@ -2667,7 +2679,9 @@ class MySearchClient:
         content_score, snippet_score, title_score = self._result_quality_score(item)
         return (
             include_match,
+            canonical_status_page_match,
             status_page_match,
+            canonical_pricing_page_match,
             pricing_page_match,
             path_precision_hits,
             total_precision_hits,
@@ -4283,6 +4297,15 @@ class MySearchClient:
             and flags["hostname"] in {"github.com", "raw.githubusercontent.com"}
         )
         pdf_bonus = int(mode == "pdf" and self._looks_like_pdf_url(item.get("url", "")))
+        paper_landing_bonus = int(
+            mode == "pdf"
+            and "paper" in precision_tokens
+            and str(flags["hostname"]) == "arxiv.org"
+            and any(
+                marker in urlparse(item.get("url", "")).path.lower()
+                for marker in ("/abs/", "/html/")
+            )
+        )
         non_third_party = int(flags["non_third_party"])
         official_resource_match = int(
             self._is_probably_official_resource_result(
@@ -4309,6 +4332,7 @@ class MySearchClient:
         return (
             include_match,
             official_resource_match,
+            paper_landing_bonus,
             path_precision_hits,
             total_precision_hits,
             registered_domain_label_match,
@@ -4683,6 +4707,14 @@ class MySearchClient:
             marker in title_text for marker in ("pricing", "price", "plan")
         )
 
+    def _looks_like_canonical_pricing_result(self, *, hostname: str, path: str) -> bool:
+        normalized_path = path.rstrip("/")
+        if hostname.startswith("shop.") and ("/shop/buy" in normalized_path or "/buy-" in normalized_path):
+            return True
+        if "pricing" in normalized_path and "/docs/" not in normalized_path and not hostname.startswith("developers."):
+            return True
+        return False
+
     def _looks_like_status_result(self, *, url: str, hostname: str, title_text: str) -> bool:
         path = urlparse(url).path.lower()
         if hostname.startswith("status.") or ".statuspage." in hostname:
@@ -4697,6 +4729,12 @@ class MySearchClient:
         return any(marker in path for marker in status_markers) or any(
             marker in title_text for marker in ("status", "incident", "outage", "uptime")
         )
+
+    def _looks_like_canonical_status_result(self, *, hostname: str, path: str) -> bool:
+        normalized_path = path.rstrip("/")
+        if hostname.startswith("status.") or ".statuspage." in hostname:
+            return True
+        return normalized_path.startswith("/incidents") or normalized_path.startswith("/incident")
 
     def _looks_like_resource_result(
         self,
