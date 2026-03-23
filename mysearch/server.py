@@ -11,19 +11,8 @@ from mysearch.clients import MySearchClient
 from mysearch.config import MCPTransport, MySearchConfig
 
 
-def _ensure_list(value: str | list[str] | None) -> list[str] | None:
+def _ensure_list(value: str | list | None) -> list | None:
     """兼容单值字符串输入，避免模型把单元素数组写成标量时直接校验失败。"""
-    if value is None:
-        return None
-    if isinstance(value, str):
-        return [value]
-    return value
-
-
-def _ensure_sources(
-    value: Literal["web", "x"] | list[Literal["web", "x"]] | None,
-) -> list[Literal["web", "x"]] | None:
-    """兼容 sources 传单个字符串的情况。"""
     if value is None:
         return None
     if isinstance(value, str):
@@ -80,7 +69,7 @@ def build_mcp(config: MySearchConfig) -> tuple[MySearchClient, FastMCP]:
             intent=intent,
             strategy=strategy,
             provider=provider,
-            sources=_ensure_sources(sources),
+            sources=_ensure_list(sources),
             max_results=max_results,
             include_content=include_content,
             include_answer=include_answer,
