@@ -1581,6 +1581,34 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(request_payloads[0]["type"], "keyword")
 
+    def test_exa_search_uses_research_paper_category_for_pdf_mode(self) -> None:
+        client = MySearchClient()
+        request_payloads: list[dict[str, object]] = []
+
+        client._get_key_or_raise = lambda provider: type(  # type: ignore[method-assign]
+            "FakeKey",
+            (),
+            {"key": "test-key", "source": "env"},
+        )()
+
+        def fake_request_json(**kwargs):  # type: ignore[no-untyped-def]
+            request_payloads.append(dict(kwargs["payload"]))
+            return {"results": []}
+
+        client._request_json = fake_request_json  # type: ignore[method-assign]
+
+        client._search_exa(
+            query="DeepSeek R1 paper pdf",
+            max_results=5,
+            include_domains=["arxiv.org"],
+            exclude_domains=None,
+            include_content=False,
+            mode="pdf",
+            intent="resource",
+        )
+
+        self.assertEqual(request_payloads[0]["category"], "research paper")
+
     def test_search_verify_conflicts_trigger_xai_arbitration(self) -> None:
         client = MySearchClient()
         client._provider_can_serve = lambda provider: True  # type: ignore[method-assign]
