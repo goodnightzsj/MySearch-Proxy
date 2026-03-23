@@ -591,33 +591,21 @@ class MySearchClient:
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
             )
-        elif decision.provider == "tavily":
-            result = self._search_tavily(
+        elif decision.provider in ("tavily", "firecrawl", "exa"):
+            result, fallback_info = self._search_with_fallback(
+                primary_provider=decision.provider,
                 query=query,
                 max_results=max_results,
-                topic=decision.tavily_topic,
+                mode=mode,
+                intent=resolved_intent,
+                decision=decision,
                 include_answer=effective_include_answer,
                 include_content=include_content,
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
             )
-        elif decision.provider == "firecrawl":
-            result = self._search_firecrawl(
-                query=query,
-                max_results=max_results,
-                categories=decision.firecrawl_categories or [],
-                include_content=include_content or mode in {"docs", "research", "github", "pdf"},
-                include_domains=include_domains,
-                exclude_domains=exclude_domains,
-            )
-        elif decision.provider == "exa":
-            result = self._search_exa(
-                query=query,
-                max_results=max_results,
-                include_domains=include_domains,
-                exclude_domains=exclude_domains,
-                include_content=include_content,
-            )
+            if fallback_info:
+                result["fallback"] = fallback_info
         elif decision.provider == "xai":
             result = self._search_xai(
                 query=query,
@@ -989,7 +977,7 @@ class MySearchClient:
                 return RouteDecision(
                     provider="tavily",
                     reason="显式指定 Tavily",
-                    tavily_topic="news" if mode == "news" else "general",
+                    tavily_topic="news" if mode == "news" or intent in {"news", "status"} else "general",
                 )
             if provider == "firecrawl":
                 return RouteDecision(
@@ -1123,16 +1111,26 @@ class MySearchClient:
             )
 
         if mode == "research":
-            if not self._provider_can_serve(self.config.tavily) and self._provider_can_serve(
-                self.config.exa
-            ):
+            if self._provider_can_serve(self.config.tavily):
+                return RouteDecision(
+                    provider="tavily",
+                    reason="research 模式先用 Tavily 做发现，再按策略决定是否扩展验证",
+                    tavily_topic="general",
+                )
+            if self._provider_can_serve(self.config.exa):
                 return RouteDecision(
                     provider="exa",
                     reason="Tavily 未配置，research 发现阶段回退到 Exa",
                 )
+            if self._provider_can_serve(self.config.firecrawl):
+                return RouteDecision(
+                    provider="firecrawl",
+                    reason="Tavily / Exa 未配置，research 发现阶段回退到 Firecrawl",
+                    firecrawl_categories=self._firecrawl_categories(mode, intent),
+                )
             return RouteDecision(
                 provider="tavily",
-                reason="research 模式先用 Tavily 做发现，再按策略决定是否扩展验证",
+                reason="research 模式默认走 Tavily（无可用替代）",
                 tavily_topic="general",
             )
 
@@ -1226,6 +1224,106 @@ class MySearchClient:
             self.config.firecrawl
         )
 
+    # ------------------------------------------------------------------
+    # Provider-level fallback: if the chosen provider fails, try others
+    # ------------------------------------------------------------------
+
+    _SEARCH_FALLBACK_CHAIN: dict[str, list[str]] = {
+        "tavily": ["exa", "firecrawl"],
+        "firecrawl": ["exa", "tavily"],
+        "exa": ["firecrawl", "tavily"],
+    }
+
+    def _search_with_fallback(
+        self,
+        *,
+        primary_provider: str,
+        query: str,
+        max_results: int,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        decision: RouteDecision,
+        include_answer: bool,
+        include_content: bool,
+        include_domains: list[str] | None,
+        exclude_domains: list[str] | None,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """Try the primary provider; on failure, walk the fallback chain."""
+        chain = [primary_provider] + self._SEARCH_FALLBACK_CHAIN.get(primary_provider, [])
+        last_error: Exception | None = None
+        for provider_name in chain:
+            try:
+                result = self._dispatch_single_provider(
+                    provider_name=provider_name,
+                    query=query,
+                    max_results=max_results,
+                    mode=mode,
+                    intent=intent,
+                    decision=decision,
+                    include_answer=include_answer,
+                    include_content=include_content,
+                    include_domains=include_domains,
+                    exclude_domains=exclude_domains,
+                )
+                fallback_info = None
+                if provider_name != primary_provider:
+                    fallback_info = {
+                        "from": primary_provider,
+                        "to": provider_name,
+                        "reason": str(last_error)[:200] if last_error else "primary provider failed",
+                    }
+                return result, fallback_info
+            except (MySearchError, Exception) as exc:
+                last_error = exc
+                continue
+        raise MySearchError(
+            f"All providers failed for query '{query[:80]}': {last_error}"
+        )
+
+    def _dispatch_single_provider(
+        self,
+        *,
+        provider_name: str,
+        query: str,
+        max_results: int,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        decision: RouteDecision,
+        include_answer: bool,
+        include_content: bool,
+        include_domains: list[str] | None,
+        exclude_domains: list[str] | None,
+    ) -> dict[str, Any]:
+        """Call exactly one search provider by name."""
+        if provider_name == "tavily":
+            return self._search_tavily(
+                query=query,
+                max_results=max_results,
+                topic=decision.tavily_topic,
+                include_answer=include_answer,
+                include_content=include_content,
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+            )
+        if provider_name == "firecrawl":
+            return self._search_firecrawl(
+                query=query,
+                max_results=max_results,
+                categories=decision.firecrawl_categories or self._firecrawl_categories(mode, intent),
+                include_content=include_content or mode in {"docs", "research", "github", "pdf"},
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+            )
+        if provider_name == "exa":
+            return self._search_exa(
+                query=query,
+                max_results=max_results,
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+                include_content=include_content,
+            )
+        raise MySearchError(f"Unknown provider: {provider_name}")
+
     def _search_web_blended(
         self,
         *,
@@ -1282,10 +1380,28 @@ class MySearchClient:
             }
 
         blended_results, blended_errors = self._execute_parallel(tasks, max_workers=2)
-        self._raise_parallel_error(blended_errors, "primary")
-        primary_result = blended_results["primary"]
-        secondary_result = blended_results.get("secondary")
-        secondary_error = str(blended_errors["secondary"]) if "secondary" in blended_errors else ""
+
+        primary_failed = "primary" in blended_errors
+        secondary_failed = "secondary" in blended_errors
+
+        if primary_failed and not secondary_failed:
+            # Primary down but secondary succeeded — use secondary as sole result
+            primary_result = blended_results["secondary"]
+            primary_result["fallback"] = {
+                "from": decision.provider,
+                "to": primary_result.get("provider", "unknown"),
+                "reason": str(blended_errors["primary"])[:200],
+            }
+            secondary_result = None
+            secondary_error = ""
+        elif primary_failed and secondary_failed:
+            # Both failed — raise the primary error
+            self._raise_parallel_error(blended_errors, "primary")
+            return {}  # unreachable, keeps type checker happy
+        else:
+            primary_result = blended_results["primary"]
+            secondary_result = blended_results.get("secondary")
+            secondary_error = str(blended_errors["secondary"]) if secondary_failed else ""
 
         merged = self._merge_search_payloads(
             primary_result=primary_result,
@@ -3097,18 +3213,27 @@ class MySearchClient:
         return []
 
     def _looks_like_news_query(self, query_lower: str) -> bool:
-        keywords = [
+        # 中文关键词：直接 substring 匹配
+        cn_keywords = ["刚刚", "最新", "新闻", "动态"]
+        if any(kw in query_lower for kw in cn_keywords):
+            return True
+        # 英文关键词：排除常见技术搭配的误判
+        # "breaking changes" / "latest version" 等不是新闻查询
+        tech_negatives = [
+            "breaking change", "breaking update",
+            "latest version", "latest release", "latest docs",
+            "latest commit", "latest tag",
+        ]
+        if any(neg in query_lower for neg in tech_negatives):
+            return False
+        en_keywords = [
             "latest",
             "breaking",
             "news",
             "today",
             "this week",
-            "刚刚",
-            "最新",
-            "新闻",
-            "动态",
         ]
-        return any(keyword in query_lower for keyword in keywords)
+        return any(keyword in query_lower for keyword in en_keywords)
 
     def _looks_like_status_query(self, query_lower: str) -> bool:
         keywords = [
