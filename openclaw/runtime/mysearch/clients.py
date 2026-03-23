@@ -2548,16 +2548,32 @@ class MySearchClient:
                 title_text=title_text,
                 query_tokens=paper_tokens,
             )
+            derivative_title = self._looks_like_derivative_paper_title(title_text)
             paper_shape = self._looks_like_pdf_url(url) or any(
                 marker in path for marker in ("/abs/", "/html/")
             )
             if named_paper and paper_shape:
                 return True
-            if paper_shape and total_hits >= min(max(len(paper_tokens), 2), 3):
+            if not derivative_title and paper_shape and total_hits >= min(max(len(paper_tokens), 2), 3):
                 return True
             if hostname == "arxiv.org" and path_hits >= 2 and paper_shape:
                 return True
         return False
+
+    def _looks_like_derivative_paper_title(self, title_text: str) -> bool:
+        derivative_markers = (
+            "analysis",
+            "benchmark",
+            "explained",
+            "interpret",
+            "lets think",
+            "let’s think",
+            "rethinking",
+            "survey",
+            "thoughtology",
+            "tutorial",
+        )
+        return any(marker in title_text for marker in derivative_markers)
 
     def _has_canonical_pricing_result(self, results: list[dict[str, Any]]) -> bool:
         for item in results[:5]:
