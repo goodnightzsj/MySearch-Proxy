@@ -318,6 +318,13 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(decision.provider, "tavily")
         self.assertEqual(decision.tavily_topic, "news")
 
+    def test_status_intent_routes_to_general_tavily_topic(self) -> None:
+        client = _make_client(tavily_keys=["key1"])
+        decision = self._route(client, mode="web", intent="status")
+        self.assertEqual(decision.provider, "tavily")
+        self.assertEqual(decision.tavily_topic, "general")
+        self.assertEqual(decision.result_profile, "web")
+
     def test_default_web_routes_to_tavily(self) -> None:
         client = _make_client(tavily_keys=["key1"])
         decision = self._route(client, mode="web")
@@ -383,6 +390,16 @@ class IntentResolutionTests(unittest.TestCase):
         client = _make_client()
         result = client._resolve_intent(
             query="anything", mode="auto", intent="auto", sources=["x"]
+        )
+        self.assertEqual(result, "status")
+
+    def test_status_like_query_wins_before_news_keyword(self) -> None:
+        client = _make_client()
+        result = client._resolve_intent(
+            query="OpenAI latest status update",
+            mode="auto",
+            intent="auto",
+            sources=["web"],
         )
         self.assertEqual(result, "status")
 

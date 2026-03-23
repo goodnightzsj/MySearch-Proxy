@@ -140,6 +140,14 @@ _MODE_PROVIDER_POLICY: dict[str, SearchRoutePolicy] = {
         result_profile="news",
         allow_exa_rescue=True,
     ),
+    "status": SearchRoutePolicy(
+        key="status",
+        provider="tavily",
+        fallback_chain=("firecrawl", "exa"),
+        tavily_topic="general",
+        result_profile="web",
+        allow_exa_rescue=True,
+    ),
     "docs": SearchRoutePolicy(
         key="docs",
         provider="firecrawl",
@@ -1500,6 +1508,13 @@ class MySearchClient:
                 research_summary = (summary_result.get("answer") or "").strip()
             except MySearchError:
                 pass
+        if not research_summary:
+            research_summary = self._build_research_summary_fallback(
+                web_search=web_search,
+                pages=pages,
+                citations=citations,
+                social=social,
+            )
 
         return {
             "provider": "hybrid",
@@ -2171,6 +2186,8 @@ class MySearchClient:
             return "exploratory"
         if sources == ["x"]:
             return "status"
+        if self._looks_like_status_query(query_lower):
+            return "status"
         if self._looks_like_news_query(query_lower):
             return "news"
         if self._looks_like_comparison_query(query_lower):
@@ -2179,8 +2196,6 @@ class MySearchClient:
             return "tutorial"
         if self._looks_like_docs_query(query_lower):
             return "resource"
-        if self._looks_like_status_query(query_lower):
-            return "status"
         if self._looks_like_exploratory_query(query_lower):
             return "exploratory"
         return "factual"
@@ -2224,7 +2239,9 @@ class MySearchClient:
             return _MODE_PROVIDER_POLICY[mode]
         if intent in {"resource", "tutorial"} or self._looks_like_docs_query(query_lower):
             return _MODE_PROVIDER_POLICY["resource"]
-        if intent in {"news", "status"} or mode == "news" or self._looks_like_news_query(query_lower):
+        if intent == "status" or self._looks_like_status_query(query_lower):
+            return _MODE_PROVIDER_POLICY["status"]
+        if intent == "news" or mode == "news" or self._looks_like_news_query(query_lower):
             return _MODE_PROVIDER_POLICY["news"]
         if intent in {"exploratory", "comparison"} and self._provider_can_serve(self.config.exa):
             return _MODE_PROVIDER_POLICY["exploratory"]
@@ -2609,11 +2626,15 @@ class MySearchClient:
         query: str,
         item: dict[str, Any],
         include_domains: list[str] | None,
-    ) -> tuple[int, int, int, int, int, int, int, int]:
+    ) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int]:
         hostname = self._result_hostname(item)
         registered_domain = self._registered_domain(hostname)
+        url = item.get("url", "")
+        path = urlparse(url).path.lower()
         title_text = (item.get("title") or "").lower()
+        query_lower = query.lower()
         query_tokens = self._query_brand_tokens(query)
+        precision_tokens = self._query_precision_tokens(query)
         include_match = int(
             bool(include_domains)
             and any(self._domain_matches(hostname, domain) for domain in include_domains or [])
@@ -2626,12 +2647,30 @@ class MySearchClient:
         )
         host_brand_match = int(any(token in hostname for token in query_tokens))
         title_brand_match = int(any(token in title_text for token in query_tokens))
+        path_precision_hits, total_precision_hits = self._query_precision_hit_counts(
+            hostname=hostname,
+            path=path,
+            title_text=title_text,
+            query_tokens=precision_tokens,
+        )
+        status_page_match = int(
+            self._looks_like_status_query(query_lower)
+            and self._looks_like_status_result(url=url, hostname=hostname, title_text=title_text)
+        )
+        pricing_page_match = int(
+            self._looks_like_pricing_query(query_lower)
+            and self._looks_like_pricing_result(url=url, hostname=hostname, title_text=title_text)
+        )
         non_aggregator = int(not self._is_obvious_web_aggregator(registered_domain))
         matched_provider_count = len(item.get("matched_providers") or [])
         cross_provider_boost = min(matched_provider_count, 3)
         content_score, snippet_score, title_score = self._result_quality_score(item)
         return (
             include_match,
+            status_page_match,
+            pricing_page_match,
+            path_precision_hits,
+            total_precision_hits,
             registered_domain_label_match,
             host_brand_match,
             title_brand_match,
@@ -4199,6 +4238,7 @@ class MySearchClient:
             return results
 
         query_tokens = self._query_brand_tokens(query)
+        precision_tokens = self._query_precision_tokens(query)
         strict_official = bool(include_domains) or self._looks_like_official_query(query)
         ranked = sorted(
             enumerate(results),
@@ -4207,6 +4247,7 @@ class MySearchClient:
                     mode=mode,
                     item=pair[1],
                     query_tokens=query_tokens,
+                    precision_tokens=precision_tokens,
                     include_domains=include_domains,
                     strict_official=strict_official,
                 ),
@@ -4222,9 +4263,10 @@ class MySearchClient:
         mode: SearchMode,
         item: dict[str, Any],
         query_tokens: list[str],
+        precision_tokens: list[str],
         include_domains: list[str] | None,
         strict_official: bool,
-    ) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int, int]:
+    ) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int, int, int, int]:
         flags = self._resource_result_flags(
             mode=mode,
             item=item,
@@ -4255,11 +4297,20 @@ class MySearchClient:
                 official_query=strict_official,
             )
         )
+        url = item.get("url", "")
+        path_precision_hits, total_precision_hits = self._query_precision_hit_counts(
+            hostname=str(flags["hostname"]),
+            path=urlparse(url).path.lower(),
+            title_text=(item.get("title") or "").lower(),
+            query_tokens=precision_tokens,
+        )
         matched_provider_count = len(item.get("matched_providers") or [])
         content_score, snippet_score, title_score = self._result_quality_score(item)
         return (
             include_match,
             official_resource_match,
+            path_precision_hits,
+            total_precision_hits,
             registered_domain_label_match,
             github_bonus,
             pdf_bonus,
@@ -4545,6 +4596,107 @@ class MySearchClient:
                 continue
             tokens.append(token)
         return tokens
+
+    def _query_precision_tokens(self, query: str) -> list[str]:
+        stopwords = {
+            "a",
+            "an",
+            "and",
+            "best",
+            "docs",
+            "documentation",
+            "for",
+            "guide",
+            "how",
+            "official",
+            "the",
+            "with",
+            "官网",
+            "官方",
+        }
+        precision_tokens: list[str] = []
+        seen: set[str] = set()
+        raw_tokens = re.findall(r"[a-z0-9][a-z0-9._/-]{1,}", query.lower())
+        for raw_token in raw_tokens:
+            cleaned = raw_token.strip("._/-")
+            candidates = {cleaned}
+            compact = re.sub(r"[^a-z0-9]+", "", cleaned)
+            if compact:
+                candidates.add(compact)
+            candidates.update(
+                token
+                for token in re.split(r"[^a-z0-9]+", cleaned)
+                if token
+            )
+            for candidate in candidates:
+                if candidate in stopwords or candidate.isdigit():
+                    continue
+                if len(candidate) < 3:
+                    continue
+                if candidate in seen:
+                    continue
+                seen.add(candidate)
+                precision_tokens.append(candidate)
+        return precision_tokens
+
+    def _query_precision_hit_counts(
+        self,
+        *,
+        hostname: str,
+        path: str,
+        title_text: str,
+        query_tokens: list[str],
+    ) -> tuple[int, int]:
+        if not query_tokens:
+            return 0, 0
+        path_text = f"{hostname} {path}"
+        full_text = f"{path_text} {title_text}"
+        path_matches = sum(1 for token in query_tokens if token in path_text)
+        total_matches = sum(1 for token in query_tokens if token in full_text)
+        return min(path_matches, 4), min(total_matches, 6)
+
+    def _looks_like_pricing_query(self, query_lower: str) -> bool:
+        keywords = [
+            "pricing",
+            "price",
+            "多少钱",
+            "价格",
+            "售价",
+            "buy",
+            "购买",
+        ]
+        return any(keyword in query_lower for keyword in keywords)
+
+    def _looks_like_pricing_result(self, *, url: str, hostname: str, title_text: str) -> bool:
+        path = urlparse(url).path.lower()
+        if hostname.startswith("shop."):
+            return True
+        pricing_markers = (
+            "/pricing",
+            "/price",
+            "/plans",
+            "/plan",
+            "/shop/buy",
+            "/buy-",
+        )
+        return any(marker in path for marker in pricing_markers) or any(
+            marker in title_text for marker in ("pricing", "price", "plan")
+        )
+
+    def _looks_like_status_result(self, *, url: str, hostname: str, title_text: str) -> bool:
+        path = urlparse(url).path.lower()
+        if hostname.startswith("status.") or ".statuspage." in hostname:
+            return True
+        status_markers = (
+            "/status",
+            "/incidents",
+            "/incident",
+            "/uptime",
+            "/outage",
+        )
+        return any(marker in path for marker in status_markers) or any(
+            marker in title_text for marker in ("status", "incident", "outage", "uptime")
+        )
 
     def _looks_like_resource_result(
         self,
@@ -5361,6 +5513,56 @@ class MySearchClient:
             "生态",
         ]
         return any(keyword in query_lower for keyword in keywords)
+
+    def _build_research_summary_fallback(
+        self,
+        *,
+        web_search: dict[str, Any],
+        pages: list[dict[str, Any]],
+        citations: list[dict[str, Any]],
+        social: dict[str, Any] | None,
+    ) -> str:
+        web_answer = (web_search.get("answer") or "").strip()
+        if web_answer:
+            return web_answer
+        if social:
+            social_answer = (social.get("answer") or "").strip()
+            if social_answer:
+                return social_answer
+
+        url_to_title: dict[str, str] = {}
+        for citation in citations:
+            url = (citation.get("url") or "").strip()
+            title = (citation.get("title") or "").strip()
+            if url and title and url not in url_to_title:
+                url_to_title[url] = title
+
+        highlights: list[str] = []
+        for page in pages:
+            if page.get("error"):
+                continue
+            excerpt = (page.get("excerpt") or page.get("content") or "").strip()
+            if not excerpt:
+                continue
+            excerpt = self._build_excerpt(excerpt, limit=180)
+            title = url_to_title.get((page.get("url") or "").strip(), "").strip()
+            if title:
+                highlights.append(f"{title}: {excerpt}")
+            else:
+                highlights.append(excerpt)
+            if len(highlights) >= 2:
+                break
+        if highlights:
+            return "Key findings from retrieved sources: " + " ".join(highlights)
+
+        citation_titles = [
+            (citation.get("title") or "").strip()
+            for citation in citations
+            if (citation.get("title") or "").strip()
+        ]
+        if citation_titles:
+            return "Relevant sources include " + ", ".join(citation_titles[:3]) + "."
+        return ""
 
     def _build_excerpt(self, content: str, limit: int = 600) -> str:
         compact = re.sub(r"\s+", " ", content).strip()
