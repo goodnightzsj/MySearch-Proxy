@@ -403,6 +403,16 @@ class IntentResolutionTests(unittest.TestCase):
         )
         self.assertEqual(result, "status")
 
+    def test_box_office_query_resolves_to_news(self) -> None:
+        client = _make_client()
+        result = client._resolve_intent(
+            query="2026 highest grossing movie opening weekend",
+            mode="auto",
+            intent="auto",
+            sources=["web"],
+        )
+        self.assertEqual(result, "news")
+
     def test_research_mode_auto_intent(self) -> None:
         client = _make_client()
         result = client._resolve_intent(

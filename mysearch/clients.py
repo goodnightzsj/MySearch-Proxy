@@ -5476,6 +5476,10 @@ class MySearchClient:
             "news",
             "today",
             "this week",
+            "box office",
+            "opening weekend",
+            "rumor",
+            "rumors",
         ]
         return any(keyword in query_lower for keyword in en_keywords)
 
