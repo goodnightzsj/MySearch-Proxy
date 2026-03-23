@@ -72,10 +72,10 @@ class MySearchClientTests(unittest.TestCase):
         results = [
             {
                 "provider": "tavily",
-                "title": "Bowen Yang & Matt Rogers Strike New Deal For Las Culturistas",
-                "url": "https://deadline.com/2026/03/bowen-yang-matt-rogers-las-culturistas-new-deal-iheartmedia-1236762675/",
+                "title": "Report: Giants Tried To Trade For Notable Veteran Linebacker",
+                "url": "https://nfltraderumors.co/report-giants-tried-to-trade-for-notable-veteran-linebacker/",
                 "published_date": "Mon, 23 Mar 2026 13:00:00 GMT",
-                "snippet": "A new podcast distribution agreement.",
+                "snippet": "NFL trade rumor roundup.",
             },
             {
                 "provider": "tavily",

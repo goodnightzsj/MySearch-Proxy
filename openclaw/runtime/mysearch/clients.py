@@ -2608,17 +2608,31 @@ class MySearchClient:
         query: str,
         item: dict[str, Any],
         include_domains: list[str] | None,
-    ) -> tuple[int, int, int, int, int, int, int, int, int, int]:
+    ) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int]:
         hostname = self._result_hostname(item)
+        registered_domain = self._registered_domain(hostname)
         path = urlparse(item.get("url", "")).path.lower()
         title_text = (item.get("title") or "").lower()
         snippet_text = (item.get("snippet") or "").lower()
         content_text = (item.get("content") or "").lower()
+        query_lower = query.lower()
+        gossip_query = self._looks_like_gossip_query(query_lower)
         path_precision_hits, total_precision_hits = self._query_precision_hit_counts(
             hostname=hostname,
             path=path,
             title_text=f"{title_text} {snippet_text} {content_text}",
             query_tokens=self._query_precision_tokens(query),
+        )
+        gossip_story_match = int(
+            gossip_query
+            and self._looks_like_gossip_result(
+                title_text=title_text,
+                snippet_text=snippet_text,
+                path=path,
+            )
+        )
+        gossip_domain_match = int(
+            gossip_query and self._is_entertainment_gossip_domain(registered_domain)
         )
         include_match = int(
             bool(include_domains)
@@ -2631,6 +2645,8 @@ class MySearchClient:
         content_score, snippet_score, title_score = self._result_quality_score(item)
         return (
             include_match,
+            gossip_story_match,
+            gossip_domain_match,
             path_precision_hits,
             total_precision_hits,
             mainstream,
@@ -5503,6 +5519,59 @@ class MySearchClient:
             "rumors",
         ]
         return any(keyword in query_lower for keyword in en_keywords)
+
+    def _looks_like_gossip_query(self, query_lower: str) -> bool:
+        keywords = [
+            "celebrity",
+            "breakup",
+            "breakups",
+            "dating",
+            "divorce",
+            "rumor",
+            "rumors",
+            "八卦",
+            "分手",
+            "离婚",
+            "恋情",
+            "绯闻",
+        ]
+        return any(keyword in query_lower for keyword in keywords)
+
+    def _is_entertainment_gossip_domain(self, registered_domain: str) -> bool:
+        return registered_domain in {
+            "eonline.com",
+            "justjared.com",
+            "pagesix.com",
+            "people.com",
+            "radaronline.com",
+            "tmz.com",
+            "usmagazine.com",
+        }
+
+    def _looks_like_gossip_result(
+        self,
+        *,
+        title_text: str,
+        snippet_text: str,
+        path: str,
+    ) -> bool:
+        text = f"{title_text} {snippet_text} {path}"
+        keywords = [
+            "breakup",
+            "breakups",
+            "dating",
+            "divorce",
+            "rumor",
+            "rumors",
+            "split",
+            "splits",
+            "关系",
+            "分手",
+            "离婚",
+            "恋情",
+            "绯闻",
+        ]
+        return any(keyword in text for keyword in keywords)
 
     def _looks_like_status_query(self, query_lower: str) -> bool:
         keywords = [
