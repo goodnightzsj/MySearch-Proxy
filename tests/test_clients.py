@@ -1053,6 +1053,87 @@ class MySearchClientTests(unittest.TestCase):
             "https://www.latimes.com/entertainment-arts/awards/story/2026-03-15/oscars-2026-winners-list-full-results",
         )
 
+    def test_rerank_general_web_prefers_exact_official_pricing_page(self) -> None:
+        client = MySearchClient()
+
+        reranked = client._rerank_general_results(
+            query="OpenAI pricing official",
+            result_profile="web",
+            include_domains=None,
+            results=[
+                {
+                    "provider": "tavily",
+                    "title": "Compare OpenAI API models",
+                    "url": "https://developers.openai.com/api/docs/models/compare",
+                    "snippet": "Compare model capabilities",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "API Pricing | OpenAI",
+                    "url": "https://openai.com/api/pricing/",
+                    "snippet": "Official pricing page",
+                    "content": "",
+                },
+            ],
+        )
+
+        self.assertEqual(reranked[0]["url"], "https://openai.com/api/pricing/")
+
+    def test_rerank_general_web_prefers_status_page_for_status_queries(self) -> None:
+        client = MySearchClient()
+
+        reranked = client._rerank_general_results(
+            query="OpenAI latest status update",
+            result_profile="web",
+            include_domains=None,
+            results=[
+                {
+                    "provider": "tavily",
+                    "title": "OpenAI latest rollout update",
+                    "url": "https://www.theverge.com/ai/123/openai-update",
+                    "snippet": "News article",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "OpenAI Status",
+                    "url": "https://status.openai.com/incidents/abc123",
+                    "snippet": "Incident details",
+                    "content": "",
+                },
+            ],
+        )
+
+        self.assertEqual(reranked[0]["url"], "https://status.openai.com/incidents/abc123")
+
+    def test_rerank_resource_results_prefers_exact_query_token_page(self) -> None:
+        client = MySearchClient()
+
+        reranked = client._rerank_resource_results(
+            query="Playwright test.step docs",
+            mode="docs",
+            include_domains=None,
+            results=[
+                {
+                    "provider": "tavily",
+                    "title": "Test class | Playwright",
+                    "url": "https://playwright.dev/docs/api/class-test",
+                    "snippet": "General test API reference",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "TestStepInfo class | Playwright",
+                    "url": "https://playwright.dev/docs/api/class-teststepinfo",
+                    "snippet": "test.step related API",
+                    "content": "",
+                },
+            ],
+        )
+
+        self.assertEqual(reranked[0]["url"], "https://playwright.dev/docs/api/class-teststepinfo")
+
     def test_resolve_research_plan_adapts_docs_and_news_budgets(self) -> None:
         client = MySearchClient()
 
@@ -1220,6 +1301,55 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["evidence"]["xai_arbitration_confidence"], "high")
         self.assertEqual(result["evidence"]["answer_source"], "xai_arbitration")
         self.assertIn("low-source-diversity", result["evidence"]["conflicts"])
+
+    def test_research_falls_back_to_local_summary_when_xai_summary_missing(self) -> None:
+        client = MySearchClient()
+        client._provider_can_serve = lambda provider: False if provider.name == "xai" else True  # type: ignore[method-assign]
+        client.search = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "intent": "resource",
+            "strategy": "deep",
+            "answer": "",
+            "results": [
+                {
+                    "title": "Primary finding",
+                    "url": "https://docs.example.com/primary",
+                    "snippet": "Background mode lets requests run asynchronously.",
+                    "content": "",
+                }
+            ],
+            "citations": [
+                {"title": "Primary finding", "url": "https://docs.example.com/primary"},
+            ],
+            "evidence": {
+                "providers_consulted": ["tavily"],
+                "verification": "single-provider",
+                "citation_count": 1,
+                "source_diversity": 1,
+                "source_domains": ["example.com"],
+                "official_source_count": 1,
+                "official_mode": "strict",
+                "confidence": "high",
+                "conflicts": [],
+            },
+        }
+        client.extract_url = lambda **kwargs: {  # type: ignore[method-assign]
+            "url": kwargs["url"],
+            "provider": "firecrawl",
+            "content": "Background mode lets requests run asynchronously and finish later without blocking the client.",
+            "cache": {"extract": {"hit": False, "ttl_seconds": 300}},
+        }
+
+        result = client.research(
+            query="OpenAI background mode official docs",
+            mode="docs",
+            strategy="deep",
+            include_social=False,
+            scrape_top_n=1,
+        )
+
+        self.assertIn("Key findings from retrieved sources:", result["research_summary"])
+        self.assertIn("Primary finding", result["research_summary"])
 
 
 if __name__ == "__main__":
