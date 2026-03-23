@@ -4295,6 +4295,7 @@ class MySearchClient:
             enumerate(results),
             key=lambda pair: (
                 self._resource_result_rank(
+                    query=query,
                     mode=mode,
                     item=pair[1],
                     query_tokens=query_tokens,
@@ -4311,6 +4312,7 @@ class MySearchClient:
     def _resource_result_rank(
         self,
         *,
+        query: str,
         mode: SearchMode,
         item: dict[str, Any],
         query_tokens: list[str],
@@ -4347,7 +4349,11 @@ class MySearchClient:
             mode == "pdf"
             and self._looks_like_primary_named_paper_result(
                 title_text=(item.get("title") or "").lower(),
-                query_tokens=self._paper_query_subject_tokens(query_tokens, precision_tokens),
+                query_tokens=self._paper_query_subject_tokens(
+                    query=query,
+                    query_tokens=query_tokens,
+                    precision_tokens=precision_tokens,
+                ),
             )
         )
         non_third_party = int(flags["non_third_party"])
@@ -4395,12 +4401,20 @@ class MySearchClient:
 
     def _paper_query_subject_tokens(
         self,
+        *,
+        query: str,
         query_tokens: list[str],
         precision_tokens: list[str],
     ) -> list[str]:
         subject_tokens: list[str] = []
         seen: set[str] = set()
-        for token in [*query_tokens, *precision_tokens]:
+        raw_query_tokens = [
+            cleaned
+            for raw_token in re.findall(r"[a-z0-9][a-z0-9._/-]{1,}", query.lower())
+            for cleaned in [raw_token.strip("._/-")]
+            if self._is_mixed_alnum_short_token(cleaned)
+        ]
+        for token in [*query_tokens, *raw_query_tokens, *precision_tokens]:
             cleaned = token.strip().lower()
             if cleaned in seen or cleaned in {"paper", "pdf"}:
                 continue
@@ -4689,7 +4703,7 @@ class MySearchClient:
         for token in re.findall(r"[a-z0-9][a-z0-9._-]{1,}", query.lower()):
             if token in stopwords or token.isdigit():
                 continue
-            if len(token) < 3 and not self._is_mixed_alnum_short_token(token):
+            if len(token) < 3:
                 continue
             tokens.append(token)
         return tokens
@@ -4728,7 +4742,7 @@ class MySearchClient:
             for candidate in candidates:
                 if candidate in stopwords or candidate.isdigit():
                     continue
-                if len(candidate) < 3 and not self._is_mixed_alnum_short_token(candidate):
+                if len(candidate) < 3:
                     continue
                 if candidate in seen:
                     continue
