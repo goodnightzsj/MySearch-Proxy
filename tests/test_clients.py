@@ -257,7 +257,7 @@ class MySearchClientTests(unittest.TestCase):
         payload = captured["payload"]
         assert isinstance(payload, dict)
         self.assertNotIn("categories", payload)
-        self.assertIn("scrapeOptions", payload)
+        self.assertNotIn("scrapeOptions", payload)
 
     def test_apply_result_event_answer_override_extracts_album_of_the_year_from_page_content(self) -> None:
         client = MySearchClient()
