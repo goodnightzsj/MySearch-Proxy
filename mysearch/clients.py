@@ -2943,7 +2943,7 @@ class MySearchClient:
                 snippet_text=snippet_text,
                 path=path,
             )
-            if winner_page or (category_match and fact_match):
+            if winner_page or fact_match:
                 return True
         return False
 
@@ -3573,6 +3573,9 @@ class MySearchClient:
             patterns = [
                 rf"{marker_pattern}(?:\s+winner)?\s*[–—:]",
                 rf"{marker_pattern}(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)\b",
+                rf"[\"“'‘][^\"”’'\n]{{2,100}}[\"”’'‘]\s+is\s+the\s+(?:20\d{{2}}\s+)?{marker_pattern}\s+winner",
+                rf"[\"“'‘][^\"”’'\n]{{2,100}}[\"”’'‘]\s+(?:won|wins)\s+{marker_pattern}",
+                rf"[A-Z][A-Za-z0-9'’&.\- ]{{2,100}}\s+(?:won|wins)\s+{marker_pattern}",
             ]
             if any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns):
                 return True
@@ -7315,6 +7318,7 @@ class MySearchClient:
                 combined_text,
                 patterns=[
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+won[^\n]{0,80}\bbest picture\b",
+                    r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+is\s+the\s+(?:20\d{2}\s+)?best picture winner",
                     r"best picture\s*[–—:]\s*([^\n.;]{2,100})",
                     r"best picture(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)?\s+([^\n.;]{2,100})",
                 ],
@@ -7327,6 +7331,8 @@ class MySearchClient:
                 combined_text,
                 patterns=[
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+won[^\n]{0,80}\bbest actor\b",
+                    r"([A-Z][A-Za-z0-9'’&.\- ]{2,100})\s+wins\s+best actor",
+                    r"([A-Z][A-Za-z0-9'’&.\- ]{2,100})\s+is\s+the\s+(?:20\d{2}\s+)?best actor winner",
                     r"best actor\s*[–—:]\s*([^\n.;]{2,100})",
                     r"best actor(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)?\s+([^\n.;]{2,100})",
                     r"([A-Z][A-Za-z0-9'’&.\- ]{2,100})\s+won\s+best actor",
@@ -7351,6 +7357,7 @@ class MySearchClient:
                 combined_text,
                 patterns=[
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+(?:won|wins)[^\n]{0,80}\balbum of the year\b",
+                    r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+[–—:]\s*album of the year",
                     r"album of the year\s*[–—:]\s*([^\n.;]{2,100})",
                     r"album of the year(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)?\s+([^\n.;]{2,100})",
                     r"([^\n.;]{2,100})\s+won\s+album of the year",
@@ -7374,8 +7381,10 @@ class MySearchClient:
                 combined_text,
                 patterns=[
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+(?:won|wins)[^\n]{0,80}\brecord of the year\b",
+                    r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+[–—:]\s*record of the year",
                     r"record of the year\s*[–—:]\s*([^\n.;]{2,100})",
                     r"record of the year(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)?\s+([^\n.;]{2,100})",
+                    r"([^\n.;]{2,100})\s+wins\s+record of the year",
                     r"([^\n.;]{2,100})\s+won\s+record of the year",
                 ],
                 reject_substrings=[

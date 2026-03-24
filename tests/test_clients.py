@@ -317,6 +317,54 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["answer"], "Best Actor winner: Colman Domingo")
         self.assertEqual(result["evidence"]["answer_source"], "result-event-extraction")
 
+    def test_apply_result_event_answer_override_extracts_best_picture_from_headline_style_result(self) -> None:
+        client = MySearchClient()
+
+        result = client._apply_result_event_answer_override(
+            query="2026 Oscars best picture winner",
+            mode="news",
+            intent="news",
+            strategy="verify",
+            result={
+                "answer": "",
+                "results": [
+                    {
+                        "title": "'One Battle After Another' is the 2026 Best Picture winner at the Academy Awards",
+                        "url": "https://example.com/oscars-best-picture",
+                        "snippet": "",
+                        "content": "",
+                    }
+                ],
+                "evidence": {},
+            },
+        )
+
+        self.assertEqual(result["answer"], "Best Picture winner: One Battle After Another")
+
+    def test_apply_result_event_answer_override_extracts_best_actor_from_headline_style_result(self) -> None:
+        client = MySearchClient()
+
+        result = client._apply_result_event_answer_override(
+            query="2026 Oscars best actor winner",
+            mode="news",
+            intent="news",
+            strategy="verify",
+            result={
+                "answer": "",
+                "results": [
+                    {
+                        "title": "Michael B. Jordan wins Best Actor at Oscars 2026",
+                        "url": "https://example.com/oscars-best-actor",
+                        "snippet": "",
+                        "content": "",
+                    }
+                ],
+                "evidence": {},
+            },
+        )
+
+        self.assertEqual(result["answer"], "Best Actor winner: Michael B. Jordan")
+
     def test_apply_result_event_answer_override_extracts_box_office_title(self) -> None:
         client = MySearchClient()
 
@@ -436,6 +484,30 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(result["answer"], "Record of the Year winner: Not Like Us")
         self.assertEqual(result["evidence"]["answer_source"], "result-event-extraction")
+
+    def test_apply_result_event_answer_override_extracts_record_of_the_year_from_headline_style_result(self) -> None:
+        client = MySearchClient()
+
+        result = client._apply_result_event_answer_override(
+            query="2026 Grammy Record of the Year winner",
+            mode="news",
+            intent="news",
+            strategy="verify",
+            result={
+                "answer": "",
+                "results": [
+                    {
+                        "title": '"Not Like Us" wins Record of the Year',
+                        "url": "https://example.com/grammys-record-year",
+                        "snippet": "",
+                        "content": "",
+                    }
+                ],
+                "evidence": {},
+            },
+        )
+
+        self.assertEqual(result["answer"], "Record of the Year winner: Not Like Us")
 
     def test_extract_result_event_answer_trims_trailing_list_noise(self) -> None:
         client = MySearchClient()
