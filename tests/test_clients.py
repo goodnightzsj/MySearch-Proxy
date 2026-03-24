@@ -3362,7 +3362,7 @@ class MySearchClientTests(unittest.TestCase):
         self.assertIn("Best MCP Servers for Search in 2026 - Top 10 Tools", summary)
         self.assertNotIn("marketing copy", summary)
 
-    def test_research_anchors_web_discovery_to_tavily_for_generic_queries(self) -> None:
+    def test_research_anchors_web_discovery_to_tavily_for_factual_queries(self) -> None:
         client = MySearchClient()
         search_calls: list[dict[str, object]] = []
 
@@ -3403,7 +3403,7 @@ class MySearchClientTests(unittest.TestCase):
             "cache": {"extract": {"hit": False, "ttl_seconds": 300}},
         }
         client.research(
-            query="best search MCP server 2026",
+            query="capital of France",
             mode="web",
             strategy="deep",
             include_social=False,
@@ -3411,6 +3411,7 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertTrue(search_calls)
+        self.assertEqual(search_calls[0]["mode"], "web")
         self.assertEqual(search_calls[0]["provider"], "tavily")
 
     def test_resolve_research_plan_uses_docs_mode_for_technical_comparison_queries(self) -> None:
@@ -3429,6 +3430,23 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertEqual(plan["web_mode"], "docs")
+
+    def test_resolve_research_plan_uses_exploratory_mode_for_generic_comparison_queries(self) -> None:
+        client = MySearchClient()
+
+        plan = client._resolve_research_plan(
+            query="best search MCP server 2026",
+            mode="web",
+            intent="exploratory",
+            strategy="deep",
+            web_max_results=5,
+            social_max_results=5,
+            scrape_top_n=3,
+            include_social=False,
+            include_domains=None,
+        )
+
+        self.assertEqual(plan["web_mode"], "exploratory")
 
     def test_research_prioritizes_authoritative_sources_for_technical_comparison_queries(self) -> None:
         client = MySearchClient()
