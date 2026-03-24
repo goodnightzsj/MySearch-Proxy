@@ -2035,12 +2035,23 @@ class MySearchClient:
             }
             project_candidates: list[dict[str, Any]] = []
             curated_candidates: list[dict[str, Any]] = []
+            listicle_candidates: list[dict[str, Any]] = []
             directory_candidates: list[dict[str, Any]] = []
             community_candidates: list[dict[str, Any]] = []
             for item in combined:
                 hostname = self._result_hostname(item)
                 registered_domain = self._registered_domain(hostname)
                 path = urlparse(item.get("url", "")).path.lower()
+                title_text = (item.get("title") or "").lower()
+                snippet_text = (item.get("snippet") or "").lower()
+                listicle_candidate = (
+                    any(marker in title_text for marker in ("best ", "top ", "roundup", "ranking"))
+                    or any(marker in path for marker in ("/best-", "/top-", "/list-", "/lists/"))
+                    or (
+                        any(marker in snippet_text for marker in ("top ", "best ", "ranked ", "roundup"))
+                        and "/blog/" in path
+                    )
+                )
                 if registered_domain in community_domains:
                     community_candidates.append(item)
                 elif registered_domain == "github.com":
@@ -2050,6 +2061,8 @@ class MySearchClient:
                     and any(marker in path for marker in ("/server/", "/servers/"))
                 ):
                     directory_candidates.append(item)
+                elif listicle_candidate:
+                    listicle_candidates.append(item)
                 else:
                     curated_candidates.append(item)
             if len(project_candidates) > 1:
@@ -2080,9 +2093,17 @@ class MySearchClient:
                     results=directory_candidates,
                     include_domains=include_domains,
                 )
+            if len(listicle_candidates) > 1:
+                listicle_candidates = self._rerank_general_results(
+                    query=query,
+                    result_profile="web",
+                    results=listicle_candidates,
+                    include_domains=include_domains,
+                )
             selected = [
                 *project_candidates,
                 *curated_candidates,
+                *listicle_candidates,
                 *directory_candidates,
                 *community_candidates,
             ][:max_results]
