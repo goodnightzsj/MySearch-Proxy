@@ -803,6 +803,12 @@ class MySearchClientTests(unittest.TestCase):
             "https://playwright.dev/docs/api/class-teststep",
         )
 
+    def test_exa_category_does_not_treat_tutorial_query_as_research_paper(self) -> None:
+        client = MySearchClient()
+
+        self.assertEqual(client._exa_category("docs", "tutorial"), "")
+        self.assertEqual(client._exa_category("pdf", "tutorial"), "research paper")
+
     def test_changelog_query_uses_tavily_news_policy(self) -> None:
         client = MySearchClient()
 
