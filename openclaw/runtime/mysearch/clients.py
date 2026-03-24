@@ -4713,7 +4713,7 @@ class MySearchClient:
         exact_identifier_tokens: list[str],
         include_domains: list[str] | None,
         strict_official: bool,
-    ) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int]:
+    ) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int]:
         flags = self._resource_result_flags(
             mode=mode,
             item=item,
@@ -4771,6 +4771,22 @@ class MySearchClient:
             )
         )
         url = item.get("url", "")
+        query_lower = query.lower()
+        pricing_page_match = int(
+            self._looks_like_pricing_query(query_lower)
+            and self._looks_like_pricing_result(
+                url=url,
+                hostname=str(flags["hostname"]),
+                title_text=(item.get("title") or "").lower(),
+            )
+        )
+        canonical_pricing_page_match = int(
+            self._looks_like_pricing_query(query_lower)
+            and self._looks_like_canonical_pricing_result(
+                hostname=str(flags["hostname"]),
+                path=urlparse(url).path.lower(),
+            )
+        )
         path_precision_hits, total_precision_hits = self._query_precision_hit_counts(
             hostname=str(flags["hostname"]),
             path=urlparse(url).path.lower(),
@@ -4793,6 +4809,8 @@ class MySearchClient:
         return (
             include_match,
             official_resource_match,
+            canonical_pricing_page_match,
+            pricing_page_match,
             primary_named_paper_bonus,
             non_derivative_paper_bonus,
             paper_landing_bonus,
