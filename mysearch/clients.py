@@ -8293,6 +8293,7 @@ class MySearchClient:
                 ]
 
         comparison_rows: list[dict[str, str]] = []
+        decision_table: list[dict[str, str]] = []
         if comparison_like:
             url_to_excerpt = {
                 (page.get("url") or "").strip(): self._build_excerpt(
@@ -8376,17 +8377,43 @@ class MySearchClient:
                 )
                 if len(comparison_rows) >= 4:
                     break
+            for row in comparison_rows[:4]:
+                cluster_label = str(row.get("cluster") or "").strip()
+                cluster_detail = next(
+                    (
+                        item
+                        for item in source_clusters
+                        if str(item.get("label") or "").strip() == cluster_label
+                    ),
+                    {},
+                )
+                decision_table.append(
+                    {
+                        "candidate": str(row.get("candidate") or "").strip(),
+                        "fit": self._research_cluster_fit_summary(cluster_label),
+                        "strengths": self._research_decision_strengths(
+                            cluster_label=cluster_label,
+                            provider_support=str(row.get("provider_support") or "").strip(),
+                            note=str(row.get("note") or "").strip(),
+                            cluster_detail=cluster_detail,
+                        ),
+                        "cautions": self._research_decision_cautions(
+                            cluster_label=cluster_label,
+                            provider_support=str(row.get("provider_support") or "").strip(),
+                        ),
+                    }
+                )
 
         recommendation = ""
         if comparison_like:
-            if authoritative_source_count > 0 and comparison_rows:
+            if authoritative_source_count > 0 and decision_table:
                 recommendation = (
-                    f"Start from {comparison_rows[0]['candidate']} as the primary anchor, "
+                    f"Start from {decision_table[0]['candidate']} as the primary anchor, "
                     "then use the remaining shortlisted sources to validate trade-offs and edge cases."
                 )
-            elif comparison_rows:
+            elif decision_table:
                 recommendation = (
-                    f"Treat {comparison_rows[0]['candidate']} as the leading candidate for now, "
+                    f"Treat {decision_table[0]['candidate']} as the leading candidate for now, "
                     "but keep the next shortlisted sources in scope because the evidence is still comparative."
                 )
 
@@ -8414,6 +8441,7 @@ class MySearchClient:
             ],
             "comparison_lens": comparison_lens,
             "comparison_rows": comparison_rows,
+            "decision_table": decision_table,
             "recommendation": recommendation,
         }
 
@@ -8499,6 +8527,27 @@ class MySearchClient:
                 note = str(row.get("note") or "").replace("|", "/").strip()
                 lines.append(f"| {candidate} | {cluster} | {provider_support} | {note} |")
 
+        decision_table = [
+            item
+            for item in (sections.get("decision_table") or [])
+            if isinstance(item, dict) and item.get("candidate")
+        ]
+        if decision_table:
+            lines.extend(
+                [
+                    "",
+                    "## Decision Table",
+                    "| Candidate | Best Fit | Strengths | Cautions |",
+                    "|---|---|---|---|",
+                ]
+            )
+            for row in decision_table[:4]:
+                candidate = str(row.get("candidate") or "").replace("|", "/").strip()
+                fit = str(row.get("fit") or "").replace("|", "/").strip()
+                strengths = str(row.get("strengths") or "").replace("|", "/").strip()
+                cautions = str(row.get("cautions") or "").replace("|", "/").strip()
+                lines.append(f"| {candidate} | {fit} | {strengths} | {cautions} |")
+
         provider_roles = [
             str(item).strip()
             for item in (sections.get("provider_roles") or [])
@@ -8535,6 +8584,8 @@ class MySearchClient:
             for cluster in source_clusters[:5]:
                 label = str(cluster.get("label") or "").strip()
                 count = int(cluster.get("count") or 0)
+                tier = str(cluster.get("tier") or "").strip()
+                weight = float(cluster.get("weight") or 0)
                 domains = ", ".join(
                     str(domain).strip()
                     for domain in (cluster.get("domains") or [])[:3]
@@ -8547,6 +8598,8 @@ class MySearchClient:
                 )
                 detail_bits = [
                     f"{count} source(s)" if count else "",
+                    f"tier={tier}" if tier else "",
+                    f"weight={weight:.1f}" if weight else "",
                     f"domains={domains}" if domains else "",
                     f"providers={providers}" if providers else "",
                 ]
@@ -8622,18 +8675,45 @@ class MySearchClient:
                     "count": 0,
                     "domains": [],
                     "providers": [],
+                    "cross_provider_count": 0,
                 },
             )
             bucket["count"] += 1
             domain = self._registered_domain(self._result_hostname(item))
             if domain and domain not in bucket["domains"]:
                 bucket["domains"].append(domain)
-            for provider in (
+            matched_providers = [
+                provider
+                for provider in (
                 item.get("matched_providers")
                 or [item.get("provider", "")]
-            ):
+                )
+                if provider
+            ]
+            if len(set(matched_providers)) > 1:
+                bucket["cross_provider_count"] += 1
+            for provider in matched_providers:
                 if provider and provider not in bucket["providers"]:
                     bucket["providers"].append(provider)
+
+        for bucket in cluster_buckets.values():
+            provider_support = len(bucket.get("providers") or [])
+            cross_provider_count = int(bucket.get("cross_provider_count") or 0)
+            label = str(bucket.get("label") or "")
+            base_weight = self._research_cluster_base_weight(
+                label=label,
+                authoritative_preferred=authoritative_preferred,
+            )
+            weight = round(
+                base_weight
+                + float(bucket.get("count") or 0) * 1.4
+                + provider_support * 0.8
+                + cross_provider_count * 1.2,
+                2,
+            )
+            bucket["provider_support_count"] = provider_support
+            bucket["weight"] = weight
+            bucket["tier"] = self._research_cluster_tier(weight=weight, label=label)
 
         preferred_order = (
             ["official", "supporting", "general", "community"]
@@ -8643,6 +8723,7 @@ class MySearchClient:
         return sorted(
             cluster_buckets.values(),
             key=lambda item: (
+                -float(item.get("weight") or 0),
                 preferred_order.index(item["label"])
                 if item["label"] in preferred_order
                 else len(preferred_order),
@@ -8687,7 +8768,7 @@ class MySearchClient:
             )
             if not claim:
                 continue
-            claim_key = re.sub(r"[^a-z0-9]+", " ", claim.lower()).strip()
+            claim_key = self._research_claim_signature(claim)
             if not claim_key:
                 continue
             if claim_key not in claims_by_key:
@@ -8720,25 +8801,180 @@ class MySearchClient:
         excerpt: str,
         comparison_like: bool,
     ) -> str:
+        cleaned_title = self._normalize_research_claim_text(
+            re.split(r"\s[\-|:|]\s", title, maxsplit=1)[0].strip() or title,
+            comparison_like=comparison_like,
+        )
         excerpt = re.sub(r"\s+", " ", excerpt).strip()
         if excerpt:
             first_sentence = re.split(r"(?<=[.!?。！？])\s+", excerpt, maxsplit=1)[0].strip()
-            first_sentence_lower = first_sentence.lower()
-            if first_sentence and not any(
-                marker in first_sentence_lower
-                for marker in (
-                    "marketing copy",
-                    "skip to content",
-                    "you signed in with another tab",
-                    "method not allowed",
-                    "\"error\"",
-                    "jsonrpc",
-                )
-            ):
-                return self._build_excerpt(first_sentence, limit=160)
-        if comparison_like and title:
-            return re.split(r"\s[\-|:|]\s", title, maxsplit=1)[0].strip() or title
-        return title.strip()
+            cleaned_excerpt = self._normalize_research_claim_text(
+                first_sentence,
+                comparison_like=comparison_like,
+            )
+            if cleaned_excerpt:
+                if cleaned_title and self._research_excerpt_looks_like_navigation_noise(cleaned_excerpt):
+                    return cleaned_title
+                if not self._research_excerpt_looks_like_noise(cleaned_excerpt):
+                    excerpt_tokens = set(re.findall(r"[a-z0-9]+", cleaned_excerpt.lower()))
+                    title_tokens = set(re.findall(r"[a-z0-9]+", cleaned_title.lower()))
+                    if cleaned_title and title_tokens and excerpt_tokens and (
+                        len(title_tokens & excerpt_tokens) >= max(2, min(len(title_tokens), 3))
+                    ):
+                        return cleaned_title
+                    return cleaned_excerpt
+        return cleaned_title
+
+    def _normalize_research_claim_text(
+        self,
+        text: str,
+        *,
+        comparison_like: bool,
+    ) -> str:
+        compact = re.sub(r"\s+", " ", text).strip(" -|:;,.")
+        compact = re.sub(r"^[#>*`\-\d\.\)\s]+", "", compact).strip()
+        compact = re.sub(r"\[[^\]]+\]\([^)]+\)", "", compact).strip()
+        compact = re.sub(r"https?://\S+", "", compact).strip()
+        compact = compact.replace("\\_", "_")
+        if not compact:
+            return ""
+        if comparison_like:
+            compact = re.split(r"\s[\-|:|]\s", compact, maxsplit=1)[0].strip() or compact
+        compact = self._build_excerpt(compact, limit=160)
+        if self._research_excerpt_looks_like_noise(compact):
+            return ""
+        return compact
+
+    def _research_claim_signature(self, claim: str) -> str:
+        normalized = re.sub(r"[^a-z0-9]+", " ", claim.lower()).strip()
+        if not normalized:
+            return ""
+        stopwords = {
+            "a",
+            "an",
+            "and",
+            "api",
+            "best",
+            "by",
+            "docs",
+            "documentation",
+            "for",
+            "guide",
+            "in",
+            "latest",
+            "of",
+            "official",
+            "reference",
+            "the",
+            "to",
+            "updated",
+            "with",
+        }
+        tokens = [
+            token
+            for token in normalized.split()
+            if token not in stopwords and len(token) > 1
+        ]
+        signature_tokens = tokens[:8] or normalized.split()[:8]
+        return " ".join(signature_tokens)
+
+    def _research_excerpt_looks_like_navigation_noise(self, text: str) -> bool:
+        lowered = text.lower()
+        return any(
+            marker in lowered
+            for marker in (
+                "primary navigation",
+                "search docs",
+                "skip to content",
+                "suggested",
+                "chatgpt actions",
+                "search the api docs",
+                "marketing copy",
+            )
+        )
+
+    def _research_excerpt_looks_like_noise(self, text: str) -> bool:
+        lowered = text.lower()
+        return any(
+            marker in lowered
+            for marker in (
+                "you signed in with another tab",
+                "method not allowed",
+                "\"error\"",
+                "jsonrpc",
+            )
+        )
+
+    def _research_cluster_base_weight(
+        self,
+        *,
+        label: str,
+        authoritative_preferred: bool,
+    ) -> float:
+        if authoritative_preferred:
+            return {
+                "official": 4.0,
+                "supporting": 3.0,
+                "general": 2.0,
+                "community": 1.0,
+            }.get(label, 1.0)
+        return {
+            "project": 4.0,
+            "curated": 3.0,
+            "listicle": 2.0,
+            "directory": 1.5,
+            "community": 1.0,
+        }.get(label, 1.0)
+
+    def _research_cluster_tier(self, *, weight: float, label: str) -> str:
+        if label in {"official", "project"} or weight >= 6.0:
+            return "primary"
+        if weight >= 3.5:
+            return "secondary"
+        return "supplemental"
+
+    def _research_cluster_fit_summary(self, cluster_label: str) -> str:
+        return {
+            "official": "canonical ground truth",
+            "supporting": "supporting analysis",
+            "general": "general coverage",
+            "community": "community signal",
+            "project": "project-native source",
+            "curated": "curated comparison",
+            "listicle": "broad scan",
+            "directory": "directory-style inventory",
+        }.get(cluster_label, "general coverage")
+
+    def _research_decision_strengths(
+        self,
+        *,
+        cluster_label: str,
+        provider_support: str,
+        note: str,
+        cluster_detail: dict[str, Any],
+    ) -> str:
+        strength_bits = [self._research_cluster_fit_summary(cluster_label)]
+        tier = str(cluster_detail.get("tier") or "").strip()
+        if tier:
+            strength_bits.append(tier)
+        if provider_support and provider_support != "unknown":
+            strength_bits.append(f"provider support={provider_support}")
+        if note:
+            strength_bits.append(note[:100])
+        return "; ".join(bit for bit in strength_bits if bit)
+
+    def _research_decision_cautions(
+        self,
+        *,
+        cluster_label: str,
+        provider_support: str,
+    ) -> str:
+        cautions: list[str] = []
+        if cluster_label in {"community", "directory", "listicle"}:
+            cautions.append("lower authority")
+        if " + " not in provider_support and provider_support not in {"", "unknown"}:
+            cautions.append("single-provider support")
+        return "; ".join(cautions) if cautions else "none"
 
     def _build_excerpt(self, content: str, limit: int = 600) -> str:
         compact = re.sub(r"\s+", " ", content).strip()

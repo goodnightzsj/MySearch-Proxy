@@ -194,6 +194,12 @@ Preferred order:
 5. only fall back to other search tools if MySearch is unavailable or the user
    explicitly asks for another source
 
+Additional note:
+
+- `research` now tries to return a structured short report instead of only a URL list
+- typical sections include `claim-level evidence`, `source clusters`, a ranked shortlist, and a decision table
+- this is especially useful for technical comparisons, release/changelog trade-off analysis, and lightweight research with explicit support
+
 For the full behavior rules, see:
 
 - [SKILL.md](./SKILL.md)

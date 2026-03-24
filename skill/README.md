@@ -195,6 +195,12 @@ python skill/scripts/check_mysearch.py \
 4. 需要小型研究包时用 `research`
 5. 只有 MySearch 不可用或用户明确要求时，才回退到别的搜索工具
 
+补充：
+
+- `research` 现在会尽量输出结构化报告，而不只是 URL 列表
+- 典型内容包括：`claim-level evidence`、`source clusters`、ranked shortlist 和 decision table
+- 适合技术比较、选型、release / changelog 对比、带来源依据的轻量研究
+
 更完整的调用规则见：
 
 - [SKILL.md](./SKILL.md)

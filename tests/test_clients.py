@@ -3770,6 +3770,55 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(len(deduped), 1)
         self.assertEqual(deduped[0]["matched_providers"], ["exa", "tavily"])
 
+    def test_research_claim_text_prefers_clean_title_over_navigation_excerpt(self) -> None:
+        client = MySearchClient()
+
+        claim = client._research_claim_text(
+            title="Migrate to the Responses API | OpenAI API",
+            excerpt="## Search the API docs Search docs ### Suggested response_format Primary navigation Search docs",
+            comparison_like=True,
+        )
+
+        self.assertEqual(claim, "Migrate to the Responses API")
+
+    def test_research_claim_evidence_merges_similar_claims_by_signature(self) -> None:
+        client = MySearchClient()
+
+        claims = client._build_research_claim_evidence(
+            ordered_results=[
+                {
+                    "provider": "exa",
+                    "matched_providers": ["exa"],
+                    "title": "Migrate to the Responses API | OpenAI API",
+                    "url": "https://developers.openai.com/api/docs/guides/migrate-to-responses",
+                    "snippet": "Migration guide for the Responses API.",
+                },
+                {
+                    "provider": "tavily",
+                    "matched_providers": ["tavily"],
+                    "title": "Migrate to Responses API - OpenAI Docs",
+                    "url": "https://platform.openai.com/docs/guides/responses-vs-chat-completions",
+                    "snippet": "Docs about migrating to the Responses API.",
+                },
+            ],
+            pages=[],
+            citations=[
+                {
+                    "title": "Migrate to the Responses API | OpenAI API",
+                    "url": "https://developers.openai.com/api/docs/guides/migrate-to-responses",
+                },
+                {
+                    "title": "Migrate to Responses API - OpenAI Docs",
+                    "url": "https://platform.openai.com/docs/guides/responses-vs-chat-completions",
+                },
+            ],
+            comparison_like=True,
+        )
+
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(sorted(claims[0]["providers"]), ["exa", "tavily"])
+        self.assertEqual(len(claims[0]["sources"]), 2)
+
     def test_research_report_sections_include_claim_evidence_and_source_clusters(self) -> None:
         client = MySearchClient()
 
@@ -3822,11 +3871,16 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertIn("claim_evidence", sections)
         self.assertIn("source_clusters", sections)
+        self.assertIn("decision_table", sections)
         self.assertEqual(sections["claim_evidence"][0]["providers"], ["exa", "tavily"])
         self.assertEqual(sections["source_clusters"][0]["label"], "project")
+        self.assertEqual(sections["source_clusters"][0]["tier"], "primary")
+        self.assertGreater(sections["source_clusters"][0]["weight"], 0)
+        self.assertEqual(sections["decision_table"][0]["fit"], "project-native source")
         self.assertIn("## Claim-Level Evidence", summary)
         self.assertIn("## Source Clusters", summary)
         self.assertIn("| Candidate | Cluster | Provider Support | Evidence Note |", summary)
+        self.assertIn("## Decision Table", summary)
 
 
 if __name__ == "__main__":

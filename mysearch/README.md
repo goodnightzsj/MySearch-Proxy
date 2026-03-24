@@ -319,6 +319,7 @@ MySearch 不是单一 provider 的壳。
   - Firecrawl 优先，Tavily 回退
 - `research`
   - 一轮小 research：搜索发现 + 正文抓取 + 可选 social 补充
+  - 当前会尽量输出结构化 short report，显式包含 `claim-level evidence`、`source clusters`、ranked shortlist 与 decision table，而不只是结果拼接
 
 补充约束：
 
