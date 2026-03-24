@@ -200,6 +200,51 @@ class MySearchClientTests(unittest.TestCase):
             "factual",
         )
 
+    def test_docs_tutorial_query_uses_tutorial_policy_without_strict_resource_mode(self) -> None:
+        client = MySearchClient()
+        query = "Playwright test.step tutorial example"
+
+        resolved_intent = client._resolve_intent(
+            query=query,
+            mode="docs",
+            intent="auto",
+            sources=["web"],
+        )
+        policy = client._route_policy_for_request(
+            query=query,
+            mode="docs",
+            intent=resolved_intent,
+            include_content=False,
+        )
+
+        self.assertEqual(resolved_intent, "tutorial")
+        self.assertEqual(policy.key, "tutorial")
+        self.assertEqual(policy.provider, "exa")
+        self.assertFalse(
+            client._should_use_strict_resource_policy(
+                query=query,
+                mode="docs",
+                intent=resolved_intent,
+                include_domains=None,
+            )
+        )
+        self.assertFalse(client._should_rerank_resource_results(mode="docs", intent=resolved_intent))
+
+    def test_changelog_query_uses_tavily_news_policy(self) -> None:
+        client = MySearchClient()
+
+        policy = client._route_policy_for_request(
+            query="Next.js 16 release notes official",
+            mode="docs",
+            intent="resource",
+            include_content=False,
+        )
+
+        self.assertEqual(policy.key, "changelog")
+        self.assertEqual(policy.provider, "tavily")
+        self.assertEqual(policy.tavily_topic, "news")
+        self.assertEqual(policy.firecrawl_categories, ("news",))
+
     def test_request_json_auth_error_mentions_rejected_key(self) -> None:
         client = MySearchClient()
         provider = client.config.tavily
@@ -342,6 +387,60 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(len(json_calls), 1)
         self.assertEqual(json_calls[0]["path"], "/responses")
         self.assertEqual(json_calls[0]["payload"]["model"], "grok-4.1-fast")
+
+    def test_xai_compatible_search_timeout_falls_back_to_tavily_x_results(self) -> None:
+        client = MySearchClient()
+        provider = client.config.xai
+        provider.search_mode = "compatible"
+        provider.default_paths["social_search"] = "/social/search"
+        provider.alternate_base_urls["social_search"] = "http://gateway.example/v1"
+        client._get_key_or_raise = lambda provider: type(  # type: ignore[method-assign]
+            "Record",
+            (),
+            {"key": "gateway-token", "source": "env"},
+        )()
+        calls: list[dict[str, object]] = []
+
+        def fake_request_json(**kwargs):  # type: ignore[no-untyped-def]
+            calls.append(kwargs)
+            raise MySearchError("xai request timeout after 45s: http://127.0.0.1:9874/social/search")
+
+        client._request_json = fake_request_json  # type: ignore[method-assign]
+        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "Fallback social summary",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "OpenAI on X",
+                    "url": "https://x.com/OpenAI/status/123",
+                    "snippet": "Latest OpenAI post",
+                    "content": "",
+                }
+            ],
+            "citations": [{"title": "OpenAI on X", "url": "https://x.com/OpenAI/status/123"}],
+        }
+
+        result = client._search_xai_compatible(
+            query="latest OpenAI X posts GPT-5",
+            sources=["x"],
+            max_results=5,
+            allowed_x_handles=None,
+            excluded_x_handles=None,
+            from_date=None,
+            to_date=None,
+            include_x_images=False,
+            include_x_videos=False,
+        )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["timeout_seconds"], 20)
+        self.assertEqual(result["provider"], "tavily_social_fallback")
+        self.assertEqual(result["results"][0]["url"], "https://x.com/OpenAI/status/123")
+        self.assertEqual(result["fallback"]["from"], "xai_compatible")
 
     def test_github_blob_raw_urls_try_common_branch_aliases(self) -> None:
         client = MySearchClient()
@@ -1601,6 +1700,40 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertEqual(reranked[0]["url"], "https://openai.com/api/pricing/")
+
+    def test_rerank_resource_results_prefers_release_blog_for_changelog_query(self) -> None:
+        client = MySearchClient()
+
+        reranked = client._rerank_resource_results(
+            query="Next.js 16 release notes official",
+            mode="docs",
+            include_domains=["nextjs.org"],
+            results=[
+                {
+                    "provider": "tavily",
+                    "title": "Guides: Next.js MCP Server",
+                    "url": "https://nextjs.org/docs/app/guides/mcp",
+                    "snippet": "Generic MCP guide",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Next.js 16",
+                    "url": "https://nextjs.org/blog/next-16",
+                    "snippet": "Official release announcement",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Upgrading: Version 16",
+                    "url": "https://nextjs.org/docs/app/guides/upgrading/version-16",
+                    "snippet": "Migration guide",
+                    "content": "",
+                },
+            ],
+        )
+
+        self.assertEqual(reranked[0]["url"], "https://nextjs.org/blog/next-16")
 
     def test_pdf_verify_blend_promotes_exact_paper_page(self) -> None:
         client = MySearchClient()
