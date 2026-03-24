@@ -1529,6 +1529,7 @@ class MySearchClient:
         providers_consulted = [item for item in [web_provider, social_provider] if item]
         if exa_discovery and not research_errors.get("exa_discovery"):
             providers_consulted.append("exa")
+        providers_consulted = list(dict.fromkeys(providers_consulted))
         citations = self._dedupe_citations(
             web_search.get("citations") or [],
             (social.get("citations") or []) if social else [],
@@ -4861,7 +4862,8 @@ class MySearchClient:
         if not raw:
             return ""
         parsed = urlparse(raw)
-        if self._clean_hostname(parsed.netloc) != "arxiv.org":
+        hostname = self._clean_hostname(parsed.netloc)
+        if hostname not in {"arxiv.org", "arxiv.gg"}:
             return raw
         match = re.match(
             r"^/(?:abs|html|pdf)/(?P<paper_id>\d{4}\.\d{4,5})(?:v\d+)?(?:\.pdf)?$",
