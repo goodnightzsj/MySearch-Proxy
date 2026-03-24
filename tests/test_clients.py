@@ -1733,6 +1733,89 @@ class MySearchClientTests(unittest.TestCase):
         self.assertTrue(result["evidence"]["pdf_exa_boost"])
         self.assertEqual(result["results"][0]["url"], "https://arxiv.org/abs/2501.12948")
 
+    def test_pdf_verify_uses_tavily_boost_when_exa_still_lacks_exact_paper_title(self) -> None:
+        client = MySearchClient()
+        client._provider_can_serve = lambda provider: provider.name in {"firecrawl", "exa", "tavily"}  # type: ignore[method-assign]
+        client._search_firecrawl = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "firecrawl",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "firecrawl",
+                    "source": "web",
+                    "title": "Insights into DeepSeek-V3: Scaling Challenges and Reflections on Hardware for AI Architectures",
+                    "url": "https://arxiv.org/abs/2505.09343",
+                    "snippet": "Wrong but related paper",
+                    "content": "Wrong but related paper" if kwargs.get("include_content") else "",
+                }
+            ],
+            "citations": [
+                {
+                    "title": "Insights into DeepSeek-V3: Scaling Challenges and Reflections on Hardware for AI Architectures",
+                    "url": "https://arxiv.org/abs/2505.09343",
+                }
+            ],
+        }
+        client._search_exa = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "exa",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "exa",
+                    "source": "web",
+                    "title": "Computer Science > Computation and Language",
+                    "url": "https://arxiv.org/abs/2501.12948",
+                    "snippet": "",
+                    "content": "",
+                }
+            ],
+            "citations": [
+                {"title": "Computer Science > Computation and Language", "url": "https://arxiv.org/abs/2501.12948"},
+            ],
+        }
+        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning",
+                    "url": "https://arxiv.org/html/2501.12948v1",
+                    "snippet": "Exact paper page",
+                    "content": "",
+                }
+            ],
+            "citations": [
+                {
+                    "title": "DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning",
+                    "url": "https://arxiv.org/html/2501.12948v1",
+                }
+            ],
+        }
+
+        result = client.search(
+            query="DeepSeek R1 paper pdf",
+            mode="pdf",
+            strategy="verify",
+            provider="auto",
+            include_answer=False,
+            include_content=True,
+            include_domains=["arxiv.org"],
+            max_results=5,
+        )
+
+        self.assertTrue(result["evidence"]["pdf_exa_boost"])
+        self.assertTrue(result["evidence"]["pdf_tavily_boost"])
+        self.assertEqual(result["results"][0]["url"], "https://arxiv.org/abs/2501.12948")
+        self.assertIn("DeepSeek-R1", result["summary"])
+
     def test_resolve_research_plan_adapts_docs_and_news_budgets(self) -> None:
         client = MySearchClient()
 
