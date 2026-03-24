@@ -155,6 +155,33 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertTrue(captured["include_content"])
 
+    def test_news_rerank_prefers_award_winners_page_over_nominations_page(self) -> None:
+        client = MySearchClient()
+
+        ranked = client._rerank_general_results(
+            query="2026 Grammy Album of the Year winner",
+            result_profile="news",
+            results=[
+                {
+                    "provider": "tavily",
+                    "title": "2026 GRAMMYS Nominations: Album Of The Year Nominees | GRAMMY.com",
+                    "url": "https://www.grammy.com/news/2026-grammys-nominations-album-of-the-year",
+                    "snippet": "",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "The complete list of 2026 Grammy winners and nominees : NPR",
+                    "url": "https://www.npr.org/2026/02/01/nx-s1-5693046/2026-grammy-awards-full-list-winners-nominees",
+                    "snippet": "",
+                    "content": "",
+                },
+            ],
+            include_domains=None,
+        )
+
+        self.assertIn("winners", ranked[0]["title"].lower())
+
     def test_apply_result_event_answer_override_extracts_best_picture_winner(self) -> None:
         client = MySearchClient()
 
@@ -162,6 +189,7 @@ class MySearchClientTests(unittest.TestCase):
             query="2026 Oscars best picture winner",
             mode="news",
             intent="news",
+            strategy="verify",
             result={
                 "answer": "Not yet determined",
                 "results": [
@@ -186,6 +214,7 @@ class MySearchClientTests(unittest.TestCase):
             query="2026 highest grossing movie opening weekend",
             mode="news",
             intent="news",
+            strategy="verify",
             result={
                 "answer": "",
                 "results": [
@@ -202,6 +231,32 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(result["answer"], "Top opening-weekend title: Project Hail Mary")
         self.assertEqual(result["evidence"]["answer_source"], "result-event-extraction")
+
+    def test_firecrawl_news_search_skips_scrape_options_even_when_include_content_requested(self) -> None:
+        client = MySearchClient()
+        captured: dict[str, object] = {}
+        client._get_key_or_raise = lambda provider: type(  # type: ignore[method-assign]
+            "Record",
+            (),
+            {"key": "firecrawl-key", "source": "env"},
+        )()
+
+        def fake_request_json(**kwargs):  # type: ignore[no-untyped-def]
+            captured.update(kwargs)
+            return {"data": {"news": [], "web": []}}
+
+        client._request_json = fake_request_json  # type: ignore[method-assign]
+
+        client._search_firecrawl_once(
+            query="2026 Oscars best picture winner",
+            max_results=3,
+            categories=["news"],
+            include_content=True,
+        )
+
+        payload = captured["payload"]
+        assert isinstance(payload, dict)
+        self.assertNotIn("scrapeOptions", payload)
 
     def test_pdf_rerank_prefers_primary_named_paper_over_derivative_variants(self) -> None:
         client = MySearchClient()
