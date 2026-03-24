@@ -1155,6 +1155,10 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["evidence"]["official_source_count"], 1)
         self.assertTrue(result["evidence"]["official_filter_applied"])
         self.assertNotIn("strict-official-unmet", result["evidence"]["conflicts"])
+        self.assertEqual(
+            result["summary"],
+            "Top official match: API Pricing | OpenAI (openai.com)",
+        )
 
     def test_docs_mode_enters_strict_resource_policy(self) -> None:
         client = MySearchClient()
@@ -1461,6 +1465,40 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertEqual(reranked[0]["url"], "https://playwright.dev/docs/api/class-teststep")
+
+    def test_rerank_resource_results_prefers_non_locale_official_variant(self) -> None:
+        client = MySearchClient()
+
+        reranked = client._rerank_resource_results(
+            query="OpenAI API pricing official",
+            mode="web",
+            include_domains=None,
+            results=[
+                {
+                    "provider": "exa",
+                    "title": "Precios de la API - OpenAI",
+                    "url": "https://openai.com/es-419/api/pricing/",
+                    "snippet": "Localized pricing page",
+                    "content": "",
+                },
+                {
+                    "provider": "exa",
+                    "title": "API Pricing - OpenAI",
+                    "url": "https://openai.com/api/pricing/",
+                    "snippet": "Canonical pricing page",
+                    "content": "",
+                },
+                {
+                    "provider": "exa",
+                    "title": "Pricing | OpenAI API",
+                    "url": "https://developers.openai.com/api/docs/pricing/",
+                    "snippet": "Docs pricing reference",
+                    "content": "",
+                },
+            ],
+        )
+
+        self.assertEqual(reranked[0]["url"], "https://openai.com/api/pricing/")
 
     def test_pdf_verify_blend_promotes_exact_paper_page(self) -> None:
         client = MySearchClient()
@@ -1927,6 +1965,41 @@ class MySearchClientTests(unittest.TestCase):
         self.assertIn("Primary finding", result["research_summary"])
         self.assertEqual(result["summary"], result["research_summary"])
         self.assertEqual(result["confidence"], "high")
+
+    def test_research_summary_fallback_uses_title_based_synthesis_for_comparison_queries(self) -> None:
+        client = MySearchClient()
+
+        summary = client._build_research_summary_fallback(
+            query="best search MCP server 2026",
+            web_search={"intent": "exploratory", "answer": ""},
+            pages=[
+                {
+                    "url": "https://fast.io/resources/best-mcp-servers-search/",
+                    "excerpt": "This long page starts with marketing copy that should not dominate the summary.",
+                }
+            ],
+            citations=[
+                {
+                    "title": "Best MCP Servers for Search in 2026 - Top 10 Tools",
+                    "url": "https://fast.io/resources/best-mcp-servers-search/",
+                },
+                {
+                    "title": "List of Top MCP Servers for March 20, 2026",
+                    "url": "https://mcpmarket.com/daily/top-mcp-server-list-march-20-2026",
+                },
+            ],
+            social=None,
+            evidence={
+                "providers_consulted": ["firecrawl", "exa"],
+                "citation_count": 2,
+                "confidence": "medium",
+                "research_plan": {"scrape_top_n": 2},
+            },
+        )
+
+        self.assertIn("comparative rather than authoritative", summary)
+        self.assertIn("Best MCP Servers for Search in 2026 - Top 10 Tools", summary)
+        self.assertNotIn("marketing copy", summary)
 
     def test_research_anchors_web_discovery_to_tavily_for_generic_queries(self) -> None:
         client = MySearchClient()
