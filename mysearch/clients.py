@@ -2631,7 +2631,13 @@ class MySearchClient:
                 self.config.tavily
             ) and self._provider_is_live_ok(self.config.firecrawl)
         if include_domains:
-            return False
+            return (
+                self._looks_like_changelog_query(query.lower())
+                and decision.provider == "tavily"
+                and strategy in {"verify", "deep"}
+                and self._provider_is_live_ok(self.config.tavily)
+                and self._provider_is_live_ok(self.config.firecrawl)
+            )
         if mode in {"docs", "github", "pdf"}:
             return False
         if intent in {"resource", "tutorial"}:
@@ -2732,7 +2738,9 @@ class MySearchClient:
                 max_results=max_results,
                 topic=decision.tavily_topic,
                 include_answer=include_answer,
-                include_content=include_content and intent != "tutorial",
+                include_content=include_content
+                and intent != "tutorial"
+                and not self._looks_like_changelog_query(query.lower()),
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
                 strategy=strategy,
@@ -3240,7 +3248,43 @@ class MySearchClient:
             self._looks_like_pricing_query(query_lower)
             and self._looks_like_canonical_pricing_result(hostname=hostname, path=path)
         )
+        tutorial_query = self._looks_like_tutorial_query(query_lower)
+        tutorial_community_match = int(
+            tutorial_query
+            and self._looks_like_tutorial_community_result(
+                hostname=hostname,
+                registered_domain=registered_domain,
+                path=path,
+            )
+        )
+        tutorial_brand_aligned = int(
+            tutorial_query
+            and self._looks_like_brand_aligned_tutorial_result(
+                hostname=hostname,
+                registered_domain=registered_domain,
+                path=path,
+                title_text=title_text,
+                query_tokens=query_tokens,
+                path_precision_hits=path_precision_hits,
+                exact_total_hits=exact_total_hits,
+            )
+        )
+        non_tutorial_blog = int(
+            not (
+                tutorial_query
+                and not tutorial_brand_aligned
+                and not tutorial_community_match
+                and self._is_obvious_tutorial_blog_domain(registered_domain)
+            )
+        )
         local_life_query = self._looks_like_local_life_query(query_lower)
+        canonical_local_guide_match = int(
+            local_life_query
+            and self._looks_like_canonical_local_life_guide_result(
+                url=url,
+                hostname=hostname,
+            )
+        )
         local_guide_match = int(
             local_life_query
             and self._looks_like_local_life_guide_result(
@@ -3267,6 +3311,10 @@ class MySearchClient:
             status_page_match,
             canonical_pricing_page_match,
             pricing_page_match,
+            tutorial_community_match,
+            tutorial_brand_aligned,
+            non_tutorial_blog,
+            canonical_local_guide_match,
             local_guide_match,
             non_local_life_repost,
             exact_path_hits,
@@ -3352,6 +3400,20 @@ class MySearchClient:
             return guide_shape or any(marker in guide_text for marker in guide_markers)
         return guide_shape and any(marker in guide_text for marker in guide_markers)
 
+    def _looks_like_canonical_local_life_guide_result(
+        self,
+        *,
+        url: str,
+        hostname: str,
+    ) -> bool:
+        registered_domain = self._registered_domain(hostname)
+        path = urlparse(url).path.lower()
+        if registered_domain == "bendibao.com":
+            return "/tour/" in path or "/flowers" in path
+        if registered_domain in {"trip.com", "ctrip.com"}:
+            return any(marker in path for marker in ("/moments/detail/", "/travel-guide/", "/travel/"))
+        return any(marker in path for marker in ("/tour/", "/travel/", "/guide", "/flowers"))
+
     def _is_obvious_local_life_repost_domain(self, registered_domain: str) -> bool:
         return registered_domain in {
             "163.com",
@@ -3361,6 +3423,50 @@ class MySearchClient:
             "sina.cn",
             "sohu.com",
             "weibo.com",
+        }
+
+    def _looks_like_tutorial_community_result(
+        self,
+        *,
+        hostname: str,
+        registered_domain: str,
+        path: str,
+    ) -> bool:
+        return (
+            registered_domain == "stackoverflow.com"
+            or (registered_domain == "github.com" and any(marker in path for marker in ("/issues/", "/discussions/")))
+            or self._is_obvious_official_community_result(hostname=hostname, path=path)
+        )
+
+    def _looks_like_brand_aligned_tutorial_result(
+        self,
+        *,
+        hostname: str,
+        registered_domain: str,
+        path: str,
+        title_text: str,
+        query_tokens: list[str],
+        path_precision_hits: int,
+        exact_total_hits: int,
+    ) -> bool:
+        brand_aligned = self._registered_domain_label_matches(
+            registered_domain=registered_domain,
+            query_tokens=query_tokens,
+        ) or any(token in hostname for token in query_tokens)
+        if not brand_aligned:
+            return False
+        docs_path = any(marker in path for marker in ("/docs/", "/guide", "/api/", "/writing-tests", "/running-tests"))
+        return docs_path or path_precision_hits >= 1 or exact_total_hits > 0 or "tutorial" in title_text
+
+    def _is_obvious_tutorial_blog_domain(self, registered_domain: str) -> bool:
+        return registered_domain in {
+            "checklyhq.com",
+            "loadmill.com",
+            "medium.com",
+            "substack.com",
+            "testgrid.io",
+            "timdeschryver.dev",
+            "youtube.com",
         }
 
     def _search_web_blended(

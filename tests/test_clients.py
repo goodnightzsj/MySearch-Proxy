@@ -290,6 +290,23 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertFalse(should_blend)
 
+    def test_strict_changelog_query_allows_tavily_firecrawl_blend(self) -> None:
+        client = MySearchClient()
+        client._provider_is_live_ok = lambda provider: True  # type: ignore[method-assign]
+
+        should_blend = client._should_blend_web_providers(
+            query="Next.js 16 release notes official",
+            requested_provider="auto",
+            decision=RouteDecision(provider="tavily", reason="test", result_profile="resource"),
+            sources=["web"],
+            strategy="verify",
+            mode="docs",
+            intent="resource",
+            include_domains=["nextjs.org"],
+        )
+
+        self.assertTrue(should_blend)
+
     def test_request_json_auth_error_mentions_rejected_key(self) -> None:
         client = MySearchClient()
         provider = client.config.tavily
@@ -1849,6 +1866,60 @@ class MySearchClientTests(unittest.TestCase):
                     "title": "上海赏花攻略",
                     "url": "https://m.sh.bendibao.com/tour/flowers?month=3%E6%9C%88",
                     "snippet": "本地生活导览页",
+                    "content": "",
+                },
+            ],
+        )
+
+        self.assertEqual(reranked[0]["url"], "https://m.sh.bendibao.com/tour/flowers?month=3%E6%9C%88")
+
+    def test_rerank_general_web_prefers_brand_aligned_tutorial_docs_over_generic_blogs(self) -> None:
+        client = MySearchClient()
+
+        reranked = client._rerank_general_results(
+            query="Playwright test.step tutorial example",
+            result_profile="web",
+            include_domains=None,
+            results=[
+                {
+                    "provider": "tavily",
+                    "title": "Improve Your Playwright Documentation with Test Steps - Checkly",
+                    "url": "https://www.checklyhq.com/blog/improve-your-playwright-documentation-with-steps/",
+                    "snippet": "Third-party tutorial article",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Running and debugging tests | Playwright",
+                    "url": "https://playwright.dev/docs/running-tests",
+                    "snippet": "Official debugging guide",
+                    "content": "",
+                },
+            ],
+        )
+
+        self.assertEqual(reranked[0]["url"], "https://playwright.dev/docs/running-tests")
+
+    def test_rerank_general_web_prefers_canonical_local_life_guide_over_generic_local_page(self) -> None:
+        client = MySearchClient()
+
+        reranked = client._rerank_general_results(
+            query="上海 2026 春季赏花攻略",
+            result_profile="web",
+            include_domains=None,
+            results=[
+                {
+                    "provider": "tavily",
+                    "title": "上海休闲攻略",
+                    "url": "https://m.sh.bendibao.com/xiuxian/304455.html",
+                    "snippet": "泛生活频道文章",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "上海赏花攻略",
+                    "url": "https://m.sh.bendibao.com/tour/flowers?month=3%E6%9C%88",
+                    "snippet": "本地赏花专题页",
                     "content": "",
                 },
             ],
