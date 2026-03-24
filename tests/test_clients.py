@@ -1584,6 +1584,68 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["fallback"]["to"], "exa")
         self.assertEqual(result["results"][0]["url"], "https://arxiv.org/abs/2501.12948")
 
+    def test_pdf_verify_uses_exa_boost_for_weak_firecrawl_match(self) -> None:
+        client = MySearchClient()
+        client._provider_can_serve = lambda provider: provider.name in {"firecrawl", "exa"}  # type: ignore[method-assign]
+        client._search_firecrawl = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "firecrawl",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "firecrawl",
+                    "source": "web",
+                    "title": "Investigating Local Censorship in DeepSeek's R1 ...",
+                    "url": "https://arxiv.org/abs/2505.12625",
+                    "snippet": "Related but not the primary paper",
+                    "content": "Related but not the primary paper" if kwargs.get("include_content") else "",
+                }
+            ],
+            "citations": [
+                {
+                    "title": "Investigating Local Censorship in DeepSeek's R1 ...",
+                    "url": "https://arxiv.org/abs/2505.12625",
+                }
+            ],
+        }
+        client._search_exa = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "exa",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "exa",
+                    "source": "web",
+                    "title": "DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning",
+                    "url": "https://arxiv.org/abs/2501.12948",
+                    "snippet": "The exact paper page",
+                    "content": "",
+                }
+            ],
+            "citations": [
+                {
+                    "title": "DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning",
+                    "url": "https://arxiv.org/abs/2501.12948",
+                }
+            ],
+        }
+
+        result = client.search(
+            query="DeepSeek R1 paper pdf",
+            mode="pdf",
+            strategy="verify",
+            provider="auto",
+            include_answer=False,
+            include_content=True,
+            include_domains=["arxiv.org"],
+            max_results=5,
+        )
+
+        self.assertTrue(result["evidence"]["pdf_exa_boost"])
+        self.assertEqual(result["results"][0]["url"], "https://arxiv.org/abs/2501.12948")
+
     def test_resolve_research_plan_adapts_docs_and_news_budgets(self) -> None:
         client = MySearchClient()
 
