@@ -5128,6 +5128,8 @@ class MySearchClient:
             query_tokens=query_tokens,
             include_domains=include_domains,
         )
+        hostname = str(flags["hostname"])
+        path = urlparse(item.get("url", "")).path.lower()
         include_match = int(flags["include_match"])
         host_brand_match = int(flags["host_brand_match"])
         registered_domain_label_match = int(flags["registered_domain_label_match"])
@@ -5164,11 +5166,20 @@ class MySearchClient:
                 ),
             )
         )
+        non_community_official = int(
+            not (
+                strict_official
+                and self._is_obvious_official_community_result(
+                    hostname=hostname,
+                    path=path,
+                )
+            )
+        )
         non_third_party = int(flags["non_third_party"])
         official_resource_match = int(
             self._is_probably_official_resource_result(
                 mode=mode,
-                hostname=str(flags["hostname"]),
+                hostname=hostname,
                 include_match=bool(include_match),
                 registered_domain_label_match=bool(registered_domain_label_match),
                 host_brand_match=bool(host_brand_match),
@@ -5192,40 +5203,49 @@ class MySearchClient:
             self._looks_like_changelog_query(query_lower)
             and self._looks_like_canonical_changelog_result(
                 url=url,
-                hostname=str(flags["hostname"]),
+                hostname=hostname,
                 title_text=(item.get("title") or "").lower(),
                 precision_tokens=precision_tokens,
+            )
+        )
+        non_generic_changelog_index = int(
+            not (
+                self._looks_like_changelog_query(query_lower)
+                and self._looks_like_generic_changelog_index_result(
+                    hostname=hostname,
+                    path=path,
+                )
             )
         )
         pricing_page_match = int(
             self._looks_like_pricing_query(query_lower)
             and self._looks_like_pricing_result(
                 url=url,
-                hostname=str(flags["hostname"]),
+                hostname=hostname,
                 title_text=(item.get("title") or "").lower(),
             )
         )
         canonical_pricing_page_match = int(
             self._looks_like_pricing_query(query_lower)
             and self._looks_like_canonical_pricing_result(
-                hostname=str(flags["hostname"]),
-                path=urlparse(url).path.lower(),
+                hostname=hostname,
+                path=path,
             )
         )
         path_precision_hits, total_precision_hits = self._query_precision_hit_counts(
-            hostname=str(flags["hostname"]),
-            path=urlparse(url).path.lower(),
+            hostname=hostname,
+            path=path,
             title_text=(item.get("title") or "").lower(),
             query_tokens=precision_tokens,
         )
         non_locale_variant = int(
             not (
                 strict_official
-                and self._looks_like_locale_prefixed_path(urlparse(url).path)
+                and self._looks_like_locale_prefixed_path(path)
             )
         )
         exact_path_hits, exact_total_hits = self._query_exact_identifier_hit_counts(
-            path=urlparse(url).path.lower(),
+            path=path,
             title_text=(item.get("title") or "").lower(),
             query_tokens=exact_identifier_tokens,
         )
@@ -5233,9 +5253,11 @@ class MySearchClient:
         content_score, snippet_score, title_score = self._result_quality_score(item)
         return (
             include_match,
+            non_community_official,
             official_resource_match,
             canonical_changelog_page_match,
             changelog_page_match,
+            non_generic_changelog_index,
             canonical_pricing_page_match,
             pricing_page_match,
             primary_named_paper_bonus,
@@ -5258,6 +5280,12 @@ class MySearchClient:
             snippet_score,
             title_score,
         )
+
+    def _looks_like_generic_changelog_index_result(self, *, hostname: str, path: str) -> bool:
+        normalized_path = path.rstrip("/") or "/"
+        if hostname.startswith("github.com"):
+            return False
+        return normalized_path in {"/blog", "/changelog", "/releases", "/release-notes"}
 
     def _paper_query_subject_tokens(
         self,

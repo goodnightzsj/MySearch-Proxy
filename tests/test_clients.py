@@ -2034,6 +2034,44 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(reranked[0]["url"], "https://openai.com/api/pricing/")
 
+    def test_rerank_resource_results_demotes_official_community_pages_for_strict_web_queries(self) -> None:
+        client = MySearchClient()
+
+        reranked = client._rerank_resource_results(
+            query="OpenAI API pricing official",
+            mode="web",
+            include_domains=["openai.com"],
+            results=[
+                {
+                    "provider": "exa",
+                    "title": "Confused about OpenAI pricing",
+                    "url": "https://community.openai.com/t/confused-about-openai-pricing/12345",
+                    "snippet": "Official community discussion about pricing",
+                    "content": "",
+                },
+                {
+                    "provider": "exa",
+                    "title": "API Pricing - OpenAI",
+                    "url": "https://openai.com/api/pricing/",
+                    "snippet": "Canonical pricing page",
+                    "content": "",
+                },
+                {
+                    "provider": "exa",
+                    "title": "API Pricing Guide - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/pricing/",
+                    "snippet": "Developer pricing reference",
+                    "content": "",
+                },
+            ],
+        )
+
+        self.assertEqual(reranked[0]["url"], "https://openai.com/api/pricing/")
+        self.assertGreater(
+            [item["url"] for item in reranked].index("https://community.openai.com/t/confused-about-openai-pricing/12345"),
+            0,
+        )
+
     def test_rerank_resource_results_prefers_release_blog_for_changelog_query(self) -> None:
         client = MySearchClient()
 
@@ -2067,6 +2105,42 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertEqual(reranked[0]["url"], "https://nextjs.org/blog/next-16")
+
+    def test_rerank_resource_results_demotes_generic_blog_index_for_changelog_query(self) -> None:
+        client = MySearchClient()
+
+        reranked = client._rerank_resource_results(
+            query="Next.js 16 release notes official",
+            mode="docs",
+            include_domains=["nextjs.org"],
+            results=[
+                {
+                    "provider": "tavily",
+                    "title": "The latest Next.js news",
+                    "url": "https://nextjs.org/blog",
+                    "snippet": "Next.js 16 is now available with major improvements.",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Next.js 16",
+                    "url": "https://nextjs.org/blog/next-16",
+                    "snippet": "Official release announcement",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Upgrading: Version 16",
+                    "url": "https://nextjs.org/docs/app/guides/upgrading/version-16",
+                    "snippet": "Migration guide",
+                    "content": "",
+                },
+            ],
+        )
+
+        urls = [item["url"] for item in reranked]
+        self.assertEqual(urls[0], "https://nextjs.org/blog/next-16")
+        self.assertGreater(urls.index("https://nextjs.org/blog"), 0)
 
     def test_pdf_verify_blend_promotes_exact_paper_page(self) -> None:
         client = MySearchClient()
