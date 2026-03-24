@@ -214,7 +214,7 @@ class MySearchClientTests(unittest.TestCase):
             query=query,
             mode="docs",
             intent=resolved_intent,
-            include_content=False,
+            include_content=True,
         )
 
         self.assertEqual(resolved_intent, "tutorial")
@@ -237,7 +237,7 @@ class MySearchClientTests(unittest.TestCase):
             query="Next.js 16 release notes official",
             mode="docs",
             intent="resource",
-            include_content=False,
+            include_content=True,
         )
 
         self.assertEqual(policy.key, "changelog")
@@ -437,7 +437,7 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0]["timeout_seconds"], 20)
+        self.assertEqual(calls[0]["timeout_seconds"], 10)
         self.assertEqual(result["provider"], "tavily_social_fallback")
         self.assertEqual(result["results"][0]["url"], "https://x.com/OpenAI/status/123")
         self.assertEqual(result["fallback"]["from"], "xai_compatible")

@@ -2496,12 +2496,12 @@ class MySearchClient:
         query_lower = query.lower()
         if mode == "research":
             return _MODE_PROVIDER_POLICY["research"]
-        if include_content:
-            return _MODE_PROVIDER_POLICY["content"]
         if intent == "tutorial":
             return _MODE_PROVIDER_POLICY["tutorial"]
         if self._looks_like_changelog_query(query_lower):
             return _MODE_PROVIDER_POLICY["changelog"]
+        if include_content:
+            return _MODE_PROVIDER_POLICY["content"]
         if mode in {"docs", "github", "pdf"}:
             return _MODE_PROVIDER_POLICY[mode]
         if intent == "resource" or self._looks_like_docs_query(query_lower):
@@ -4178,7 +4178,7 @@ class MySearchClient:
                 payload=payload,
                 key=key.key,
                 base_url=provider.base_url_for("social_search"),
-                timeout_seconds=min(self.config.timeout_seconds, 20),
+                timeout_seconds=min(self.config.timeout_seconds, 10),
             )
             return self._normalize_social_gateway_response(
                 response=response,
