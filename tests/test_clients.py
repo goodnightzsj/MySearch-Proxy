@@ -150,6 +150,10 @@ class MySearchClientTests(unittest.TestCase):
             client._canonical_result_url("https://arxiv.org/html/2501.12948v1"),
             "https://arxiv.org/abs/2501.12948",
         )
+        self.assertEqual(
+            client._canonical_result_url("https://arxiv.gg/abs/2501.12948"),
+            "https://arxiv.org/abs/2501.12948",
+        )
 
     def test_pdf_query_tokenization_keeps_short_model_suffix(self) -> None:
         client = MySearchClient()
@@ -2143,6 +2147,7 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["web_search"]["provider"], "exa")
         self.assertEqual(result["web_search"]["fallback"]["to"], "exa")
         self.assertIn("comparative rather than authoritative", result["summary"])
+        self.assertEqual(result["evidence"]["providers_consulted"], ["exa"])
 
 
 if __name__ == "__main__":
