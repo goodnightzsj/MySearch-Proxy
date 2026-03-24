@@ -7249,31 +7249,32 @@ class MySearchClient:
         query: str,
         results: list[dict[str, Any]],
     ) -> str:
-        if not results:
-            return ""
-        top = results[0]
-        url = str(top.get("url") or "").strip()
-        if not url:
-            return ""
-        try:
-            extracted_page = self.extract_url(
-                url=url,
-                provider="auto",
-                formats=["markdown"],
-                only_main_content=True,
+        for top in results[:3]:
+            url = str(top.get("url") or "").strip()
+            if not url:
+                continue
+            try:
+                extracted_page = self.extract_url(
+                    url=url,
+                    provider="auto",
+                    formats=["markdown"],
+                    only_main_content=True,
+                )
+            except MySearchError:
+                continue
+            extracted_answer = self._extract_result_event_answer(
+                query=query,
+                results=[
+                    {
+                        "title": top.get("title", ""),
+                        "snippet": top.get("snippet", ""),
+                        "content": extracted_page.get("content", ""),
+                    }
+                ],
             )
-        except MySearchError:
-            return ""
-        return self._extract_result_event_answer(
-            query=query,
-            results=[
-                {
-                    "title": top.get("title", ""),
-                    "snippet": top.get("snippet", ""),
-                    "content": extracted_page.get("content", ""),
-                }
-            ],
-        )
+            if extracted_answer:
+                return extracted_answer
+        return ""
 
     def _answer_looks_uncertain(self, answer: str) -> bool:
         answer_lower = answer.lower()
@@ -7503,6 +7504,7 @@ class MySearchClient:
         entity = re.split(r",\s*(?:[\"“]|[A-Z][A-Za-z])", entity, maxsplit=1)[0]
         entity = re.split(r"\s{2,}", entity, maxsplit=1)[0]
         entity = re.sub(r"\s+\((?:winner|winners)\)$", "", entity, flags=re.IGNORECASE).strip()
+        entity = entity.strip(" \t\r\n-:;,.\"'“”‘’")
         if len(entity) < 2:
             return ""
         if reject_substrings:

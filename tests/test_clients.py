@@ -509,6 +509,41 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(result["answer"], "Record of the Year winner: Not Like Us")
 
+    def test_apply_result_event_answer_override_tries_multiple_top_pages(self) -> None:
+        client = MySearchClient()
+        page_payloads = {
+            "https://example.com/first": {"content": ""},
+            "https://example.com/second": {"content": 'Record of the Year: "Not Like Us", Kendrick Lamar'},
+        }
+        client.extract_url = lambda **kwargs: page_payloads[kwargs["url"]]  # type: ignore[method-assign]
+
+        result = client._apply_result_event_answer_override(
+            query="2026 Grammy Record of the Year winner",
+            mode="news",
+            intent="news",
+            strategy="verify",
+            result={
+                "answer": "",
+                "results": [
+                    {
+                        "title": "The complete list of 2026 Grammy winners and nominees",
+                        "url": "https://example.com/first",
+                        "snippet": "",
+                        "content": "",
+                    },
+                    {
+                        "title": "2026 Grammys: See The Full Winners & Nominees List",
+                        "url": "https://example.com/second",
+                        "snippet": "",
+                        "content": "",
+                    },
+                ],
+                "evidence": {},
+            },
+        )
+
+        self.assertEqual(result["answer"], "Record of the Year winner: Not Like Us")
+
     def test_extract_result_event_answer_trims_trailing_list_noise(self) -> None:
         client = MySearchClient()
 
