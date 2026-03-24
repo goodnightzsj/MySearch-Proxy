@@ -232,7 +232,7 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["answer"], "Top opening-weekend title: Project Hail Mary")
         self.assertEqual(result["evidence"]["answer_source"], "result-event-extraction")
 
-    def test_firecrawl_news_search_skips_scrape_options_even_when_include_content_requested(self) -> None:
+    def test_firecrawl_news_search_omits_unsupported_news_category(self) -> None:
         client = MySearchClient()
         captured: dict[str, object] = {}
         client._get_key_or_raise = lambda provider: type(  # type: ignore[method-assign]
@@ -256,7 +256,44 @@ class MySearchClientTests(unittest.TestCase):
 
         payload = captured["payload"]
         assert isinstance(payload, dict)
-        self.assertNotIn("scrapeOptions", payload)
+        self.assertNotIn("categories", payload)
+        self.assertIn("scrapeOptions", payload)
+
+    def test_apply_result_event_answer_override_extracts_album_of_the_year_from_page_content(self) -> None:
+        client = MySearchClient()
+
+        client.extract_url = lambda **kwargs: {  # type: ignore[method-assign]
+            "content": (
+                "Bad Bunny won album of the year for his album "
+                "_DeBÍ TiRAR MáS FOToS_, marking the first time a primarily "
+                "Spanish-language album has won album of the year."
+            )
+        }
+
+        result = client._apply_result_event_answer_override(
+            query="2026 Grammy Album of the Year winner",
+            mode="news",
+            intent="news",
+            strategy="verify",
+            result={
+                "answer": "",
+                "results": [
+                    {
+                        "title": "The complete list of 2026 Grammy winners and nominees",
+                        "url": "https://www.npr.org/2026/02/01/grammys",
+                        "snippet": "",
+                        "content": "",
+                    }
+                ],
+                "evidence": {},
+            },
+        )
+
+        self.assertEqual(
+            result["answer"],
+            "Album of the Year winner: DeBÍ TiRAR MáS FOToS by Bad Bunny",
+        )
+        self.assertEqual(result["evidence"]["answer_source"], "result-event-extraction")
 
     def test_pdf_rerank_prefers_primary_named_paper_over_derivative_variants(self) -> None:
         client = MySearchClient()
@@ -406,7 +443,7 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(policy.key, "changelog")
         self.assertEqual(policy.provider, "tavily")
         self.assertEqual(policy.tavily_topic, "news")
-        self.assertEqual(policy.firecrawl_categories, ("news",))
+        self.assertEqual(policy.firecrawl_categories, ("research",))
         self.assertTrue(policy.allow_exa_rescue)
 
     def test_tutorial_tavily_dispatch_disables_content_fetch(self) -> None:
