@@ -119,6 +119,20 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(result, "news")
 
+    def test_news_route_policy_prefers_exa_rescue_without_firecrawl_search(self) -> None:
+        client = MySearchClient()
+
+        policy = client._route_policy_for_request(
+            query="2026 Oscars best picture winner",
+            mode="news",
+            intent="news",
+            include_content=False,
+        )
+
+        self.assertEqual(policy.key, "news")
+        self.assertEqual(policy.provider, "tavily")
+        self.assertEqual(policy.fallback_chain, ("exa",))
+
     def test_dispatch_single_provider_for_news_result_query_requests_content_in_verify(self) -> None:
         client = MySearchClient()
         captured: dict[str, object] = {}
