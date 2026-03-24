@@ -3643,9 +3643,52 @@ class MySearchClientTests(unittest.TestCase):
             scrape_top_n=2,
         )
 
-        self.assertEqual(result["pages"][0]["url"], "https://fastmcp.me/mcp-servers-for-code-analysis")
+        self.assertEqual(result["pages"][0]["url"], "https://github.com/tolkonepiu/best-of-mcp-servers")
         self.assertNotEqual(result["pages"][0]["url"], "https://www.reddit.com/r/ClaudeAI/comments/example")
         self.assertEqual(result["evidence"]["community_source_count"], 1)
+
+    def test_research_candidate_selection_prefers_curated_results_over_mcp_directories(self) -> None:
+        client = MySearchClient()
+
+        selected, meta = client._select_research_candidate_results(
+            query="best search MCP server 2026",
+            mode="exploratory",
+            intent="exploratory",
+            max_results=4,
+            web_results=[
+                {
+                    "title": "mcp-omnisearch MCP Server",
+                    "url": "https://mcp.so/server/mcp-omnisearch",
+                    "snippet": "Directory listing",
+                },
+            ],
+            docs_rescue_results=[],
+            tavily_support_results=[
+                {
+                    "title": "The Best MCP Servers for Developers in 2026",
+                    "url": "https://www.builder.io/blog/best-mcp-servers-2026",
+                    "snippet": "Curated engineering comparison",
+                },
+                {
+                    "title": "best-of-mcp-servers - GitHub",
+                    "url": "https://github.com/tolkonepiu/best-of-mcp-servers",
+                    "snippet": "Curated repo list",
+                },
+            ],
+            exa_results=[
+                {
+                    "title": "Google Search MCP Server",
+                    "url": "https://mcp-ai.org/server/google-search-mcp-server-renoscriptdev",
+                    "snippet": "Directory listing",
+                },
+            ],
+            include_domains=None,
+            authoritative_preferred=False,
+        )
+
+        self.assertEqual(selected[0]["url"], "https://github.com/tolkonepiu/best-of-mcp-servers")
+        self.assertEqual(selected[1]["url"], "https://www.builder.io/blog/best-mcp-servers-2026")
+        self.assertIn("github.com", meta["selected_candidate_domains"])
 
     def test_research_falls_back_to_exa_discovery_when_web_discovery_fails(self) -> None:
         client = MySearchClient()
