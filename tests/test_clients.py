@@ -1454,6 +1454,59 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(reranked[0]["url"], "https://www.apple.com.cn/shop/buy-mac/macbook-air")
 
+    def test_official_policy_prefers_canonical_buy_page_over_specific_sku(self) -> None:
+        client = MySearchClient()
+
+        result = client._apply_official_resource_policy(
+            query="MacBook Air M5 国行价格 官方",
+            mode="web",
+            intent="factual",
+            include_domains=["apple.com.cn"],
+            result={
+                "results": [
+                    {
+                        "provider": "exa",
+                        "title": "购买MacBook Air 15 英寸(M5) - 午夜色- 24GB/4TB - Apple (中国大陆)",
+                        "url": "https://www.apple.com.cn/shop/buy-mac/macbook-air/15-inch-midnight-m5-chip-10-core-cpu-10-core-gpu-24gb-memory-4tb-storage",
+                        "snippet": "",
+                        "content": "",
+                    },
+                    {
+                        "provider": "exa",
+                        "title": "13 英寸和15 英寸MacBook Air - Apple (中国大陆)",
+                        "url": "https://www.apple.com.cn/macbook-air/",
+                        "snippet": "",
+                        "content": "",
+                    },
+                    {
+                        "provider": "exa",
+                        "title": "购买 MacBook Air",
+                        "url": "https://www.apple.com.cn/shop/buy-mac/macbook-air",
+                        "snippet": "",
+                        "content": "",
+                    },
+                ],
+                "citations": [
+                    {
+                        "title": "购买MacBook Air 15 英寸(M5) - 午夜色- 24GB/4TB - Apple (中国大陆)",
+                        "url": "https://www.apple.com.cn/shop/buy-mac/macbook-air/15-inch-midnight-m5-chip-10-core-cpu-10-core-gpu-24gb-memory-4tb-storage",
+                    },
+                    {
+                        "title": "13 英寸和15 英寸MacBook Air - Apple (中国大陆)",
+                        "url": "https://www.apple.com.cn/macbook-air/",
+                    },
+                    {
+                        "title": "购买 MacBook Air",
+                        "url": "https://www.apple.com.cn/shop/buy-mac/macbook-air",
+                    },
+                ],
+                "evidence": {},
+            },
+        )
+
+        self.assertEqual(result["results"][0]["url"], "https://www.apple.com.cn/shop/buy-mac/macbook-air")
+        self.assertEqual(result["citations"][0]["url"], "https://www.apple.com.cn/shop/buy-mac/macbook-air")
+
     def test_rerank_general_web_prefers_status_page_for_status_queries(self) -> None:
         client = MySearchClient()
 
