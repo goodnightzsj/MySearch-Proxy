@@ -6051,7 +6051,7 @@ class MySearchClient:
         exact_identifier_tokens: list[str],
         include_domains: list[str] | None,
         strict_official: bool,
-    ) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int]:
+    ) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int]:
         flags = self._resource_result_flags(
             mode=mode,
             item=item,
@@ -6131,6 +6131,21 @@ class MySearchClient:
             path=path,
             title_text=(item.get("title") or "").lower(),
             query_tokens=exact_identifier_tokens,
+        )
+        tutorial_query = self._looks_like_tutorial_query(query_lower)
+        tutorial_exact_identifier_match = int(
+            tutorial_query and (exact_total_hits > 0 or exact_path_hits > 0)
+        )
+        non_generic_tutorial_docs = int(
+            not (
+                tutorial_query
+                and exact_identifier_tokens
+                and self._looks_like_generic_debugging_docs_result(
+                    hostname=hostname,
+                    path=path,
+                    title_text=(item.get("title") or "").lower(),
+                )
+            )
         )
         official_docs_query = strict_official and self._looks_like_official_docs_query(query_lower)
         official_topic_exact_match = int(
@@ -6221,6 +6236,8 @@ class MySearchClient:
             non_community_official,
             official_resource_match,
             official_topic_exact_match,
+            tutorial_exact_identifier_match,
+            non_generic_tutorial_docs,
             non_generic_official_landing,
             canonical_changelog_page_match,
             changelog_page_match,
