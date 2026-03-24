@@ -107,6 +107,18 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(result, "resource")
 
+    def test_resolve_intent_treats_debugging_query_as_tutorial(self) -> None:
+        client = MySearchClient()
+
+        result = client._resolve_intent(
+            query="Playwright strict mode violation fix",
+            mode="auto",
+            intent="auto",
+            sources=["web"],
+        )
+
+        self.assertEqual(result, "tutorial")
+
     def test_resolve_intent_treats_award_winner_query_as_news(self) -> None:
         client = MySearchClient()
 
@@ -1883,6 +1895,57 @@ class MySearchClientTests(unittest.TestCase):
             "Top official match: API Pricing - OpenAI (openai.com)",
         )
 
+    def test_search_strict_official_mode_prefers_exact_official_docs_page_over_generic_brand_pages(self) -> None:
+        client = MySearchClient()
+        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "ChatGPT Pricing | OpenAI",
+                    "url": "https://openai.com/business/chatgpt-pricing/",
+                    "snippet": "Generic pricing landing page",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "Webhooks | OpenAI API Reference",
+                    "url": "https://platform.openai.com/docs/api-reference/webhooks",
+                    "snippet": "Official webhook reference",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "OpenAI Developer Docs",
+                    "url": "https://developers.openai.com/",
+                    "snippet": "Generic docs landing",
+                    "content": "",
+                },
+            ],
+            "citations": [
+                {"title": "ChatGPT Pricing | OpenAI", "url": "https://openai.com/business/chatgpt-pricing/"},
+                {"title": "Webhooks | OpenAI API Reference", "url": "https://platform.openai.com/docs/api-reference/webhooks"},
+                {"title": "OpenAI Developer Docs", "url": "https://developers.openai.com/"},
+            ],
+        }
+
+        result = client.search(
+            query="OpenAI webhooks official docs",
+            mode="web",
+            strategy="verify",
+            provider="tavily",
+            include_answer=False,
+        )
+
+        self.assertEqual(result["results"][0]["url"], "https://platform.openai.com/docs/api-reference/webhooks")
+        self.assertEqual(result["evidence"]["official_mode"], "strict")
+
     def test_docs_mode_enters_strict_resource_policy(self) -> None:
         client = MySearchClient()
 
@@ -2035,6 +2098,33 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["provider"], "hybrid")
         self.assertEqual(result["fallback"]["to"], "exa")
         self.assertEqual(result["results"][0]["url"], "https://arxiv.org/abs/2501.12948")
+
+    def test_rerank_resource_results_prefers_exact_versioned_pdf_paper(self) -> None:
+        client = MySearchClient()
+
+        reranked = client._rerank_resource_results(
+            query="Gemma 3 technical report pdf",
+            mode="pdf",
+            include_domains=["arxiv.org"],
+            results=[
+                {
+                    "provider": "firecrawl",
+                    "title": "Gemma: Open Models Based on Gemini Research and Technology",
+                    "url": "https://arxiv.org/abs/2403.08295",
+                    "snippet": "Older Gemma paper",
+                    "content": "",
+                },
+                {
+                    "provider": "firecrawl",
+                    "title": "Gemma 3 Technical Report",
+                    "url": "https://arxiv.org/abs/2503.19786",
+                    "snippet": "Exact Gemma 3 paper",
+                    "content": "",
+                },
+            ],
+        )
+
+        self.assertEqual(reranked[0]["url"], "https://arxiv.org/abs/2503.19786")
 
     def test_rerank_general_news_prefers_mainstream_article_shape(self) -> None:
         client = MySearchClient()
@@ -2419,6 +2509,33 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(reranked[0]["url"], "https://status.openai.com/incidents/abc123")
 
+    def test_rerank_general_web_accepts_brand_status_domain_root_as_canonical_status(self) -> None:
+        client = MySearchClient()
+
+        reranked = client._rerank_general_results(
+            query="Cloudflare status official",
+            result_profile="web",
+            include_domains=["cloudflare.com"],
+            results=[
+                {
+                    "provider": "tavily",
+                    "title": "Cloudflare status",
+                    "url": "https://www.cloudflarestatus.com/",
+                    "snippet": "Cloudflare system status",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Cloudflare Documentation",
+                    "url": "https://developers.cloudflare.com/support/troubleshooting/cloudflare-errors/",
+                    "snippet": "Support docs",
+                    "content": "",
+                },
+            ],
+        )
+
+        self.assertEqual(reranked[0]["url"], "https://www.cloudflarestatus.com/")
+
     def test_rerank_general_web_prefers_local_guide_over_repost_for_life_queries(self) -> None:
         client = MySearchClient()
 
@@ -2472,6 +2589,33 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertEqual(reranked[0]["url"], "https://playwright.dev/docs/running-tests")
+
+    def test_rerank_general_web_prefers_debug_issue_sources_for_debugging_queries(self) -> None:
+        client = MySearchClient()
+
+        reranked = client._rerank_general_results(
+            query="Playwright strict mode violation fix",
+            result_profile="web",
+            include_domains=None,
+            results=[
+                {
+                    "provider": "tavily",
+                    "title": "Writing tests | Playwright",
+                    "url": "https://playwright.dev/docs/writing-tests",
+                    "snippet": "Generic official docs",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "strict mode violation when locator resolves to two elements",
+                    "url": "https://github.com/microsoft/playwright/issues/30069",
+                    "snippet": "Debugging issue thread with workaround",
+                    "content": "",
+                },
+            ],
+        )
+
+        self.assertEqual(reranked[0]["url"], "https://github.com/microsoft/playwright/issues/30069")
 
     def test_rerank_general_web_prefers_canonical_local_life_guide_over_generic_local_page(self) -> None:
         client = MySearchClient()
