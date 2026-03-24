@@ -5195,7 +5195,7 @@ class MySearchClient:
         return "neural"
 
     def _exa_category(self, mode: str, intent: str) -> str:
-        if mode == "pdf" or intent == "tutorial":
+        if mode == "pdf":
             return "research paper"
         if mode == "github":
             return "github"
