@@ -4494,6 +4494,12 @@ class MySearchClient:
             and flags["hostname"] in {"github.com", "raw.githubusercontent.com"}
         )
         pdf_bonus = int(mode == "pdf" and self._looks_like_pdf_url(item.get("url", "")))
+        non_derivative_paper_bonus = int(
+            mode == "pdf"
+            and not self._looks_like_derivative_paper_title(
+                (item.get("title") or "").lower()
+            )
+        )
         paper_landing_bonus = int(
             mode == "pdf"
             and "paper" in precision_tokens
@@ -4546,6 +4552,7 @@ class MySearchClient:
             include_match,
             official_resource_match,
             primary_named_paper_bonus,
+            non_derivative_paper_bonus,
             paper_landing_bonus,
             exact_path_hits,
             exact_total_hits,

@@ -119,6 +119,30 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertIn("Incentivizing Reasoning Capability", ranked[0]["title"])
 
+    def test_pdf_rerank_prefers_non_derivative_abs_page_over_survey_title(self) -> None:
+        client = MySearchClient()
+        results = [
+            {
+                "provider": "exa",
+                "title": "[2505.00551] 100 Days After DeepSeek-R1: A Survey on Replication Studies and More Directions for Reasoning Language Models",
+                "url": "https://arxiv.org/abs/2505.00551",
+            },
+            {
+                "provider": "exa",
+                "title": "Computer Science > Computation and Language",
+                "url": "https://arxiv.org/abs/2501.12948?sfnsn=scwspmo",
+            },
+        ]
+
+        ranked = client._rerank_resource_results(
+            query="DeepSeek R1 paper pdf",
+            mode="pdf",
+            results=results,
+            include_domains=["arxiv.org"],
+        )
+
+        self.assertEqual(ranked[0]["url"], "https://arxiv.org/abs/2501.12948?sfnsn=scwspmo")
+
     def test_pdf_query_tokenization_keeps_short_model_suffix(self) -> None:
         client = MySearchClient()
 
