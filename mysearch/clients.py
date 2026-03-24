@@ -1848,7 +1848,14 @@ class MySearchClient:
             intent=intent,
             include_domains=include_domains,
         )
-        web_mode = "news" if mode == "news" else ("docs" if mode in {"docs", "github", "pdf"} or prefers_authoritative_sources else "web")
+        if mode == "news":
+            web_mode: SearchMode = "news"
+        elif mode in {"docs", "github", "pdf"} or prefers_authoritative_sources:
+            web_mode = "docs"
+        elif intent in {"comparison", "exploratory"}:
+            web_mode = "exploratory"
+        else:
+            web_mode = "web"
         planned_web_max = web_max_results
         planned_social_max = social_max_results if include_social else 0
         planned_scrape_top_n = scrape_top_n
