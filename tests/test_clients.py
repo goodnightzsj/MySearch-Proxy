@@ -1904,6 +1904,49 @@ class MySearchClientTests(unittest.TestCase):
             result["summary"],
             "Top official match: API Pricing | OpenAI (openai.com)",
         )
+        self.assertTrue(result["evidence"]["official_filter_reduced"])
+
+    def test_search_strict_official_mode_marks_filter_applied_when_all_results_are_official(self) -> None:
+        client = MySearchClient()
+        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "Background mode | OpenAI API",
+                    "url": "https://developers.openai.com/api/docs/guides/background/",
+                    "snippet": "Official guide",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "Create a model response | OpenAI API Reference",
+                    "url": "https://developers.openai.com/api/reference/resources/responses/methods/create/",
+                    "snippet": "Official reference",
+                    "content": "",
+                },
+            ],
+            "citations": [
+                {"title": "Background mode | OpenAI API", "url": "https://developers.openai.com/api/docs/guides/background/"},
+                {"title": "Create a model response | OpenAI API Reference", "url": "https://developers.openai.com/api/reference/resources/responses/methods/create/"},
+            ],
+        }
+
+        result = client.search(
+            query="OpenAI Responses API background mode official docs",
+            mode="docs",
+            strategy="verify",
+            provider="tavily",
+            include_answer=False,
+        )
+
+        self.assertTrue(result["evidence"]["official_filter_applied"])
+        self.assertFalse(result["evidence"]["official_filter_reduced"])
 
     def test_search_strict_official_mode_reranks_locale_variant_below_canonical_page(self) -> None:
         client = MySearchClient()
@@ -2001,6 +2044,77 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["results"][0]["url"], "https://platform.openai.com/docs/api-reference/webhooks")
         self.assertEqual(result["evidence"]["official_mode"], "strict")
 
+    def test_search_strict_official_mode_prefers_topic_specific_docs_page_over_generic_reference(self) -> None:
+        client = MySearchClient()
+        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "Create a model response | OpenAI API Reference",
+                    "url": "https://developers.openai.com/api/reference/resources/responses/methods/create/",
+                    "snippet": "Generic response create reference",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "Background mode | OpenAI API",
+                    "url": "https://developers.openai.com/api/docs/guides/background/",
+                    "snippet": "Specific background mode guide",
+                    "content": "",
+                },
+            ],
+            "citations": [
+                {"title": "Create a model response | OpenAI API Reference", "url": "https://developers.openai.com/api/reference/resources/responses/methods/create/"},
+                {"title": "Background mode | OpenAI API", "url": "https://developers.openai.com/api/docs/guides/background/"},
+            ],
+        }
+
+        result = client.search(
+            query="OpenAI Responses API background mode official docs",
+            mode="docs",
+            strategy="verify",
+            provider="tavily",
+            include_answer=False,
+        )
+
+        self.assertEqual(
+            result["results"][0]["url"],
+            "https://developers.openai.com/api/docs/guides/background/",
+        )
+
+    def test_web_rerank_prefers_canonical_status_root_over_status_api_endpoint(self) -> None:
+        client = MySearchClient()
+
+        ranked = client._rerank_general_results(
+            query="Cloudflare status official",
+            result_profile="web",
+            results=[
+                {
+                    "provider": "tavily",
+                    "title": "API - Cloudflare Status",
+                    "url": "https://www.cloudflarestatus.com/api",
+                    "snippet": "",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Cloudflare Status",
+                    "url": "https://www.cloudflarestatus.com/",
+                    "snippet": "",
+                    "content": "",
+                },
+            ],
+            include_domains=["cloudflarestatus.com"],
+        )
+
+        self.assertEqual(ranked[0]["url"], "https://www.cloudflarestatus.com/")
+
     def test_docs_mode_enters_strict_resource_policy(self) -> None:
         client = MySearchClient()
 
@@ -2012,6 +2126,33 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertEqual(mode, "strict")
+
+    def test_pdf_rerank_prefers_exact_named_paper_title_for_single_token_subject(self) -> None:
+        client = MySearchClient()
+
+        ranked = client._rerank_resource_results(
+            query="HeterMoE pdf",
+            mode="pdf",
+            results=[
+                {
+                    "provider": "tavily",
+                    "title": "[PDF] Simulating LLM training workloads for heterogeneous compute and memory systems",
+                    "url": "https://arxiv.org/abs/2508.05370",
+                    "snippet": "",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "HeterMoE: Efficient Training of Mixture-of-Experts Models on Heterogeneous GPUs - arXiv",
+                    "url": "https://arxiv.org/abs/2504.03871",
+                    "snippet": "",
+                    "content": "",
+                },
+            ],
+            include_domains=["arxiv.org"],
+        )
+
+        self.assertEqual(ranked[0]["url"], "https://arxiv.org/abs/2504.03871")
 
     def test_search_uses_exa_rescue_for_sparse_web_results(self) -> None:
         client = MySearchClient()
@@ -3943,6 +4084,71 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["evidence"]["providers_consulted"], ["exa"])
         self.assertIn("## Provider Contributions", result["summary"])
         self.assertIn("Exa expanded semantic coverage", result["summary"])
+
+    def test_research_falls_back_to_docs_rescue_when_primary_web_discovery_fails(self) -> None:
+        client = MySearchClient()
+        client._provider_can_serve = lambda provider: provider.name != "xai"  # type: ignore[method-assign]
+        client._research_prefers_authoritative_sources = lambda **kwargs: True  # type: ignore[method-assign]
+        client._resolve_research_plan = lambda **kwargs: {  # type: ignore[method-assign]
+            "web_mode": "web",
+            "web_max_results": kwargs["web_max_results"],
+            "social_max_results": kwargs["social_max_results"],
+            "scrape_top_n": kwargs["scrape_top_n"],
+        }
+
+        def fake_search(**kwargs):  # type: ignore[no-untyped-def]
+            if kwargs["mode"] == "web":
+                raise MySearchError("tavily request failed (HTTP 503): upstream unavailable")
+            self.assertEqual(kwargs["mode"], "docs")
+            return {
+                "provider": "firecrawl",
+                "transport": "env",
+                "query": kwargs["query"],
+                "answer": "",
+                "results": [
+                    {
+                        "provider": "firecrawl",
+                        "title": "API Pricing | OpenAI",
+                        "url": "https://openai.com/api/pricing/",
+                        "snippet": "Official pricing page",
+                        "content": "",
+                    }
+                ],
+                "citations": [
+                    {"title": "API Pricing | OpenAI", "url": "https://openai.com/api/pricing/"},
+                ],
+                "evidence": {
+                    "providers_consulted": ["firecrawl"],
+                    "verification": "single-provider",
+                    "citation_count": 1,
+                    "source_diversity": 1,
+                    "source_domains": ["openai.com"],
+                    "official_source_count": 1,
+                    "official_mode": "strict",
+                    "confidence": "high",
+                    "conflicts": [],
+                },
+            }
+
+        client.search = fake_search  # type: ignore[method-assign]
+        client.extract_url = lambda **kwargs: {  # type: ignore[method-assign]
+            "url": kwargs["url"],
+            "provider": "firecrawl",
+            "content": "Pricing details for the OpenAI API.",
+            "cache": {"extract": {"hit": False, "ttl_seconds": 300}},
+        }
+
+        result = client.research(
+            query="OpenAI API pricing official",
+            mode="web",
+            strategy="deep",
+            include_social=False,
+            scrape_top_n=1,
+        )
+
+        self.assertEqual(result["web_search"]["provider"], "firecrawl")
+        self.assertEqual(result["web_search"]["fallback"]["to"], "docs_rescue")
+        self.assertEqual(result["pages"][0]["url"], "https://openai.com/api/pricing/")
 
     def test_dedupe_research_results_preserves_matched_providers(self) -> None:
         client = MySearchClient()

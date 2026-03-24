@@ -1630,6 +1630,28 @@ class MySearchClient:
                     exa_discovery=exa_discovery,
                     include_domains=include_domains,
                 )
+            elif research_results.get("docs_rescue") and not research_errors.get("docs_rescue"):
+                web_search = self._build_research_secondary_fallback_result(
+                    query=query,
+                    mode=research_plan["web_mode"],
+                    intent=resolved_intent,
+                    strategy=resolved_strategy,
+                    source_result=research_results["docs_rescue"],
+                    include_domains=include_domains,
+                    fallback_to="docs_rescue",
+                    fallback_reason="primary web discovery failed",
+                )
+            elif research_results.get("tavily_support") and not research_errors.get("tavily_support"):
+                web_search = self._build_research_secondary_fallback_result(
+                    query=query,
+                    mode=research_plan["web_mode"],
+                    intent=resolved_intent,
+                    strategy=resolved_strategy,
+                    source_result=research_results["tavily_support"],
+                    include_domains=include_domains,
+                    fallback_to="tavily_support",
+                    fallback_reason="primary web discovery failed",
+                )
             else:
                 self._raise_parallel_error(research_errors, "web")
                 web_search = research_results["web"]
@@ -2412,6 +2434,7 @@ class MySearchClient:
         evidence.setdefault("citation_count", len(citations))
         evidence.setdefault("official_mode", official_mode)
         evidence.setdefault("official_filter_applied", False)
+        evidence.setdefault("official_filter_reduced", False)
 
         source_domains = self._collect_source_domains(results=results, citations=citations)
         official_source_count = self._count_official_resource_results(
@@ -2557,6 +2580,7 @@ class MySearchClient:
         evidence = dict(enriched.get("evidence") or {})
         evidence.setdefault("official_mode", official_mode)
         evidence.setdefault("official_filter_applied", False)
+        evidence.setdefault("official_filter_reduced", False)
         evidence.setdefault("official_candidate_count", 0)
         if official_mode == "off" or not results:
             enriched["evidence"] = evidence
@@ -2572,7 +2596,8 @@ class MySearchClient:
         )
         evidence["official_candidate_count"] = len(official_candidates)
         if official_mode == "strict" and official_candidates:
-            evidence["official_filter_applied"] = len(official_candidates) < len(results)
+            evidence["official_filter_applied"] = True
+            evidence["official_filter_reduced"] = len(official_candidates) < len(results)
             enriched["results"] = official_candidates
             enriched["citations"] = self._align_citations_with_results(
                 results=official_candidates,
@@ -2646,6 +2671,72 @@ class MySearchClient:
             "fallback",
             {"from": "research-web", "to": "exa", "reason": "primary web discovery failed"},
         )
+        results = list(fallback_result.get("results") or [])
+        citations = list(fallback_result.get("citations") or [])
+        if self._should_rerank_resource_results(mode=mode, intent=intent):
+            results = self._rerank_resource_results(
+                query=query,
+                mode=mode,
+                results=results,
+                include_domains=include_domains,
+            )
+        elif self._should_rerank_general_results(result_profile="web"):
+            results = self._rerank_general_results(
+                query=query,
+                result_profile="web",
+                results=results,
+                include_domains=include_domains,
+            )
+        fallback_result["results"] = results
+        fallback_result["citations"] = self._align_citations_with_results(
+            results=results,
+            citations=citations,
+        )
+        fallback_result = self._apply_official_resource_policy(
+            query=query,
+            mode=mode,
+            intent=intent,
+            result=fallback_result,
+            include_domains=include_domains,
+        )
+        fallback_result = self._trim_search_payload(fallback_result, max_results=len(results) or 5)
+        fallback_result = self._augment_evidence_summary(
+            fallback_result,
+            query=query,
+            mode=mode,
+            intent=intent,
+            include_domains=include_domains,
+        )
+        fallback_result["summary"] = self._build_search_summary_fallback(
+            query=query,
+            mode=mode,
+            intent=intent,
+            result=fallback_result,
+        )
+        return fallback_result
+
+    def _build_research_secondary_fallback_result(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        strategy: SearchStrategy,
+        source_result: dict[str, Any],
+        include_domains: list[str] | None,
+        fallback_to: str,
+        fallback_reason: str,
+    ) -> dict[str, Any]:
+        fallback_result = dict(source_result)
+        fallback_result["provider"] = str(source_result.get("provider") or fallback_to)
+        fallback_result["query"] = query
+        fallback_result["intent"] = intent
+        fallback_result["strategy"] = strategy
+        fallback_result["fallback"] = {
+            "from": "research-web",
+            "to": fallback_to,
+            "reason": fallback_reason,
+        }
         results = list(fallback_result.get("results") or [])
         citations = list(fallback_result.get("citations") or [])
         if self._should_rerank_resource_results(mode=mode, intent=intent):
@@ -3915,6 +4006,12 @@ class MySearchClient:
             status_query
             and self._looks_like_status_result(url=item.get("url", ""), hostname=hostname, title_text=title_text)
         )
+        non_status_api_endpoint = int(
+            not (
+                status_query
+                and path.startswith("/api")
+            )
+        )
         canonical_changelog_page_match = int(
             status_query
             and self._looks_like_canonical_changelog_result(
@@ -3946,6 +4043,7 @@ class MySearchClient:
             non_low_signal_social,
             non_award_nomination_page,
             non_community_official,
+            non_status_api_endpoint,
             canonical_status_page_match,
             status_page_match,
             canonical_changelog_page_match,
@@ -4024,6 +4122,12 @@ class MySearchClient:
         status_page_match = int(
             status_query
             and self._looks_like_status_result(url=url, hostname=hostname, title_text=title_text)
+        )
+        non_status_api_endpoint = int(
+            not (
+                status_query
+                and path.startswith("/api")
+            )
         )
         canonical_status_page_match = int(
             status_query
@@ -4143,6 +4247,7 @@ class MySearchClient:
             registered_domain_label_match,
             host_brand_match,
             title_brand_match,
+            non_status_api_endpoint,
             non_aggregator,
             cross_provider_boost,
             content_score,
@@ -6020,6 +6125,7 @@ class MySearchClient:
         query_tokens = self._query_brand_tokens(query)
         precision_tokens = self._query_precision_tokens(query)
         exact_identifier_tokens = self._query_exact_identifier_tokens(query)
+        topic_specific_tokens = self._query_topic_specific_tokens(query)
         strict_official = bool(include_domains) or self._looks_like_official_query(query)
         ranked = sorted(
             enumerate(results),
@@ -6031,6 +6137,7 @@ class MySearchClient:
                     query_tokens=query_tokens,
                     precision_tokens=precision_tokens,
                     exact_identifier_tokens=exact_identifier_tokens,
+                    topic_specific_tokens=topic_specific_tokens,
                     include_domains=include_domains,
                     strict_official=strict_official,
                 ),
@@ -6049,9 +6156,10 @@ class MySearchClient:
         query_tokens: list[str],
         precision_tokens: list[str],
         exact_identifier_tokens: list[str],
+        topic_specific_tokens: list[str],
         include_domains: list[str] | None,
         strict_official: bool,
-    ) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int]:
+    ) -> tuple[int, ...]:
         flags = self._resource_result_flags(
             mode=mode,
             item=item,
@@ -6127,6 +6235,12 @@ class MySearchClient:
             title_text=(item.get("title") or "").lower(),
             query_tokens=precision_tokens,
         )
+        topic_path_hits, topic_total_hits = self._query_precision_hit_counts(
+            hostname=hostname,
+            path=path,
+            title_text=(item.get("title") or "").lower(),
+            query_tokens=topic_specific_tokens,
+        )
         exact_path_hits, exact_total_hits = self._query_exact_identifier_hit_counts(
             path=path,
             title_text=(item.get("title") or "").lower(),
@@ -6151,7 +6265,16 @@ class MySearchClient:
         official_topic_exact_match = int(
             official_docs_query
             and docs_shape_match
-            and (exact_total_hits > 0 or path_precision_hits >= 2 or total_precision_hits >= 3)
+            and (
+                (
+                    bool(topic_specific_tokens)
+                    and (topic_total_hits > 0 or topic_path_hits > 0)
+                )
+                or (
+                    not topic_specific_tokens
+                    and (exact_total_hits > 0 or path_precision_hits >= 2 or total_precision_hits >= 3)
+                )
+            )
         )
         non_generic_official_landing = int(
             not (
@@ -6163,6 +6286,15 @@ class MySearchClient:
                 )
             )
         )
+        paper_subject_tokens = (
+            self._paper_query_subject_tokens(
+                query=query,
+                query_tokens=query_tokens,
+                precision_tokens=precision_tokens,
+            )
+            if mode == "pdf"
+            else []
+        )
         paper_compound_tokens = self._paper_query_compound_tokens(query) if mode == "pdf" else []
         paper_compound_match = int(
             mode == "pdf"
@@ -6172,6 +6304,13 @@ class MySearchClient:
                     token,
                 )
                 for token in paper_compound_tokens
+            )
+        )
+        paper_subject_exact_match = int(
+            mode == "pdf"
+            and self._looks_like_primary_named_paper_result(
+                title_text=(item.get("title") or "").lower(),
+                query_tokens=paper_subject_tokens,
             )
         )
         non_paper_compound_mismatch = int(
@@ -6236,6 +6375,14 @@ class MySearchClient:
             non_community_official,
             official_resource_match,
             official_topic_exact_match,
+            paper_subject_exact_match,
+            primary_named_paper_bonus,
+            non_derivative_paper_bonus,
+            paper_compound_match,
+            non_paper_compound_mismatch,
+            paper_landing_bonus,
+            topic_path_hits,
+            topic_total_hits,
             tutorial_exact_identifier_match,
             non_generic_tutorial_docs,
             non_generic_official_landing,
@@ -6244,11 +6391,6 @@ class MySearchClient:
             non_generic_changelog_index,
             canonical_pricing_page_match,
             pricing_page_match,
-            primary_named_paper_bonus,
-            non_derivative_paper_bonus,
-            paper_compound_match,
-            non_paper_compound_mismatch,
-            paper_landing_bonus,
             exact_path_hits,
             exact_total_hits,
             non_locale_variant,
@@ -6332,8 +6474,11 @@ class MySearchClient:
         title_text: str,
         query_tokens: list[str],
     ) -> bool:
-        if len(query_tokens) < 2:
+        if not query_tokens:
             return False
+        if len(query_tokens) == 1:
+            token = re.escape(query_tokens[0])
+            return re.match(rf"^\s*(?:\[[^\]]+\]\s*)?{token}(?:\b|[\s:()\-])", title_text) is not None
         subject_pattern = r"[\s\-_]*".join(re.escape(token) for token in query_tokens[:2])
         return re.match(rf"^\s*{subject_pattern}\s*:", title_text) is not None
 
@@ -6750,6 +6895,30 @@ class MySearchClient:
             seen.add(compact)
             tokens.append(compact)
         return tokens
+
+    def _query_topic_specific_tokens(self, query: str) -> list[str]:
+        generic_tokens = {
+            "api",
+            "apis",
+            "docs",
+            "documentation",
+            "guide",
+            "guides",
+            "official",
+            "openai",
+            "paper",
+            "pdf",
+            "price",
+            "pricing",
+            "report",
+            "response",
+            "responses",
+        }
+        return [
+            token
+            for token in self._query_precision_tokens(query)
+            if token not in generic_tokens
+        ]
 
     def _query_exact_identifier_hit_counts(
         self,
