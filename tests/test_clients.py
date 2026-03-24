@@ -133,6 +133,23 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(policy.provider, "tavily")
         self.assertEqual(policy.fallback_chain, ("exa",))
 
+    def test_news_verify_does_not_enable_tavily_firecrawl_blend(self) -> None:
+        client = MySearchClient()
+        client._provider_is_live_ok = lambda provider: True  # type: ignore[method-assign]
+
+        should_blend = client._should_blend_web_providers(
+            query="2026 Oscars best picture winner",
+            requested_provider="auto",
+            decision=RouteDecision(provider="tavily", reason="test", result_profile="news"),
+            sources=["web"],
+            strategy="verify",
+            mode="news",
+            intent="news",
+            include_domains=None,
+        )
+
+        self.assertFalse(should_blend)
+
     def test_dispatch_single_provider_for_news_result_query_requests_content_in_verify(self) -> None:
         client = MySearchClient()
         captured: dict[str, object] = {}
@@ -2954,7 +2971,7 @@ class MySearchClientTests(unittest.TestCase):
         }
 
         result = client.search(
-            query="vendor rollout status",
+            query="vendor rollout discrepancy",
             mode="web",
             strategy="verify",
             provider="auto",

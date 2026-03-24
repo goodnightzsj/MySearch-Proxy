@@ -2667,9 +2667,7 @@ class MySearchClient:
         if "x" in sources:
             return False
         if mode == "news" or intent in {"news", "status"}:
-            return strategy in {"verify", "deep"} and self._provider_is_live_ok(
-                self.config.tavily
-            ) and self._provider_is_live_ok(self.config.firecrawl)
+            return False
         if mode == "pdf":
             return strategy in {"verify", "deep"} and self._provider_is_live_ok(
                 self.config.tavily
