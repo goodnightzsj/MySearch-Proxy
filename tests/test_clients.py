@@ -1737,6 +1737,71 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertTrue(weak)
 
+    def test_strict_changelog_query_allows_exa_rescue_for_weak_results(self) -> None:
+        client = MySearchClient()
+        client._provider_can_serve = lambda provider: provider.name == "exa"  # type: ignore[method-assign]
+
+        should_rescue = client._should_attempt_exa_rescue(
+            query="Next.js 16 release notes official",
+            mode="docs",
+            intent="resource",
+            decision=RouteDecision(
+                provider="tavily",
+                reason="test",
+                result_profile="resource",
+                allow_exa_rescue=True,
+            ),
+            result={
+                "provider": "tavily",
+                "results": [
+                    {
+                        "title": "Renaming Middleware to Proxy - Next.js",
+                        "url": "https://nextjs.org/docs/messages/middleware-to-proxy",
+                        "snippet": "",
+                        "content": "",
+                    },
+                    {
+                        "title": "Next.js Blog",
+                        "url": "https://nextjs.org/blog",
+                        "snippet": "",
+                        "content": "",
+                    },
+                ]
+            },
+            max_results=5,
+            include_domains=["nextjs.org"],
+        )
+
+        self.assertTrue(should_rescue)
+
+    def test_tutorial_results_without_brand_aligned_or_issue_sources_trigger_exa_rescue(self) -> None:
+        client = MySearchClient()
+
+        weak = client._result_set_looks_weak_for_exa_rescue(
+            query="Playwright test.step tutorial example",
+            mode="docs",
+            result={
+                "results": [
+                    {
+                        "provider": "tavily",
+                        "title": "Playwright step - Loadmill - AI",
+                        "url": "https://docs.loadmill.com/test-editor/steps/playwright-step",
+                        "snippet": "",
+                        "content": "",
+                    },
+                    {
+                        "provider": "tavily",
+                        "title": "Keep your Playwright tests structured with steps - Tim Deschryver",
+                        "url": "https://timdeschryver.dev/blog/keep-your-playwright-tests-structured-with-steps",
+                        "snippet": "",
+                        "content": "",
+                    },
+                ]
+            },
+        )
+
+        self.assertTrue(weak)
+
     def test_rerank_general_web_prefers_status_page_for_status_queries(self) -> None:
         client = MySearchClient()
 
@@ -1763,6 +1828,33 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertEqual(reranked[0]["url"], "https://status.openai.com/incidents/abc123")
+
+    def test_rerank_general_web_prefers_local_guide_over_repost_for_life_queries(self) -> None:
+        client = MySearchClient()
+
+        reranked = client._rerank_general_results(
+            query="上海 2026 春季赏花攻略",
+            result_profile="web",
+            include_domains=None,
+            results=[
+                {
+                    "provider": "tavily",
+                    "title": "2026上海春日赏花攻略，看这一篇就够了！ - 网易",
+                    "url": "https://www.163.com/dy/article/KNM9TT6205179EUD.html",
+                    "snippet": "转载型赏花文章",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "上海赏花攻略",
+                    "url": "https://m.sh.bendibao.com/tour/flowers?month=3%E6%9C%88",
+                    "snippet": "本地生活导览页",
+                    "content": "",
+                },
+            ],
+        )
+
+        self.assertEqual(reranked[0]["url"], "https://m.sh.bendibao.com/tour/flowers?month=3%E6%9C%88")
 
     def test_rerank_general_web_demotes_official_community_threads_for_status_queries(self) -> None:
         client = MySearchClient()
