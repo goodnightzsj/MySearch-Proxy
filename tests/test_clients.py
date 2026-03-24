@@ -775,6 +775,34 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(policy.key, "tutorial")
         self.assertEqual(policy.provider, "tavily")
 
+    def test_rerank_resource_results_prefers_exact_tutorial_api_page_over_generic_docs(self) -> None:
+        client = MySearchClient()
+
+        ranked = client._rerank_resource_results(
+            query="Playwright test.step tutorial example",
+            mode="docs",
+            results=[
+                {
+                    "provider": "firecrawl",
+                    "title": "Running and debugging tests | Playwright",
+                    "url": "https://playwright.dev/docs/running-tests",
+                    "snippet": "Run tests and debug them in UI mode.",
+                },
+                {
+                    "provider": "firecrawl",
+                    "title": "TestStep | Playwright",
+                    "url": "https://playwright.dev/docs/api/class-teststep",
+                    "snippet": "API reference for test.step.",
+                },
+            ],
+            include_domains=None,
+        )
+
+        self.assertEqual(
+            ranked[0]["url"],
+            "https://playwright.dev/docs/api/class-teststep",
+        )
+
     def test_changelog_query_uses_tavily_news_policy(self) -> None:
         client = MySearchClient()
 
