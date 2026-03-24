@@ -2005,6 +2005,42 @@ class MySearchClientTests(unittest.TestCase):
         self.assertTrue(result["evidence"]["official_filter_applied"])
         self.assertFalse(result["evidence"]["official_filter_reduced"])
 
+    def test_search_docs_summary_includes_excerpt_for_top_official_match(self) -> None:
+        client = MySearchClient()
+        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "useEffectEvent – React 中文文档",
+                    "url": "https://zh-hans.react.dev/reference/react/useEffectEvent",
+                    "snippet": "useEffectEvent 是一个 React Hook，它让你把事件逻辑从 Effect 中分离出来。",
+                    "content": "",
+                }
+            ],
+            "citations": [
+                {
+                    "title": "useEffectEvent – React 中文文档",
+                    "url": "https://zh-hans.react.dev/reference/react/useEffectEvent",
+                }
+            ],
+        }
+
+        result = client.search(
+            query="React useEffectEvent 中文文档",
+            mode="docs",
+            strategy="verify",
+            provider="tavily",
+            include_answer=False,
+        )
+
+        self.assertIn("Top official match: useEffectEvent", result["summary"])
+        self.assertIn("React Hook", result["summary"])
+
     def test_search_strict_official_mode_reranks_locale_variant_below_canonical_page(self) -> None:
         client = MySearchClient()
         client._search_exa = lambda **kwargs: {  # type: ignore[method-assign]

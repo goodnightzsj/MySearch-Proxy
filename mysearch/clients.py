@@ -8231,6 +8231,7 @@ class MySearchClient:
         source_diversity = int(evidence.get("source_diversity") or 0)
         verification = str(evidence.get("verification") or "").strip()
         domain = self._registered_domain(self._result_hostname(top))
+        top_excerpt = self._search_summary_excerpt(top, limit=160)
 
         if official_mode == "strict":
             summary = f"Top official match: {label}"
@@ -8243,9 +8244,22 @@ class MySearchClient:
 
         if domain:
             summary = f"{summary} ({domain})"
+        if top_excerpt and (mode in {"docs", "github", "pdf"} or intent in {"resource", "tutorial"}):
+            summary = f"{summary} — {top_excerpt}"
         if verification == "cross-provider" and source_diversity >= 2:
             summary = f"{summary}; corroborated across {source_diversity} domains"
         return summary
+
+    def _search_summary_excerpt(self, item: Mapping[str, Any], limit: int = 160) -> str:
+        snippet = re.sub(
+            r"\s+",
+            " ",
+            str(item.get("snippet") or item.get("content") or "").strip(),
+        ).strip()
+        if not snippet:
+            return ""
+        snippet = re.sub(r"^[#>*`\-\s]+", "", snippet).strip()
+        return self._build_excerpt(snippet, limit=limit)
 
     def _apply_result_event_answer_override(
         self,
