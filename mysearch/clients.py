@@ -2786,7 +2786,11 @@ class MySearchClient:
             intent=intent,
             include_domains=include_domains,
         ) == "strict"
-        rescue_sensitive_query = mode == "pdf" or self._looks_like_pricing_query(query_lower)
+        rescue_sensitive_query = (
+            mode == "pdf"
+            or self._looks_like_pricing_query(query_lower)
+            or self._looks_like_changelog_query(query_lower)
+        )
         if (include_domains or strict_official) and not rescue_sensitive_query:
             return False
         results = list(result.get("results") or [])
@@ -2802,9 +2806,10 @@ class MySearchClient:
             return True
         query_terms = re.findall(r"[a-z0-9\u4e00-\u9fff]+", query_lower)
         long_tail_signal = len(query_terms) >= 6 or len(query) >= 48
-        return sparse_results and (
-            mode == "news" or intent in {"comparison", "exploratory", "tutorial"} or long_tail_signal
-        )
+        weak_result_signal = mode == "news" or intent in {"comparison", "exploratory", "tutorial"}
+        if weak_results and weak_result_signal:
+            return True
+        return sparse_results and (weak_result_signal or long_tail_signal)
 
     def _result_set_looks_weak_for_exa_rescue(
         self,
@@ -2822,6 +2827,8 @@ class MySearchClient:
             return not self._has_canonical_pricing_result(results)
         if self._looks_like_changelog_query(query.lower()):
             return not self._has_strong_changelog_result(query=query, results=results)
+        if self._looks_like_tutorial_query(query.lower()):
+            return not self._has_strong_tutorial_result(query=query, results=results)
         return False
 
     def _has_strong_pdf_match(
@@ -2910,6 +2917,47 @@ class MySearchClient:
                 hostname=hostname,
                 title_text=title_text,
             ):
+                return True
+        return False
+
+    def _has_strong_tutorial_result(
+        self,
+        *,
+        query: str,
+        results: list[dict[str, Any]],
+    ) -> bool:
+        query_tokens = self._query_brand_tokens(query)
+        precision_tokens = self._query_precision_tokens(query)
+        exact_identifier_tokens = self._query_exact_identifier_tokens(query)
+        for item in results[:5]:
+            url = item.get("url", "")
+            hostname = self._result_hostname(item)
+            registered_domain = self._registered_domain(hostname)
+            path = urlparse(url).path.lower()
+            title_text = (item.get("title") or "").lower()
+            path_hits, total_hits = self._query_precision_hit_counts(
+                hostname=hostname,
+                path=path,
+                title_text=title_text,
+                query_tokens=precision_tokens,
+            )
+            _, exact_total_hits = self._query_exact_identifier_hit_counts(
+                path=path,
+                title_text=title_text,
+                query_tokens=exact_identifier_tokens,
+            )
+            community_debug = (
+                registered_domain == "stackoverflow.com"
+                or (registered_domain == "github.com" and any(marker in path for marker in ("/issues/", "/discussions/")))
+                or self._is_obvious_official_community_result(hostname=hostname, path=path)
+            )
+            brand_aligned = self._registered_domain_label_matches(
+                registered_domain=registered_domain,
+                query_tokens=query_tokens,
+            ) or any(token in hostname for token in query_tokens)
+            if community_debug and (path_hits > 0 or exact_total_hits > 0 or "issue" in title_text):
+                return True
+            if brand_aligned and (exact_total_hits > 0 or path_hits >= 2 or total_hits >= 3):
                 return True
         return False
 
@@ -3192,6 +3240,22 @@ class MySearchClient:
             self._looks_like_pricing_query(query_lower)
             and self._looks_like_canonical_pricing_result(hostname=hostname, path=path)
         )
+        local_life_query = self._looks_like_local_life_query(query_lower)
+        local_guide_match = int(
+            local_life_query
+            and self._looks_like_local_life_guide_result(
+                url=url,
+                hostname=hostname,
+                title_text=title_text,
+                snippet_text=(item.get("snippet") or "").lower(),
+            )
+        )
+        non_local_life_repost = int(
+            not (
+                local_life_query
+                and self._is_obvious_local_life_repost_domain(registered_domain)
+            )
+        )
         non_aggregator = int(not self._is_obvious_web_aggregator(registered_domain))
         matched_provider_count = len(item.get("matched_providers") or [])
         cross_provider_boost = min(matched_provider_count, 3)
@@ -3203,6 +3267,8 @@ class MySearchClient:
             status_page_match,
             canonical_pricing_page_match,
             pricing_page_match,
+            local_guide_match,
+            non_local_life_repost,
             exact_path_hits,
             exact_total_hits,
             path_precision_hits,
@@ -3257,6 +3323,44 @@ class MySearchClient:
             "reddit.com",
             "researchgate.net",
             "stackoverflow.com",
+        }
+
+    def _looks_like_local_life_guide_result(
+        self,
+        *,
+        url: str,
+        hostname: str,
+        title_text: str,
+        snippet_text: str,
+    ) -> bool:
+        registered_domain = self._registered_domain(hostname)
+        path = urlparse(url).path.lower()
+        guide_markers = (
+            "攻略",
+            "赏花",
+            "踏青",
+            "景点",
+            "路线",
+            "门票",
+            "游玩",
+            "travel guide",
+            "things to do",
+        )
+        guide_shape = any(marker in path for marker in ("/tour/", "/travel/", "/guide", "/flowers", "/trip/"))
+        guide_text = f"{title_text} {snippet_text}"
+        if registered_domain in {"bendibao.com", "ctrip.com", "trip.com", "mafengwo.cn", "qyer.com"}:
+            return guide_shape or any(marker in guide_text for marker in guide_markers)
+        return guide_shape and any(marker in guide_text for marker in guide_markers)
+
+    def _is_obvious_local_life_repost_domain(self, registered_domain: str) -> bool:
+        return registered_domain in {
+            "163.com",
+            "facebook.com",
+            "ifeng.com",
+            "qq.com",
+            "sina.cn",
+            "sohu.com",
+            "weibo.com",
         }
 
     def _search_web_blended(
