@@ -453,6 +453,53 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(answer, "Best Picture winner: One Battle After Another")
 
+    def test_result_set_looks_weak_for_exa_rescue_for_award_prediction_results(self) -> None:
+        client = MySearchClient()
+
+        weak = client._result_set_looks_weak_for_exa_rescue(
+            query="2026 Oscars best actor winner",
+            mode="news",
+            result={
+                "results": [
+                    {
+                        "title": "Oscars 2027 early prediction: who will win next year",
+                        "url": "https://www.theguardian.com/film/2026/mar/18/oscars-2027-early-prediction-wins",
+                        "snippet": "",
+                        "content": "",
+                    }
+                ]
+            },
+        )
+
+        self.assertTrue(weak)
+
+    def test_apply_result_event_answer_override_does_not_extract_from_weak_award_mentions(self) -> None:
+        client = MySearchClient()
+
+        result = client._apply_result_event_answer_override(
+            query="2026 Oscars best picture winner",
+            mode="news",
+            intent="news",
+            strategy="verify",
+            result={
+                "answer": "",
+                "results": [
+                    {
+                        "title": "Sean Penn Receives Mock Oscar in Ukraine After Skipping Academy Awards",
+                        "url": "https://variety.com/2026/awards/news/sean-penn-mock-oscar-ukraine-skipping-academy-awards-1236692213/",
+                        "snippet": (
+                            "Sean Penn won best supporting actor for his performance "
+                            "in Paul Thomas Anderson's best picture-winning One Battle After Another."
+                        ),
+                        "content": "",
+                    }
+                ],
+                "evidence": {},
+            },
+        )
+
+        self.assertEqual(result["answer"], "")
+
     def test_pdf_rerank_prefers_primary_named_paper_over_derivative_variants(self) -> None:
         client = MySearchClient()
         results = [

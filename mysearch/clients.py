@@ -2884,14 +2884,67 @@ class MySearchClient:
         results = list(result.get("results") or [])
         if not results:
             return True
+        query_lower = query.lower()
+        if self._looks_like_award_result_query(query_lower):
+            return not self._has_strong_award_result(query=query, results=results)
         if mode == "pdf":
             return not self._has_strong_pdf_match(query=query, results=results)
-        if self._looks_like_pricing_query(query.lower()):
+        if self._looks_like_pricing_query(query_lower):
             return not self._has_canonical_pricing_result(results)
-        if self._looks_like_changelog_query(query.lower()):
+        if self._looks_like_changelog_query(query_lower):
             return not self._has_strong_changelog_result(query=query, results=results)
-        if self._looks_like_tutorial_query(query.lower()):
+        if self._looks_like_tutorial_query(query_lower):
             return not self._has_strong_tutorial_result(query=query, results=results)
+        return False
+
+    def _has_strong_award_result(
+        self,
+        *,
+        query: str,
+        results: list[dict[str, Any]],
+    ) -> bool:
+        query_lower = query.lower()
+        for item in results[:3]:
+            hostname = self._result_hostname(item)
+            registered_domain = self._registered_domain(hostname)
+            path = urlparse(item.get("url", "")).path.lower()
+            title_text = (item.get("title") or "").lower()
+            snippet_text = (item.get("snippet") or "").lower()
+            content_text = (item.get("content") or "").lower()
+            if self._looks_like_award_prediction_result(
+                title_text=title_text,
+                snippet_text=snippet_text,
+                path=path,
+            ):
+                continue
+            if self._looks_like_query_year_mismatch(
+                query=query_lower,
+                text=f"{title_text} {snippet_text} {content_text} {path}",
+            ):
+                continue
+            if registered_domain in {"facebook.com", "instagram.com", "tiktok.com", "youtube.com"}:
+                continue
+            category_match = self._looks_like_award_category_match(
+                query_lower=query_lower,
+                title_text=title_text,
+                snippet_text=snippet_text,
+                content_text=content_text,
+                path=path,
+            )
+            fact_match = self._looks_like_award_fact_match(
+                query_lower=query_lower,
+                title_text=title_text,
+                snippet_text=snippet_text,
+                content_text=content_text,
+                path=path,
+            )
+            winner_page = self._looks_like_award_winner_result(
+                title_text=title_text,
+                snippet_text=snippet_text,
+                path=path,
+            )
+            if winner_page or (category_match and fact_match):
+                return True
         return False
 
     def _has_strong_pdf_match(
@@ -3482,13 +3535,13 @@ class MySearchClient:
         text = f"{title_text} {snippet_text} {path}"
         winner_markers = [
             "complete winners",
+            "full list of winners",
             "full winners",
+            "winners and nominees",
+            "heres a full list",
+            "here's a full list",
             "winner list",
             "winners list",
-            "won the",
-            "wins",
-            "winner",
-            "winners",
         ]
         return any(marker in text for marker in winner_markers)
 
@@ -3504,6 +3557,26 @@ class MySearchClient:
         text = f"{title_text} {snippet_text} {content_text} {path}"
         category_markers = self._award_query_category_markers(query_lower)
         return bool(category_markers) and any(marker in text for marker in category_markers)
+
+    def _looks_like_award_fact_match(
+        self,
+        *,
+        query_lower: str,
+        title_text: str,
+        snippet_text: str,
+        content_text: str,
+        path: str,
+    ) -> bool:
+        text = f"{title_text} {snippet_text} {content_text} {path}"
+        for marker in self._award_query_category_markers(query_lower):
+            marker_pattern = re.escape(marker)
+            patterns = [
+                rf"{marker_pattern}(?:\s+winner)?\s*[–—:]",
+                rf"{marker_pattern}(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)\b",
+            ]
+            if any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns):
+                return True
+        return False
 
     def _looks_like_award_nomination_result(
         self,
@@ -7129,14 +7202,26 @@ class MySearchClient:
             return result
 
         current_answer = str(result.get("answer") or "").strip()
+        result_items = list(result.get("results") or [])
+        if (
+            self._looks_like_award_result_query(query_lower)
+            and not self._has_strong_award_result(query=query, results=result_items)
+        ):
+            if current_answer and self._answer_looks_uncertain(current_answer):
+                updated = dict(result)
+                updated["answer"] = ""
+                updated["evidence"] = dict(updated.get("evidence") or {})
+                updated["evidence"]["answer_source"] = "suppressed-provider-answer"
+                return updated
+            return result
         extracted_answer = self._extract_result_event_answer(
             query=query,
-            results=list(result.get("results") or []),
+            results=result_items,
         )
         if not extracted_answer and strategy in {"verify", "deep"}:
             extracted_answer = self._extract_result_event_answer_from_top_page(
                 query=query,
-                results=list(result.get("results") or []),
+                results=result_items,
             )
 
         if extracted_answer:
@@ -7230,7 +7315,7 @@ class MySearchClient:
                 combined_text,
                 patterns=[
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+won[^\n]{0,80}\bbest picture\b",
-                    r"best picture\s*[–—:-]\s*([^\n.;]{2,100})",
+                    r"best picture\s*[–—:]\s*([^\n.;]{2,100})",
                     r"best picture(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)?\s+([^\n.;]{2,100})",
                 ],
             )
@@ -7242,7 +7327,7 @@ class MySearchClient:
                 combined_text,
                 patterns=[
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+won[^\n]{0,80}\bbest actor\b",
-                    r"best actor\s*[–—:-]\s*([^\n.;]{2,100})",
+                    r"best actor\s*[–—:]\s*([^\n.;]{2,100})",
                     r"best actor(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)?\s+([^\n.;]{2,100})",
                     r"([A-Z][A-Za-z0-9'’&.\- ]{2,100})\s+won\s+best actor",
                 ],
@@ -7266,7 +7351,7 @@ class MySearchClient:
                 combined_text,
                 patterns=[
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+(?:won|wins)[^\n]{0,80}\balbum of the year\b",
-                    r"album of the year\s*[–—:-]\s*([^\n.;]{2,100})",
+                    r"album of the year\s*[–—:]\s*([^\n.;]{2,100})",
                     r"album of the year(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)?\s+([^\n.;]{2,100})",
                     r"([^\n.;]{2,100})\s+won\s+album of the year",
                 ],
@@ -7289,7 +7374,7 @@ class MySearchClient:
                 combined_text,
                 patterns=[
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+(?:won|wins)[^\n]{0,80}\brecord of the year\b",
-                    r"record of the year\s*[–—:-]\s*([^\n.;]{2,100})",
+                    r"record of the year\s*[–—:]\s*([^\n.;]{2,100})",
                     r"record of the year(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)?\s+([^\n.;]{2,100})",
                     r"([^\n.;]{2,100})\s+won\s+record of the year",
                 ],
