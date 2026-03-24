@@ -185,6 +185,21 @@ _MODE_PROVIDER_POLICY: dict[str, SearchRoutePolicy] = {
         firecrawl_categories=("research",),
         result_profile="resource",
     ),
+    "tutorial": SearchRoutePolicy(
+        key="tutorial",
+        provider="exa",
+        fallback_chain=("tavily", "firecrawl"),
+        result_profile="web",
+        allow_exa_rescue=True,
+    ),
+    "changelog": SearchRoutePolicy(
+        key="changelog",
+        provider="tavily",
+        fallback_chain=("firecrawl", "exa"),
+        tavily_topic="news",
+        firecrawl_categories=("news",),
+        result_profile="resource",
+    ),
     "exploratory": SearchRoutePolicy(
         key="exploratory",
         provider="exa",
@@ -1885,6 +1900,8 @@ class MySearchClient:
         query_lower = query.lower()
         if include_domains:
             return True
+        if intent == "tutorial":
+            return False
         if mode in {"docs", "github", "pdf"}:
             return True
         if self._looks_like_official_query(query):
@@ -2364,7 +2381,11 @@ class MySearchClient:
                 sources=["x"],
                 result_profile="off",
             )
-        if policy.key in {"docs", "resource"} and include_domains and self._domains_prefer_firecrawl_discovery(include_domains):
+        if policy.key == "tutorial":
+            reason = "教程 / 排障类查询默认走 Exa，优先拿社区解法和语义相邻案例"
+        elif policy.key == "changelog":
+            reason = "release / changelog 类查询默认走 Tavily，优先拿官方发布页与更新说明"
+        elif policy.key in {"docs", "resource"} and include_domains and self._domains_prefer_firecrawl_discovery(include_domains):
             reason = "检测到受限 / 社区域名，优先用 Firecrawl 做站内发现"
         elif policy.key in {"docs", "github", "pdf"}:
             reason = "文档 / GitHub / PDF 默认走 Firecrawl，页面发现与正文抓取保持一致"
@@ -2418,12 +2439,16 @@ class MySearchClient:
         query_lower = query.lower()
         if mode == "news":
             return "news"
+        if self._looks_like_tutorial_query(query_lower):
+            return "tutorial"
         if mode in {"docs", "github", "pdf"}:
             return "resource"
         if mode == "research":
             return "exploratory"
         if sources == ["x"]:
             return "status"
+        if self._looks_like_changelog_query(query_lower):
+            return "resource"
         if self._looks_like_status_query(query_lower):
             return "status"
         if self._looks_like_news_query(query_lower):
@@ -2473,9 +2498,13 @@ class MySearchClient:
             return _MODE_PROVIDER_POLICY["research"]
         if include_content:
             return _MODE_PROVIDER_POLICY["content"]
+        if intent == "tutorial":
+            return _MODE_PROVIDER_POLICY["tutorial"]
+        if self._looks_like_changelog_query(query_lower):
+            return _MODE_PROVIDER_POLICY["changelog"]
         if mode in {"docs", "github", "pdf"}:
             return _MODE_PROVIDER_POLICY[mode]
-        if intent in {"resource", "tutorial"} or self._looks_like_docs_query(query_lower):
+        if intent == "resource" or self._looks_like_docs_query(query_lower):
             return _MODE_PROVIDER_POLICY["resource"]
         if intent == "status" or self._looks_like_status_query(query_lower):
             return _MODE_PROVIDER_POLICY["status"]
@@ -4141,21 +4170,91 @@ class MySearchClient:
         if include_x_videos:
             payload["include_x_videos"] = True
 
-        response = self._request_json(
-            provider=provider,
-            method="POST",
-            path=search_path,
-            payload=payload,
-            key=key.key,
-            base_url=provider.base_url_for("social_search"),
-        )
-        return self._normalize_social_gateway_response(
-            response=response,
+        try:
+            response = self._request_json(
+                provider=provider,
+                method="POST",
+                path=search_path,
+                payload=payload,
+                key=key.key,
+                base_url=provider.base_url_for("social_search"),
+                timeout_seconds=min(self.config.timeout_seconds, 20),
+            )
+            return self._normalize_social_gateway_response(
+                response=response,
+                query=query,
+                transport=key.source,
+                from_date=from_date,
+                to_date=to_date,
+            )
+        except MySearchHTTPError as exc:
+            if exc.is_auth_error:
+                raise
+            return self._search_tavily_social_fallback(
+                query=query,
+                max_results=max_results,
+                from_date=from_date,
+                to_date=to_date,
+                fallback_reason=str(exc),
+            )
+        except MySearchError as exc:
+            return self._search_tavily_social_fallback(
+                query=query,
+                max_results=max_results,
+                from_date=from_date,
+                to_date=to_date,
+                fallback_reason=str(exc),
+            )
+
+    def _search_tavily_social_fallback(
+        self,
+        *,
+        query: str,
+        max_results: int,
+        from_date: str | None,
+        to_date: str | None,
+        fallback_reason: str,
+    ) -> dict[str, Any]:
+        tavily_result = self._search_tavily(
             query=query,
-            transport=key.source,
-            from_date=from_date,
-            to_date=to_date,
+            max_results=max_results,
+            topic="news",
+            include_answer=True,
+            include_content=False,
+            include_domains=["x.com"],
+            exclude_domains=None,
+            strategy="fast",
+            days=self._infer_tavily_days("status", from_date),
         )
+        fallback_results = [
+            {
+                "provider": "tavily_social_fallback",
+                "source": "x",
+                "title": item.get("title", ""),
+                "url": item.get("url", ""),
+                "snippet": item.get("snippet", ""),
+                "content": item.get("content", ""),
+            }
+            for item in tavily_result.get("results", [])
+        ]
+        if not fallback_results:
+            raise MySearchError(fallback_reason)
+        return {
+            "provider": "tavily_social_fallback",
+            "transport": tavily_result.get("transport", "env"),
+            "query": query,
+            "answer": tavily_result.get("answer", ""),
+            "results": fallback_results,
+            "citations": self._align_citations_with_results(
+                results=fallback_results,
+                citations=list(tavily_result.get("citations") or []),
+            ),
+            "fallback": {
+                "from": "xai_compatible",
+                "to": "tavily_social_fallback",
+                "reason": fallback_reason[:200],
+            },
+        }
 
     def _scrape_firecrawl(
         self,
@@ -4666,7 +4765,9 @@ class MySearchClient:
         mode: SearchMode,
         intent: ResolvedSearchIntent,
     ) -> bool:
-        return mode in {"docs", "github", "pdf"} or intent in {"resource", "tutorial"}
+        if intent == "tutorial":
+            return False
+        return mode in {"docs", "github", "pdf"} or intent == "resource"
 
     def _rerank_resource_results(
         self,
@@ -4713,7 +4814,7 @@ class MySearchClient:
         exact_identifier_tokens: list[str],
         include_domains: list[str] | None,
         strict_official: bool,
-    ) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int]:
+    ) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int]:
         flags = self._resource_result_flags(
             mode=mode,
             item=item,
@@ -4772,6 +4873,23 @@ class MySearchClient:
         )
         url = item.get("url", "")
         query_lower = query.lower()
+        changelog_page_match = int(
+            self._looks_like_changelog_query(query_lower)
+            and self._looks_like_changelog_result(
+                url=url,
+                hostname=str(flags["hostname"]),
+                title_text=(item.get("title") or "").lower(),
+            )
+        )
+        canonical_changelog_page_match = int(
+            self._looks_like_changelog_query(query_lower)
+            and self._looks_like_canonical_changelog_result(
+                url=url,
+                hostname=str(flags["hostname"]),
+                title_text=(item.get("title") or "").lower(),
+                precision_tokens=precision_tokens,
+            )
+        )
         pricing_page_match = int(
             self._looks_like_pricing_query(query_lower)
             and self._looks_like_pricing_result(
@@ -4809,6 +4927,8 @@ class MySearchClient:
         return (
             include_match,
             official_resource_match,
+            canonical_changelog_page_match,
+            changelog_page_match,
             canonical_pricing_page_match,
             pricing_page_match,
             primary_named_paper_bonus,
@@ -5343,6 +5463,55 @@ class MySearchClient:
         if "pricing" in normalized_path and "/docs/" not in normalized_path and not hostname.startswith("developers."):
             return True
         return False
+
+    def _looks_like_changelog_result(self, *, url: str, hostname: str, title_text: str) -> bool:
+        path = urlparse(url).path.lower()
+        changelog_markers = (
+            "/blog/",
+            "/changelog",
+            "/release-notes",
+            "/releases",
+            "/updating",
+            "/upgrading",
+            "/version-",
+        )
+        title_markers = (
+            "announcing",
+            "changelog",
+            "release notes",
+            "what's new",
+            "whats new",
+        )
+        return any(marker in path for marker in changelog_markers) or any(
+            marker in title_text for marker in title_markers
+        )
+
+    def _looks_like_canonical_changelog_result(
+        self,
+        *,
+        url: str,
+        hostname: str,
+        title_text: str,
+        precision_tokens: list[str],
+    ) -> bool:
+        path = urlparse(url).path.lower().rstrip("/")
+        if not self._looks_like_changelog_result(url=url, hostname=hostname, title_text=title_text):
+            return False
+        high_signal_path = any(
+            marker in path
+            for marker in ("/blog/", "/release-notes", "/releases")
+        )
+        if not high_signal_path:
+            return False
+        if not precision_tokens:
+            return True
+        path_hits, total_hits = self._query_precision_hit_counts(
+            hostname=hostname,
+            path=path,
+            title_text=title_text,
+            query_tokens=precision_tokens,
+        )
+        return path_hits > 0 or total_hits > 0
 
     def _is_obvious_official_community_result(self, *, hostname: str, path: str) -> bool:
         labels = [label for label in hostname.split(".") if label]
