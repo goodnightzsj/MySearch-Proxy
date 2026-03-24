@@ -8103,6 +8103,89 @@ class MySearchClient:
         ]
         top_sources = citation_title_lines[:4]
 
+        comparison_lens: list[str] = []
+        if comparison_like:
+            if "search" in query_lower:
+                comparison_lens = [
+                    "search breadth and freshness",
+                    "integration fit for agent workflows",
+                    "deployment and operational simplicity",
+                ]
+            elif any(token in query_lower for token in ("code", "analysis", "repo", "repository")):
+                comparison_lens = [
+                    "code intelligence depth",
+                    "IDE or workflow integration",
+                    "operational fit and maintenance burden",
+                ]
+            else:
+                comparison_lens = [
+                    "relevance and source quality",
+                    "coverage breadth",
+                    "operational trade-offs",
+                ]
+
+        comparison_rows: list[dict[str, str]] = []
+        if comparison_like:
+            url_to_excerpt = {
+                (page.get("url") or "").strip(): self._build_excerpt(
+                    (page.get("excerpt") or page.get("content") or "").strip(),
+                    limit=120,
+                )
+                for page in pages
+                if (page.get("url") or "").strip() and not page.get("error")
+            }
+            seen_shortlist_urls: set[str] = set()
+            shortlist_urls = [
+                (citation.get("url") or "").strip()
+                for citation in citations
+                if (citation.get("url") or "").strip()
+            ]
+            shortlist_urls.extend(
+                (page.get("url") or "").strip()
+                for page in pages
+                if (page.get("url") or "").strip() and not page.get("error")
+            )
+            for url in shortlist_urls:
+                if not url or url in seen_shortlist_urls:
+                    continue
+                seen_shortlist_urls.add(url)
+                title = url_to_title.get(url, "").strip() or url
+                candidate = title
+                if "github.com/" in url:
+                    parsed = urlparse(url)
+                    parts = [part for part in parsed.path.strip("/").split("/") if part]
+                    if len(parts) >= 2:
+                        candidate = f"{parts[0]}/{parts[1]}"
+                else:
+                    candidate = re.split(r"\s[\-|:|]\s", title, maxsplit=1)[0].strip() or title
+                evidence_note = url_to_excerpt.get(url, "").strip()
+                if "marketing copy" in evidence_note.lower():
+                    evidence_note = ""
+                if not evidence_note:
+                    evidence_note = self._registered_domain(self._result_hostname({"url": url}))
+                comparison_rows.append(
+                    {
+                        "candidate": candidate[:80],
+                        "source": self._registered_domain(self._result_hostname({"url": url})) or url,
+                        "note": evidence_note[:140],
+                    }
+                )
+                if len(comparison_rows) >= 4:
+                    break
+
+        recommendation = ""
+        if comparison_like:
+            if authoritative_source_count > 0 and comparison_rows:
+                recommendation = (
+                    f"Start from {comparison_rows[0]['candidate']} as the primary anchor, "
+                    "then use the remaining shortlisted sources to validate trade-offs and edge cases."
+                )
+            elif comparison_rows:
+                recommendation = (
+                    f"Treat {comparison_rows[0]['candidate']} as the leading candidate for now, "
+                    "but keep the next shortlisted sources in scope because the evidence is still comparative."
+                )
+
         return {
             "executive_summary": primary_finding,
             "key_findings": key_findings[:3],
@@ -8123,6 +8206,9 @@ class MySearchClient:
                 )
                 if bit
             ],
+            "comparison_lens": comparison_lens,
+            "comparison_rows": comparison_rows,
+            "recommendation": recommendation,
         }
 
     def _render_research_report(self, sections: dict[str, Any]) -> str:
@@ -8146,6 +8232,29 @@ class MySearchClient:
             lines.extend(["", "## Evidence Highlights"])
             for item in evidence_highlights:
                 lines.append(f"- {item}")
+
+        comparison_lens = [
+            str(item).strip()
+            for item in (sections.get("comparison_lens") or [])
+            if str(item).strip()
+        ]
+        if comparison_lens:
+            lines.extend(["", "## Comparison Lens"])
+            for item in comparison_lens:
+                lines.append(f"- {item}")
+
+        comparison_rows = [
+            item
+            for item in (sections.get("comparison_rows") or [])
+            if isinstance(item, dict) and item.get("candidate")
+        ]
+        if comparison_rows:
+            lines.extend(["", "## Ranked Shortlist", "| Candidate | Source | Evidence Note |", "|---|---|---|"])
+            for row in comparison_rows[:4]:
+                candidate = str(row.get("candidate") or "").replace("|", "/").strip()
+                source = str(row.get("source") or "").replace("|", "/").strip()
+                note = str(row.get("note") or "").replace("|", "/").strip()
+                lines.append(f"| {candidate} | {source} | {note} |")
 
         provider_roles = [
             str(item).strip()
@@ -8176,6 +8285,10 @@ class MySearchClient:
         social_signal = str(sections.get("social_signal") or "").strip()
         if social_signal:
             lines.extend(["", "## Social Signal", f"- {social_signal}"])
+
+        recommendation = str(sections.get("recommendation") or "").strip()
+        if recommendation:
+            lines.extend(["", "## Recommendation", f"- {recommendation}"])
 
         caveats = [str(item).strip() for item in (sections.get("caveats") or []) if str(item).strip()]
         top_sources = [str(item).strip() for item in (sections.get("top_sources") or []) if str(item).strip()]
