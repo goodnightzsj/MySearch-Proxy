@@ -1606,6 +1606,63 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["results"][0]["url"], "https://www.apple.com.cn/shop/buy-mac/macbook-air")
         self.assertEqual(result["citations"][0]["url"], "https://www.apple.com.cn/shop/buy-mac/macbook-air")
 
+    def test_official_policy_for_status_queries_uses_general_rerank(self) -> None:
+        client = MySearchClient()
+
+        result = client._apply_official_resource_policy(
+            query="OpenAI background mode latest status",
+            mode="news",
+            intent="status",
+            include_domains=["openai.com"],
+            result={
+                "results": [
+                    {
+                        "provider": "tavily",
+                        "title": "Background mode requests stuck in queued status - OpenAI Developer Community",
+                        "url": "https://community.openai.com/t/background-mode-requests-stuck-in-queued-status-responses-api/1372058",
+                        "snippet": "",
+                        "content": "",
+                    },
+                    {
+                        "provider": "tavily",
+                        "title": "Background mode guide | OpenAI",
+                        "url": "https://developers.openai.com/api/docs/guides/background/",
+                        "snippet": "",
+                        "content": "",
+                    },
+                    {
+                        "provider": "tavily",
+                        "title": "Responses API errors when using background mode",
+                        "url": "https://status.openai.com/incidents/01KKMB9HWS1B9452FT6BV6KDD6",
+                        "snippet": "",
+                        "content": "",
+                    },
+                ],
+                "citations": [
+                    {
+                        "title": "Background mode requests stuck in queued status - OpenAI Developer Community",
+                        "url": "https://community.openai.com/t/background-mode-requests-stuck-in-queued-status-responses-api/1372058",
+                    },
+                    {
+                        "title": "Background mode guide | OpenAI",
+                        "url": "https://developers.openai.com/api/docs/guides/background/",
+                    },
+                    {
+                        "title": "Responses API errors when using background mode",
+                        "url": "https://status.openai.com/incidents/01KKMB9HWS1B9452FT6BV6KDD6",
+                    },
+                ],
+                "evidence": {},
+            },
+        )
+
+        urls = [item["url"] for item in result["results"]]
+        self.assertEqual(urls[0], "https://status.openai.com/incidents/01KKMB9HWS1B9452FT6BV6KDD6")
+        self.assertLess(
+            urls.index("https://developers.openai.com/api/docs/guides/background/"),
+            urls.index("https://community.openai.com/t/background-mode-requests-stuck-in-queued-status-responses-api/1372058"),
+        )
+
     def test_rerank_general_web_prefers_status_page_for_status_queries(self) -> None:
         client = MySearchClient()
 
