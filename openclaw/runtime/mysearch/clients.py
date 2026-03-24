@@ -1707,7 +1707,7 @@ class MySearchClient:
             exa_promoted_page_count=len(exa_promoted_urls),
         )
 
-        research_summary = ""
+        executive_summary = ""
         if (
             resolved_strategy == "deep"
             and self.config.xai.search_mode == "official"
@@ -1719,18 +1719,19 @@ class MySearchClient:
                     sources=["web"],
                     max_results=3,
                 )
-                research_summary = (summary_result.get("answer") or "").strip()
+                executive_summary = (summary_result.get("answer") or "").strip()
             except MySearchError:
                 pass
-        if not research_summary:
-            research_summary = self._build_research_summary_fallback(
-                query=query,
-                web_search=web_search,
-                pages=pages,
-                citations=citations,
-                social=social,
-                evidence=evidence,
-            )
+        report_sections = self._build_research_report_sections(
+            query=query,
+            web_search=web_search,
+            pages=pages,
+            citations=citations,
+            social=social,
+            evidence=evidence,
+            executive_summary_override=executive_summary,
+        )
+        research_summary = self._render_research_report(report_sections)
 
         return {
             "provider": "hybrid",
@@ -1746,6 +1747,8 @@ class MySearchClient:
             "summary": research_summary,
             "confidence": evidence.get("confidence"),
             "research_summary": research_summary,
+            "report_markdown": research_summary,
+            "report_sections": report_sections,
             "notes": [
                 "默认用 Tavily 做发现，Firecrawl 做正文抓取，X 搜索走 xAI Responses API",
                 "如果某个 provider 没配 key，会保留错误并尽量返回其余部分",
@@ -6856,7 +6859,7 @@ class MySearchClient:
             summary = f"{summary}; corroborated across {source_diversity} domains"
         return summary
 
-    def _build_research_summary_fallback(
+    def _build_research_report_sections(
         self,
         *,
         query: str,
@@ -6865,7 +6868,8 @@ class MySearchClient:
         citations: list[dict[str, Any]],
         social: dict[str, Any] | None,
         evidence: dict[str, Any],
-    ) -> str:
+        executive_summary_override: str = "",
+    ) -> dict[str, Any]:
         web_answer = (web_search.get("answer") or "").strip()
         social_answer = ""
         if social:
@@ -6918,7 +6922,7 @@ class MySearchClient:
             or self._looks_like_exploratory_query(query_lower)
             or any(token in query_lower for token in ("best ", "top ", "compare ", "comparison "))
         )
-        primary_finding = web_answer or social_answer
+        primary_finding = executive_summary_override or web_answer or social_answer
         if not primary_finding and comparison_like:
             if citation_title_lines:
                 primary_finding = (
@@ -6934,19 +6938,49 @@ class MySearchClient:
         if not primary_finding and highlights:
             primary_finding = highlights[0]
         if not primary_finding:
-            return ""
+            return {}
 
-        lines = [f"Primary finding: {primary_finding}"]
         supporting = citation_title_lines[:] if comparison_like and citation_title_lines else highlights[:]
         if supporting and supporting[0] == primary_finding:
             supporting = supporting[1:]
-        if supporting:
-            lines.extend(["", "Supporting evidence:"])
-            for item in supporting[:2]:
-                lines.append(f"- {item}")
+
+        key_findings: list[str] = []
+        if comparison_like and citation_title_lines:
+            key_findings.extend(citation_title_lines[:3])
+        else:
+            for item in highlights[:3]:
+                if item not in key_findings:
+                    key_findings.append(item)
+            if not key_findings:
+                for title in citation_title_lines[:3]:
+                    if title not in key_findings:
+                        key_findings.append(title)
+
+        evidence_highlights: list[str] = []
+        for item in supporting[:3]:
+            if item not in evidence_highlights:
+                evidence_highlights.append(item)
+
+        provider_roles: list[str] = []
+        providers = [str(item) for item in (evidence.get("providers_consulted") or []) if item]
+        if "tavily" in providers:
+            provider_roles.append("Tavily handled broad discovery and initial ranking.")
+        if evidence.get("page_count"):
+            provider_roles.append(
+                f"Firecrawl/extract captured full content for {int(evidence.get('page_count') or 0)} page(s)."
+            )
+        exa_unique = int(evidence.get("exa_unique_url_count") or 0)
+        if exa_unique > 0:
+            provider_roles.append(
+                f"Exa expanded semantic coverage with {exa_unique} unique candidate URL(s)."
+            )
+        if social_answer:
+            provider_roles.append("xAI added social or synthesis context to the research pass.")
+        arbitration_summary = str(evidence.get("xai_arbitration_summary") or "").strip()
+        if arbitration_summary:
+            provider_roles.append("xAI arbitrated conflicting evidence across providers.")
 
         coverage_bits: list[str] = []
-        providers = [str(item) for item in (evidence.get("providers_consulted") or []) if item]
         if providers:
             coverage_bits.append(f"providers={', '.join(providers)}")
         page_count = int(evidence.get("page_count") or 0)
@@ -6956,29 +6990,110 @@ class MySearchClient:
         citation_count = int(evidence.get("citation_count") or 0)
         if citation_count > 0:
             coverage_bits.append(f"citations={citation_count}")
-        exa_unique = int(evidence.get("exa_unique_url_count") or 0)
         if exa_unique > 0:
             coverage_bits.append(f"exa_unique_urls={exa_unique}")
+        source_diversity = int(evidence.get("source_diversity") or 0)
+        if source_diversity > 0:
+            coverage_bits.append(f"source_domains={source_diversity}")
         confidence = str(evidence.get("confidence") or "").strip()
         if confidence:
             coverage_bits.append(f"confidence={confidence}")
-        if coverage_bits:
-            lines.extend(["", "Coverage:", f"- {' | '.join(coverage_bits)}"])
-
-        if social_answer and social_answer != primary_finding:
-            lines.extend(["", f"Social signal: {social_answer}"])
+        social_signal = social_answer if social_answer and social_answer != primary_finding else ""
 
         significant_conflicts = [
             str(item)
             for item in (evidence.get("conflicts") or [])
             if item and item != "social-search-unavailable"
         ]
-        if significant_conflicts:
-            lines.extend(["", "Open questions:", f"- {'; '.join(significant_conflicts[:3])}"])
-        elif citation_titles:
-            lines.extend(["", "Top sources:", f"- {'; '.join(citation_titles[:3])}"])
+        top_sources = citation_title_lines[:4]
+
+        return {
+            "executive_summary": primary_finding,
+            "key_findings": key_findings[:3],
+            "evidence_highlights": evidence_highlights[:3],
+            "provider_roles": provider_roles[:4],
+            "coverage_bits": coverage_bits,
+            "social_signal": social_signal,
+            "caveats": significant_conflicts[:4],
+            "top_sources": top_sources,
+        }
+
+    def _render_research_report(self, sections: dict[str, Any]) -> str:
+        if not sections:
+            return ""
+
+        lines: list[str] = ["## Executive Summary", sections.get("executive_summary", "").strip()]
+
+        key_findings = [str(item).strip() for item in (sections.get("key_findings") or []) if str(item).strip()]
+        if key_findings:
+            lines.extend(["", "## Key Findings"])
+            for item in key_findings:
+                lines.append(f"- {item}")
+
+        evidence_highlights = [
+            str(item).strip()
+            for item in (sections.get("evidence_highlights") or [])
+            if str(item).strip()
+        ]
+        if evidence_highlights:
+            lines.extend(["", "## Evidence Highlights"])
+            for item in evidence_highlights:
+                lines.append(f"- {item}")
+
+        provider_roles = [
+            str(item).strip()
+            for item in (sections.get("provider_roles") or [])
+            if str(item).strip()
+        ]
+        if provider_roles:
+            lines.extend(["", "## Provider Contributions"])
+            for item in provider_roles:
+                lines.append(f"- {item}")
+
+        coverage_bits = [
+            str(item).strip()
+            for item in (sections.get("coverage_bits") or [])
+            if str(item).strip()
+        ]
+        if coverage_bits:
+            lines.extend(["", "## Coverage", f"- {' | '.join(coverage_bits)}"])
+
+        social_signal = str(sections.get("social_signal") or "").strip()
+        if social_signal:
+            lines.extend(["", "## Social Signal", f"- {social_signal}"])
+
+        caveats = [str(item).strip() for item in (sections.get("caveats") or []) if str(item).strip()]
+        top_sources = [str(item).strip() for item in (sections.get("top_sources") or []) if str(item).strip()]
+        if caveats:
+            lines.extend(["", "## Caveats"])
+            for item in caveats:
+                lines.append(f"- {item}")
+        elif top_sources:
+            lines.extend(["", "## Top Sources"])
+            for item in top_sources[:3]:
+                lines.append(f"- {item}")
 
         return "\n".join(lines).strip()
+
+    def _build_research_summary_fallback(
+        self,
+        *,
+        query: str,
+        web_search: dict[str, Any],
+        pages: list[dict[str, Any]],
+        citations: list[dict[str, Any]],
+        social: dict[str, Any] | None,
+        evidence: dict[str, Any],
+    ) -> str:
+        sections = self._build_research_report_sections(
+            query=query,
+            web_search=web_search,
+            pages=pages,
+            citations=citations,
+            social=social,
+            evidence=evidence,
+        )
+        return self._render_research_report(sections)
 
     def _build_excerpt(self, content: str, limit: int = 600) -> str:
         compact = re.sub(r"\s+", " ", content).strip()
