@@ -3692,6 +3692,8 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(selected[0]["url"], "https://github.com/tolkonepiu/best-of-mcp-servers")
         self.assertEqual(selected[1]["url"], "https://www.builder.io/blog/best-mcp-servers-2026")
         self.assertIn("github.com", meta["selected_candidate_domains"])
+        self.assertEqual(meta["selected_candidate_cluster_counts"]["project"], 1)
+        self.assertEqual(meta["selected_candidate_cluster_counts"]["listicle"], 1)
 
     def test_research_falls_back_to_exa_discovery_when_web_discovery_fails(self) -> None:
         client = MySearchClient()
@@ -3742,6 +3744,89 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["evidence"]["providers_consulted"], ["exa"])
         self.assertIn("## Provider Contributions", result["summary"])
         self.assertIn("Exa expanded semantic coverage", result["summary"])
+
+    def test_dedupe_research_results_preserves_matched_providers(self) -> None:
+        client = MySearchClient()
+
+        deduped = client._dedupe_research_results_for_report(
+            [
+                {
+                    "provider": "exa",
+                    "title": "best-of-mcp-servers - GitHub",
+                    "url": "https://github.com/tolkonepiu/best-of-mcp-servers",
+                    "snippet": "Curated repo list",
+                }
+            ],
+            [
+                {
+                    "provider": "tavily",
+                    "title": "best-of-mcp-servers - GitHub",
+                    "url": "https://github.com/tolkonepiu/best-of-mcp-servers",
+                    "snippet": "Repository of MCP servers",
+                }
+            ],
+        )
+
+        self.assertEqual(len(deduped), 1)
+        self.assertEqual(deduped[0]["matched_providers"], ["exa", "tavily"])
+
+    def test_research_report_sections_include_claim_evidence_and_source_clusters(self) -> None:
+        client = MySearchClient()
+
+        sections = client._build_research_report_sections(
+            query="best search MCP server 2026",
+            web_search={"intent": "exploratory", "answer": ""},
+            ordered_results=[
+                {
+                    "provider": "exa",
+                    "matched_providers": ["exa", "tavily"],
+                    "title": "best-of-mcp-servers - GitHub",
+                    "url": "https://github.com/tolkonepiu/best-of-mcp-servers",
+                    "snippet": "Curated repo list for MCP servers.",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "The Best MCP Servers for Developers in 2026",
+                    "url": "https://www.builder.io/blog/best-mcp-servers-2026",
+                    "snippet": "Curated engineering comparison.",
+                },
+            ],
+            pages=[
+                {
+                    "url": "https://github.com/tolkonepiu/best-of-mcp-servers",
+                    "excerpt": "This repository curates MCP servers for search, code analysis, and automation use cases.",
+                    "content": "",
+                }
+            ],
+            citations=[
+                {
+                    "title": "best-of-mcp-servers - GitHub",
+                    "url": "https://github.com/tolkonepiu/best-of-mcp-servers",
+                },
+                {
+                    "title": "The Best MCP Servers for Developers in 2026",
+                    "url": "https://www.builder.io/blog/best-mcp-servers-2026",
+                },
+            ],
+            social=None,
+            evidence={
+                "providers_consulted": ["exa", "tavily"],
+                "citation_count": 2,
+                "confidence": "medium",
+                "research_plan": {"scrape_top_n": 2, "web_mode": "exploratory"},
+                "selected_candidate_domains": ["github.com", "builder.io"],
+                "authoritative_research": False,
+            },
+        )
+        summary = client._render_research_report(sections)
+
+        self.assertIn("claim_evidence", sections)
+        self.assertIn("source_clusters", sections)
+        self.assertEqual(sections["claim_evidence"][0]["providers"], ["exa", "tavily"])
+        self.assertEqual(sections["source_clusters"][0]["label"], "project")
+        self.assertIn("## Claim-Level Evidence", summary)
+        self.assertIn("## Source Clusters", summary)
+        self.assertIn("| Candidate | Cluster | Provider Support | Evidence Note |", summary)
 
 
 if __name__ == "__main__":
