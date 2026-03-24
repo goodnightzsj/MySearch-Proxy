@@ -1160,6 +1160,51 @@ class MySearchClientTests(unittest.TestCase):
             "Top official match: API Pricing | OpenAI (openai.com)",
         )
 
+    def test_search_strict_official_mode_reranks_locale_variant_below_canonical_page(self) -> None:
+        client = MySearchClient()
+        client._search_exa = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "exa",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "exa",
+                    "source": "web",
+                    "title": "Precios de la API - OpenAI",
+                    "url": "https://openai.com/es-419/api/pricing/",
+                    "snippet": "Localized pricing page",
+                    "content": "",
+                },
+                {
+                    "provider": "exa",
+                    "source": "web",
+                    "title": "API Pricing - OpenAI",
+                    "url": "https://openai.com/api/pricing/",
+                    "snippet": "Canonical pricing page",
+                    "content": "",
+                },
+            ],
+            "citations": [
+                {"title": "Precios de la API - OpenAI", "url": "https://openai.com/es-419/api/pricing/"},
+                {"title": "API Pricing - OpenAI", "url": "https://openai.com/api/pricing/"},
+            ],
+        }
+
+        result = client.search(
+            query="OpenAI API pricing official",
+            mode="web",
+            strategy="verify",
+            provider="exa",
+            include_answer=False,
+        )
+
+        self.assertEqual(result["results"][0]["url"], "https://openai.com/api/pricing/")
+        self.assertEqual(
+            result["summary"],
+            "Top official match: API Pricing - OpenAI (openai.com)",
+        )
+
     def test_docs_mode_enters_strict_resource_policy(self) -> None:
         client = MySearchClient()
 
@@ -2051,6 +2096,53 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertTrue(search_calls)
         self.assertEqual(search_calls[0]["provider"], "tavily")
+
+    def test_research_falls_back_to_exa_discovery_when_web_discovery_fails(self) -> None:
+        client = MySearchClient()
+        client._provider_can_serve = lambda provider: provider.name == "exa"  # type: ignore[method-assign]
+
+        def failing_search(**kwargs):  # type: ignore[no-untyped-def]
+            raise MySearchError("tavily request failed (HTTP 503): upstream unavailable")
+
+        client.search = failing_search  # type: ignore[method-assign]
+        client._search_exa = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "exa",
+            "transport": "env",
+            "query": kwargs["query"],
+            "results": [
+                {
+                    "provider": "exa",
+                    "title": "Best MCP Servers for Search in 2026 - Top 10 Tools",
+                    "url": "https://fast.io/resources/best-mcp-servers-search/",
+                    "snippet": "Comparison-heavy page",
+                    "content": "",
+                }
+            ],
+            "citations": [
+                {
+                    "title": "Best MCP Servers for Search in 2026 - Top 10 Tools",
+                    "url": "https://fast.io/resources/best-mcp-servers-search/",
+                }
+            ],
+        }
+        client.extract_url = lambda **kwargs: {  # type: ignore[method-assign]
+            "url": kwargs["url"],
+            "provider": "firecrawl",
+            "content": "A structured comparison of MCP servers for search-focused agent workflows.",
+            "cache": {"extract": {"hit": False, "ttl_seconds": 300}},
+        }
+
+        result = client.research(
+            query="best search MCP server 2026",
+            mode="web",
+            strategy="deep",
+            include_social=False,
+            scrape_top_n=1,
+        )
+
+        self.assertEqual(result["web_search"]["provider"], "exa")
+        self.assertEqual(result["web_search"]["fallback"]["to"], "exa")
+        self.assertIn("comparative rather than authoritative", result["summary"])
 
 
 if __name__ == "__main__":
