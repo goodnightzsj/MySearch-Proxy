@@ -4257,7 +4257,7 @@ class MySearchClient:
         if search_categories:
             payload["categories"] = [{"type": item} for item in search_categories]
         if include_content:
-            if "news" not in search_categories:
+            if not requested_news and "news" not in search_categories:
                 payload["scrapeOptions"] = {
                     "formats": ["markdown"],
                     "onlyMainContent": True,
@@ -7187,15 +7187,29 @@ class MySearchClient:
         return ""
 
     def _extract_album_of_the_year_entity(self, text: str) -> str:
-        patterns = [
+        duo_patterns = [
             r"([A-Z][A-Za-z0-9&'’.\- ]{1,80}) won album of the year for (?:his|her|their|its) album[_*\s]+([^_\n.;]{2,120})",
             r"([A-Z][A-Za-z0-9&'’.\- ]{1,80}) won album of the year for the album[_*\s]+([^_\n.;]{2,120})",
         ]
-        for pattern in patterns:
+        for pattern in duo_patterns:
             match = re.search(pattern, text, flags=re.IGNORECASE)
             if not match:
                 continue
-            artist = self._clean_extracted_fact_entity(match.group(1))
+            artist = self._clean_extracted_fact_entity(
+                match.group(1),
+                reject_substrings=[
+                    "award",
+                    "winner",
+                    "nominee",
+                    "nominees",
+                    "best new artist",
+                    "collaboration",
+                    "his ",
+                    "her ",
+                    "their ",
+                    "its ",
+                ],
+            )
             album = self._clean_extracted_fact_entity(
                 match.group(2),
                 reject_substrings=[
@@ -7208,6 +7222,26 @@ class MySearchClient:
             )
             if album and artist:
                 return f"{album} by {artist}"
+            if album:
+                return album
+        album_only_patterns = [
+            r"won album of the year for (?:his|her|their|its) album[_*\s]+([^_\n.;]{2,120})",
+            r"won album of the year for the album[_*\s]+([^_\n.;]{2,120})",
+        ]
+        for pattern in album_only_patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            album = self._clean_extracted_fact_entity(
+                match.group(1),
+                reject_substrings=[
+                    "award",
+                    "winner",
+                    "nominee",
+                    "nominees",
+                    "best new artist",
+                ],
+            )
             if album:
                 return album
         return ""
