@@ -606,6 +606,29 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(answer, "Best Picture winner: One Battle After Another")
 
+    def test_extract_album_of_the_year_answer_trims_trailing_explanatory_clause(self) -> None:
+        client = MySearchClient()
+
+        answer = client._extract_result_event_answer(
+            query="2026 Grammy Album of the Year winner",
+            results=[
+                {
+                    "title": "Grammy Awards winners list",
+                    "snippet": "",
+                    "content": (
+                        "Bad Bunny won album of the year for his album "
+                        "_DeBÍ TiRAR MáS FOToS_, marking the first time a primarily "
+                        "Spanish-language album has won album of the year."
+                    ),
+                }
+            ],
+        )
+
+        self.assertEqual(
+            answer,
+            "Album of the Year winner: DeBÍ TiRAR MáS FOToS by Bad Bunny",
+        )
+
     def test_result_set_looks_weak_for_exa_rescue_for_award_prediction_results(self) -> None:
         client = MySearchClient()
 
