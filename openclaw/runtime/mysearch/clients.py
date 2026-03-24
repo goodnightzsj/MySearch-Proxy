@@ -1409,8 +1409,21 @@ class MySearchClient:
             research_tasks,
             max_workers=len(research_tasks),
         )
-        self._raise_parallel_error(research_errors, "web")
-        web_search = research_results["web"]
+        web_search = research_results.get("web")
+        exa_discovery = research_results.get("exa_discovery")
+        if web_search is None:
+            if exa_discovery and not research_errors.get("exa_discovery"):
+                web_search = self._build_research_web_fallback_result(
+                    query=query,
+                    mode=research_plan["web_mode"],
+                    intent=resolved_intent,
+                    strategy=resolved_strategy,
+                    exa_discovery=exa_discovery,
+                    include_domains=include_domains,
+                )
+            else:
+                self._raise_parallel_error(research_errors, "web")
+                web_search = research_results["web"]
 
         urls: list[str] = []
         prefetched_content: dict[str, str] = {}
@@ -1443,7 +1456,6 @@ class MySearchClient:
                         if len(urls) >= research_plan["scrape_top_n"]:
                             break
 
-        exa_discovery = research_results.get("exa_discovery")
         exa_discovery_results = (
             list(exa_discovery.get("results") or [])
             if exa_discovery and not research_errors.get("exa_discovery")
@@ -1887,7 +1899,77 @@ class MySearchClient:
                 strict_official=strict_official,
             ):
                 candidates.append(dict(item))
+        if len(candidates) >= 2:
+            candidates = self._rerank_resource_results(
+                query=query,
+                mode=mode,
+                results=candidates,
+                include_domains=include_domains,
+            )
         return candidates
+
+    def _build_research_web_fallback_result(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        strategy: SearchStrategy,
+        exa_discovery: dict[str, Any],
+        include_domains: list[str] | None,
+    ) -> dict[str, Any]:
+        fallback_result = dict(exa_discovery)
+        fallback_result["provider"] = "exa"
+        fallback_result["query"] = query
+        fallback_result["intent"] = intent
+        fallback_result["strategy"] = strategy
+        fallback_result.setdefault(
+            "fallback",
+            {"from": "research-web", "to": "exa", "reason": "primary web discovery failed"},
+        )
+        results = list(fallback_result.get("results") or [])
+        citations = list(fallback_result.get("citations") or [])
+        if self._should_rerank_resource_results(mode=mode, intent=intent):
+            results = self._rerank_resource_results(
+                query=query,
+                mode=mode,
+                results=results,
+                include_domains=include_domains,
+            )
+        elif self._should_rerank_general_results(result_profile="web"):
+            results = self._rerank_general_results(
+                query=query,
+                result_profile="web",
+                results=results,
+                include_domains=include_domains,
+            )
+        fallback_result["results"] = results
+        fallback_result["citations"] = self._align_citations_with_results(
+            results=results,
+            citations=citations,
+        )
+        fallback_result = self._apply_official_resource_policy(
+            query=query,
+            mode=mode,
+            intent=intent,
+            result=fallback_result,
+            include_domains=include_domains,
+        )
+        fallback_result = self._trim_search_payload(fallback_result, max_results=len(results) or 5)
+        fallback_result = self._augment_evidence_summary(
+            fallback_result,
+            query=query,
+            mode=mode,
+            intent=intent,
+            include_domains=include_domains,
+        )
+        fallback_result["summary"] = self._build_search_summary_fallback(
+            query=query,
+            mode=mode,
+            intent=intent,
+            result=fallback_result,
+        )
+        return fallback_result
 
     def _augment_research_evidence(
         self,
@@ -6121,6 +6203,7 @@ class MySearchClient:
             web_search.get("intent") in {"comparison", "exploratory"}
             or self._looks_like_comparison_query(query_lower)
             or self._looks_like_exploratory_query(query_lower)
+            or any(token in query_lower for token in ("best ", "top ", "compare ", "comparison "))
         )
         primary_finding = web_answer or social_answer
         if not primary_finding and comparison_like:
