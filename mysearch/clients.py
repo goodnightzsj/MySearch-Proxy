@@ -1002,12 +1002,14 @@ class MySearchClient:
                 )
                 if exa_boost.get("results"):
                     merged = self._merge_search_payloads(
-                        primary_result=result,
-                        secondary_result=exa_boost,
+                        primary_result=exa_boost if needs_pdf_exa_boost else result,
+                        secondary_result=result if needs_pdf_exa_boost else exa_boost,
                         max_results=max_results,
                     )
                     result["results"] = merged["results"]
                     result["citations"] = merged["citations"]
+                    if needs_pdf_exa_boost:
+                        result["provider"] = "hybrid"
                     if self._should_rerank_resource_results(mode=mode, intent=resolved_intent):
                         reranked_results = self._rerank_resource_results(
                             query=query,
