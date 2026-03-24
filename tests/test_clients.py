@@ -3546,6 +3546,89 @@ class MySearchClientTests(unittest.TestCase):
         self.assertIn("## Source Mix", result["summary"])
         self.assertIn("## Top Sources", result["summary"])
 
+    def test_research_comparison_queries_downrank_community_results(self) -> None:
+        client = MySearchClient()
+        client._provider_can_serve = lambda provider: provider.name != "xai"  # type: ignore[method-assign]
+        client.search = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "intent": "exploratory",
+            "strategy": "deep",
+            "answer": "",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "title": "Reddit thread about best MCP servers",
+                    "url": "https://www.reddit.com/r/ClaudeAI/comments/example",
+                    "snippet": "community discussion",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Best MCP Servers for Code Analysis in 2026 | FastMCP",
+                    "url": "https://fastmcp.me/mcp-servers-for-code-analysis",
+                    "snippet": "curated roundup",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "best-of-mcp-servers - GitHub",
+                    "url": "https://github.com/tolkonepiu/best-of-mcp-servers",
+                    "snippet": "curated repo list",
+                    "content": "",
+                },
+            ],
+            "citations": [
+                {
+                    "title": "Reddit thread about best MCP servers",
+                    "url": "https://www.reddit.com/r/ClaudeAI/comments/example",
+                },
+                {
+                    "title": "Best MCP Servers for Code Analysis in 2026 | FastMCP",
+                    "url": "https://fastmcp.me/mcp-servers-for-code-analysis",
+                },
+                {
+                    "title": "best-of-mcp-servers - GitHub",
+                    "url": "https://github.com/tolkonepiu/best-of-mcp-servers",
+                },
+            ],
+            "evidence": {
+                "providers_consulted": ["tavily"],
+                "verification": "single-provider",
+                "citation_count": 3,
+                "source_diversity": 3,
+                "source_domains": ["reddit.com", "fastmcp.me", "github.com"],
+                "official_source_count": 0,
+                "official_mode": "off",
+                "confidence": "medium",
+                "conflicts": [],
+            },
+        }
+        client._search_exa = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "exa",
+            "transport": "env",
+            "query": kwargs["query"],
+            "results": [],
+            "citations": [],
+        }
+        client.extract_url = lambda **kwargs: {  # type: ignore[method-assign]
+            "url": kwargs["url"],
+            "provider": "firecrawl",
+            "content": f"content for {kwargs['url']}",
+            "cache": {"extract": {"hit": False, "ttl_seconds": 300}},
+        }
+
+        result = client.research(
+            query="best search MCP server 2026",
+            mode="web",
+            strategy="deep",
+            include_social=False,
+            scrape_top_n=2,
+        )
+
+        self.assertEqual(result["pages"][0]["url"], "https://fastmcp.me/mcp-servers-for-code-analysis")
+        self.assertNotEqual(result["pages"][0]["url"], "https://www.reddit.com/r/ClaudeAI/comments/example")
+        self.assertEqual(result["evidence"]["community_source_count"], 1)
+
     def test_research_falls_back_to_exa_discovery_when_web_discovery_fails(self) -> None:
         client = MySearchClient()
         client._provider_can_serve = lambda provider: provider.name == "exa"  # type: ignore[method-assign]

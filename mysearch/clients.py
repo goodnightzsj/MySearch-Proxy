@@ -1965,11 +1965,48 @@ class MySearchClient:
             }
 
         if not authoritative_preferred:
-            selected = combined[:max_results]
+            community_domains = {
+                "facebook.com",
+                "linkedin.com",
+                "news.ycombinator.com",
+                "quora.com",
+                "reddit.com",
+                "twitter.com",
+                "x.com",
+                "youtube.com",
+                "youtu.be",
+            }
+            curated_candidates: list[dict[str, Any]] = []
+            community_candidates: list[dict[str, Any]] = []
+            for item in combined:
+                registered_domain = self._registered_domain(self._result_hostname(item))
+                if registered_domain in community_domains:
+                    community_candidates.append(item)
+                else:
+                    curated_candidates.append(item)
+            if len(curated_candidates) > 1:
+                curated_candidates = self._rerank_general_results(
+                    query=query,
+                    result_profile="web",
+                    results=curated_candidates,
+                    include_domains=include_domains,
+                )
+            if len(community_candidates) > 1:
+                community_candidates = self._rerank_general_results(
+                    query=query,
+                    result_profile="web",
+                    results=community_candidates,
+                    include_domains=include_domains,
+                )
+            selected = [*curated_candidates, *community_candidates][:max_results]
             selected_domains = self._collect_source_domains(results=selected, citations=[])
             return selected, {
                 "authoritative_source_count": 0,
-                "community_source_count": 0,
+                "community_source_count": sum(
+                    1
+                    for item in selected
+                    if self._registered_domain(self._result_hostname(item)) in community_domains
+                ),
                 "selected_candidate_domains": selected_domains[:5],
             }
 
