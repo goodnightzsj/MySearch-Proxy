@@ -1096,6 +1096,12 @@ class MySearchClient:
         if "low-source-diversity" in conflicts and resolved_strategy in {"fast", "balanced"}:
             evidence["retry_hint"] = "consider strategy=verify for broader source diversity"
             result["evidence"] = evidence
+        result["summary"] = self._build_search_summary_fallback(
+            query=query,
+            mode=mode,
+            intent=resolved_intent,
+            result=result,
+        )
 
         route_reason = decision.reason
         if result.get("provider") == "hybrid" and resolved_strategy in {"balanced", "verify", "deep"}:
@@ -1552,6 +1558,7 @@ class MySearchClient:
                 pass
         if not research_summary:
             research_summary = self._build_research_summary_fallback(
+                query=query,
                 web_search=web_search,
                 pages=pages,
                 citations=citations,
@@ -4520,7 +4527,7 @@ class MySearchClient:
         exact_identifier_tokens: list[str],
         include_domains: list[str] | None,
         strict_official: bool,
-    ) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int, int, int, int]:
+    ) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int]:
         flags = self._resource_result_flags(
             mode=mode,
             item=item,
@@ -4584,6 +4591,12 @@ class MySearchClient:
             title_text=(item.get("title") or "").lower(),
             query_tokens=precision_tokens,
         )
+        non_locale_variant = int(
+            not (
+                strict_official
+                and self._looks_like_locale_prefixed_path(urlparse(url).path)
+            )
+        )
         exact_path_hits, exact_total_hits = self._query_exact_identifier_hit_counts(
             path=urlparse(url).path.lower(),
             title_text=(item.get("title") or "").lower(),
@@ -4599,6 +4612,7 @@ class MySearchClient:
             paper_landing_bonus,
             exact_path_hits,
             exact_total_hits,
+            non_locale_variant,
             path_precision_hits,
             total_precision_hits,
             registered_domain_label_match,
@@ -4775,6 +4789,13 @@ class MySearchClient:
             return raw
         scheme = parsed.scheme or "https"
         return f"{scheme}://arxiv.org/abs/{match.group('paper_id')}"
+
+    def _looks_like_locale_prefixed_path(self, path: str) -> bool:
+        parts = [item for item in (path or "").split("/") if item]
+        if len(parts) < 2:
+            return False
+        first = parts[0].strip().lower()
+        return bool(re.fullmatch(r"[a-z]{2}(?:-[a-z0-9]{2,8}){0,2}", first))
 
     def _result_quality_score(self, item: dict[str, Any]) -> tuple[int, int, int]:
         content = item.get("content") or ""
@@ -5996,9 +6017,54 @@ class MySearchClient:
         ]
         return any(keyword in query_lower for keyword in keywords)
 
+    def _build_search_summary_fallback(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent | str,
+        result: dict[str, Any],
+    ) -> str:
+        answer = (result.get("answer") or "").strip()
+        if answer:
+            return answer
+
+        results = list(result.get("results") or [])
+        if not results:
+            return ""
+
+        top = results[0]
+        title = (top.get("title") or "").strip()
+        url = (top.get("url") or "").strip()
+        label = title or url
+        if not label:
+            return ""
+
+        evidence = result.get("evidence") or {}
+        official_mode = str(evidence.get("official_mode") or "off")
+        source_diversity = int(evidence.get("source_diversity") or 0)
+        verification = str(evidence.get("verification") or "").strip()
+        domain = self._registered_domain(self._result_hostname(top))
+
+        if official_mode == "strict":
+            summary = f"Top official match: {label}"
+        elif mode == "news" or intent == "news":
+            summary = f"Top news match: {label}"
+        elif mode in {"docs", "github", "pdf"} or intent in {"resource", "tutorial"}:
+            summary = f"Top source: {label}"
+        else:
+            summary = f"Top result: {label}"
+
+        if domain:
+            summary = f"{summary} ({domain})"
+        if verification == "cross-provider" and source_diversity >= 2:
+            summary = f"{summary}; corroborated across {source_diversity} domains"
+        return summary
+
     def _build_research_summary_fallback(
         self,
         *,
+        query: str,
         web_search: dict[str, Any],
         pages: list[dict[str, Any]],
         citations: list[dict[str, Any]],
@@ -6038,16 +6104,44 @@ class MySearchClient:
             for citation in citations
             if (citation.get("title") or "").strip()
         ]
+        citation_title_lines: list[str] = []
+        for citation in citations:
+            title = (citation.get("title") or "").strip()
+            url = (citation.get("url") or "").strip()
+            if not title:
+                continue
+            domain = self._registered_domain(self._result_hostname({"url": url}))
+            line = f"{title} ({domain})" if domain and domain not in title.lower() else title
+            if line not in citation_title_lines:
+                citation_title_lines.append(line)
+            if len(citation_title_lines) >= 4:
+                break
+        query_lower = query.lower()
+        comparison_like = (
+            web_search.get("intent") in {"comparison", "exploratory"}
+            or self._looks_like_comparison_query(query_lower)
+            or self._looks_like_exploratory_query(query_lower)
+        )
         primary_finding = web_answer or social_answer
-        if not primary_finding and highlights:
-            primary_finding = highlights[0]
+        if not primary_finding and comparison_like:
+            if citation_title_lines:
+                primary_finding = (
+                    "The strongest available evidence is comparative rather than authoritative; "
+                    f"recurring source clusters include {', '.join(citation_title_lines[:3])}."
+                )
+            else:
+                primary_finding = (
+                    "The strongest available evidence is comparative rather than authoritative."
+                )
         if not primary_finding and citation_titles:
             primary_finding = citation_titles[0]
+        if not primary_finding and highlights:
+            primary_finding = highlights[0]
         if not primary_finding:
             return ""
 
         lines = [f"Primary finding: {primary_finding}"]
-        supporting = highlights[:]
+        supporting = citation_title_lines[:] if comparison_like and citation_title_lines else highlights[:]
         if supporting and supporting[0] == primary_finding:
             supporting = supporting[1:]
         if supporting:
