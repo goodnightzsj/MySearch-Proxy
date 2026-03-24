@@ -3150,6 +3150,7 @@ class MySearchClient:
         snippet_text = (item.get("snippet") or "").lower()
         content_text = (item.get("content") or "").lower()
         query_lower = query.lower()
+        page_text = f"{title_text} {snippet_text} {content_text} {path}"
         gossip_query = self._looks_like_gossip_query(query_lower)
         status_query = self._looks_like_status_query(query_lower)
         award_query = self._looks_like_award_result_query(query_lower)
@@ -3166,6 +3167,41 @@ class MySearchClient:
                 title_text=title_text,
                 snippet_text=snippet_text,
                 path=path,
+            )
+        )
+        award_category_match = int(
+            award_query
+            and self._looks_like_award_category_match(
+                query_lower=query_lower,
+                title_text=title_text,
+                snippet_text=snippet_text,
+                content_text=content_text,
+                path=path,
+            )
+        )
+        non_award_prediction_page = int(
+            not (
+                award_query
+                and self._looks_like_award_prediction_result(
+                    title_text=title_text,
+                    snippet_text=snippet_text,
+                    path=path,
+                )
+            )
+        )
+        non_year_mismatch = int(
+            not (
+                award_query
+                and self._looks_like_query_year_mismatch(
+                    query=query_lower,
+                    text=page_text,
+                )
+            )
+        )
+        non_low_signal_social = int(
+            not (
+                award_query
+                and registered_domain in {"facebook.com", "instagram.com", "tiktok.com", "youtube.com"}
             )
         )
         non_award_nomination_page = int(
@@ -3235,6 +3271,10 @@ class MySearchClient:
         return (
             include_match,
             award_winner_page_match,
+            award_category_match,
+            non_award_prediction_page,
+            non_year_mismatch,
+            non_low_signal_social,
             non_award_nomination_page,
             non_community_official,
             canonical_status_page_match,
@@ -3452,6 +3492,19 @@ class MySearchClient:
         ]
         return any(marker in text for marker in winner_markers)
 
+    def _looks_like_award_category_match(
+        self,
+        *,
+        query_lower: str,
+        title_text: str,
+        snippet_text: str,
+        content_text: str,
+        path: str,
+    ) -> bool:
+        text = f"{title_text} {snippet_text} {content_text} {path}"
+        category_markers = self._award_query_category_markers(query_lower)
+        return bool(category_markers) and any(marker in text for marker in category_markers)
+
     def _looks_like_award_nomination_result(
         self,
         *,
@@ -3477,6 +3530,31 @@ class MySearchClient:
         return any(marker in text for marker in nomination_markers) and not any(
             marker in text for marker in winner_markers
         )
+
+    def _looks_like_award_prediction_result(
+        self,
+        *,
+        title_text: str,
+        snippet_text: str,
+        path: str,
+    ) -> bool:
+        text = f"{title_text} {snippet_text} {path}"
+        prediction_markers = [
+            "award buzz",
+            "contender",
+            "contenders",
+            "forecast",
+            "next year",
+            "next-year",
+            "odds",
+            "prediction",
+            "predictions",
+            "predicts",
+            "snub",
+            "snubs",
+            "way too early",
+        ]
+        return any(marker in text for marker in prediction_markers)
 
     def _looks_like_news_article_result(self, item: dict[str, Any]) -> bool:
         path = urlparse(item.get("url", "")).path.lower()
@@ -6799,6 +6877,20 @@ class MySearchClient:
         ]
         return any(keyword in query_lower for keyword in keywords)
 
+    def _award_query_category_markers(self, query_lower: str) -> list[str]:
+        markers: list[str] = []
+        if "best picture" in query_lower or "最佳影片" in query_lower or "最佳电影" in query_lower:
+            markers.extend(["best picture", "最佳影片", "最佳电影"])
+        if "best actor" in query_lower or "最佳男主角" in query_lower:
+            markers.extend(["best actor", "actor in a leading role", "最佳男主角"])
+        if "best actress" in query_lower or "最佳女主角" in query_lower:
+            markers.extend(["best actress", "actress in a leading role", "最佳女主角"])
+        if any(token in query_lower for token in ("album of the year", "aoty", "最佳专辑")):
+            markers.extend(["album of the year", "aoty", "最佳专辑"])
+        if any(token in query_lower for token in ("record of the year", "最佳歌曲")):
+            markers.extend(["record of the year", "最佳歌曲"])
+        return markers
+
     def _looks_like_box_office_query(self, query_lower: str) -> bool:
         keywords = [
             "box office",
@@ -7145,6 +7237,27 @@ class MySearchClient:
             if entity:
                 return f"Best Picture winner: {entity}"
 
+        if "best actor" in query_lower or "最佳男主角" in query_lower:
+            entity = self._extract_named_fact_entity(
+                combined_text,
+                patterns=[
+                    r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+won[^\n]{0,80}\bbest actor\b",
+                    r"best actor\s*[–—:-]\s*([^\n.;]{2,100})",
+                    r"best actor(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)?\s+([^\n.;]{2,100})",
+                    r"([A-Z][A-Za-z0-9'’&.\- ]{2,100})\s+won\s+best actor",
+                ],
+                reject_substrings=[
+                    "actress",
+                    "award",
+                    "nominee",
+                    "nominees",
+                    "supporting",
+                    "winner",
+                ],
+            )
+            if entity:
+                return f"Best Actor winner: {entity}"
+
         if any(token in query_lower for token in ("album of the year", "aoty", "最佳专辑")):
             entity = self._extract_album_of_the_year_entity(combined_text)
             if entity:
@@ -7170,6 +7283,27 @@ class MySearchClient:
             )
             if entity:
                 return f"Album of the Year winner: {entity}"
+
+        if "record of the year" in query_lower or "最佳歌曲" in query_lower:
+            entity = self._extract_named_fact_entity(
+                combined_text,
+                patterns=[
+                    r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+(?:won|wins)[^\n]{0,80}\brecord of the year\b",
+                    r"record of the year\s*[–—:-]\s*([^\n.;]{2,100})",
+                    r"record of the year(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)?\s+([^\n.;]{2,100})",
+                    r"([^\n.;]{2,100})\s+won\s+record of the year",
+                ],
+                reject_substrings=[
+                    "album of the year",
+                    "award",
+                    "nominee",
+                    "nominees",
+                    "song of the year",
+                    "winner",
+                ],
+            )
+            if entity:
+                return f"Record of the Year winner: {entity}"
 
         if self._looks_like_box_office_query(query_lower):
             entity = self._extract_named_fact_entity(
@@ -7270,8 +7404,11 @@ class MySearchClient:
         reject_substrings: list[str] | None = None,
     ) -> str:
         entity = re.sub(r"\s+", " ", value).strip(" \t\r\n-:;,.\"'“”‘’")
+        entity = re.sub(r"^(?:winner|winners)\s*[:\-]\s*", "", entity, flags=re.IGNORECASE)
         entity = re.split(r"\s+(?:with|which|that|after|during|for)\s+", entity, maxsplit=1)[0]
+        entity = re.split(r",\s*(?:[\"“]|[A-Z][A-Za-z])", entity, maxsplit=1)[0]
         entity = re.split(r"\s{2,}", entity, maxsplit=1)[0]
+        entity = re.sub(r"\s+\((?:winner|winners)\)$", "", entity, flags=re.IGNORECASE).strip()
         if len(entity) < 2:
             return ""
         if reject_substrings:
@@ -7279,6 +7416,15 @@ class MySearchClient:
             if any(token in entity_lower for token in reject_substrings):
                 return ""
         return entity
+
+    def _looks_like_query_year_mismatch(self, *, query: str, text: str) -> bool:
+        query_years = {year for year in re.findall(r"\b20\d{2}\b", query)}
+        if not query_years:
+            return False
+        result_years = {year for year in re.findall(r"\b20\d{2}\b", text)}
+        if not result_years:
+            return False
+        return query_years.isdisjoint(result_years)
 
     def _build_research_report_sections(
         self,

@@ -213,6 +213,60 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertIn("winners", ranked[0]["title"].lower())
 
+    def test_news_rerank_downranks_predictions_and_year_mismatch_for_award_results(self) -> None:
+        client = MySearchClient()
+
+        ranked = client._rerank_general_results(
+            query="2026 Oscars best actor winner",
+            result_profile="news",
+            results=[
+                {
+                    "provider": "tavily",
+                    "title": "Oscars 2027 early prediction: who will win next year",
+                    "url": "https://www.theguardian.com/film/2026/mar/18/oscars-2027-early-prediction-wins",
+                    "snippet": "",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Oscars 2026 winners list: Best Actor goes to Colman Domingo",
+                    "url": "https://www.hollywoodreporter.com/lists/oscars-2026-winners-list-best-actor",
+                    "snippet": "",
+                    "content": "",
+                },
+            ],
+            include_domains=None,
+        )
+
+        self.assertIn("best actor", ranked[0]["title"].lower())
+
+    def test_news_rerank_prefers_category_match_over_generic_awards_article(self) -> None:
+        client = MySearchClient()
+
+        ranked = client._rerank_general_results(
+            query="2026 Grammy Record of the Year winner",
+            result_profile="news",
+            results=[
+                {
+                    "provider": "tavily",
+                    "title": "Norah Jones, Ray Charles to be honored at 2026 Grammy Hall of Fame Gala",
+                    "url": "https://www.billboard.com/music/awards/norah-jones-ray-charles-award-2026-grammy-hall-of-fame-gala-1236201595/",
+                    "snippet": "",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "The complete list of 2026 Grammy winners and nominees",
+                    "url": "https://www.npr.org/2026/02/01/nx-s1-5693046/2026-grammy-awards-full-list-winners-nominees",
+                    "snippet": "Record of the Year — Not Like Us",
+                    "content": "",
+                },
+            ],
+            include_domains=None,
+        )
+
+        self.assertIn("winners", ranked[0]["title"].lower())
+
     def test_apply_result_event_answer_override_extracts_best_picture_winner(self) -> None:
         client = MySearchClient()
 
@@ -236,6 +290,31 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertEqual(result["answer"], "Best Picture winner: One Battle After Another")
+        self.assertEqual(result["evidence"]["answer_source"], "result-event-extraction")
+
+    def test_apply_result_event_answer_override_extracts_best_actor_winner(self) -> None:
+        client = MySearchClient()
+
+        result = client._apply_result_event_answer_override(
+            query="2026 Oscars best actor winner",
+            mode="news",
+            intent="news",
+            strategy="verify",
+            result={
+                "answer": "",
+                "results": [
+                    {
+                        "title": "Oscars 2026 winners list",
+                        "url": "https://example.com/oscars-2026",
+                        "snippet": "Best Actor — Colman Domingo",
+                        "content": "",
+                    }
+                ],
+                "evidence": {},
+            },
+        )
+
+        self.assertEqual(result["answer"], "Best Actor winner: Colman Domingo")
         self.assertEqual(result["evidence"]["answer_source"], "result-event-extraction")
 
     def test_apply_result_event_answer_override_extracts_box_office_title(self) -> None:
@@ -325,6 +404,54 @@ class MySearchClientTests(unittest.TestCase):
             "Album of the Year winner: DeBÍ TiRAR MáS FOToS by Bad Bunny",
         )
         self.assertEqual(result["evidence"]["answer_source"], "result-event-extraction")
+
+    def test_apply_result_event_answer_override_extracts_record_of_the_year_from_page_content(self) -> None:
+        client = MySearchClient()
+
+        client.extract_url = lambda **kwargs: {  # type: ignore[method-assign]
+            "content": (
+                "\"Not Like Us\" won Record of the Year, while other categories "
+                "included additional performances later in the ceremony."
+            )
+        }
+
+        result = client._apply_result_event_answer_override(
+            query="2026 Grammy Record of the Year winner",
+            mode="news",
+            intent="news",
+            strategy="verify",
+            result={
+                "answer": "",
+                "results": [
+                    {
+                        "title": "The complete list of 2026 Grammy winners and nominees",
+                        "url": "https://www.npr.org/2026/02/01/grammys",
+                        "snippet": "",
+                        "content": "",
+                    }
+                ],
+                "evidence": {},
+            },
+        )
+
+        self.assertEqual(result["answer"], "Record of the Year winner: Not Like Us")
+        self.assertEqual(result["evidence"]["answer_source"], "result-event-extraction")
+
+    def test_extract_result_event_answer_trims_trailing_list_noise(self) -> None:
+        client = MySearchClient()
+
+        answer = client._extract_result_event_answer(
+            query="2026 Oscars best picture winner",
+            results=[
+                {
+                    "title": "Oscars 2026 winners list",
+                    "snippet": 'Best Picture winner: One Battle After Another, "Sinners," and "Dune: Messiah" also won major prizes.',
+                    "content": "",
+                }
+            ],
+        )
+
+        self.assertEqual(answer, "Best Picture winner: One Battle After Another")
 
     def test_pdf_rerank_prefers_primary_named_paper_over_derivative_variants(self) -> None:
         client = MySearchClient()
