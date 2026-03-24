@@ -969,14 +969,25 @@ class MySearchClient:
             include_domains=include_domains,
         )
 
-        if (
+        needs_pdf_exa_boost = (
+            mode == "pdf"
+            and decision.provider not in {"exa", "xai"}
+            and not result.get("fallback")
+            and self._provider_can_serve(self.config.exa)
+            and not self._has_strong_pdf_match(
+                query=query,
+                results=list(result.get("results") or []),
+            )
+        )
+        should_low_confidence_boost = (
             (result.get("evidence") or {}).get("confidence") == "low"
             and resolved_strategy not in {"fast"}
             and decision.provider not in {"exa", "xai"}
             and not result.get("fallback")
             and not include_domains
             and self._provider_can_serve(self.config.exa)
-        ):
+        )
+        if should_low_confidence_boost or needs_pdf_exa_boost:
             try:
                 exa_boost = self._search_exa(
                     query=query,
@@ -997,7 +1008,34 @@ class MySearchClient:
                     )
                     result["results"] = merged["results"]
                     result["citations"] = merged["citations"]
-                    result.setdefault("evidence", {})["low_confidence_exa_boost"] = True
+                    if self._should_rerank_resource_results(mode=mode, intent=resolved_intent):
+                        reranked_results = self._rerank_resource_results(
+                            query=query,
+                            mode=mode,
+                            results=list(result.get("results") or []),
+                            include_domains=include_domains,
+                        )
+                        result["results"] = reranked_results
+                        result["citations"] = self._align_citations_with_results(
+                            results=reranked_results,
+                            citations=list(result.get("citations") or []),
+                        )
+                    elif self._should_rerank_general_results(result_profile=decision.result_profile):
+                        reranked_results = self._rerank_general_results(
+                            query=query,
+                            result_profile=decision.result_profile,
+                            results=list(result.get("results") or []),
+                            include_domains=include_domains,
+                        )
+                        result["results"] = reranked_results
+                        result["citations"] = self._align_citations_with_results(
+                            results=reranked_results,
+                            citations=list(result.get("citations") or []),
+                        )
+                    if should_low_confidence_boost:
+                        result.setdefault("evidence", {})["low_confidence_exa_boost"] = True
+                    if needs_pdf_exa_boost:
+                        result.setdefault("evidence", {})["pdf_exa_boost"] = True
                     result = self._augment_evidence_summary(
                         result,
                         query=query,

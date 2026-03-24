@@ -68,6 +68,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tavily-bearer", default=DEFAULT_TAVILY_BEARER)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--benchmark-id", action="append", default=[])
+    parser.add_argument("--mysearch-only", action="store_true")
+    parser.add_argument("--reuse-output-csv", default="")
     return parser.parse_args()
 
 
@@ -353,8 +355,10 @@ class MCPClient:
 payload = json.loads(base64.b64decode(sys.argv[1]).decode())
 mysearch = MCPClient(payload["mysearch_url"])
 mysearch.initialize()
-tavily = MCPClient(payload["tavily_url"], {"Authorization": f'Bearer {payload["tavily_bearer"]}'})
-tavily.initialize()
+tavily = None
+if not payload.get("mysearch_only"):
+    tavily = MCPClient(payload["tavily_url"], {"Authorization": f'Bearer {payload["tavily_bearer"]}'})
+    tavily.initialize()
 
 output = []
 for case in payload["cases"]:
@@ -381,29 +385,39 @@ for case in payload["cases"]:
         row["error"] = f"mysearch: {exc}"
         row["mysearch_raw"] = ""
 
-    try:
-        tavily_payload = tavily.call_tool(case["tavily_tool"], case["tavily_args"])
-        tavily_text, tavily_blob = parse_tool_content_text(tavily_payload)
-        summary, urls, _ = summarize(tavily_blob)
-        row["tavily_summary"] = summary
-        row["tavily_top_urls"] = " | ".join(urls)
-        row["tavily_raw"] = tavily_text
-    except Exception as exc:
-        row["run_status"] = "partial-error" if row["run_status"] == "captured" else "error"
-        row["error"] = (row["error"] + " ; " if row["error"] else "") + f"tavily: {exc}"
-        row["tavily_raw"] = ""
+    if tavily is not None:
+        try:
+            tavily_payload = tavily.call_tool(case["tavily_tool"], case["tavily_args"])
+            tavily_text, tavily_blob = parse_tool_content_text(tavily_payload)
+            summary, urls, _ = summarize(tavily_blob)
+            row["tavily_summary"] = summary
+            row["tavily_top_urls"] = " | ".join(urls)
+            row["tavily_raw"] = tavily_text
+        except Exception as exc:
+            row["run_status"] = "partial-error" if row["run_status"] == "captured" else "error"
+            row["error"] = (row["error"] + " ; " if row["error"] else "") + f"tavily: {exc}"
+            row["tavily_raw"] = ""
     output.append(row)
 
 print(json.dumps(output, ensure_ascii=False))
 """
 
 
-def run_remote_cases(host: str, mysearch_url: str, tavily_url: str, tavily_bearer: str, cases: list[dict[str, object]]) -> list[dict[str, str]]:
+def run_remote_cases(
+    host: str,
+    mysearch_url: str,
+    tavily_url: str,
+    tavily_bearer: str,
+    cases: list[dict[str, object]],
+    *,
+    mysearch_only: bool = False,
+) -> list[dict[str, str]]:
     payload = {
         "mysearch_url": mysearch_url,
         "tavily_url": tavily_url,
         "tavily_bearer": tavily_bearer,
         "cases": cases,
+        "mysearch_only": mysearch_only,
     }
     payload_b64 = base64.b64encode(json.dumps(payload, ensure_ascii=False).encode()).decode()
     cmd = [
@@ -430,9 +444,23 @@ def write_raw(raw_dir: Path, benchmark_id: str, provider: str, text: str) -> str
     return str(path)
 
 
-def build_output_rows(results: list[dict[str, str]], raw_dir: Path) -> list[dict[str, str]]:
+def load_existing_rows(path: Path) -> dict[str, dict[str, str]]:
+    if not path.exists():
+        return {}
+    with path.open(newline="", encoding="utf-8") as f:
+        return {row["benchmark_id"]: row for row in csv.DictReader(f)}
+
+
+def build_output_rows(
+    results: list[dict[str, str]],
+    raw_dir: Path,
+    *,
+    existing_rows: Optional[dict[str, dict[str, str]]] = None,
+    preserve_tavily: bool = False,
+) -> list[dict[str, str]]:
     output_rows = []
     for item in results:
+        existing = (existing_rows or {}).get(item["benchmark_id"], {})
         notes = []
         mysearch_raw = item.pop("mysearch_raw", "")
         tavily_raw = item.pop("tavily_raw", "")
@@ -440,7 +468,15 @@ def build_output_rows(results: list[dict[str, str]], raw_dir: Path) -> list[dict
             notes.append(f"mysearch_raw={write_raw(raw_dir, item['benchmark_id'], 'mysearch', mysearch_raw)}")
         if tavily_raw:
             notes.append(f"tavily_raw={write_raw(raw_dir, item['benchmark_id'], 'tavily', tavily_raw)}")
+        elif preserve_tavily and existing.get("notes"):
+            notes.extend(
+                chunk.strip()
+                for chunk in existing["notes"].split(" ; ")
+                if chunk.strip().startswith("tavily_raw=")
+            )
         row = {key: "" for key in FIELDNAMES}
+        if preserve_tavily:
+            row.update(existing)
         row.update(item)
         row["winner"] = "pending-review"
         row["winner_reason"] = "raw capture completed; scoring pending"
@@ -479,8 +515,16 @@ def main() -> int:
         tavily_url=args.tavily_url,
         tavily_bearer=args.tavily_bearer,
         cases=cases,
+        mysearch_only=args.mysearch_only,
     )
-    output_rows = build_output_rows(results, raw_dir)
+    reuse_path = Path(args.reuse_output_csv) if args.reuse_output_csv else output_path
+    existing_rows = load_existing_rows(reuse_path) if args.mysearch_only else {}
+    output_rows = build_output_rows(
+        results,
+        raw_dir,
+        existing_rows=existing_rows,
+        preserve_tavily=args.mysearch_only,
+    )
     write_output(output_path, output_rows)
     print(f"Wrote {len(output_rows)} rows to {output_path}")
     return 0
