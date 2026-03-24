@@ -2803,10 +2803,13 @@ class MySearchClientTests(unittest.TestCase):
             scrape_top_n=1,
         )
 
-        self.assertIn("Primary finding:", result["research_summary"])
-        self.assertIn("Coverage:", result["research_summary"])
-        self.assertIn("Primary finding", result["research_summary"])
+        self.assertIn("## Executive Summary", result["research_summary"])
+        self.assertIn("## Coverage", result["research_summary"])
+        self.assertIn("## Provider Contributions", result["research_summary"])
         self.assertEqual(result["summary"], result["research_summary"])
+        self.assertEqual(result["report_markdown"], result["research_summary"])
+        self.assertIn("executive_summary", result["report_sections"])
+        self.assertIn("coverage_bits", result["report_sections"])
         self.assertEqual(result["confidence"], "high")
 
     def test_research_summary_fallback_uses_title_based_synthesis_for_comparison_queries(self) -> None:
@@ -2840,6 +2843,9 @@ class MySearchClientTests(unittest.TestCase):
             },
         )
 
+        self.assertIn("## Executive Summary", summary)
+        self.assertIn("## Key Findings", summary)
+        self.assertIn("## Coverage", summary)
         self.assertIn("comparative rather than authoritative", summary)
         self.assertIn("Best MCP Servers for Search in 2026 - Top 10 Tools", summary)
         self.assertNotIn("marketing copy", summary)
@@ -2942,6 +2948,8 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["web_search"]["fallback"]["to"], "exa")
         self.assertIn("comparative rather than authoritative", result["summary"])
         self.assertEqual(result["evidence"]["providers_consulted"], ["exa"])
+        self.assertIn("## Provider Contributions", result["summary"])
+        self.assertIn("Exa expanded semantic coverage", result["summary"])
 
 
 if __name__ == "__main__":
