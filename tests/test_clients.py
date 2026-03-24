@@ -859,6 +859,65 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(decision.provider, "firecrawl")
 
+    def test_web_route_prefers_exa_when_tavily_probe_is_degraded(self) -> None:
+        client = MySearchClient()
+        client.keyring.has_provider = lambda provider: provider in {"tavily", "firecrawl", "exa"}  # type: ignore[method-assign]
+
+        def fake_probe(provider, key_count):  # type: ignore[no-untyped-def]
+            if provider.name == "tavily":
+                return {
+                    "status": "http_error",
+                    "error": "proxy_error",
+                    "checked_at": "2026-03-24T00:00:00+00:00",
+                }
+            return {
+                "status": "ok",
+                "error": "",
+                "checked_at": "2026-03-24T00:00:00+00:00",
+            }
+
+        client._probe_provider_status = fake_probe  # type: ignore[method-assign]
+
+        decision = client._route_search(
+            query="best model context protocol server 2026",
+            mode="web",
+            intent="factual",
+            provider="auto",
+            sources=["web"],
+            include_content=False,
+            include_domains=None,
+            allowed_x_handles=None,
+            excluded_x_handles=None,
+        )
+
+        self.assertEqual(decision.provider, "exa")
+        self.assertEqual(decision.fallback_chain, ["firecrawl", "tavily"])
+
+    def test_blended_search_requires_live_ok_providers(self) -> None:
+        client = MySearchClient()
+        client.keyring.has_provider = lambda provider: provider in {"tavily", "firecrawl"}  # type: ignore[method-assign]
+
+        def fake_probe(provider, key_count):  # type: ignore[no-untyped-def]
+            return {
+                "status": "http_error" if provider.name == "tavily" else "ok",
+                "error": "proxy_error" if provider.name == "tavily" else "",
+                "checked_at": "2026-03-24T00:00:00+00:00",
+            }
+
+        client._probe_provider_status = fake_probe  # type: ignore[method-assign]
+
+        self.assertFalse(
+            client._should_blend_web_providers(
+                requested_provider="auto",
+                decision=RouteDecision(provider="firecrawl", reason="fallback", result_profile="web"),
+                sources=["web"],
+                strategy="balanced",
+                mode="web",
+                intent="factual",
+                include_domains=None,
+            )
+        )
+
     def test_search_reranks_direct_docs_results_to_official_first(self) -> None:
         client = MySearchClient()
         client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
@@ -1626,6 +1685,12 @@ class MySearchClientTests(unittest.TestCase):
     def test_search_verify_conflicts_trigger_xai_arbitration(self) -> None:
         client = MySearchClient()
         client._provider_can_serve = lambda provider: True  # type: ignore[method-assign]
+        client.keyring.has_provider = lambda provider: True  # type: ignore[method-assign]
+        client._probe_provider_status = lambda provider, key_count: {  # type: ignore[method-assign]
+            "status": "ok",
+            "error": "",
+            "checked_at": "2026-03-24T00:00:00+00:00",
+        }
         client.config.xai.search_mode = "official"
         client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
             "provider": "tavily",

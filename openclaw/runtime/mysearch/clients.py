@@ -2274,14 +2274,28 @@ class MySearchClient:
         policy: SearchRoutePolicy,
     ) -> tuple[ProviderName, list[str] | None]:
         ordered: list[ProviderName] = [policy.provider, *policy.fallback_chain]
-        available: list[ProviderName] = []
+        healthy: list[ProviderName] = []
+        degraded: list[ProviderName] = []
         for provider_name in ordered:
             config = self._provider_config_for_name(provider_name)
-            if self._provider_can_serve(config):
-                available.append(provider_name)
-        if not available:
+            status = self._provider_live_status(config)
+            if status is None or status == "auth_error":
+                continue
+            if status == "ok":
+                healthy.append(provider_name)
+            else:
+                degraded.append(provider_name)
+        if healthy:
+            selected = healthy[0]
+            remaining = [
+                item for item in [*healthy[1:], *degraded] if item != selected
+            ]
+            return selected, remaining or None
+        if degraded:
+            return degraded[0], degraded[1:] or None
+        if not healthy and not degraded:
             return policy.provider, list(policy.fallback_chain) or None
-        return available[0], list(available[1:]) or None
+        return policy.provider, list(policy.fallback_chain) or None
 
     def _provider_config_for_name(self, provider_name: ProviderName) -> ProviderConfig:
         if provider_name == "tavily":
@@ -2323,20 +2337,20 @@ class MySearchClient:
         if "x" in sources:
             return False
         if mode == "news" or intent in {"news", "status"}:
-            return strategy in {"verify", "deep"} and self._provider_can_serve(
+            return strategy in {"verify", "deep"} and self._provider_is_live_ok(
                 self.config.tavily
-            ) and self._provider_can_serve(self.config.firecrawl)
+            ) and self._provider_is_live_ok(self.config.firecrawl)
         if mode == "pdf":
-            return strategy in {"verify", "deep"} and self._provider_can_serve(
+            return strategy in {"verify", "deep"} and self._provider_is_live_ok(
                 self.config.tavily
-            ) and self._provider_can_serve(self.config.firecrawl)
+            ) and self._provider_is_live_ok(self.config.firecrawl)
         if include_domains:
             return False
         if mode in {"docs", "github", "pdf"}:
             return False
         if intent in {"resource", "tutorial"}:
             return False
-        return self._provider_can_serve(self.config.tavily) and self._provider_can_serve(
+        return self._provider_is_live_ok(self.config.tavily) and self._provider_is_live_ok(
             self.config.firecrawl
         )
 
@@ -5625,10 +5639,19 @@ class MySearchClient:
         return f"{compact[:217]}..."
 
     def _provider_can_serve(self, provider: ProviderConfig) -> bool:
-        if not self.keyring.has_provider(provider.name):
+        status = self._provider_live_status(provider)
+        if status is None:
             return False
+        return status != "auth_error"
+
+    def _provider_live_status(self, provider: ProviderConfig) -> str | None:
+        if not self.keyring.has_provider(provider.name):
+            return None
         status = self._probe_provider_status(provider, 1)
-        return status["status"] != "auth_error"
+        return str(status.get("status") or "")
+
+    def _provider_is_live_ok(self, provider: ProviderConfig) -> bool:
+        return self._provider_live_status(provider) == "ok"
 
     def _extract_xai_output_text(self, payload: dict[str, Any]) -> str:
         if isinstance(payload.get("output_text"), str):
