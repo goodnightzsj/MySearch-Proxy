@@ -556,6 +556,40 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(result["answer"], "Record of the Year winner: Not Like Us")
 
+    def test_apply_result_event_answer_override_uses_page_extraction_for_uncertain_balanced_answer(self) -> None:
+        client = MySearchClient()
+        client.extract_url = lambda **kwargs: {  # type: ignore[method-assign]
+            "content": (
+                "Bad Bunny won album of the year for his album "
+                "_DeBÍ TiRAR MáS FOToS_."
+            )
+        }
+
+        result = client._apply_result_event_answer_override(
+            query="2026 Grammy Album of the Year winner",
+            mode="news",
+            intent="news",
+            strategy="balanced",
+            result={
+                "answer": "The winner cannot be determined from the provided data.",
+                "results": [
+                    {
+                        "title": "Grammy Awards winners list: See which nominees are taking home golden gramophones",
+                        "url": "https://example.com/grammys",
+                        "snippet": "",
+                        "content": "",
+                    }
+                ],
+                "evidence": {},
+            },
+        )
+
+        self.assertEqual(
+            result["answer"],
+            "Album of the Year winner: DeBÍ TiRAR MáS FOToS by Bad Bunny",
+        )
+        self.assertEqual(result["evidence"]["answer_source"], "result-event-extraction")
+
     def test_extract_result_event_answer_trims_trailing_list_noise(self) -> None:
         client = MySearchClient()
 
@@ -2094,6 +2128,33 @@ class MySearchClientTests(unittest.TestCase):
         ranked = client._rerank_general_results(
             query="Cloudflare status official",
             result_profile="web",
+            results=[
+                {
+                    "provider": "tavily",
+                    "title": "API - Cloudflare Status",
+                    "url": "https://www.cloudflarestatus.com/api",
+                    "snippet": "",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Cloudflare Status",
+                    "url": "https://www.cloudflarestatus.com/",
+                    "snippet": "",
+                    "content": "",
+                },
+            ],
+            include_domains=["cloudflarestatus.com"],
+        )
+
+        self.assertEqual(ranked[0]["url"], "https://www.cloudflarestatus.com/")
+
+    def test_resource_rerank_prefers_canonical_status_root_over_status_api_endpoint(self) -> None:
+        client = MySearchClient()
+
+        ranked = client._rerank_resource_results(
+            query="Cloudflare status official",
+            mode="docs",
             results=[
                 {
                     "provider": "tavily",

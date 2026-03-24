@@ -6229,6 +6229,7 @@ class MySearchClient:
         )
         url = item.get("url", "")
         query_lower = query.lower()
+        status_query = self._looks_like_status_query(query_lower)
         path_precision_hits, total_precision_hits = self._query_precision_hit_counts(
             hostname=hostname,
             path=path,
@@ -6284,6 +6285,24 @@ class MySearchClient:
                     path=path,
                     title_text=(item.get("title") or "").lower(),
                 )
+            )
+        )
+        canonical_status_page_match = int(
+            status_query
+            and self._looks_like_canonical_status_result(hostname=hostname, path=path)
+        )
+        status_page_match = int(
+            status_query
+            and self._looks_like_status_result(
+                url=url,
+                hostname=hostname,
+                title_text=(item.get("title") or "").lower(),
+            )
+        )
+        non_status_api_endpoint = int(
+            not (
+                status_query
+                and path.startswith("/api")
             )
         )
         paper_subject_tokens = (
@@ -6375,6 +6394,9 @@ class MySearchClient:
             non_community_official,
             official_resource_match,
             official_topic_exact_match,
+            canonical_status_page_match,
+            status_page_match,
+            non_status_api_endpoint,
             paper_subject_exact_match,
             primary_named_paper_bonus,
             non_derivative_paper_bonus,
@@ -8258,7 +8280,12 @@ class MySearchClient:
             query=query,
             results=result_items,
         )
-        if not extracted_answer and strategy in {"verify", "deep"}:
+        should_try_page_extraction = (
+            strategy in {"verify", "deep"}
+            or not current_answer
+            or self._answer_looks_uncertain(current_answer)
+        )
+        if not extracted_answer and should_try_page_extraction:
             extracted_answer = self._extract_result_event_answer_from_top_page(
                 query=query,
                 results=result_items,
@@ -8318,6 +8345,14 @@ class MySearchClient:
         markers = [
             "not yet determined",
             "not yet known",
+            "cannot be determined",
+            "cannot determine",
+            "not specified",
+            "not provided",
+            "insufficient data",
+            "no winner was specified",
+            "cannot be concluded",
+            "could not be determined",
             "still unknown",
             "to be announced",
             "tbd",
