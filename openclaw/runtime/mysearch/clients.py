@@ -2477,11 +2477,12 @@ class MySearchClient:
         include_domains: list[str] | None,
     ) -> bool:
         query_lower = query.lower()
+        explicit_resource_mode = mode in {"docs", "github", "pdf"}
         if include_domains:
             return True
-        if intent == "tutorial":
+        if intent == "tutorial" and not explicit_resource_mode:
             return False
-        if mode in {"docs", "github", "pdf"}:
+        if explicit_resource_mode:
             return True
         if self._looks_like_official_query(query):
             return True
@@ -3133,13 +3134,14 @@ class MySearchClient:
         query_lower = query.lower()
         if mode == "research":
             return _MODE_PROVIDER_POLICY["research"]
-        if intent == "tutorial":
+        explicit_resource_mode = mode in {"docs", "github", "pdf"}
+        if intent == "tutorial" and not explicit_resource_mode:
             return _MODE_PROVIDER_POLICY["tutorial"]
         if self._looks_like_changelog_query(query_lower):
             return _MODE_PROVIDER_POLICY["changelog"]
         if include_content:
             return _MODE_PROVIDER_POLICY["content"]
-        if mode in {"docs", "github", "pdf"}:
+        if explicit_resource_mode:
             return _MODE_PROVIDER_POLICY[mode]
         if intent == "resource" or self._looks_like_docs_query(query_lower):
             return _MODE_PROVIDER_POLICY["resource"]
@@ -5999,9 +6001,10 @@ class MySearchClient:
         mode: SearchMode,
         intent: ResolvedSearchIntent,
     ) -> bool:
-        if intent == "tutorial":
+        explicit_resource_mode = mode in {"docs", "github", "pdf"}
+        if intent == "tutorial" and not explicit_resource_mode:
             return False
-        return mode in {"docs", "github", "pdf"} or intent == "resource"
+        return explicit_resource_mode or intent == "resource"
 
     def _rerank_resource_results(
         self,

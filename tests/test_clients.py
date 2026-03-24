@@ -724,7 +724,7 @@ class MySearchClientTests(unittest.TestCase):
             "factual",
         )
 
-    def test_docs_tutorial_query_uses_tutorial_policy_without_strict_resource_mode(self) -> None:
+    def test_docs_tutorial_query_prefers_docs_policy_with_explicit_docs_mode(self) -> None:
         client = MySearchClient()
         query = "Playwright test.step tutorial example"
 
@@ -742,9 +742,9 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertEqual(resolved_intent, "tutorial")
-        self.assertEqual(policy.key, "tutorial")
-        self.assertEqual(policy.provider, "tavily")
-        self.assertFalse(
+        self.assertEqual(policy.key, "content")
+        self.assertEqual(policy.provider, "firecrawl")
+        self.assertTrue(
             client._should_use_strict_resource_policy(
                 query=query,
                 mode="docs",
@@ -752,7 +752,28 @@ class MySearchClientTests(unittest.TestCase):
                 include_domains=None,
             )
         )
-        self.assertFalse(client._should_rerank_resource_results(mode="docs", intent=resolved_intent))
+        self.assertTrue(client._should_rerank_resource_results(mode="docs", intent=resolved_intent))
+
+    def test_auto_tutorial_query_still_uses_tutorial_policy(self) -> None:
+        client = MySearchClient()
+        query = "Playwright test.step tutorial example"
+
+        resolved_intent = client._resolve_intent(
+            query=query,
+            mode="auto",
+            intent="auto",
+            sources=["web"],
+        )
+        policy = client._route_policy_for_request(
+            query=query,
+            mode="auto",
+            intent=resolved_intent,
+            include_content=False,
+        )
+
+        self.assertEqual(resolved_intent, "tutorial")
+        self.assertEqual(policy.key, "tutorial")
+        self.assertEqual(policy.provider, "tavily")
 
     def test_changelog_query_uses_tavily_news_policy(self) -> None:
         client = MySearchClient()
