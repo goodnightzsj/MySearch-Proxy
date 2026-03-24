@@ -2766,6 +2766,7 @@ class MySearchClient:
         query_lower = query.lower()
         query_tokens = self._query_brand_tokens(query)
         precision_tokens = self._query_precision_tokens(query)
+        exact_identifier_tokens = self._query_exact_identifier_tokens(query)
         include_match = int(
             bool(include_domains)
             and any(self._domain_matches(hostname, domain) for domain in include_domains or [])
@@ -2783,6 +2784,21 @@ class MySearchClient:
             path=path,
             title_text=title_text,
             query_tokens=precision_tokens,
+        )
+        exact_path_hits, exact_total_hits = self._query_exact_identifier_hit_counts(
+            path=path,
+            title_text=title_text,
+            query_tokens=exact_identifier_tokens,
+        )
+        official_query = bool(include_domains) or self._looks_like_official_query(query)
+        non_community_official = int(
+            not (
+                official_query
+                and self._is_obvious_official_community_result(
+                    hostname=hostname,
+                    path=path,
+                )
+            )
         )
         status_page_match = int(
             self._looks_like_status_query(query_lower)
@@ -2806,10 +2822,13 @@ class MySearchClient:
         content_score, snippet_score, title_score = self._result_quality_score(item)
         return (
             include_match,
+            non_community_official,
             canonical_status_page_match,
             status_page_match,
             canonical_pricing_page_match,
             pricing_page_match,
+            exact_path_hits,
+            exact_total_hits,
             path_precision_hits,
             total_precision_hits,
             registered_domain_label_match,
@@ -4412,6 +4431,7 @@ class MySearchClient:
 
         query_tokens = self._query_brand_tokens(query)
         precision_tokens = self._query_precision_tokens(query)
+        exact_identifier_tokens = self._query_exact_identifier_tokens(query)
         strict_official = bool(include_domains) or self._looks_like_official_query(query)
         ranked = sorted(
             enumerate(results),
@@ -4422,6 +4442,7 @@ class MySearchClient:
                     item=pair[1],
                     query_tokens=query_tokens,
                     precision_tokens=precision_tokens,
+                    exact_identifier_tokens=exact_identifier_tokens,
                     include_domains=include_domains,
                     strict_official=strict_official,
                 ),
@@ -4439,6 +4460,7 @@ class MySearchClient:
         item: dict[str, Any],
         query_tokens: list[str],
         precision_tokens: list[str],
+        exact_identifier_tokens: list[str],
         include_domains: list[str] | None,
         strict_official: bool,
     ) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int, int, int, int]:
@@ -4499,6 +4521,11 @@ class MySearchClient:
             title_text=(item.get("title") or "").lower(),
             query_tokens=precision_tokens,
         )
+        exact_path_hits, exact_total_hits = self._query_exact_identifier_hit_counts(
+            path=urlparse(url).path.lower(),
+            title_text=(item.get("title") or "").lower(),
+            query_tokens=exact_identifier_tokens,
+        )
         matched_provider_count = len(item.get("matched_providers") or [])
         content_score, snippet_score, title_score = self._result_quality_score(item)
         return (
@@ -4506,6 +4533,8 @@ class MySearchClient:
             official_resource_match,
             primary_named_paper_bonus,
             paper_landing_bonus,
+            exact_path_hits,
+            exact_total_hits,
             path_precision_hits,
             total_precision_hits,
             registered_domain_label_match,
@@ -4895,6 +4924,43 @@ class MySearchClient:
         total_matches = sum(1 for token in query_tokens if token in full_text)
         return min(path_matches, 4), min(total_matches, 6)
 
+    def _query_exact_identifier_tokens(self, query: str) -> list[str]:
+        tokens: list[str] = []
+        seen: set[str] = set()
+        raw_tokens = re.findall(r"[a-z0-9][a-z0-9._/-]{2,}", query.lower())
+        for raw_token in raw_tokens:
+            if not any(marker in raw_token for marker in (".", "/", "_", "-")):
+                continue
+            compact = re.sub(r"[^a-z0-9]+", "", raw_token.strip("._/-"))
+            if len(compact) < 4 or compact in seen:
+                continue
+            seen.add(compact)
+            tokens.append(compact)
+        return tokens
+
+    def _query_exact_identifier_hit_counts(
+        self,
+        *,
+        path: str,
+        title_text: str,
+        query_tokens: list[str],
+    ) -> tuple[int, int]:
+        if not query_tokens:
+            return 0, 0
+        path_segments = {
+            token
+            for token in re.split(r"[^a-z0-9]+", path.lower())
+            if len(token) >= 3
+        }
+        title_segments = {
+            token
+            for token in re.split(r"[^a-z0-9]+", title_text.lower())
+            if len(token) >= 3
+        }
+        path_matches = sum(1 for token in query_tokens if token in path_segments)
+        total_matches = sum(1 for token in query_tokens if token in path_segments or token in title_segments)
+        return min(path_matches, 3), min(total_matches, 3)
+
     def _looks_like_pricing_query(self, query_lower: str) -> bool:
         keywords = [
             "pricing",
@@ -4933,6 +4999,14 @@ class MySearchClient:
         if "pricing" in normalized_path and "/docs/" not in normalized_path and not hostname.startswith("developers."):
             return True
         return False
+
+    def _is_obvious_official_community_result(self, *, hostname: str, path: str) -> bool:
+        labels = [label for label in hostname.split(".") if label]
+        community_labels = {"community", "forum", "forums", "discuss", "discussion"}
+        if any(label in community_labels for label in labels[:2]):
+            return True
+        normalized_path = path.rstrip("/")
+        return normalized_path.startswith("/t/") or normalized_path.startswith("/c/")
 
     def _looks_like_status_result(self, *, url: str, hostname: str, title_text: str) -> bool:
         path = urlparse(url).path.lower()
