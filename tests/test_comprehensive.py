@@ -569,6 +569,11 @@ class BlendingDecisionTests(unittest.TestCase):
 
     def test_blend_when_conditions_met(self) -> None:
         client = _make_client(tavily_keys=["k"], firecrawl_keys=["k"])
+        client._probe_provider_status = lambda provider, key_count: {  # type: ignore[method-assign]
+            "status": "ok",
+            "error": "",
+            "checked_at": "2026-03-24T00:00:00+00:00",
+        }
         self.assertTrue(client._should_blend_web_providers(
             requested_provider="auto",
             decision=RouteDecision(provider="tavily", reason="test"),
