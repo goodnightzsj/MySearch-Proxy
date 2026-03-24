@@ -8159,7 +8159,18 @@ class MySearchClient:
                 else:
                     candidate = re.split(r"\s[\-|:|]\s", title, maxsplit=1)[0].strip() or title
                 evidence_note = url_to_excerpt.get(url, "").strip()
-                if "marketing copy" in evidence_note.lower():
+                evidence_note_lower = evidence_note.lower()
+                if any(
+                    marker in evidence_note_lower
+                    for marker in (
+                        "marketing copy",
+                        "skip to content",
+                        "you signed in with another tab",
+                        "method not allowed",
+                        "\"error\"",
+                        "jsonrpc",
+                    )
+                ):
                     evidence_note = ""
                 if not evidence_note:
                     evidence_note = self._registered_domain(self._result_hostname({"url": url}))
