@@ -1985,6 +1985,7 @@ class MySearchClient:
         official_candidates = self._collect_official_result_candidates(
             query=query,
             mode=mode,
+            intent=intent,
             results=results,
             include_domains=include_domains,
             strict_official=official_mode == "strict",
@@ -2005,6 +2006,7 @@ class MySearchClient:
         *,
         query: str,
         mode: SearchMode,
+        intent: ResolvedSearchIntent,
         results: list[dict[str, Any]],
         include_domains: list[str] | None,
         strict_official: bool,
@@ -2021,12 +2023,28 @@ class MySearchClient:
             ):
                 candidates.append(dict(item))
         if len(candidates) >= 2:
-            candidates = self._rerank_resource_results(
-                query=query,
-                mode=mode,
-                results=candidates,
-                include_domains=include_domains,
+            use_general_official_rerank = (
+                mode == "news"
+                or intent in {"news", "status"}
+                or self._looks_like_status_query(query.lower())
             )
+            if use_general_official_rerank:
+                result_profile: Literal["web", "news"] = (
+                    "news" if mode == "news" or intent in {"news", "status"} else "web"
+                )
+                candidates = self._rerank_general_results(
+                    query=query,
+                    result_profile=result_profile,
+                    results=candidates,
+                    include_domains=include_domains,
+                )
+            else:
+                candidates = self._rerank_resource_results(
+                    query=query,
+                    mode=mode,
+                    results=candidates,
+                    include_domains=include_domains,
+                )
         return candidates
 
     def _build_research_web_fallback_result(
