@@ -187,8 +187,8 @@ _MODE_PROVIDER_POLICY: dict[str, SearchRoutePolicy] = {
     ),
     "tutorial": SearchRoutePolicy(
         key="tutorial",
-        provider="exa",
-        fallback_chain=("tavily", "firecrawl"),
+        provider="tavily",
+        fallback_chain=("exa", "firecrawl"),
         result_profile="web",
         allow_exa_rescue=True,
     ),
@@ -2382,7 +2382,7 @@ class MySearchClient:
                 result_profile="off",
             )
         if policy.key == "tutorial":
-            reason = "教程 / 排障类查询默认走 Exa，优先拿社区解法和语义相邻案例"
+            reason = "教程 / 排障类查询默认走 Tavily，优先拿社区解法，再用 Exa 补语义相邻案例"
         elif policy.key == "changelog":
             reason = "release / changelog 类查询默认走 Tavily，优先拿官方发布页与更新说明"
         elif policy.key in {"docs", "resource"} and include_domains and self._domains_prefer_firecrawl_discovery(include_domains):
@@ -2980,7 +2980,7 @@ class MySearchClient:
         query: str,
         item: dict[str, Any],
         include_domains: list[str] | None,
-    ) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int]:
+    ) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int]:
         hostname = self._result_hostname(item)
         registered_domain = self._registered_domain(hostname)
         path = urlparse(item.get("url", "")).path.lower()
@@ -2989,11 +2989,13 @@ class MySearchClient:
         content_text = (item.get("content") or "").lower()
         query_lower = query.lower()
         gossip_query = self._looks_like_gossip_query(query_lower)
+        status_query = self._looks_like_status_query(query_lower)
+        precision_tokens = self._query_precision_tokens(query)
         path_precision_hits, total_precision_hits = self._query_precision_hit_counts(
             hostname=hostname,
             path=path,
             title_text=f"{title_text} {snippet_text} {content_text}",
-            query_tokens=self._query_precision_tokens(query),
+            query_tokens=precision_tokens,
         )
         gossip_story_match = int(
             gossip_query
@@ -3010,6 +3012,40 @@ class MySearchClient:
             bool(include_domains)
             and any(self._domain_matches(hostname, domain) for domain in include_domains or [])
         )
+        non_community_official = int(
+            not (
+                status_query
+                and self._is_obvious_official_community_result(
+                    hostname=hostname,
+                    path=path,
+                )
+            )
+        )
+        canonical_status_page_match = int(
+            status_query
+            and self._looks_like_canonical_status_result(hostname=hostname, path=path)
+        )
+        status_page_match = int(
+            status_query
+            and self._looks_like_status_result(url=item.get("url", ""), hostname=hostname, title_text=title_text)
+        )
+        canonical_changelog_page_match = int(
+            status_query
+            and self._looks_like_canonical_changelog_result(
+                url=item.get("url", ""),
+                hostname=hostname,
+                title_text=title_text,
+                precision_tokens=precision_tokens,
+            )
+        )
+        changelog_page_match = int(
+            status_query
+            and self._looks_like_changelog_result(
+                url=item.get("url", ""),
+                hostname=hostname,
+                title_text=title_text,
+            )
+        )
         mainstream = int(self._is_mainstream_news_domain(hostname))
         article_shape = int(self._looks_like_news_article_result(item))
         has_timestamp = int(self._result_published_timestamp(item) is not None)
@@ -3017,6 +3053,11 @@ class MySearchClient:
         content_score, snippet_score, title_score = self._result_quality_score(item)
         return (
             include_match,
+            non_community_official,
+            canonical_status_page_match,
+            status_page_match,
+            canonical_changelog_page_match,
+            changelog_page_match,
             gossip_story_match,
             gossip_domain_match,
             path_precision_hits,
@@ -3069,7 +3110,12 @@ class MySearchClient:
             title_text=title_text,
             query_tokens=exact_identifier_tokens,
         )
-        official_query = bool(include_domains) or self._looks_like_official_query(query)
+        official_query = (
+            bool(include_domains)
+            or self._looks_like_official_query(query)
+            or self._looks_like_status_query(query_lower)
+            or self._looks_like_changelog_query(query_lower)
+        )
         non_community_official = int(
             not (
                 official_query

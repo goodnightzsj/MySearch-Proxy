@@ -219,7 +219,7 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(resolved_intent, "tutorial")
         self.assertEqual(policy.key, "tutorial")
-        self.assertEqual(policy.provider, "exa")
+        self.assertEqual(policy.provider, "tavily")
         self.assertFalse(
             client._should_use_strict_resource_policy(
                 query=query,
@@ -1632,6 +1632,45 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertEqual(reranked[0]["url"], "https://status.openai.com/incidents/abc123")
+
+    def test_rerank_general_web_demotes_official_community_threads_for_status_queries(self) -> None:
+        client = MySearchClient()
+
+        reranked = client._rerank_general_results(
+            query="OpenAI background mode latest status",
+            result_profile="web",
+            include_domains=None,
+            results=[
+                {
+                    "provider": "tavily",
+                    "title": "Background mode requests stuck in queued status - OpenAI Developer Community",
+                    "url": "https://community.openai.com/t/background-mode-requests-stuck-in-queued-status-responses-api/1267382",
+                    "snippet": "Official community thread",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Background mode guide | OpenAI",
+                    "url": "https://developers.openai.com/api/docs/guides/background/",
+                    "snippet": "Official developer guide",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Responses API errors when using background mode",
+                    "url": "https://status.openai.com/incidents/abc123",
+                    "snippet": "OpenAI status incident",
+                    "content": "",
+                },
+            ],
+        )
+
+        urls = [item["url"] for item in reranked]
+        self.assertEqual(urls[0], "https://status.openai.com/incidents/abc123")
+        self.assertLess(
+            urls.index("https://developers.openai.com/api/docs/guides/background/"),
+            urls.index("https://community.openai.com/t/background-mode-requests-stuck-in-queued-status-responses-api/1267382"),
+        )
 
     def test_rerank_resource_results_prefers_exact_query_token_page(self) -> None:
         client = MySearchClient()
