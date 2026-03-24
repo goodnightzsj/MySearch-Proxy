@@ -3074,6 +3074,8 @@ class MySearchClient:
         query_lower = query.lower()
         if mode == "news":
             return "news"
+        if self._looks_like_debugging_query(query_lower):
+            return "tutorial"
         if self._looks_like_tutorial_query(query_lower):
             return "tutorial"
         if mode in {"docs", "github", "pdf"}:
@@ -3531,6 +3533,7 @@ class MySearchClient:
             query_tokens=query_tokens,
             precision_tokens=precision_tokens,
         )
+        compound_tokens = self._paper_query_compound_tokens(query)
         for item in results[:3]:
             url = item.get("url", "")
             hostname = self._result_hostname(item)
@@ -3546,10 +3549,29 @@ class MySearchClient:
                 title_text=title_text,
                 query_tokens=paper_tokens,
             )
+            compound_match = any(
+                self._paper_text_matches_compound_token(f"{title_text} {path}", token)
+                for token in compound_tokens
+            )
             derivative_title = self._looks_like_derivative_paper_title(title_text)
             paper_shape = self._looks_like_pdf_url(url) or any(
                 marker in path for marker in ("/abs/", "/html/")
             )
+            if (
+                compound_tokens
+                and compound_match
+                and paper_shape
+                and not derivative_title
+                and (named_paper or total_hits >= min(max(len(paper_tokens), 2), 3))
+            ):
+                return True
+            if (
+                compound_tokens
+                and not compound_match
+                and paper_shape
+                and not self._looks_like_generic_arxiv_subject_title(title_text)
+            ):
+                continue
             if named_paper and paper_shape and not derivative_title:
                 return True
             if not derivative_title and paper_shape and total_hits >= min(max(len(paper_tokens), 2), 3):
@@ -3616,12 +3638,14 @@ class MySearchClient:
         query_tokens = self._query_brand_tokens(query)
         precision_tokens = self._query_precision_tokens(query)
         exact_identifier_tokens = self._query_exact_identifier_tokens(query)
+        debugging_query = self._looks_like_debugging_query(query.lower())
         for item in results[:5]:
             url = item.get("url", "")
             hostname = self._result_hostname(item)
             registered_domain = self._registered_domain(hostname)
             path = urlparse(url).path.lower()
             title_text = (item.get("title") or "").lower()
+            snippet_text = (item.get("snippet") or "").lower()
             path_hits, total_hits = self._query_precision_hit_counts(
                 hostname=hostname,
                 path=path,
@@ -3642,8 +3666,23 @@ class MySearchClient:
                 registered_domain=registered_domain,
                 query_tokens=query_tokens,
             ) or any(token in hostname for token in query_tokens)
+            debugging_match = self._looks_like_debugging_result(
+                hostname=hostname,
+                registered_domain=registered_domain,
+                path=path,
+                title_text=title_text,
+                snippet_text=snippet_text,
+            )
             if community_debug and (path_hits > 0 or exact_total_hits > 0 or "issue" in title_text):
                 return True
+            if debugging_query:
+                if community_debug and debugging_match:
+                    return True
+                if brand_aligned and debugging_match and (
+                    exact_total_hits > 0 or path_hits >= 1 or total_hits >= 2
+                ):
+                    return True
+                continue
             if brand_aligned and (exact_total_hits > 0 or path_hits >= 2 or total_hits >= 3):
                 return True
         return False
@@ -3849,9 +3888,13 @@ class MySearchClient:
         gossip_domain_match = int(
             gossip_query and self._is_entertainment_gossip_domain(registered_domain)
         )
+        status_query = self._looks_like_status_query(query_lower)
         include_match = int(
-            bool(include_domains)
-            and any(self._domain_matches(hostname, domain) for domain in include_domains or [])
+            (
+                bool(include_domains)
+                and any(self._domain_matches(hostname, domain) for domain in include_domains or [])
+            )
+            or (status_query and self._looks_like_brand_status_domain(hostname))
         )
         non_community_official = int(
             not (
@@ -3934,9 +3977,13 @@ class MySearchClient:
         query_tokens = self._query_brand_tokens(query)
         precision_tokens = self._query_precision_tokens(query)
         exact_identifier_tokens = self._query_exact_identifier_tokens(query)
+        status_query = self._looks_like_status_query(query_lower)
         include_match = int(
-            bool(include_domains)
-            and any(self._domain_matches(hostname, domain) for domain in include_domains or [])
+            (
+                bool(include_domains)
+                and any(self._domain_matches(hostname, domain) for domain in include_domains or [])
+            )
+            or (status_query and self._looks_like_brand_status_domain(hostname))
         )
         registered_domain_label_match = int(
             self._registered_domain_label_matches(
@@ -3960,7 +4007,7 @@ class MySearchClient:
         official_query = (
             bool(include_domains)
             or self._looks_like_official_query(query)
-            or self._looks_like_status_query(query_lower)
+            or status_query
             or self._looks_like_changelog_query(query_lower)
         )
         non_community_official = int(
@@ -3973,11 +4020,11 @@ class MySearchClient:
             )
         )
         status_page_match = int(
-            self._looks_like_status_query(query_lower)
+            status_query
             and self._looks_like_status_result(url=url, hostname=hostname, title_text=title_text)
         )
         canonical_status_page_match = int(
-            self._looks_like_status_query(query_lower)
+            status_query
             and self._looks_like_canonical_status_result(hostname=hostname, path=path)
         )
         pricing_page_match = int(
@@ -3989,6 +4036,7 @@ class MySearchClient:
             and self._looks_like_canonical_pricing_result(hostname=hostname, path=path)
         )
         tutorial_query = self._looks_like_tutorial_query(query_lower)
+        debugging_query = self._looks_like_debugging_query(query_lower)
         tutorial_community_match = int(
             tutorial_query
             and self._looks_like_tutorial_community_result(
@@ -4007,6 +4055,32 @@ class MySearchClient:
                 query_tokens=query_tokens,
                 path_precision_hits=path_precision_hits,
                 exact_total_hits=exact_total_hits,
+            )
+        )
+        debugging_signal_match = int(
+            debugging_query
+            and self._looks_like_debugging_result(
+                hostname=hostname,
+                registered_domain=registered_domain,
+                path=path,
+                title_text=title_text,
+                snippet_text=(item.get("snippet") or "").lower(),
+            )
+        )
+        debugging_community_match = int(
+            debugging_query and tutorial_community_match and debugging_signal_match
+        )
+        debugging_brand_aligned = int(
+            debugging_query and tutorial_brand_aligned and debugging_signal_match
+        )
+        non_generic_debugging_docs = int(
+            not (
+                debugging_query
+                and self._looks_like_generic_debugging_docs_result(
+                    hostname=hostname,
+                    path=path,
+                    title_text=title_text,
+                )
             )
         )
         non_tutorial_blog = int(
@@ -4051,6 +4125,9 @@ class MySearchClient:
             status_page_match,
             canonical_pricing_page_match,
             pricing_page_match,
+            debugging_community_match,
+            debugging_brand_aligned,
+            non_generic_debugging_docs,
             tutorial_community_match,
             tutorial_brand_aligned,
             non_tutorial_blog,
@@ -6041,6 +6118,52 @@ class MySearchClient:
         )
         url = item.get("url", "")
         query_lower = query.lower()
+        path_precision_hits, total_precision_hits = self._query_precision_hit_counts(
+            hostname=hostname,
+            path=path,
+            title_text=(item.get("title") or "").lower(),
+            query_tokens=precision_tokens,
+        )
+        exact_path_hits, exact_total_hits = self._query_exact_identifier_hit_counts(
+            path=path,
+            title_text=(item.get("title") or "").lower(),
+            query_tokens=exact_identifier_tokens,
+        )
+        official_docs_query = strict_official and self._looks_like_official_docs_query(query_lower)
+        official_topic_exact_match = int(
+            official_docs_query
+            and docs_shape_match
+            and (exact_total_hits > 0 or path_precision_hits >= 2 or total_precision_hits >= 3)
+        )
+        non_generic_official_landing = int(
+            not (
+                official_docs_query
+                and self._looks_like_generic_official_landing_result(
+                    hostname=hostname,
+                    path=path,
+                    title_text=(item.get("title") or "").lower(),
+                )
+            )
+        )
+        paper_compound_tokens = self._paper_query_compound_tokens(query) if mode == "pdf" else []
+        paper_compound_match = int(
+            mode == "pdf"
+            and any(
+                self._paper_text_matches_compound_token(
+                    f"{item.get('title', '')} {path}",
+                    token,
+                )
+                for token in paper_compound_tokens
+            )
+        )
+        non_paper_compound_mismatch = int(
+            not (
+                mode == "pdf"
+                and paper_compound_tokens
+                and not paper_compound_match
+                and not self._looks_like_generic_arxiv_subject_title((item.get("title") or "").lower())
+            )
+        )
         changelog_page_match = int(
             self._looks_like_changelog_query(query_lower)
             and self._looks_like_changelog_result(
@@ -6082,22 +6205,11 @@ class MySearchClient:
                 path=path,
             )
         )
-        path_precision_hits, total_precision_hits = self._query_precision_hit_counts(
-            hostname=hostname,
-            path=path,
-            title_text=(item.get("title") or "").lower(),
-            query_tokens=precision_tokens,
-        )
         non_locale_variant = int(
             not (
                 strict_official
                 and self._looks_like_locale_prefixed_path(path)
             )
-        )
-        exact_path_hits, exact_total_hits = self._query_exact_identifier_hit_counts(
-            path=path,
-            title_text=(item.get("title") or "").lower(),
-            query_tokens=exact_identifier_tokens,
         )
         matched_provider_count = len(item.get("matched_providers") or [])
         content_score, snippet_score, title_score = self._result_quality_score(item)
@@ -6105,6 +6217,8 @@ class MySearchClient:
             include_match,
             non_community_official,
             official_resource_match,
+            official_topic_exact_match,
+            non_generic_official_landing,
             canonical_changelog_page_match,
             changelog_page_match,
             non_generic_changelog_index,
@@ -6112,6 +6226,8 @@ class MySearchClient:
             pricing_page_match,
             primary_named_paper_bonus,
             non_derivative_paper_bonus,
+            paper_compound_match,
+            non_paper_compound_mismatch,
             paper_landing_bonus,
             exact_path_hits,
             exact_total_hits,
@@ -6146,13 +6262,14 @@ class MySearchClient:
     ) -> list[str]:
         subject_tokens: list[str] = []
         seen: set[str] = set()
+        compound_tokens = self._paper_query_compound_tokens(query)
         raw_query_tokens = [
             cleaned
             for raw_token in re.findall(r"[a-z0-9][a-z0-9._/-]{1,}", query.lower())
             for cleaned in [raw_token.strip("._/-")]
             if self._is_mixed_alnum_short_token(cleaned)
         ]
-        for token in [*query_tokens, *raw_query_tokens, *precision_tokens]:
+        for token in [*query_tokens, *compound_tokens, *raw_query_tokens, *precision_tokens]:
             cleaned = token.strip().lower()
             if cleaned in seen or cleaned in {"paper", "pdf"}:
                 continue
@@ -6161,6 +6278,33 @@ class MySearchClient:
             seen.add(cleaned)
             subject_tokens.append(cleaned)
         return subject_tokens[:3]
+
+    def _paper_query_compound_tokens(self, query: str) -> list[str]:
+        raw_tokens = [token for token in re.findall(r"[a-z0-9]+", query.lower()) if token]
+        compounds: list[str] = []
+        seen: set[str] = set()
+        for index, token in enumerate(raw_tokens):
+            compact = re.sub(r"[^a-z0-9]+", "", token)
+            if compact and any(ch.isalpha() for ch in compact) and any(ch.isdigit() for ch in compact):
+                if compact not in seen:
+                    seen.add(compact)
+                    compounds.append(compact)
+            if index + 1 < len(raw_tokens) and raw_tokens[index].isalpha() and raw_tokens[index + 1].isdigit():
+                combined = f"{raw_tokens[index]}{raw_tokens[index + 1]}"
+                if combined not in seen:
+                    seen.add(combined)
+                    compounds.append(combined)
+        return compounds
+
+    def _paper_text_matches_compound_token(self, text: str, compound_token: str) -> bool:
+        normalized_text = re.sub(r"[^a-z0-9]+", "", (text or "").lower())
+        if compound_token in normalized_text:
+            return True
+        letters = "".join(ch for ch in compound_token if ch.isalpha())
+        digits = "".join(ch for ch in compound_token if ch.isdigit())
+        if not letters or not digits:
+            return False
+        return re.search(rf"{re.escape(letters)}[\s\-_:/()]*{re.escape(digits)}", (text or "").lower()) is not None
 
     def _looks_like_primary_named_paper_result(
         self,
@@ -6610,6 +6754,15 @@ class MySearchClient:
         total_matches = sum(1 for token in query_tokens if token in path_segments or token in title_segments)
         return min(path_matches, 3), min(total_matches, 3)
 
+    def _looks_like_official_docs_query(self, query_lower: str) -> bool:
+        if (
+            self._looks_like_pricing_query(query_lower)
+            or self._looks_like_changelog_query(query_lower)
+            or self._looks_like_status_query(query_lower)
+        ):
+            return False
+        return self._looks_like_docs_query(query_lower) or self._looks_like_api_docs_topic_query(query_lower)
+
     def _looks_like_pricing_query(self, query_lower: str) -> bool:
         keywords = [
             "pricing",
@@ -6648,6 +6801,33 @@ class MySearchClient:
         if "pricing" in normalized_path and "/docs/" not in normalized_path and not hostname.startswith("developers."):
             return True
         return False
+
+    def _looks_like_generic_official_landing_result(
+        self,
+        *,
+        hostname: str,
+        path: str,
+        title_text: str,
+    ) -> bool:
+        normalized_path = path.rstrip("/") or "/"
+        generic_paths = {
+            "/",
+            "/api",
+            "/api/docs",
+            "/api/docs/guides",
+            "/developers",
+            "/docs",
+            "/documentation",
+            "/guides",
+            "/learn",
+            "/reference",
+        }
+        if normalized_path in generic_paths:
+            return True
+        if hostname == "openai.com" and normalized_path in {"/pricing", "/business/chatgpt-pricing"}:
+            return True
+        generic_titles = {"docs", "documentation", "developer docs", "guides", "reference"}
+        return title_text.strip() in generic_titles
 
     def _looks_like_changelog_result(self, *, url: str, hostname: str, title_text: str) -> bool:
         path = urlparse(url).path.lower()
@@ -6706,9 +6886,71 @@ class MySearchClient:
         normalized_path = path.rstrip("/")
         return normalized_path.startswith("/t/") or normalized_path.startswith("/c/")
 
+    def _looks_like_debugging_result(
+        self,
+        *,
+        hostname: str,
+        registered_domain: str,
+        path: str,
+        title_text: str,
+        snippet_text: str,
+    ) -> bool:
+        text = f"{title_text} {snippet_text} {path}"
+        if registered_domain == "github.com" and any(marker in path for marker in ("/issues/", "/discussions/")):
+            return True
+        debugging_markers = (
+            "bug",
+            "cannot",
+            "can't",
+            "debug",
+            "error",
+            "failed",
+            "failing",
+            "fix",
+            "issue",
+            "strict mode",
+            "troubleshoot",
+            "troubleshooting",
+            "violation",
+            "workaround",
+            "报错",
+            "排查",
+            "修复",
+            "错误",
+        )
+        if any(marker in text for marker in debugging_markers):
+            return True
+        return hostname.endswith("stackoverflow.com")
+
+    def _looks_like_generic_debugging_docs_result(
+        self,
+        *,
+        hostname: str,
+        path: str,
+        title_text: str,
+    ) -> bool:
+        normalized_path = path.rstrip("/")
+        generic_paths = {
+            "/docs/writing-tests",
+            "/docs/running-tests",
+            "/docs/test-fixtures",
+            "/docs/intro",
+            "/docs/test-ui-mode",
+        }
+        if normalized_path in generic_paths:
+            return True
+        generic_titles = (
+            "writing tests",
+            "running and debugging tests",
+            "running tests",
+            "test ui mode",
+            "fixtures",
+        )
+        return any(title_text.strip() == candidate for candidate in generic_titles) and hostname.endswith("playwright.dev")
+
     def _looks_like_status_result(self, *, url: str, hostname: str, title_text: str) -> bool:
         path = urlparse(url).path.lower()
-        if hostname.startswith("status.") or ".statuspage." in hostname:
+        if self._looks_like_brand_status_domain(hostname):
             return True
         status_markers = (
             "/status",
@@ -6723,9 +6965,20 @@ class MySearchClient:
 
     def _looks_like_canonical_status_result(self, *, hostname: str, path: str) -> bool:
         normalized_path = path.rstrip("/")
+        if self._looks_like_brand_status_domain(hostname):
+            return normalized_path in {"", "/", "/history", "/incidents"} or normalized_path.startswith("/incidents")
         if hostname.startswith("status.") or ".statuspage." in hostname:
             return True
         return normalized_path.startswith("/incidents") or normalized_path.startswith("/incident")
+
+    def _looks_like_brand_status_domain(self, hostname: str) -> bool:
+        cleaned = self._clean_hostname(hostname)
+        if not cleaned:
+            return False
+        if cleaned.startswith("status.") or ".statuspage." in cleaned:
+            return True
+        registered_domain = self._registered_domain(cleaned)
+        return registered_domain.endswith("status.com") or registered_domain.endswith("status.io")
 
     def _looks_like_resource_result(
         self,
@@ -7645,6 +7898,30 @@ class MySearchClient:
             "怎么",
             "如何",
             "入门",
+        ]
+        return any(keyword in query_lower for keyword in keywords)
+
+    def _looks_like_debugging_query(self, query_lower: str) -> bool:
+        keywords = [
+            "bug",
+            "cannot",
+            "can't",
+            "debug",
+            "error",
+            "failed",
+            "failing",
+            "fix",
+            "how do i fix",
+            "issue",
+            "strict mode",
+            "troubleshoot",
+            "troubleshooting",
+            "violation",
+            "workaround",
+            "报错",
+            "排查",
+            "修复",
+            "错误",
         ]
         return any(keyword in query_lower for keyword in keywords)
 
