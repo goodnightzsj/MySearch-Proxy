@@ -137,7 +137,7 @@ _MODE_PROVIDER_POLICY: dict[str, SearchRoutePolicy] = {
     "news": SearchRoutePolicy(
         key="news",
         provider="tavily",
-        fallback_chain=("firecrawl", "exa"),
+        fallback_chain=("exa",),
         tavily_topic="news",
         result_profile="news",
         allow_exa_rescue=True,
@@ -145,7 +145,7 @@ _MODE_PROVIDER_POLICY: dict[str, SearchRoutePolicy] = {
     "status": SearchRoutePolicy(
         key="status",
         provider="tavily",
-        fallback_chain=("firecrawl", "exa"),
+        fallback_chain=("exa",),
         tavily_topic="general",
         result_profile="web",
         allow_exa_rescue=True,
