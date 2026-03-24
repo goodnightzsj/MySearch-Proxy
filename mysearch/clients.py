@@ -1048,6 +1048,59 @@ class MySearchClient:
             except MySearchError:
                 pass
 
+        needs_pdf_tavily_boost = (
+            mode == "pdf"
+            and decision.provider != "xai"
+            and self._provider_can_serve(self.config.tavily)
+            and not self._has_strong_pdf_match(
+                query=query,
+                results=list(result.get("results") or []),
+            )
+        )
+        if needs_pdf_tavily_boost:
+            try:
+                tavily_boost = self._search_tavily(
+                    query=query,
+                    max_results=max_results,
+                    topic="general",
+                    include_answer=False,
+                    include_content=False,
+                    include_domains=include_domains,
+                    exclude_domains=exclude_domains,
+                    strategy=resolved_strategy,
+                )
+                if tavily_boost.get("results"):
+                    merged = self._merge_search_payloads(
+                        primary_result=tavily_boost,
+                        secondary_result=result,
+                        max_results=max_results,
+                    )
+                    result["results"] = merged["results"]
+                    result["citations"] = merged["citations"]
+                    result["provider"] = "hybrid"
+                    if self._should_rerank_resource_results(mode=mode, intent=resolved_intent):
+                        reranked_results = self._rerank_resource_results(
+                            query=query,
+                            mode=mode,
+                            results=list(result.get("results") or []),
+                            include_domains=include_domains,
+                        )
+                        result["results"] = reranked_results
+                        result["citations"] = self._align_citations_with_results(
+                            results=reranked_results,
+                            citations=list(result.get("citations") or []),
+                        )
+                    result.setdefault("evidence", {})["pdf_tavily_boost"] = True
+                    result = self._augment_evidence_summary(
+                        result,
+                        query=query,
+                        mode=mode,
+                        intent=resolved_intent,
+                        include_domains=include_domains,
+                    )
+            except MySearchError:
+                pass
+
         evidence = result.get("evidence") or {}
         conflicts = evidence.get("conflicts") or []
         if self._should_attempt_xai_arbitration(
