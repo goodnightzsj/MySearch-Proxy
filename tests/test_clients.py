@@ -3413,6 +3413,139 @@ class MySearchClientTests(unittest.TestCase):
         self.assertTrue(search_calls)
         self.assertEqual(search_calls[0]["provider"], "tavily")
 
+    def test_resolve_research_plan_uses_docs_mode_for_technical_comparison_queries(self) -> None:
+        client = MySearchClient()
+
+        plan = client._resolve_research_plan(
+            query="compare OpenAI Responses API and Batch API for long-running tasks 2026",
+            mode="web",
+            intent="comparison",
+            strategy="deep",
+            web_max_results=5,
+            social_max_results=5,
+            scrape_top_n=3,
+            include_social=False,
+            include_domains=None,
+        )
+
+        self.assertEqual(plan["web_mode"], "docs")
+
+    def test_research_prioritizes_authoritative_sources_for_technical_comparison_queries(self) -> None:
+        client = MySearchClient()
+        client._provider_can_serve = lambda provider: provider.name != "xai"  # type: ignore[method-assign]
+
+        def fake_search(**kwargs):  # type: ignore[no-untyped-def]
+            self.assertEqual(kwargs["mode"], "docs")
+            return {
+                "provider": "firecrawl",
+                "intent": "resource",
+                "strategy": "deep",
+                "answer": "",
+                "results": [
+                    {
+                        "provider": "firecrawl",
+                        "title": "A practical guide to the OpenAI Batch API",
+                        "url": "https://www.eesel.ai/blog/openai-batch-api",
+                        "snippet": "Third-party overview.",
+                        "content": "",
+                    },
+                    {
+                        "provider": "firecrawl",
+                        "title": "OpenAI API discussion thread",
+                        "url": "https://www.reddit.com/r/OpenAI/comments/example",
+                        "snippet": "Community discussion.",
+                        "content": "",
+                    },
+                ],
+                "citations": [
+                    {
+                        "title": "A practical guide to the OpenAI Batch API",
+                        "url": "https://www.eesel.ai/blog/openai-batch-api",
+                    },
+                    {
+                        "title": "OpenAI API discussion thread",
+                        "url": "https://www.reddit.com/r/OpenAI/comments/example",
+                    },
+                ],
+                "evidence": {
+                    "providers_consulted": ["firecrawl"],
+                    "verification": "single-provider",
+                    "citation_count": 2,
+                    "source_diversity": 2,
+                    "source_domains": ["eesel.ai", "reddit.com"],
+                    "official_source_count": 0,
+                    "official_mode": "off",
+                    "confidence": "medium",
+                    "conflicts": [],
+                },
+            }
+
+        client.search = fake_search  # type: ignore[method-assign]
+        client._search_exa = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "exa",
+            "transport": "env",
+            "query": kwargs["query"],
+            "results": [
+                {
+                    "provider": "exa",
+                    "title": "Background mode guide - OpenAI API",
+                    "url": "https://platform.openai.com/docs/guides/background",
+                    "snippet": "Official documentation for background mode.",
+                    "content": "",
+                },
+                {
+                    "provider": "exa",
+                    "title": "Batch API guide - OpenAI API",
+                    "url": "https://platform.openai.com/docs/guides/batch",
+                    "snippet": "Official documentation for Batch API.",
+                    "content": "",
+                },
+            ],
+            "citations": [
+                {
+                    "title": "Background mode guide - OpenAI API",
+                    "url": "https://platform.openai.com/docs/guides/background",
+                },
+                {
+                    "title": "Batch API guide - OpenAI API",
+                    "url": "https://platform.openai.com/docs/guides/batch",
+                },
+            ],
+        }
+        client.extract_url = lambda **kwargs: {  # type: ignore[method-assign]
+            "url": kwargs["url"],
+            "provider": "firecrawl",
+            "content": f"authoritative content for {kwargs['url']}",
+            "cache": {"extract": {"hit": False, "ttl_seconds": 300}},
+        }
+
+        result = client.research(
+            query="compare OpenAI Responses API and Batch API for long-running tasks 2026",
+            mode="web",
+            strategy="deep",
+            include_social=False,
+            scrape_top_n=2,
+        )
+
+        self.assertIn(
+            result["pages"][0]["url"],
+            {
+                "https://platform.openai.com/docs/guides/background",
+                "https://platform.openai.com/docs/guides/batch",
+            },
+        )
+        self.assertIn(
+            result["citations"][0]["url"],
+            {
+                "https://platform.openai.com/docs/guides/background",
+                "https://platform.openai.com/docs/guides/batch",
+            },
+        )
+        self.assertGreaterEqual(result["evidence"]["authoritative_source_count"], 2)
+        self.assertIn("Authoritative sources and corroborating analysis", result["summary"])
+        self.assertIn("## Source Mix", result["summary"])
+        self.assertIn("## Top Sources", result["summary"])
+
     def test_research_falls_back_to_exa_discovery_when_web_discovery_fails(self) -> None:
         client = MySearchClient()
         client._provider_can_serve = lambda provider: provider.name == "exa"  # type: ignore[method-assign]

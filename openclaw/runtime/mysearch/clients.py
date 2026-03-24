@@ -1520,6 +1520,12 @@ class MySearchClient:
             include_social=include_social,
             include_domains=include_domains,
         )
+        authoritative_research = self._research_prefers_authoritative_sources(
+            query=query,
+            mode=research_plan["web_mode"],
+            intent=resolved_intent,
+            include_domains=include_domains,
+        )
         discovery_include_content = research_plan["web_mode"] in {"docs"} and self._provider_can_serve(
             self.config.firecrawl
         )
@@ -1538,6 +1544,20 @@ class MySearchClient:
                 exclude_domains=exclude_domains,
             )
         }
+        if authoritative_research and research_plan["web_mode"] == "web":
+            research_tasks["docs_rescue"] = lambda: self.search(
+                query=query,
+                mode="docs",
+                intent="resource",
+                strategy="balanced" if resolved_strategy == "fast" else resolved_strategy,
+                provider="auto",
+                sources=["web"],
+                max_results=max(4, min(research_plan["web_max_results"], 6)),
+                include_content=False,
+                include_answer=False,
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+            )
         if include_social:
             research_tasks["social"] = lambda: self.search(
                 query=query,
@@ -1586,14 +1606,39 @@ class MySearchClient:
                 self._raise_parallel_error(research_errors, "web")
                 web_search = research_results["web"]
 
+        docs_rescue = research_results.get("docs_rescue")
+        docs_rescue_results = (
+            list(docs_rescue.get("results") or [])
+            if docs_rescue and not research_errors.get("docs_rescue")
+            else []
+        )
+        docs_rescue_provider = docs_rescue.get("provider", "") if docs_rescue and not research_errors.get("docs_rescue") else ""
+        exa_discovery_results = (
+            list(exa_discovery.get("results") or [])
+            if exa_discovery and not research_errors.get("exa_discovery")
+            else []
+        )
+
         urls: list[str] = []
         prefetched_content: dict[str, str] = {}
         if web_search.get("provider") == "hybrid":
-            candidate_results = web_search.get("results") or web_search.get("web", {}).get("results", [])
+            base_candidate_results = web_search.get("results") or web_search.get("web", {}).get("results", [])
         else:
-            candidate_results = web_search.get("results", [])
+            base_candidate_results = web_search.get("results", [])
 
-        for result in candidate_results:
+        research_candidate_results, research_selection_meta = self._select_research_candidate_results(
+            query=query,
+            mode=research_plan["web_mode"],
+            intent=resolved_intent,
+            max_results=research_plan["web_max_results"],
+            web_results=base_candidate_results,
+            docs_rescue_results=docs_rescue_results,
+            exa_results=exa_discovery_results,
+            include_domains=include_domains,
+            authoritative_preferred=authoritative_research,
+        )
+
+        for result in research_candidate_results:
             url = (result.get("url") or "").strip()
             if not url or url in urls:
                 continue
@@ -1617,11 +1662,6 @@ class MySearchClient:
                         if len(urls) >= research_plan["scrape_top_n"]:
                             break
 
-        exa_discovery_results = (
-            list(exa_discovery.get("results") or [])
-            if exa_discovery and not research_errors.get("exa_discovery")
-            else []
-        )
         exa_unique_urls: list[str] = []
         seen_exa_urls: set[str] = set()
         for exa_item in exa_discovery_results:
@@ -1631,7 +1671,15 @@ class MySearchClient:
             seen_exa_urls.add(exa_url)
             exa_unique_urls.append(exa_url)
 
-        exa_promoted_urls: list[str] = []
+        exa_promoted_urls = [
+            url
+            for url in urls
+            if url in seen_exa_urls
+            and url not in {
+                (item.get("url") or "").strip()
+                for item in base_candidate_results
+            }
+        ]
         if len(urls) < research_plan["scrape_top_n"]:
             if exa_discovery and not research_errors.get("exa_discovery"):
                 for exa_item in exa_discovery_results:
@@ -1687,16 +1735,28 @@ class MySearchClient:
 
         web_provider = web_search.get("provider", "")
         social_provider = social.get("provider", "") if social else ""
-        providers_consulted = [item for item in [web_provider, social_provider] if item]
+        providers_consulted = [item for item in [web_provider, docs_rescue_provider, social_provider] if item]
         if exa_discovery and not research_errors.get("exa_discovery"):
             providers_consulted.append("exa")
         providers_consulted = list(dict.fromkeys(providers_consulted))
         citations = self._dedupe_citations(
             web_search.get("citations") or [],
+            (docs_rescue.get("citations") or [])
+            if docs_rescue and not research_errors.get("docs_rescue")
+            else [],
             (social.get("citations") or []) if social else [],
             (exa_discovery.get("citations") or [])
             if exa_discovery and not research_errors.get("exa_discovery")
             else [],
+        )
+        ordered_research_results = self._dedupe_research_results_for_report(
+            research_candidate_results,
+            docs_rescue_results,
+            exa_discovery_results,
+        )
+        citations = self._align_citations_with_results(
+            results=ordered_research_results,
+            citations=citations,
         )
         evidence = self._augment_research_evidence(
             query=query,
@@ -1713,6 +1773,12 @@ class MySearchClient:
             exa_discovery_count=len(exa_discovery_results),
             exa_unique_url_count=len(exa_unique_urls),
             exa_promoted_page_count=len(exa_promoted_urls),
+            authoritative_source_count=research_selection_meta["authoritative_source_count"],
+            community_source_count=research_selection_meta["community_source_count"],
+            selected_candidate_count=len(research_candidate_results),
+            selected_candidate_domains=research_selection_meta["selected_candidate_domains"],
+            docs_rescue_result_count=len(docs_rescue_results),
+            authoritative_research=authoritative_research,
         )
 
         executive_summary = ""
@@ -1776,7 +1842,13 @@ class MySearchClient:
         include_social: bool,
         include_domains: list[str] | None,
     ) -> dict[str, Any]:
-        web_mode = "news" if mode == "news" else ("docs" if mode in {"docs", "github", "pdf"} else "web")
+        prefers_authoritative_sources = self._research_prefers_authoritative_sources(
+            query=query,
+            mode=mode,
+            intent=intent,
+            include_domains=include_domains,
+        )
+        web_mode = "news" if mode == "news" else ("docs" if mode in {"docs", "github", "pdf"} or prefers_authoritative_sources else "web")
         planned_web_max = web_max_results
         planned_social_max = social_max_results if include_social else 0
         planned_scrape_top_n = scrape_top_n
@@ -1805,6 +1877,188 @@ class MySearchClient:
             "web_max_results": planned_web_max,
             "social_max_results": planned_social_max,
             "scrape_top_n": planned_scrape_top_n,
+        }
+
+    def _looks_like_technical_research_query(self, query_lower: str) -> bool:
+        technical_markers = (
+            " api",
+            "api ",
+            "sdk",
+            "reference",
+            "background mode",
+            "batch api",
+            "responses api",
+            "webhook",
+            "webhooks",
+            "technical report",
+            "research paper",
+            "pdf",
+        )
+        return self._looks_like_docs_query(query_lower) or any(
+            marker in query_lower for marker in technical_markers
+        )
+
+    def _research_prefers_authoritative_sources(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        include_domains: list[str] | None,
+    ) -> bool:
+        query_lower = query.lower()
+        if mode in {"docs", "github", "pdf"}:
+            return True
+        if include_domains:
+            return True
+        if self._should_use_strict_resource_policy(
+            query=query,
+            mode=mode,
+            intent=intent,
+            include_domains=include_domains,
+        ):
+            return True
+        return self._looks_like_technical_research_query(query_lower)
+
+    def _dedupe_research_results_for_report(
+        self,
+        *result_lists: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        deduped: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for results in result_lists:
+            for item in results:
+                if not isinstance(item, dict):
+                    continue
+                normalized = self._canonicalize_result_item(item)
+                dedupe_key = self._result_dedupe_key(normalized)
+                if not dedupe_key or dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                deduped.append(normalized)
+        return deduped
+
+    def _select_research_candidate_results(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        max_results: int,
+        web_results: list[dict[str, Any]],
+        docs_rescue_results: list[dict[str, Any]],
+        exa_results: list[dict[str, Any]],
+        include_domains: list[str] | None,
+        authoritative_preferred: bool,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        combined = self._dedupe_research_results_for_report(
+            docs_rescue_results if authoritative_preferred else [],
+            web_results,
+            exa_results,
+            [] if authoritative_preferred else docs_rescue_results,
+        )
+        if not combined:
+            return [], {
+                "authoritative_source_count": 0,
+                "community_source_count": 0,
+                "selected_candidate_domains": [],
+            }
+
+        if not authoritative_preferred:
+            selected = combined[:max_results]
+            selected_domains = self._collect_source_domains(results=selected, citations=[])
+            return selected, {
+                "authoritative_source_count": 0,
+                "community_source_count": 0,
+                "selected_candidate_domains": selected_domains[:5],
+            }
+
+        effective_mode: SearchMode = mode if mode in {"docs", "github", "pdf"} else "docs"
+        query_tokens = self._query_brand_tokens(query)
+        official_candidates: list[dict[str, Any]] = []
+        supporting_candidates: list[dict[str, Any]] = []
+        general_candidates: list[dict[str, Any]] = []
+        community_candidates: list[dict[str, Any]] = []
+
+        for item in combined:
+            normalized = self._canonicalize_result_item(item)
+            flags = self._resource_result_flags(
+                mode=effective_mode,
+                item=normalized,
+                query_tokens=query_tokens,
+                include_domains=include_domains,
+            )
+            hostname = str(flags["hostname"])
+            path = urlparse(normalized.get("url", "")).path.lower()
+            official_candidate = self._result_matches_official_policy(
+                item=normalized,
+                mode=effective_mode,
+                query_tokens=query_tokens,
+                include_domains=include_domains,
+                strict_official=False,
+            )
+            community_candidate = (
+                not bool(flags["non_third_party"])
+                or self._is_obvious_official_community_result(hostname=hostname, path=path)
+            )
+            supportive_candidate = bool(flags["non_third_party"]) and (
+                bool(flags["docs_shape_match"])
+                or bool(flags["registered_domain_label_match"])
+                or bool(flags["host_brand_match"])
+                or bool(flags["title_brand_match"])
+            )
+            if official_candidate:
+                official_candidates.append(normalized)
+            elif supportive_candidate:
+                supporting_candidates.append(normalized)
+            elif community_candidate:
+                community_candidates.append(normalized)
+            else:
+                general_candidates.append(normalized)
+
+        if len(official_candidates) > 1:
+            official_candidates = self._rerank_resource_results(
+                query=query,
+                mode=effective_mode,
+                results=official_candidates,
+                include_domains=include_domains,
+            )
+        if len(supporting_candidates) > 1:
+            supporting_candidates = self._rerank_resource_results(
+                query=query,
+                mode=effective_mode,
+                results=supporting_candidates,
+                include_domains=include_domains,
+            )
+        if len(general_candidates) > 1:
+            general_candidates = self._rerank_general_results(
+                query=query,
+                result_profile="web",
+                results=general_candidates,
+                include_domains=include_domains,
+            )
+        if len(community_candidates) > 1:
+            community_candidates = self._rerank_general_results(
+                query=query,
+                result_profile="web",
+                results=community_candidates,
+                include_domains=include_domains,
+            )
+
+        ordered = [
+            *official_candidates,
+            *supporting_candidates,
+            *general_candidates,
+            *community_candidates,
+        ][:max_results]
+        selected_domains = self._collect_source_domains(results=ordered, citations=[])
+        return ordered, {
+            "authoritative_source_count": min(
+                len(ordered),
+                len(official_candidates) + len(supporting_candidates),
+            ),
+            "community_source_count": min(len(ordered), len(community_candidates)),
+            "selected_candidate_domains": selected_domains[:5],
         }
 
     def _candidate_result_budget(
@@ -2173,6 +2427,12 @@ class MySearchClient:
         exa_discovery_count: int,
         exa_unique_url_count: int,
         exa_promoted_page_count: int,
+        authoritative_source_count: int,
+        community_source_count: int,
+        selected_candidate_count: int,
+        selected_candidate_domains: list[str],
+        docs_rescue_result_count: int,
+        authoritative_research: bool,
     ) -> dict[str, Any]:
         successful_pages = [page for page in pages if not page.get("error")]
         page_error_count = max(len(pages) - len(successful_pages), 0)
@@ -2210,6 +2470,7 @@ class MySearchClient:
             social_present=social is not None,
             social_error=bool(social_error),
             conflicts=conflicts,
+            authoritative_source_count=authoritative_source_count,
         )
         return {
             "providers_consulted": providers_consulted,
@@ -2232,6 +2493,12 @@ class MySearchClient:
             "exa_discovery_count": exa_discovery_count,
             "exa_unique_url_count": exa_unique_url_count,
             "exa_promoted_page_count": exa_promoted_page_count,
+            "authoritative_source_count": authoritative_source_count,
+            "community_source_count": community_source_count,
+            "selected_candidate_count": selected_candidate_count,
+            "selected_candidate_domains": selected_candidate_domains[:5],
+            "docs_rescue_result_count": docs_rescue_result_count,
+            "authoritative_research": authoritative_research,
         }
 
     def _should_attempt_xai_arbitration(
@@ -2324,11 +2591,16 @@ class MySearchClient:
         social_present: bool,
         social_error: bool,
         conflicts: list[str],
+        authoritative_source_count: int,
     ) -> str:
         if "strict-official-unmet" in conflicts or "page-extraction-unavailable" in conflicts:
             return "low"
+        if authoritative_source_count >= 2 and page_success_count > 0 and not social_error:
+            return "high"
         if search_confidence == "high" and page_success_count > 0 and not social_error:
             return "high"
+        if authoritative_source_count >= 1 and page_success_count > 0:
+            return "medium"
         if search_confidence in {"high", "medium"} and (
             page_success_count > 0 or requested_page_count <= 0 or not social_present
         ):
@@ -7585,9 +7857,16 @@ class MySearchClient:
             or self._looks_like_exploratory_query(query_lower)
             or any(token in query_lower for token in ("best ", "top ", "compare ", "comparison "))
         )
+        authoritative_source_count = int(evidence.get("authoritative_source_count") or 0)
+        community_source_count = int(evidence.get("community_source_count") or 0)
         primary_finding = executive_summary_override or web_answer or social_answer
         if not primary_finding and comparison_like:
-            if citation_title_lines:
+            if authoritative_source_count > 0 and citation_title_lines:
+                primary_finding = (
+                    "Authoritative sources and corroborating analysis were found; "
+                    f"the strongest anchors include {', '.join(citation_title_lines[:3])}."
+                )
+            elif citation_title_lines:
                 primary_finding = (
                     "The strongest available evidence is comparative rather than authoritative; "
                     f"recurring source clusters include {', '.join(citation_title_lines[:3])}."
@@ -7637,6 +7916,11 @@ class MySearchClient:
             provider_roles.append(
                 f"Exa expanded semantic coverage with {exa_unique} unique candidate URL(s)."
             )
+        docs_rescue_count = int(evidence.get("docs_rescue_result_count") or 0)
+        if docs_rescue_count > 0:
+            provider_roles.append(
+                f"Docs rescue surfaced {docs_rescue_count} authoritative or product-native candidate result(s)."
+            )
         if social_answer:
             provider_roles.append("xAI added social or synthesis context to the research pass.")
         arbitration_summary = str(evidence.get("xai_arbitration_summary") or "").strip()
@@ -7658,6 +7942,10 @@ class MySearchClient:
         source_diversity = int(evidence.get("source_diversity") or 0)
         if source_diversity > 0:
             coverage_bits.append(f"source_domains={source_diversity}")
+        if authoritative_source_count > 0:
+            coverage_bits.append(f"authoritative_sources={authoritative_source_count}")
+        if community_source_count > 0:
+            coverage_bits.append(f"community_sources={community_source_count}")
         confidence = str(evidence.get("confidence") or "").strip()
         if confidence:
             coverage_bits.append(f"confidence={confidence}")
@@ -7679,6 +7967,17 @@ class MySearchClient:
             "social_signal": social_signal,
             "caveats": significant_conflicts[:4],
             "top_sources": top_sources,
+            "source_mix": [
+                bit
+                for bit in (
+                    f"authoritative={authoritative_source_count}" if authoritative_source_count > 0 else "",
+                    f"community={community_source_count}" if community_source_count > 0 else "",
+                    f"domains={', '.join(evidence.get('selected_candidate_domains') or [])}"
+                    if evidence.get("selected_candidate_domains")
+                    else "",
+                )
+                if bit
+            ],
         }
 
     def _render_research_report(self, sections: dict[str, Any]) -> str:
@@ -7721,6 +8020,14 @@ class MySearchClient:
         if coverage_bits:
             lines.extend(["", "## Coverage", f"- {' | '.join(coverage_bits)}"])
 
+        source_mix = [
+            str(item).strip()
+            for item in (sections.get("source_mix") or [])
+            if str(item).strip()
+        ]
+        if source_mix:
+            lines.extend(["", "## Source Mix", f"- {' | '.join(source_mix)}"])
+
         social_signal = str(sections.get("social_signal") or "").strip()
         if social_signal:
             lines.extend(["", "## Social Signal", f"- {social_signal}"])
@@ -7731,7 +8038,7 @@ class MySearchClient:
             lines.extend(["", "## Caveats"])
             for item in caveats:
                 lines.append(f"- {item}")
-        elif top_sources:
+        if top_sources:
             lines.extend(["", "## Top Sources"])
             for item in top_sources[:3]:
                 lines.append(f"- {item}")
