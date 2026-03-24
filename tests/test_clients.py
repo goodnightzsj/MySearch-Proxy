@@ -1240,8 +1240,15 @@ class MySearchClientTests(unittest.TestCase):
         reranked = client._rerank_general_results(
             query="OpenAI pricing official",
             result_profile="web",
-            include_domains=None,
+            include_domains=["openai.com"],
             results=[
+                {
+                    "provider": "exa",
+                    "title": "Confused about OpenAI pricing",
+                    "url": "https://community.openai.com/t/confused-about-openai-batch-api-gpt-4o-mini-pricing-why-are-the-total-costs-higher/936262",
+                    "snippet": "Official community discussion about pricing",
+                    "content": "",
+                },
                 {
                     "provider": "tavily",
                     "title": "Compare OpenAI API models",
@@ -1331,6 +1338,13 @@ class MySearchClientTests(unittest.TestCase):
                     "content": "",
                 },
                 {
+                    "provider": "exa",
+                    "title": "test.step | Playwright",
+                    "url": "https://playwright.dev/docs/api/class-teststep",
+                    "snippet": "Exact test.step API reference",
+                    "content": "",
+                },
+                {
                     "provider": "tavily",
                     "title": "TestStepInfo class | Playwright",
                     "url": "https://playwright.dev/docs/api/class-teststepinfo",
@@ -1340,7 +1354,7 @@ class MySearchClientTests(unittest.TestCase):
             ],
         )
 
-        self.assertEqual(reranked[0]["url"], "https://playwright.dev/docs/api/class-teststepinfo")
+        self.assertEqual(reranked[0]["url"], "https://playwright.dev/docs/api/class-teststep")
 
     def test_pdf_verify_blend_promotes_exact_paper_page(self) -> None:
         client = MySearchClient()
