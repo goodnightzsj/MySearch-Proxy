@@ -141,7 +141,15 @@ class MySearchClientTests(unittest.TestCase):
             include_domains=["arxiv.org"],
         )
 
-        self.assertEqual(ranked[0]["url"], "https://arxiv.org/abs/2501.12948?sfnsn=scwspmo")
+        self.assertEqual(ranked[0]["url"], "https://arxiv.org/abs/2501.12948")
+
+    def test_canonical_result_url_rewrites_arxiv_html_variant_to_abs(self) -> None:
+        client = MySearchClient()
+
+        self.assertEqual(
+            client._canonical_result_url("https://arxiv.org/html/2501.12948v1"),
+            "https://arxiv.org/abs/2501.12948",
+        )
 
     def test_pdf_query_tokenization_keeps_short_model_suffix(self) -> None:
         client = MySearchClient()
@@ -1852,8 +1860,11 @@ class MySearchClientTests(unittest.TestCase):
             scrape_top_n=1,
         )
 
-        self.assertIn("Key findings from retrieved sources:", result["research_summary"])
+        self.assertIn("Primary finding:", result["research_summary"])
+        self.assertIn("Coverage:", result["research_summary"])
         self.assertIn("Primary finding", result["research_summary"])
+        self.assertEqual(result["summary"], result["research_summary"])
+        self.assertEqual(result["confidence"], "high")
 
     def test_research_anchors_web_discovery_to_tavily_for_generic_queries(self) -> None:
         client = MySearchClient()

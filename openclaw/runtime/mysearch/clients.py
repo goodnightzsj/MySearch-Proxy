@@ -1516,6 +1516,7 @@ class MySearchClient:
                 pages=pages,
                 citations=citations,
                 social=social,
+                evidence=evidence,
             )
 
         return {
@@ -1529,6 +1530,8 @@ class MySearchClient:
             "social_error": social_error,
             "citations": citations,
             "evidence": evidence,
+            "summary": research_summary,
+            "confidence": evidence.get("confidence"),
             "research_summary": research_summary,
             "notes": [
                 "默认用 Tavily 做发现，Firecrawl 做正文抓取，X 搜索走 xAI Responses API",
@@ -4410,7 +4413,7 @@ class MySearchClient:
             if len(providers) > 1:
                 matched_results += 1
             best = max(variants, key=self._result_quality_score)
-            merged_item = dict(best)
+            merged_item = self._canonicalize_result_item(dict(best))
             merged_item["matched_providers"] = providers
             results.append(merged_item)
 
@@ -4464,7 +4467,7 @@ class MySearchClient:
             ),
             reverse=True,
         )
-        return [dict(pair[1]) for pair in ranked]
+        return [self._canonicalize_result_item(dict(pair[1])) for pair in ranked]
 
     def _resource_result_rank(
         self,
@@ -4705,12 +4708,33 @@ class MySearchClient:
         )
 
     def _result_dedupe_key(self, item: dict[str, Any]) -> str:
-        url = (item.get("url") or "").strip().lower()
+        url = self._canonical_result_url((item.get("url") or "").strip()).lower()
         if url:
             return url
         title = re.sub(r"\s+", " ", (item.get("title") or "").strip().lower())
         snippet = re.sub(r"\s+", " ", (item.get("snippet") or "").strip().lower())
         return f"{title}|{snippet[:160]}".strip("|")
+
+    def _canonicalize_result_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(item)
+        normalized["url"] = self._canonical_result_url(str(item.get("url") or ""))
+        return normalized
+
+    def _canonical_result_url(self, url: str) -> str:
+        raw = (url or "").strip()
+        if not raw:
+            return ""
+        parsed = urlparse(raw)
+        if self._clean_hostname(parsed.netloc) != "arxiv.org":
+            return raw
+        match = re.match(
+            r"^/(?:abs|html|pdf)/(?P<paper_id>\d{4}\.\d{4,5})(?:v\d+)?(?:\.pdf)?$",
+            parsed.path.lower(),
+        )
+        if not match:
+            return raw
+        scheme = parsed.scheme or "https"
+        return f"{scheme}://arxiv.org/abs/{match.group('paper_id')}"
 
     def _result_quality_score(self, item: dict[str, Any]) -> tuple[int, int, int]:
         content = item.get("content") or ""
@@ -5760,7 +5784,7 @@ class MySearchClient:
             return None
 
         normalized = dict(item)
-        normalized["url"] = url
+        normalized["url"] = self._canonical_result_url(str(url))
         normalized["title"] = title
         return normalized
 
@@ -5939,14 +5963,12 @@ class MySearchClient:
         pages: list[dict[str, Any]],
         citations: list[dict[str, Any]],
         social: dict[str, Any] | None,
+        evidence: dict[str, Any],
     ) -> str:
         web_answer = (web_search.get("answer") or "").strip()
-        if web_answer:
-            return web_answer
+        social_answer = ""
         if social:
             social_answer = (social.get("answer") or "").strip()
-            if social_answer:
-                return social_answer
 
         url_to_title: dict[str, str] = {}
         for citation in citations:
@@ -5970,17 +5992,63 @@ class MySearchClient:
                 highlights.append(excerpt)
             if len(highlights) >= 2:
                 break
-        if highlights:
-            return "Key findings from retrieved sources: " + " ".join(highlights)
 
         citation_titles = [
             (citation.get("title") or "").strip()
             for citation in citations
             if (citation.get("title") or "").strip()
         ]
-        if citation_titles:
-            return "Relevant sources include " + ", ".join(citation_titles[:3]) + "."
-        return ""
+        primary_finding = web_answer or social_answer
+        if not primary_finding and highlights:
+            primary_finding = highlights[0]
+        if not primary_finding and citation_titles:
+            primary_finding = citation_titles[0]
+        if not primary_finding:
+            return ""
+
+        lines = [f"Primary finding: {primary_finding}"]
+        supporting = highlights[:]
+        if supporting and supporting[0] == primary_finding:
+            supporting = supporting[1:]
+        if supporting:
+            lines.extend(["", "Supporting evidence:"])
+            for item in supporting[:2]:
+                lines.append(f"- {item}")
+
+        coverage_bits: list[str] = []
+        providers = [str(item) for item in (evidence.get("providers_consulted") or []) if item]
+        if providers:
+            coverage_bits.append(f"providers={', '.join(providers)}")
+        page_count = int(evidence.get("page_count") or 0)
+        requested_pages = int((evidence.get("research_plan") or {}).get("scrape_top_n") or 0)
+        if requested_pages > 0:
+            coverage_bits.append(f"pages={page_count}/{requested_pages}")
+        citation_count = int(evidence.get("citation_count") or 0)
+        if citation_count > 0:
+            coverage_bits.append(f"citations={citation_count}")
+        exa_unique = int(evidence.get("exa_unique_url_count") or 0)
+        if exa_unique > 0:
+            coverage_bits.append(f"exa_unique_urls={exa_unique}")
+        confidence = str(evidence.get("confidence") or "").strip()
+        if confidence:
+            coverage_bits.append(f"confidence={confidence}")
+        if coverage_bits:
+            lines.extend(["", "Coverage:", f"- {' | '.join(coverage_bits)}"])
+
+        if social_answer and social_answer != primary_finding:
+            lines.extend(["", f"Social signal: {social_answer}"])
+
+        significant_conflicts = [
+            str(item)
+            for item in (evidence.get("conflicts") or [])
+            if item and item != "social-search-unavailable"
+        ]
+        if significant_conflicts:
+            lines.extend(["", "Open questions:", f"- {'; '.join(significant_conflicts[:3])}"])
+        elif citation_titles:
+            lines.extend(["", "Top sources:", f"- {'; '.join(citation_titles[:3])}"])
+
+        return "\n".join(lines).strip()
 
     def _build_excerpt(self, content: str, limit: int = 600) -> str:
         compact = re.sub(r"\s+", " ", content).strip()
