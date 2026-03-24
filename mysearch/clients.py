@@ -978,6 +978,39 @@ class MySearchClient:
             result=result,
             include_domains=include_domains,
         )
+        final_official_mode = str(
+            ((result.get("evidence") or {}) if isinstance(result.get("evidence"), dict) else {}).get(
+                "official_mode"
+            )
+            or "off"
+        )
+        if final_official_mode != "off" or self._should_rerank_resource_results(
+            mode=mode,
+            intent=resolved_intent,
+        ):
+            reranked_results = self._rerank_resource_results(
+                query=query,
+                mode=mode,
+                results=list(result.get("results") or []),
+                include_domains=include_domains,
+            )
+            result["results"] = reranked_results
+            result["citations"] = self._align_citations_with_results(
+                results=reranked_results,
+                citations=list(result.get("citations") or []),
+            )
+        elif self._should_rerank_general_results(result_profile=decision.result_profile):
+            reranked_results = self._rerank_general_results(
+                query=query,
+                result_profile=decision.result_profile,
+                results=list(result.get("results") or []),
+                include_domains=include_domains,
+            )
+            result["results"] = reranked_results
+            result["citations"] = self._align_citations_with_results(
+                results=reranked_results,
+                citations=list(result.get("citations") or []),
+            )
         result = self._trim_search_payload(result, max_results=max_results)
         result = self._augment_evidence_summary(
             result,
