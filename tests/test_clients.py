@@ -1669,6 +1669,67 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["results"][0]["url"], "https://www.apple.com.cn/shop/buy-mac/macbook-air")
         self.assertEqual(result["citations"][0]["url"], "https://www.apple.com.cn/shop/buy-mac/macbook-air")
 
+    def test_official_policy_final_rerank_prefers_specific_release_page_over_indexes(self) -> None:
+        client = MySearchClient()
+
+        result = client._apply_official_resource_policy(
+            query="Next.js 16 release notes official",
+            mode="docs",
+            intent="resource",
+            include_domains=["nextjs.org"],
+            result={
+                "results": [
+                    {
+                        "provider": "tavily",
+                        "title": "The latest Next.js news",
+                        "url": "https://nextjs.org/blog",
+                        "snippet": "Generic blog index",
+                        "content": "",
+                    },
+                    {
+                        "provider": "tavily",
+                        "title": "Guides: Next.js Docs",
+                        "url": "https://nextjs.org/docs",
+                        "snippet": "Generic docs index",
+                        "content": "",
+                    },
+                    {
+                        "provider": "tavily",
+                        "title": "Next.js 16",
+                        "url": "https://nextjs.org/blog/next-16",
+                        "snippet": "Official release announcement",
+                        "content": "",
+                    },
+                    {
+                        "provider": "tavily",
+                        "title": "Upgrading: Version 16",
+                        "url": "https://nextjs.org/docs/app/guides/upgrading/version-16",
+                        "snippet": "Migration guide",
+                        "content": "",
+                    },
+                ],
+                "citations": [
+                    {"title": "The latest Next.js news", "url": "https://nextjs.org/blog"},
+                    {"title": "Guides: Next.js Docs", "url": "https://nextjs.org/docs"},
+                    {"title": "Next.js 16", "url": "https://nextjs.org/blog/next-16"},
+                    {
+                        "title": "Upgrading: Version 16",
+                        "url": "https://nextjs.org/docs/app/guides/upgrading/version-16",
+                    },
+                ],
+                "evidence": {},
+            },
+        )
+
+        reranked = client._rerank_resource_results(
+            query="Next.js 16 release notes official",
+            mode="docs",
+            results=result["results"],
+            include_domains=["nextjs.org"],
+        )
+
+        self.assertEqual(reranked[0]["url"], "https://nextjs.org/blog/next-16")
+
     def test_official_policy_for_status_queries_uses_general_rerank(self) -> None:
         client = MySearchClient()
 
