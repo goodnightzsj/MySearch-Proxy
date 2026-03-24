@@ -1220,6 +1220,13 @@ class MySearchClient:
             evidence = result.get("evidence") or {}
             conflicts = evidence.get("conflicts") or []
 
+        result = self._apply_result_event_answer_override(
+            query=query,
+            mode=mode,
+            intent=resolved_intent,
+            result=result,
+        )
+
         should_supplement_answer = (
             not (result.get("answer") or "").strip()
             and decision.provider != "xai"
@@ -2768,15 +2775,23 @@ class MySearchClient:
         strategy: str = "fast",
         from_date: str | None = None,
     ) -> dict[str, Any]:
+        result_event_query = self._looks_like_result_event_query(query.lower())
         if provider_name == "tavily":
+            tavily_include_content = (
+                include_content
+                and intent != "tutorial"
+                and not self._looks_like_changelog_query(query.lower())
+            ) or (
+                result_event_query
+                and mode == "news"
+                and strategy in {"verify", "deep"}
+            )
             return self._search_tavily(
                 query=query,
                 max_results=max_results,
                 topic=decision.tavily_topic,
                 include_answer=include_answer,
-                include_content=include_content
-                and intent != "tutorial"
-                and not self._looks_like_changelog_query(query.lower()),
+                include_content=tavily_include_content,
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
                 strategy=strategy,
@@ -2787,7 +2802,12 @@ class MySearchClient:
                 query=query,
                 max_results=max_results,
                 categories=decision.firecrawl_categories or self._firecrawl_categories(mode, intent),
-                include_content=include_content or mode in {"docs", "research", "github", "pdf"} or intent == "tutorial",
+                include_content=(
+                    include_content
+                    or mode in {"docs", "research", "github", "pdf"}
+                    or intent == "tutorial"
+                    or (result_event_query and mode == "news" and strategy in {"verify", "deep"})
+                ),
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
             )
@@ -6643,6 +6663,8 @@ class MySearchClient:
         return []
 
     def _looks_like_news_query(self, query_lower: str) -> bool:
+        if self._looks_like_result_event_query(query_lower):
+            return True
         # 中文关键词：直接 substring 匹配
         cn_keywords = ["刚刚", "最新", "新闻", "动态"]
         if any(kw in query_lower for kw in cn_keywords):
@@ -6668,6 +6690,50 @@ class MySearchClient:
             "rumors",
         ]
         return any(keyword in query_lower for keyword in en_keywords)
+
+    def _looks_like_award_result_query(self, query_lower: str) -> bool:
+        keywords = [
+            "academy awards",
+            "album of the year",
+            "aoty",
+            "best actor",
+            "best actress",
+            "best picture",
+            "emmy",
+            "emmys",
+            "golden globe",
+            "golden globes",
+            "grammy",
+            "grammys",
+            "oscar",
+            "oscars",
+            "winner",
+            "winners",
+            "won",
+            "获奖",
+            "最佳专辑",
+            "最佳影片",
+            "最佳男主角",
+            "最佳女主角",
+            "最佳电影",
+            "最佳剧集",
+            "最佳歌曲",
+        ]
+        return any(keyword in query_lower for keyword in keywords)
+
+    def _looks_like_box_office_query(self, query_lower: str) -> bool:
+        keywords = [
+            "box office",
+            "highest grossing",
+            "opening weekend",
+            "票房",
+            "首周末",
+            "开画",
+        ]
+        return any(keyword in query_lower for keyword in keywords)
+
+    def _looks_like_result_event_query(self, query_lower: str) -> bool:
+        return self._looks_like_award_result_query(query_lower) or self._looks_like_box_office_query(query_lower)
 
     def _looks_like_gossip_query(self, query_lower: str) -> bool:
         keywords = [
@@ -6786,6 +6852,8 @@ class MySearchClient:
         return any(keyword in query_lower for keyword in keywords)
 
     def _looks_like_docs_query(self, query_lower: str) -> bool:
+        if self._looks_like_api_docs_topic_query(query_lower):
+            return True
         keywords = [
             "docs",
             "documentation",
@@ -6797,6 +6865,21 @@ class MySearchClient:
             "文档",
             "接口",
             "更新日志",
+        ]
+        return any(keyword in query_lower for keyword in keywords)
+
+    def _looks_like_api_docs_topic_query(self, query_lower: str) -> bool:
+        keywords = [
+            "api webhook",
+            "api webhooks",
+            "background mode",
+            "generate metadata",
+            "generatemetadata",
+            "response api",
+            "responses api",
+            "test.step",
+            "webhook",
+            "webhooks",
         ]
         return any(keyword in query_lower for keyword in keywords)
 
@@ -6858,6 +6941,140 @@ class MySearchClient:
         if verification == "cross-provider" and source_diversity >= 2:
             summary = f"{summary}; corroborated across {source_diversity} domains"
         return summary
+
+    def _apply_result_event_answer_override(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        query_lower = query.lower()
+        if not (
+            self._looks_like_result_event_query(query_lower)
+            and (mode == "news" or intent in {"news", "status"})
+        ):
+            return result
+
+        current_answer = str(result.get("answer") or "").strip()
+        extracted_answer = self._extract_result_event_answer(
+            query=query,
+            results=list(result.get("results") or []),
+        )
+
+        if extracted_answer:
+            updated = dict(result)
+            updated["answer"] = extracted_answer
+            updated["evidence"] = dict(updated.get("evidence") or {})
+            updated["evidence"]["answer_source"] = "result-event-extraction"
+            return updated
+
+        if current_answer and self._answer_looks_uncertain(current_answer):
+            updated = dict(result)
+            updated["answer"] = ""
+            updated["evidence"] = dict(updated.get("evidence") or {})
+            updated["evidence"]["answer_source"] = "suppressed-provider-answer"
+            return updated
+
+        return result
+
+    def _answer_looks_uncertain(self, answer: str) -> bool:
+        answer_lower = answer.lower()
+        markers = [
+            "not yet determined",
+            "not yet known",
+            "still unknown",
+            "to be announced",
+            "tbd",
+            "unclear",
+            "unknown",
+            "尚未确定",
+            "尚未公布",
+            "待公布",
+            "未知",
+        ]
+        return any(marker in answer_lower for marker in markers)
+
+    def _extract_result_event_answer(
+        self,
+        *,
+        query: str,
+        results: list[dict[str, Any]],
+    ) -> str:
+        if not results:
+            return ""
+
+        query_lower = query.lower()
+        signal_texts: list[str] = []
+        for item in results[:3]:
+            for key in ("title", "snippet", "content"):
+                value = str(item.get(key) or "").strip()
+                if value:
+                    signal_texts.append(value)
+        if not signal_texts:
+            return ""
+
+        combined_text = "\n".join(signal_texts)
+
+        if "best picture" in query_lower or "最佳影片" in query_lower:
+            entity = self._extract_named_fact_entity(
+                combined_text,
+                patterns=[
+                    r"best picture\s*[–—:-]\s*([^\n.;]{2,100})",
+                    r"best picture(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)?\s+([^\n.;]{2,100})",
+                ],
+            )
+            if entity:
+                return f"Best Picture winner: {entity}"
+
+        if any(token in query_lower for token in ("album of the year", "aoty", "最佳专辑")):
+            entity = self._extract_named_fact_entity(
+                combined_text,
+                patterns=[
+                    r"album of the year\s*[–—:-]\s*([^\n.;]{2,100})",
+                    r"album of the year(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)?\s+([^\n.;]{2,100})",
+                    r"([^\n.;]{2,100})\s+won\s+album of the year",
+                ],
+            )
+            if entity:
+                return f"Album of the Year winner: {entity}"
+
+        if self._looks_like_box_office_query(query_lower):
+            entity = self._extract_named_fact_entity(
+                combined_text,
+                patterns=[
+                    r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+(?:becomes|become|became|scores|scored|tops|topped)[^\n]{0,80}(?:highest-grossing|biggest opening|opening weekend|box office)",
+                    r"([A-Z][A-Za-z0-9:,'’&\\- ]{2,100})\s+(?:becomes|become|became|scores|scored|tops|topped)[^\n]{0,80}(?:highest-grossing|biggest opening|opening weekend|box office)",
+                ],
+            )
+            if entity:
+                return f"Top opening-weekend title: {entity}"
+
+        return ""
+
+    def _extract_named_fact_entity(
+        self,
+        text: str,
+        *,
+        patterns: list[str],
+    ) -> str:
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            entity = self._clean_extracted_fact_entity(match.group(1))
+            if entity:
+                return entity
+        return ""
+
+    def _clean_extracted_fact_entity(self, value: str) -> str:
+        entity = re.sub(r"\s+", " ", value).strip(" \t\r\n-:;,.\"'“”‘’")
+        entity = re.split(r"\s+(?:with|which|that|after|during|for)\s+", entity, maxsplit=1)[0]
+        entity = re.split(r"\s{2,}", entity, maxsplit=1)[0]
+        if len(entity) < 2:
+            return ""
+        return entity
 
     def _build_research_report_sections(
         self,

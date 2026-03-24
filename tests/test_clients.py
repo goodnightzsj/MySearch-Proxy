@@ -95,6 +95,114 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertIn("Split", ranked[0]["title"])
 
+    def test_resolve_intent_treats_webhooks_official_as_resource(self) -> None:
+        client = MySearchClient()
+
+        result = client._resolve_intent(
+            query="OpenAI webhooks official",
+            mode="auto",
+            intent="auto",
+            sources=["web"],
+        )
+
+        self.assertEqual(result, "resource")
+
+    def test_resolve_intent_treats_award_winner_query_as_news(self) -> None:
+        client = MySearchClient()
+
+        result = client._resolve_intent(
+            query="2026 Oscars best picture winner",
+            mode="auto",
+            intent="auto",
+            sources=["web"],
+        )
+
+        self.assertEqual(result, "news")
+
+    def test_dispatch_single_provider_for_news_result_query_requests_content_in_verify(self) -> None:
+        client = MySearchClient()
+        captured: dict[str, object] = {}
+
+        def fake_search_tavily(**kwargs):  # type: ignore[no-untyped-def]
+            captured.update(kwargs)
+            return {
+                "provider": "tavily",
+                "results": [],
+                "citations": [],
+                "answer": "",
+            }
+
+        client._search_tavily = fake_search_tavily  # type: ignore[method-assign]
+
+        client._dispatch_single_provider(
+            provider_name="tavily",
+            query="2026 Oscars best picture winner",
+            max_results=3,
+            mode="news",
+            intent="news",
+            decision=RouteDecision(
+                provider="tavily",
+                reason="test",
+                tavily_topic="news",
+                result_profile="news",
+            ),
+            include_answer=True,
+            include_content=False,
+            include_domains=None,
+            exclude_domains=None,
+            strategy="verify",
+        )
+
+        self.assertTrue(captured["include_content"])
+
+    def test_apply_result_event_answer_override_extracts_best_picture_winner(self) -> None:
+        client = MySearchClient()
+
+        result = client._apply_result_event_answer_override(
+            query="2026 Oscars best picture winner",
+            mode="news",
+            intent="news",
+            result={
+                "answer": "Not yet determined",
+                "results": [
+                    {
+                        "title": "Oscars 2026 winners list",
+                        "url": "https://example.com/oscars-2026",
+                        "snippet": "Best Picture — One Battle After Another",
+                        "content": "",
+                    }
+                ],
+                "evidence": {},
+            },
+        )
+
+        self.assertEqual(result["answer"], "Best Picture winner: One Battle After Another")
+        self.assertEqual(result["evidence"]["answer_source"], "result-event-extraction")
+
+    def test_apply_result_event_answer_override_extracts_box_office_title(self) -> None:
+        client = MySearchClient()
+
+        result = client._apply_result_event_answer_override(
+            query="2026 highest grossing movie opening weekend",
+            mode="news",
+            intent="news",
+            result={
+                "answer": "",
+                "results": [
+                    {
+                        "title": "‘Project Hail Mary’ becomes Amazon’s highest-grossing film debut",
+                        "url": "https://fortune.com/project-hail-mary",
+                        "snippet": "",
+                        "content": "",
+                    }
+                ],
+                "evidence": {},
+            },
+        )
+
+        self.assertEqual(result["answer"], "Top opening-weekend title: Project Hail Mary")
+        self.assertEqual(result["evidence"]["answer_source"], "result-event-extraction")
+
     def test_pdf_rerank_prefers_primary_named_paper_over_derivative_variants(self) -> None:
         client = MySearchClient()
         results = [
