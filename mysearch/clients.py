@@ -1224,6 +1224,7 @@ class MySearchClient:
             query=query,
             mode=mode,
             intent=resolved_intent,
+            strategy=resolved_strategy,
             result=result,
         )
 
@@ -3153,12 +3154,31 @@ class MySearchClient:
         query_lower = query.lower()
         gossip_query = self._looks_like_gossip_query(query_lower)
         status_query = self._looks_like_status_query(query_lower)
+        award_query = self._looks_like_award_result_query(query_lower)
         precision_tokens = self._query_precision_tokens(query)
         path_precision_hits, total_precision_hits = self._query_precision_hit_counts(
             hostname=hostname,
             path=path,
             title_text=f"{title_text} {snippet_text} {content_text}",
             query_tokens=precision_tokens,
+        )
+        award_winner_page_match = int(
+            award_query
+            and self._looks_like_award_winner_result(
+                title_text=title_text,
+                snippet_text=snippet_text,
+                path=path,
+            )
+        )
+        non_award_nomination_page = int(
+            not (
+                award_query
+                and self._looks_like_award_nomination_result(
+                    title_text=title_text,
+                    snippet_text=snippet_text,
+                    path=path,
+                )
+            )
         )
         gossip_story_match = int(
             gossip_query
@@ -3216,6 +3236,8 @@ class MySearchClient:
         content_score, snippet_score, title_score = self._result_quality_score(item)
         return (
             include_match,
+            award_winner_page_match,
+            non_award_nomination_page,
             non_community_official,
             canonical_status_page_match,
             status_page_match,
@@ -3411,6 +3433,52 @@ class MySearchClient:
             "xinhuanet.com",
         }
         return registered_domain in mainstream_domains
+
+    def _looks_like_award_winner_result(
+        self,
+        *,
+        title_text: str,
+        snippet_text: str,
+        path: str,
+    ) -> bool:
+        text = f"{title_text} {snippet_text} {path}"
+        winner_markers = [
+            "complete winners",
+            "full winners",
+            "winner list",
+            "winners list",
+            "won the",
+            "wins",
+            "winner",
+            "winners",
+        ]
+        return any(marker in text for marker in winner_markers)
+
+    def _looks_like_award_nomination_result(
+        self,
+        *,
+        title_text: str,
+        snippet_text: str,
+        path: str,
+    ) -> bool:
+        text = f"{title_text} {snippet_text} {path}"
+        nomination_markers = [
+            "nomination",
+            "nominations",
+            "nominee",
+            "nominees",
+        ]
+        winner_markers = [
+            "complete winners",
+            "full winners",
+            "winner list",
+            "winners list",
+            "winner",
+            "winners",
+        ]
+        return any(marker in text for marker in nomination_markers) and not any(
+            marker in text for marker in winner_markers
+        )
 
     def _looks_like_news_article_result(self, item: dict[str, Any]) -> bool:
         path = urlparse(item.get("url", "")).path.lower()
@@ -4187,10 +4255,11 @@ class MySearchClient:
         if categories:
             payload["categories"] = [{"type": item} for item in categories]
         if include_content:
-            payload["scrapeOptions"] = {
-                "formats": ["markdown"],
-                "onlyMainContent": True,
-            }
+            if "news" not in categories:
+                payload["scrapeOptions"] = {
+                    "formats": ["markdown"],
+                    "onlyMainContent": True,
+                }
 
         response = self._request_json(
             provider=provider,
@@ -6948,6 +7017,7 @@ class MySearchClient:
         query: str,
         mode: SearchMode,
         intent: ResolvedSearchIntent,
+        strategy: SearchStrategy,
         result: dict[str, Any],
     ) -> dict[str, Any]:
         query_lower = query.lower()
@@ -6962,6 +7032,11 @@ class MySearchClient:
             query=query,
             results=list(result.get("results") or []),
         )
+        if not extracted_answer and strategy in {"verify", "deep"}:
+            extracted_answer = self._extract_result_event_answer_from_top_page(
+                query=query,
+                results=list(result.get("results") or []),
+            )
 
         if extracted_answer:
             updated = dict(result)
@@ -6978,6 +7053,38 @@ class MySearchClient:
             return updated
 
         return result
+
+    def _extract_result_event_answer_from_top_page(
+        self,
+        *,
+        query: str,
+        results: list[dict[str, Any]],
+    ) -> str:
+        if not results:
+            return ""
+        top = results[0]
+        url = str(top.get("url") or "").strip()
+        if not url:
+            return ""
+        try:
+            extracted_page = self.extract_url(
+                url=url,
+                provider="auto",
+                formats=["markdown"],
+                only_main_content=True,
+            )
+        except MySearchError:
+            return ""
+        return self._extract_result_event_answer(
+            query=query,
+            results=[
+                {
+                    "title": top.get("title", ""),
+                    "snippet": top.get("snippet", ""),
+                    "content": extracted_page.get("content", ""),
+                }
+            ],
+        )
 
     def _answer_looks_uncertain(self, answer: str) -> bool:
         answer_lower = answer.lower()
@@ -7021,6 +7128,7 @@ class MySearchClient:
             entity = self._extract_named_fact_entity(
                 combined_text,
                 patterns=[
+                    r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+won[^\n]{0,80}\bbest picture\b",
                     r"best picture\s*[–—:-]\s*([^\n.;]{2,100})",
                     r"best picture(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)?\s+([^\n.;]{2,100})",
                 ],
@@ -7032,6 +7140,7 @@ class MySearchClient:
             entity = self._extract_named_fact_entity(
                 combined_text,
                 patterns=[
+                    r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+(?:won|wins)[^\n]{0,80}\balbum of the year\b",
                     r"album of the year\s*[–—:-]\s*([^\n.;]{2,100})",
                     r"album of the year(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)?\s+([^\n.;]{2,100})",
                     r"([^\n.;]{2,100})\s+won\s+album of the year",
