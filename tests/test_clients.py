@@ -134,6 +134,21 @@ class MySearchClientTests(unittest.TestCase):
         self.assertNotIn("r1", precision_tokens)
         self.assertEqual(subject_tokens[:2], ["deepseek", "r1"])
 
+    def test_derivative_paper_title_with_named_prefix_does_not_block_exa_rescue(self) -> None:
+        client = MySearchClient()
+
+        strong_match = client._has_strong_pdf_match(
+            query="DeepSeek R1 paper pdf",
+            results=[
+                {
+                    "title": "DeepSeek-R1 Thoughtology: Let's think about LLM reasoning",
+                    "url": "https://arxiv.org/pdf/2504.07128",
+                }
+            ],
+        )
+
+        self.assertFalse(strong_match)
+
     def test_pricing_keywords_alone_do_not_trigger_docs_mode(self) -> None:
         client = MySearchClient()
 

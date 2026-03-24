@@ -2566,7 +2566,7 @@ class MySearchClient:
             paper_shape = self._looks_like_pdf_url(url) or any(
                 marker in path for marker in ("/abs/", "/html/")
             )
-            if named_paper and paper_shape:
+            if named_paper and paper_shape and not derivative_title:
                 return True
             if not derivative_title and paper_shape and total_hits >= min(max(len(paper_tokens), 2), 3):
                 return True
