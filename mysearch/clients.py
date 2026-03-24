@@ -197,7 +197,7 @@ _MODE_PROVIDER_POLICY: dict[str, SearchRoutePolicy] = {
         provider="tavily",
         fallback_chain=("firecrawl", "exa"),
         tavily_topic="news",
-        firecrawl_categories=("news",),
+        firecrawl_categories=("research",),
         result_profile="resource",
         allow_exa_rescue=True,
     ),
@@ -4248,14 +4248,16 @@ class MySearchClient:
     ) -> dict[str, Any]:
         provider = self.config.firecrawl
         key = self._get_key_or_raise(provider)
+        requested_news = "news" in categories
+        search_categories = self._normalize_firecrawl_search_categories(categories)
         payload: dict[str, Any] = {
             "query": query,
             "limit": max_results,
         }
-        if categories:
-            payload["categories"] = [{"type": item} for item in categories]
+        if search_categories:
+            payload["categories"] = [{"type": item} for item in search_categories]
         if include_content:
-            if "news" not in categories:
+            if "news" not in search_categories:
                 payload["scrapeOptions"] = {
                     "formats": ["markdown"],
                     "onlyMainContent": True,
@@ -4270,7 +4272,7 @@ class MySearchClient:
         )
         data = response.get("data") or {}
         results = []
-        source_order = ("news", "web") if "news" in categories else ("web", "news")
+        source_order = ("news", "web") if requested_news else ("web", "news")
         for source_name in source_order:
             for item in data.get(source_name, []) or []:
                 results.append(
@@ -6726,10 +6728,19 @@ class MySearchClient:
         if mode == "pdf":
             return ["pdf"]
         if mode == "news" or intent in {"news", "status"}:
-            return ["news"]
+            return []
         if mode in {"docs", "research"} or intent in {"resource", "tutorial"}:
             return ["research"]
         return []
+
+    def _normalize_firecrawl_search_categories(self, categories: list[str]) -> list[str]:
+        supported = {"github", "research", "pdf"}
+        normalized: list[str] = []
+        for item in categories:
+            value = str(item or "").strip().lower()
+            if value in supported and value not in normalized:
+                normalized.append(value)
+        return normalized
 
     def _looks_like_news_query(self, query_lower: str) -> bool:
         if self._looks_like_result_event_query(query_lower):
@@ -7137,6 +7148,9 @@ class MySearchClient:
                 return f"Best Picture winner: {entity}"
 
         if any(token in query_lower for token in ("album of the year", "aoty", "最佳专辑")):
+            entity = self._extract_album_of_the_year_entity(combined_text)
+            if entity:
+                return f"Album of the Year winner: {entity}"
             entity = self._extract_named_fact_entity(
                 combined_text,
                 patterns=[
@@ -7144,6 +7158,16 @@ class MySearchClient:
                     r"album of the year\s*[–—:-]\s*([^\n.;]{2,100})",
                     r"album of the year(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)?\s+([^\n.;]{2,100})",
                     r"([^\n.;]{2,100})\s+won\s+album of the year",
+                ],
+                reject_substrings=[
+                    "award",
+                    "winner",
+                    "nominee",
+                    "nominees",
+                    "best new artist",
+                    "record of the year",
+                    "song of the year",
+                    "won ",
                 ],
             )
             if entity:
@@ -7162,27 +7186,66 @@ class MySearchClient:
 
         return ""
 
+    def _extract_album_of_the_year_entity(self, text: str) -> str:
+        patterns = [
+            r"([A-Z][A-Za-z0-9&'’.\- ]{1,80}) won album of the year for (?:his|her|their|its) album[_*\s]+([^_\n.;]{2,120})",
+            r"([A-Z][A-Za-z0-9&'’.\- ]{1,80}) won album of the year for the album[_*\s]+([^_\n.;]{2,120})",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            artist = self._clean_extracted_fact_entity(match.group(1))
+            album = self._clean_extracted_fact_entity(
+                match.group(2),
+                reject_substrings=[
+                    "award",
+                    "winner",
+                    "nominee",
+                    "nominees",
+                    "best new artist",
+                ],
+            )
+            if album and artist:
+                return f"{album} by {artist}"
+            if album:
+                return album
+        return ""
+
     def _extract_named_fact_entity(
         self,
         text: str,
         *,
         patterns: list[str],
+        reject_substrings: list[str] | None = None,
     ) -> str:
         for pattern in patterns:
             match = re.search(pattern, text, flags=re.IGNORECASE)
             if not match:
                 continue
-            entity = self._clean_extracted_fact_entity(match.group(1))
+            entity = self._clean_extracted_fact_entity(
+                match.group(1),
+                reject_substrings=reject_substrings,
+            )
             if entity:
                 return entity
         return ""
 
-    def _clean_extracted_fact_entity(self, value: str) -> str:
+    def _clean_extracted_fact_entity(
+        self,
+        value: str,
+        *,
+        reject_substrings: list[str] | None = None,
+    ) -> str:
         entity = re.sub(r"\s+", " ", value).strip(" \t\r\n-:;,.\"'“”‘’")
         entity = re.split(r"\s+(?:with|which|that|after|during|for)\s+", entity, maxsplit=1)[0]
         entity = re.split(r"\s{2,}", entity, maxsplit=1)[0]
         if len(entity) < 2:
             return ""
+        if reject_substrings:
+            entity_lower = entity.lower()
+            if any(token in entity_lower for token in reject_substrings):
+                return ""
         return entity
 
     def _build_research_report_sections(
