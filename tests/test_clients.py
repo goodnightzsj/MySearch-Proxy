@@ -1816,6 +1816,63 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["results"][0]["url"], "https://arxiv.org/abs/2501.12948")
         self.assertIn("DeepSeek-R1", result["summary"])
 
+    def test_pdf_title_enrichment_promotes_generic_arxiv_entry(self) -> None:
+        client = MySearchClient()
+        client._provider_can_serve = lambda provider: provider.name == "exa"  # type: ignore[method-assign]
+        client._search_exa = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "exa",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "exa",
+                    "source": "web",
+                    "title": "Insights into DeepSeek-V3: Scaling Challenges and Reflections on Hardware for AI Architectures",
+                    "url": "https://arxiv.org/abs/2505.09343",
+                    "snippet": "Wrong but related paper",
+                    "content": "",
+                },
+                {
+                    "provider": "exa",
+                    "source": "web",
+                    "title": "Computer Science > Computation and Language",
+                    "url": "https://arxiv.org/abs/2501.12948",
+                    "snippet": "",
+                    "content": "",
+                },
+            ],
+            "citations": [
+                {
+                    "title": "Insights into DeepSeek-V3: Scaling Challenges and Reflections on Hardware for AI Architectures",
+                    "url": "https://arxiv.org/abs/2505.09343",
+                },
+                {
+                    "title": "Computer Science > Computation and Language",
+                    "url": "https://arxiv.org/abs/2501.12948",
+                },
+            ],
+        }
+        client._fetch_arxiv_title = lambda url: (  # type: ignore[method-assign]
+            "DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning"
+            if "2501.12948" in url
+            else ""
+        )
+
+        result = client.search(
+            query="DeepSeek R1 paper pdf",
+            mode="pdf",
+            strategy="verify",
+            provider="exa",
+            include_answer=False,
+            include_domains=["arxiv.org"],
+            max_results=5,
+        )
+
+        self.assertEqual(result["results"][0]["url"], "https://arxiv.org/abs/2501.12948")
+        self.assertTrue(result["evidence"]["pdf_title_enrichment"])
+        self.assertIn("DeepSeek-R1", result["summary"])
+
     def test_resolve_research_plan_adapts_docs_and_news_budgets(self) -> None:
         client = MySearchClient()
 

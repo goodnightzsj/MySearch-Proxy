@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import html
 import json
 import re
 import sys
@@ -1100,6 +1101,55 @@ class MySearchClient:
                     )
             except MySearchError:
                 pass
+
+        if mode == "pdf" and result.get("results"):
+            enriched_results = [dict(item) for item in (result.get("results") or [])]
+            updated_titles = False
+            for item in enriched_results[:5]:
+                if self._result_hostname(item) != "arxiv.org":
+                    continue
+                current_title = (item.get("title") or "").strip()
+                if current_title and not self._looks_like_generic_arxiv_subject_title(current_title):
+                    continue
+                fetched_title = self._fetch_arxiv_title(item.get("url", ""))
+                if fetched_title and fetched_title != current_title:
+                    item["title"] = fetched_title
+                    updated_titles = True
+            if updated_titles:
+                deduped = self._merge_search_payloads(
+                    primary_result={
+                        "provider": result.get("provider", ""),
+                        "results": enriched_results,
+                        "citations": list(result.get("citations") or []),
+                    },
+                    secondary_result=None,
+                    max_results=max_results,
+                )
+                result["results"] = deduped["results"]
+                result["citations"] = self._align_citations_with_results(
+                    results=deduped["results"],
+                    citations=list(result.get("citations") or []),
+                )
+                if self._should_rerank_resource_results(mode=mode, intent=resolved_intent):
+                    reranked_results = self._rerank_resource_results(
+                        query=query,
+                        mode=mode,
+                        results=list(result.get("results") or []),
+                        include_domains=include_domains,
+                    )
+                    result["results"] = reranked_results
+                    result["citations"] = self._align_citations_with_results(
+                        results=reranked_results,
+                        citations=list(result.get("citations") or []),
+                    )
+                result.setdefault("evidence", {})["pdf_title_enrichment"] = True
+                result = self._augment_evidence_summary(
+                    result,
+                    query=query,
+                    mode=mode,
+                    intent=resolved_intent,
+                    include_domains=include_domains,
+                )
 
         evidence = result.get("evidence") or {}
         conflicts = evidence.get("conflicts") or []
@@ -4933,6 +4983,39 @@ class MySearchClient:
             return False
         first = parts[0].strip().lower()
         return bool(re.fullmatch(r"[a-z]{2}(?:-[a-z0-9]{2,8}){0,2}", first))
+
+    def _looks_like_generic_arxiv_subject_title(self, title_text: str) -> bool:
+        cleaned = re.sub(r"\s+", " ", (title_text or "").strip())
+        if not cleaned:
+            return True
+        return bool(re.fullmatch(r"[A-Za-z][A-Za-z &]+ > [A-Za-z][A-Za-z ,&()/-]+", cleaned))
+
+    def _fetch_arxiv_title(self, url: str) -> str:
+        canonical_url = self._canonical_result_url(url)
+        if self._result_hostname({"url": canonical_url}) != "arxiv.org":
+            return ""
+        try:
+            response = self._http.get(canonical_url, headers={"Accept": "text/html"})
+            response.raise_for_status()
+        except httpx.HTTPError:
+            return ""
+
+        text = response.text
+        meta_match = re.search(
+            r'<meta[^>]+name=["\']citation_title["\'][^>]+content=["\']([^"\']+)["\']',
+            text,
+            re.IGNORECASE,
+        )
+        if meta_match:
+            return html.unescape(meta_match.group(1)).strip()
+
+        title_match = re.search(r"<title>(.*?)</title>", text, re.IGNORECASE | re.DOTALL)
+        if not title_match:
+            return ""
+        title = html.unescape(re.sub(r"\s+", " ", title_match.group(1))).strip()
+        title = re.sub(r"^\[\d{4}\.\d{4,5}(?:v\d+)?\]\s*", "", title)
+        title = title.replace(" | arXiv e-print archive", "").strip()
+        return title
 
     def _result_quality_score(self, item: dict[str, Any]) -> tuple[int, int, int]:
         content = item.get("content") or ""
