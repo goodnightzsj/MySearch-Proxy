@@ -3411,7 +3411,7 @@ class MySearchClient:
         if registered_domain == "bendibao.com":
             return "/tour/" in path or "/flowers" in path
         if registered_domain in {"trip.com", "ctrip.com"}:
-            return any(marker in path for marker in ("/moments/detail/", "/travel-guide/", "/travel/"))
+            return any(marker in path for marker in ("/travel-guide/", "/travel/"))
         return any(marker in path for marker in ("/tour/", "/travel/", "/guide", "/flowers"))
 
     def _is_obvious_local_life_repost_domain(self, registered_domain: str) -> bool:
