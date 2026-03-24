@@ -244,6 +244,51 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(policy.provider, "tavily")
         self.assertEqual(policy.tavily_topic, "news")
         self.assertEqual(policy.firecrawl_categories, ("news",))
+        self.assertTrue(policy.allow_exa_rescue)
+
+    def test_tutorial_tavily_dispatch_disables_content_fetch(self) -> None:
+        client = MySearchClient()
+        captured = {}
+
+        def fake_search_tavily(**kwargs):  # type: ignore[no-untyped-def]
+            captured.update(kwargs)
+            return {"provider": "tavily", "results": [], "citations": []}
+
+        client._search_tavily = fake_search_tavily  # type: ignore[method-assign]
+
+        client._dispatch_single_provider(
+            provider_name="tavily",
+            query="Playwright test.step tutorial example",
+            max_results=5,
+            mode="docs",
+            intent="tutorial",
+            decision=RouteDecision(provider="tavily", reason="test", tavily_topic="general"),
+            include_answer=False,
+            include_content=True,
+            include_domains=None,
+            exclude_domains=None,
+            strategy="balanced",
+            from_date=None,
+        )
+
+        self.assertFalse(captured["include_content"])
+
+    def test_life_query_skips_tavily_firecrawl_blend(self) -> None:
+        client = MySearchClient()
+        client._provider_is_live_ok = lambda provider: True  # type: ignore[method-assign]
+
+        should_blend = client._should_blend_web_providers(
+            query="上海 2026 春季赏花攻略",
+            requested_provider="auto",
+            decision=RouteDecision(provider="tavily", reason="test", result_profile="web"),
+            sources=["web"],
+            strategy="balanced",
+            mode="web",
+            intent="factual",
+            include_domains=None,
+        )
+
+        self.assertFalse(should_blend)
 
     def test_request_json_auth_error_mentions_rejected_key(self) -> None:
         client = MySearchClient()
@@ -1058,6 +1103,7 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertFalse(
             client._should_blend_web_providers(
+                query="example query",
                 requested_provider="auto",
                 decision=RouteDecision(provider="firecrawl", reason="fallback", result_profile="web"),
                 sources=["web"],
@@ -1662,6 +1708,34 @@ class MySearchClientTests(unittest.TestCase):
             urls.index("https://developers.openai.com/api/docs/guides/background/"),
             urls.index("https://community.openai.com/t/background-mode-requests-stuck-in-queued-status-responses-api/1372058"),
         )
+
+    def test_changelog_weak_results_trigger_exa_rescue_signal(self) -> None:
+        client = MySearchClient()
+
+        weak = client._result_set_looks_weak_for_exa_rescue(
+            query="Next.js 16 release notes official",
+            mode="docs",
+            result={
+                "results": [
+                    {
+                        "provider": "tavily",
+                        "title": "Renaming Middleware to Proxy - Next.js",
+                        "url": "https://nextjs.org/docs/messages/middleware-to-proxy",
+                        "snippet": "",
+                        "content": "",
+                    },
+                    {
+                        "provider": "tavily",
+                        "title": "Next.js Blog",
+                        "url": "https://nextjs.org/blog",
+                        "snippet": "",
+                        "content": "",
+                    },
+                ]
+            },
+        )
+
+        self.assertTrue(weak)
 
     def test_rerank_general_web_prefers_status_page_for_status_queries(self) -> None:
         client = MySearchClient()

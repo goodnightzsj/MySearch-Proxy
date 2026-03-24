@@ -199,6 +199,7 @@ _MODE_PROVIDER_POLICY: dict[str, SearchRoutePolicy] = {
         tavily_topic="news",
         firecrawl_categories=("news",),
         result_profile="resource",
+        allow_exa_rescue=True,
     ),
     "exploratory": SearchRoutePolicy(
         key="exploratory",
@@ -713,6 +714,7 @@ class MySearchClient:
             )
 
         if self._should_blend_web_providers(
+            query=query,
             requested_provider=provider,
             decision=decision,
             sources=normalized_sources,
@@ -2603,6 +2605,7 @@ class MySearchClient:
     def _should_blend_web_providers(
         self,
         *,
+        query: str = "",
         requested_provider: ProviderName,
         decision: RouteDecision,
         sources: list[str],
@@ -2632,6 +2635,8 @@ class MySearchClient:
         if mode in {"docs", "github", "pdf"}:
             return False
         if intent in {"resource", "tutorial"}:
+            return False
+        if self._looks_like_local_life_query(query.lower()):
             return False
         return self._provider_is_live_ok(self.config.tavily) and self._provider_is_live_ok(
             self.config.firecrawl
@@ -2727,7 +2732,7 @@ class MySearchClient:
                 max_results=max_results,
                 topic=decision.tavily_topic,
                 include_answer=include_answer,
-                include_content=include_content,
+                include_content=include_content and intent != "tutorial",
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
                 strategy=strategy,
@@ -2815,6 +2820,8 @@ class MySearchClient:
             return not self._has_strong_pdf_match(query=query, results=results)
         if self._looks_like_pricing_query(query.lower()):
             return not self._has_canonical_pricing_result(results)
+        if self._looks_like_changelog_query(query.lower()):
+            return not self._has_strong_changelog_result(query=query, results=results)
         return False
 
     def _has_strong_pdf_match(
@@ -2877,6 +2884,32 @@ class MySearchClient:
             hostname = self._result_hostname(item)
             path = urlparse(item.get("url", "")).path.lower()
             if self._looks_like_canonical_pricing_result(hostname=hostname, path=path):
+                return True
+        return False
+
+    def _has_strong_changelog_result(
+        self,
+        *,
+        query: str,
+        results: list[dict[str, Any]],
+    ) -> bool:
+        precision_tokens = self._query_precision_tokens(query)
+        for item in results[:3]:
+            url = item.get("url", "")
+            hostname = self._result_hostname(item)
+            title_text = (item.get("title") or "").lower()
+            if self._looks_like_canonical_changelog_result(
+                url=url,
+                hostname=hostname,
+                title_text=title_text,
+                precision_tokens=precision_tokens,
+            ):
+                return True
+            if self._looks_like_changelog_result(
+                url=url,
+                hostname=hostname,
+                title_text=title_text,
+            ):
                 return True
         return False
 
@@ -6455,6 +6488,26 @@ class MySearchClient:
             "怎么",
             "如何",
             "入门",
+        ]
+        return any(keyword in query_lower for keyword in keywords)
+
+    def _looks_like_local_life_query(self, query_lower: str) -> bool:
+        keywords = [
+            "攻略",
+            "赏花",
+            "景点",
+            "周末去哪",
+            "游玩",
+            "旅游",
+            "旅行",
+            "美食",
+            "门票",
+            "路线",
+            "guide",
+            "itinerary",
+            "things to do",
+            "travel guide",
+            "weekend",
         ]
         return any(keyword in query_lower for keyword in keywords)
 
