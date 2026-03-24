@@ -1544,6 +1544,24 @@ class MySearchClient:
                 exclude_domains=exclude_domains,
             )
         }
+        if (
+            not authoritative_research
+            and research_plan["web_mode"] == "exploratory"
+            and self._provider_can_serve(self.config.tavily)
+        ):
+            research_tasks["tavily_support"] = lambda: self.search(
+                query=query,
+                mode="web",
+                intent=resolved_intent,
+                strategy="balanced" if resolved_strategy == "fast" else resolved_strategy,
+                provider="tavily",
+                sources=["web"],
+                max_results=max(4, min(research_plan["web_max_results"], 6)),
+                include_content=False,
+                include_answer=False,
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+            )
         if authoritative_research and research_plan["web_mode"] == "web":
             research_tasks["docs_rescue"] = lambda: self.search(
                 query=query,
@@ -1613,6 +1631,17 @@ class MySearchClient:
             else []
         )
         docs_rescue_provider = docs_rescue.get("provider", "") if docs_rescue and not research_errors.get("docs_rescue") else ""
+        tavily_support = research_results.get("tavily_support")
+        tavily_support_results = (
+            list(tavily_support.get("results") or [])
+            if tavily_support and not research_errors.get("tavily_support")
+            else []
+        )
+        tavily_support_provider = (
+            tavily_support.get("provider", "")
+            if tavily_support and not research_errors.get("tavily_support")
+            else ""
+        )
         exa_discovery_results = (
             list(exa_discovery.get("results") or [])
             if exa_discovery and not research_errors.get("exa_discovery")
@@ -1633,6 +1662,7 @@ class MySearchClient:
             max_results=research_plan["web_max_results"],
             web_results=base_candidate_results,
             docs_rescue_results=docs_rescue_results,
+            tavily_support_results=tavily_support_results,
             exa_results=exa_discovery_results,
             include_domains=include_domains,
             authoritative_preferred=authoritative_research,
@@ -1735,7 +1765,11 @@ class MySearchClient:
 
         web_provider = web_search.get("provider", "")
         social_provider = social.get("provider", "") if social else ""
-        providers_consulted = [item for item in [web_provider, docs_rescue_provider, social_provider] if item]
+        providers_consulted = [
+            item
+            for item in [web_provider, docs_rescue_provider, tavily_support_provider, social_provider]
+            if item
+        ]
         if exa_discovery and not research_errors.get("exa_discovery"):
             providers_consulted.append("exa")
         providers_consulted = list(dict.fromkeys(providers_consulted))
@@ -1743,6 +1777,9 @@ class MySearchClient:
             web_search.get("citations") or [],
             (docs_rescue.get("citations") or [])
             if docs_rescue and not research_errors.get("docs_rescue")
+            else [],
+            (tavily_support.get("citations") or [])
+            if tavily_support and not research_errors.get("tavily_support")
             else [],
             (social.get("citations") or []) if social else [],
             (exa_discovery.get("citations") or [])
@@ -1752,6 +1789,7 @@ class MySearchClient:
         ordered_research_results = self._dedupe_research_results_for_report(
             research_candidate_results,
             docs_rescue_results,
+            tavily_support_results,
             exa_discovery_results,
         )
         citations = self._align_citations_with_results(
@@ -1954,6 +1992,7 @@ class MySearchClient:
         max_results: int,
         web_results: list[dict[str, Any]],
         docs_rescue_results: list[dict[str, Any]],
+        tavily_support_results: list[dict[str, Any]],
         exa_results: list[dict[str, Any]],
         include_domains: list[str] | None,
         authoritative_preferred: bool,
@@ -1961,6 +2000,7 @@ class MySearchClient:
         combined = self._dedupe_research_results_for_report(
             docs_rescue_results if authoritative_preferred else [],
             web_results,
+            tavily_support_results,
             exa_results,
             [] if authoritative_preferred else docs_rescue_results,
         )
@@ -1983,14 +2023,42 @@ class MySearchClient:
                 "youtube.com",
                 "youtu.be",
             }
+            directory_domains = {
+                "mcp-ai.org",
+                "mcp.so",
+                "mcpmarket.com",
+                "mcpnow.io",
+                "mcpserverfinder.com",
+                "mcpservers.org",
+                "pulsemcp.com",
+                "toolhunter.cc",
+            }
+            project_candidates: list[dict[str, Any]] = []
             curated_candidates: list[dict[str, Any]] = []
+            directory_candidates: list[dict[str, Any]] = []
             community_candidates: list[dict[str, Any]] = []
             for item in combined:
-                registered_domain = self._registered_domain(self._result_hostname(item))
+                hostname = self._result_hostname(item)
+                registered_domain = self._registered_domain(hostname)
+                path = urlparse(item.get("url", "")).path.lower()
                 if registered_domain in community_domains:
                     community_candidates.append(item)
+                elif registered_domain == "github.com":
+                    project_candidates.append(item)
+                elif registered_domain in directory_domains or (
+                    "mcp" in hostname
+                    and any(marker in path for marker in ("/server/", "/servers/"))
+                ):
+                    directory_candidates.append(item)
                 else:
                     curated_candidates.append(item)
+            if len(project_candidates) > 1:
+                project_candidates = self._rerank_general_results(
+                    query=query,
+                    result_profile="web",
+                    results=project_candidates,
+                    include_domains=include_domains,
+                )
             if len(curated_candidates) > 1:
                 curated_candidates = self._rerank_general_results(
                     query=query,
@@ -2005,7 +2073,19 @@ class MySearchClient:
                     results=community_candidates,
                     include_domains=include_domains,
                 )
-            selected = [*curated_candidates, *community_candidates][:max_results]
+            if len(directory_candidates) > 1:
+                directory_candidates = self._rerank_general_results(
+                    query=query,
+                    result_profile="web",
+                    results=directory_candidates,
+                    include_domains=include_domains,
+                )
+            selected = [
+                *project_candidates,
+                *curated_candidates,
+                *directory_candidates,
+                *community_candidates,
+            ][:max_results]
             selected_domains = self._collect_source_domains(results=selected, citations=[])
             return selected, {
                 "authoritative_source_count": 0,
