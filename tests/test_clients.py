@@ -663,6 +663,22 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(answer, "Best Picture winner: One Battle After Another")
 
+    def test_extract_result_event_answer_trims_trailing_cost_clause_after_quoted_title(self) -> None:
+        client = MySearchClient()
+
+        answer = client._extract_result_event_answer(
+            query="2026 Oscars best picture winner",
+            results=[
+                {
+                    "title": "Oscars 2026 winners list",
+                    "snippet": 'Best Picture winner: “One Battle After Another” cost Warner Bros. around $145 million to produce.',
+                    "content": "",
+                }
+            ],
+        )
+
+        self.assertEqual(answer, "Best Picture winner: One Battle After Another")
+
     def test_extract_result_event_answer_prefers_prioritized_top_five_candidates(self) -> None:
         client = MySearchClient()
 

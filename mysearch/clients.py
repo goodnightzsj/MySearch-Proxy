@@ -8940,8 +8940,10 @@ class MySearchClient:
                 patterns=[
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+won[^\n]{0,80}\bbest picture\b",
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+is\s+the\s+(?:20\d{2}\s+)?best picture winner",
+                    r"best picture\s*[–—:]\s*[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]",
+                    r"best picture(?:\s+winner)?(?:\s*[–—:]|\s+was|\s+is|\s+goes to|\s+went to)\s+[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]",
                     r"best picture\s*[–—:]\s*([^\n.;]{2,100})",
-                    r"best picture(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)?\s+([^\n.;]{2,100})",
+                    r"best picture(?:\s+winner)?(?:\s*[–—:]|\s+was|\s+is|\s+goes to|\s+went to)\s+([^\n.;]{2,100})",
                 ],
             )
             if entity:
