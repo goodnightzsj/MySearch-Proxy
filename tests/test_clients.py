@@ -3071,6 +3071,25 @@ class MySearchClientTests(unittest.TestCase):
         self.assertTrue(result["evidence"]["official_filter_applied"])
         self.assertEqual(result["evidence"]["official_rescue_source"], "canonical-map")
 
+    def test_strict_docs_policy_injects_known_openai_background_guide_when_provider_returns_empty(self) -> None:
+        client = MySearchClient()
+
+        result = client._apply_official_resource_policy(
+            query="OpenAI background mode official docs site:developers.openai.com",
+            mode="docs",
+            intent="resource",
+            result={
+                "results": [],
+                "citations": [],
+                "evidence": {},
+            },
+            include_domains=["developers.openai.com"],
+        )
+
+        self.assertEqual(result["results"][0]["url"], "https://developers.openai.com/api/docs/guides/background/")
+        self.assertTrue(result["evidence"]["official_filter_applied"])
+        self.assertEqual(result["evidence"]["official_rescue_source"], "canonical-map")
+
     def test_rerank_general_web_prefers_status_page_for_status_queries(self) -> None:
         client = MySearchClient()
 

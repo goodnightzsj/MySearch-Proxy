@@ -2621,7 +2621,7 @@ class MySearchClient:
         evidence.setdefault("official_filter_applied", False)
         evidence.setdefault("official_filter_reduced", False)
         evidence.setdefault("official_candidate_count", 0)
-        if official_mode == "off" or not results:
+        if official_mode == "off":
             enriched["evidence"] = evidence
             return enriched
 
