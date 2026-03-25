@@ -935,6 +935,13 @@ class MySearchClient:
         from_date: str | None = None,
         to_date: str | None = None,
     ) -> dict[str, Any]:
+        result = self._apply_result_event_answer_override(
+            query=query,
+            mode=mode,
+            intent=resolved_intent,
+            strategy=resolved_strategy,
+            result=result,
+        )
         if self._should_attempt_exa_rescue(
             query=query,
             mode=mode,
@@ -3860,6 +3867,13 @@ class MySearchClient:
             mode=mode,
             result=result,
         )
+        if self._should_skip_exa_rescue_for_result_event(
+            query=query,
+            mode=mode,
+            intent=intent,
+            result=result,
+        ):
+            return False
         if not sparse_results and not weak_results:
             return False
         if rescue_sensitive_query:
@@ -3870,6 +3884,25 @@ class MySearchClient:
         if weak_results and weak_result_signal:
             return True
         return sparse_results and (weak_result_signal or long_tail_signal)
+
+    def _should_skip_exa_rescue_for_result_event(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        result: dict[str, Any],
+    ) -> bool:
+        query_lower = query.lower()
+        if not (
+            self._looks_like_result_event_query(query_lower)
+            and (mode == "news" or intent in {"news", "status"})
+        ):
+            return False
+        evidence = result.get("evidence") or {}
+        return bool(str(result.get("answer") or "").strip()) and (
+            str(evidence.get("answer_source") or "") == "result-event-extraction"
+        )
 
     def _result_set_looks_weak_for_exa_rescue(
         self,
@@ -3901,7 +3934,7 @@ class MySearchClient:
         results: list[dict[str, Any]],
     ) -> bool:
         query_lower = query.lower()
-        for item in results[:3]:
+        for item in results[:5]:
             hostname = self._result_hostname(item)
             registered_domain = self._registered_domain(hostname)
             path = urlparse(item.get("url", "")).path.lower()
@@ -8768,11 +8801,7 @@ class MySearchClient:
         query: str,
         results: list[dict[str, Any]],
     ) -> str:
-        candidates = sorted(
-            results[:5],
-            key=lambda item: self._result_event_page_priority(query=query, item=item),
-            reverse=True,
-        )
+        candidates = self._result_event_candidates(query=query, results=results, limit=5)
         for top in candidates:
             url = str(top.get("url") or "").strip()
             if not url:
@@ -8799,6 +8828,22 @@ class MySearchClient:
             if extracted_answer:
                 return extracted_answer
         return ""
+
+    def _result_event_candidates(
+        self,
+        *,
+        query: str,
+        results: list[dict[str, Any]],
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        if self._looks_like_result_event_query(query.lower()):
+            candidate_window = max(limit, 10)
+            return sorted(
+                results[:candidate_window],
+                key=lambda item: self._result_event_page_priority(query=query, item=item),
+                reverse=True,
+            )[:limit]
+        return results[: min(limit, 3)]
 
     def _result_event_page_priority(
         self,
@@ -8879,7 +8924,7 @@ class MySearchClient:
 
         query_lower = query.lower()
         signal_texts: list[str] = []
-        for item in results[:3]:
+        for item in self._result_event_candidates(query=query, results=results, limit=5):
             for key in ("title", "snippet", "content"):
                 value = str(item.get(key) or "").strip()
                 if value:
@@ -8944,6 +8989,11 @@ class MySearchClient:
                     "nominee",
                     "nominees",
                     "best new artist",
+                    "his album",
+                    "her album",
+                    "their album",
+                    "its album",
+                    "the album",
                     "record of the year",
                     "song of the year",
                     "won ",
@@ -8992,6 +9042,8 @@ class MySearchClient:
         duo_patterns = [
             r"([A-Z][A-Za-z0-9&'’.\- ]{1,80}) won album of the year for (?:his|her|their|its) album[_*\s]+([^_\n.;]{2,120})",
             r"([A-Z][A-Za-z0-9&'’.\- ]{1,80}) won album of the year for the album[_*\s]+([^_\n.;]{2,120})",
+            r"([A-Z][A-Za-z0-9&'’.\- ]{1,80}) won album of the year for[_*\s]+([^_\n.;]{2,120})",
+            r"([A-Z][A-Za-z0-9&'’.\- ]{1,80}) wins album of the year for[_*\s]+([^_\n.;]{2,120})",
         ]
         for pattern in duo_patterns:
             match = re.search(pattern, text, flags=re.IGNORECASE)
@@ -9005,6 +9057,11 @@ class MySearchClient:
                     "nominee",
                     "nominees",
                     "best new artist",
+                    "his album",
+                    "her album",
+                    "their album",
+                    "its album",
+                    "the album",
                     "collaboration",
                     "his ",
                     "her ",
@@ -9020,6 +9077,11 @@ class MySearchClient:
                     "nominee",
                     "nominees",
                     "best new artist",
+                    "his album",
+                    "her album",
+                    "their album",
+                    "its album",
+                    "the album",
                 ],
             )
             if album and artist:
@@ -9042,6 +9104,11 @@ class MySearchClient:
                     "nominee",
                     "nominees",
                     "best new artist",
+                    "his album",
+                    "her album",
+                    "their album",
+                    "its album",
+                    "the album",
                 ],
             )
             if album:

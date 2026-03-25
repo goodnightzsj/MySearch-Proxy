@@ -663,6 +663,100 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(answer, "Best Picture winner: One Battle After Another")
 
+    def test_extract_result_event_answer_prefers_prioritized_top_five_candidates(self) -> None:
+        client = MySearchClient()
+
+        answer = client._extract_result_event_answer(
+            query="2026 Grammy Album of the Year winner",
+            results=[
+                {
+                    "title": "2026 Grammy predictions: who could win Album of the Year",
+                    "url": "https://example.com/predictions",
+                    "snippet": "Critics are making their best guesses before the ceremony.",
+                    "content": "",
+                },
+                {
+                    "title": "2026 Grammys red carpet recap",
+                    "url": "https://example.com/red-carpet",
+                    "snippet": "Fashion highlights and arrivals from music's biggest night.",
+                    "content": "",
+                },
+                {
+                    "title": "2026 Grammy nominees recap",
+                    "url": "https://example.com/nominees",
+                    "snippet": "A look back at the Album of the Year nominees before the show.",
+                    "content": "",
+                },
+                {
+                    "title": "2025 Grammy winners list",
+                    "url": "https://example.com/2025-winners",
+                    "snippet": "Last year's major winners across all categories.",
+                    "content": "",
+                },
+                {
+                    "title": "The complete list of 2026 Grammy winners and nominees",
+                    "url": "https://www.npr.org/2026/02/01/nx-s1-5693046/2026-grammy-awards-full-list-winners-nominees",
+                    "snippet": "Bad Bunny won album of the year for DeBÍ TiRAR MáS FOToS.",
+                    "content": "",
+                },
+            ],
+        )
+
+        self.assertEqual(
+            answer,
+            "Album of the Year winner: DeBÍ TiRAR MáS FOToS by Bad Bunny",
+        )
+
+    def test_extract_result_event_answer_promotes_relevant_candidate_beyond_first_five_raw_results(self) -> None:
+        client = MySearchClient()
+
+        answer = client._extract_result_event_answer(
+            query="2026 Grammy Album of the Year winner",
+            results=[
+                {
+                    "title": "2026 Grammy predictions: who could win Album of the Year",
+                    "url": "https://example.com/predictions",
+                    "snippet": "Critics are making their best guesses before the ceremony.",
+                    "content": "",
+                },
+                {
+                    "title": "2026 Grammys red carpet recap",
+                    "url": "https://example.com/red-carpet",
+                    "snippet": "Fashion highlights and arrivals from music's biggest night.",
+                    "content": "",
+                },
+                {
+                    "title": "2026 Grammy nominees recap",
+                    "url": "https://example.com/nominees",
+                    "snippet": "A look back at the Album of the Year nominees before the show.",
+                    "content": "",
+                },
+                {
+                    "title": "2025 Grammy winners list",
+                    "url": "https://example.com/2025-winners",
+                    "snippet": "Last year's major winners across all categories.",
+                    "content": "",
+                },
+                {
+                    "title": "2026 Grammys live updates",
+                    "url": "https://example.com/live-updates",
+                    "snippet": "Follow along for performances, speeches and surprise appearances.",
+                    "content": "",
+                },
+                {
+                    "title": "The complete list of 2026 Grammy winners and nominees",
+                    "url": "https://www.npr.org/2026/02/01/nx-s1-5693046/2026-grammy-awards-full-list-winners-nominees",
+                    "snippet": "Bad Bunny won album of the year for DeBÍ TiRAR MáS FOToS.",
+                    "content": "",
+                },
+            ],
+        )
+
+        self.assertEqual(
+            answer,
+            "Album of the Year winner: DeBÍ TiRAR MáS FOToS by Bad Bunny",
+        )
+
     def test_extract_album_of_the_year_answer_trims_trailing_explanatory_clause(self) -> None:
         client = MySearchClient()
 
@@ -705,6 +799,124 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertTrue(weak)
+
+    def test_result_event_answer_source_skips_exa_rescue_for_strong_award_results(self) -> None:
+        client = MySearchClient()
+        client._provider_can_serve = lambda provider: provider.name == "exa"  # type: ignore[method-assign]
+
+        should_rescue = client._should_attempt_exa_rescue(
+            query="2026 Grammy Album of the Year winner",
+            mode="news",
+            intent="news",
+            decision=RouteDecision(
+                provider="tavily",
+                reason="test",
+                result_profile="news",
+                allow_exa_rescue=True,
+            ),
+            result={
+                "provider": "tavily",
+                "answer": "Album of the Year winner: DeBÍ TiRAR MáS FOToS by Bad Bunny",
+                "results": [
+                    {
+                        "title": "The complete list of 2026 Grammy winners and nominees",
+                        "url": "https://www.npr.org/2026/02/01/nx-s1-5693046/2026-grammy-awards-full-list-winners-nominees",
+                        "snippet": "",
+                        "content": "",
+                    }
+                ],
+                "evidence": {"answer_source": "result-event-extraction"},
+            },
+            max_results=5,
+            include_domains=None,
+        )
+
+        self.assertFalse(should_rescue)
+
+    def test_has_strong_award_result_considers_top_five_results(self) -> None:
+        client = MySearchClient()
+
+        strong = client._has_strong_award_result(
+            query="2026 Grammy Album of the Year winner",
+            results=[
+                {
+                    "title": "2026 Grammy predictions and early picks",
+                    "url": "https://example.com/predictions",
+                    "snippet": "",
+                    "content": "",
+                },
+                {
+                    "title": "2026 Grammys red carpet recap",
+                    "url": "https://example.com/red-carpet",
+                    "snippet": "",
+                    "content": "",
+                },
+                {
+                    "title": "Album of the Year nominees recap",
+                    "url": "https://example.com/nominees",
+                    "snippet": "",
+                    "content": "",
+                },
+                {
+                    "title": "2025 Grammy winners list",
+                    "url": "https://example.com/2025-grammys",
+                    "snippet": "",
+                    "content": "",
+                },
+                {
+                    "title": "The complete list of 2026 Grammy winners and nominees",
+                    "url": "https://www.npr.org/2026/02/01/nx-s1-5693046/2026-grammy-awards-full-list-winners-nominees",
+                    "snippet": "",
+                    "content": "",
+                },
+            ],
+        )
+
+        self.assertTrue(strong)
+
+    def test_extract_result_event_answer_prefers_prioritized_top_five_candidates(self) -> None:
+        client = MySearchClient()
+
+        answer = client._extract_result_event_answer(
+            query="2026 Grammy Album of the Year winner",
+            results=[
+                {
+                    "title": "2026 Grammy predictions and early picks",
+                    "url": "https://example.com/predictions",
+                    "snippet": "",
+                    "content": "",
+                },
+                {
+                    "title": "2026 Grammys red carpet recap",
+                    "url": "https://example.com/red-carpet",
+                    "snippet": "",
+                    "content": "",
+                },
+                {
+                    "title": "Album of the Year nominees recap",
+                    "url": "https://example.com/nominees",
+                    "snippet": "",
+                    "content": "",
+                },
+                {
+                    "title": "2025 Grammy winners list",
+                    "url": "https://example.com/2025-grammys",
+                    "snippet": "",
+                    "content": "",
+                },
+                {
+                    "title": "The complete list of 2026 Grammy winners and nominees",
+                    "url": "https://www.npr.org/2026/02/01/nx-s1-5693046/2026-grammy-awards-full-list-winners-nominees",
+                    "snippet": "Bad Bunny won album of the year for DeBÍ TiRAR MáS FOToS.",
+                    "content": "",
+                },
+            ],
+        )
+
+        self.assertEqual(
+            answer,
+            "Album of the Year winner: DeBÍ TiRAR MáS FOToS by Bad Bunny",
+        )
 
     def test_apply_result_event_answer_override_does_not_extract_from_weak_award_mentions(self) -> None:
         client = MySearchClient()
