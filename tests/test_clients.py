@@ -2276,6 +2276,60 @@ class MySearchClientTests(unittest.TestCase):
             "https://developers.openai.com/api/docs/guides/background/",
         )
 
+    def test_rerank_resource_results_prefers_docs_guide_over_language_sdk_reference_when_query_not_language_specific(self) -> None:
+        client = MySearchClient()
+
+        reranked = client._rerank_resource_results(
+            query="OpenAI webhooks official docs",
+            mode="docs",
+            include_domains=None,
+            results=[
+                {
+                    "provider": "firecrawl",
+                    "title": "Webhooks | OpenAI API Reference",
+                    "url": "https://developers.openai.com/api/reference/go/resources/webhooks",
+                    "snippet": "Go SDK reference for webhooks",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Webhooks | OpenAI API",
+                    "url": "https://developers.openai.com/api/docs/guides/webhooks/",
+                    "snippet": "Official guide for using webhooks",
+                    "content": "",
+                },
+            ],
+        )
+
+        self.assertEqual(reranked[0]["url"], "https://developers.openai.com/api/docs/guides/webhooks/")
+
+    def test_rerank_resource_results_keeps_language_sdk_reference_when_query_mentions_language(self) -> None:
+        client = MySearchClient()
+
+        reranked = client._rerank_resource_results(
+            query="OpenAI webhooks python api reference",
+            mode="docs",
+            include_domains=None,
+            results=[
+                {
+                    "provider": "tavily",
+                    "title": "Webhooks | OpenAI API",
+                    "url": "https://developers.openai.com/api/docs/guides/webhooks/",
+                    "snippet": "Official guide for using webhooks",
+                    "content": "",
+                },
+                {
+                    "provider": "firecrawl",
+                    "title": "Webhooks | OpenAI API Reference",
+                    "url": "https://developers.openai.com/api/reference/python/resources/webhooks/",
+                    "snippet": "Python SDK reference for webhooks",
+                    "content": "",
+                },
+            ],
+        )
+
+        self.assertEqual(reranked[0]["url"], "https://developers.openai.com/api/reference/python/resources/webhooks/")
+
     def test_web_rerank_prefers_canonical_status_root_over_status_api_endpoint(self) -> None:
         client = MySearchClient()
 

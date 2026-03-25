@@ -6405,6 +6405,17 @@ class MySearchClient:
                 )
             )
         )
+        non_language_sdk_reference = int(
+            not (
+                official_docs_query
+                and self._looks_like_language_specific_sdk_reference_result(
+                    hostname=hostname,
+                    path=path,
+                    title_text=(item.get("title") or "").lower(),
+                )
+                and not self._query_mentions_programming_language(query_lower)
+            )
+        )
         non_generic_official_landing = int(
             not (
                 official_docs_query
@@ -6537,6 +6548,7 @@ class MySearchClient:
             1 - tutorial_community_result,
             tutorial_exact_identifier_match,
             non_generic_tutorial_docs,
+            non_language_sdk_reference,
             non_generic_official_landing,
             canonical_changelog_page_match,
             changelog_page_match,
@@ -7171,6 +7183,50 @@ class MySearchClient:
             return True
         generic_titles = {"docs", "documentation", "developer docs", "guides", "reference"}
         return title_text.strip() in generic_titles
+
+    def _query_mentions_programming_language(self, query_lower: str) -> bool:
+        terms = set(re.findall(r"[a-z0-9#+.-]+", query_lower))
+        language_markers = (
+            "c#",
+            "csharp",
+            "go",
+            "java",
+            "javascript",
+            "node",
+            "php",
+            "python",
+            "ruby",
+            "sdk",
+            "typescript",
+        )
+        return any(marker in query_lower and marker in terms for marker in language_markers)
+
+    def _looks_like_language_specific_sdk_reference_result(
+        self,
+        *,
+        hostname: str,
+        path: str,
+        title_text: str,
+    ) -> bool:
+        if "api/reference" not in path and "api reference" not in title_text:
+            return False
+        language_markers = (
+            "/csharp/",
+            "/go/",
+            "/java/",
+            "/javascript/",
+            "/node/",
+            "/php/",
+            "/python/",
+            "/ruby/",
+            "/typescript/",
+        )
+        if any(marker in path for marker in language_markers):
+            return True
+        return any(
+            marker in title_text
+            for marker in ("python", "ruby", "go", "typescript", "javascript", "java", "php", "c#", "csharp", "node")
+        ) and hostname.endswith("openai.com")
 
     def _looks_like_changelog_result(self, *, url: str, hostname: str, title_text: str) -> bool:
         path = urlparse(url).path.lower()
