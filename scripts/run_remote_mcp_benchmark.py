@@ -106,6 +106,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--benchmark-id", action="append", default=[])
     parser.add_argument("--mysearch-only", action="store_true")
     parser.add_argument("--reuse-output-csv", default="")
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=0,
+        help="Run the selected benchmark rows in multiple SSH batches to avoid long-lived connection resets.",
+    )
     return parser.parse_args()
 
 
@@ -700,6 +706,10 @@ def run_remote_cases(
         "ssh",
         "-o",
         "ConnectTimeout=10",
+        "-o",
+        "ServerAliveInterval=30",
+        "-o",
+        "ServerAliveCountMax=6",
         host,
         "python3",
         "-",
@@ -831,6 +841,12 @@ def write_output(path: Path, rows: list[dict[str, str]]) -> None:
         writer.writerows(rows)
 
 
+def batched_rows(rows: list[dict[str, str]], chunk_size: int) -> list[list[dict[str, str]]]:
+    if chunk_size <= 0 or chunk_size >= len(rows):
+        return [rows]
+    return [rows[index : index + chunk_size] for index in range(0, len(rows), chunk_size)]
+
+
 def main() -> int:
     args = parse_args()
     input_path = Path(args.input_csv)
@@ -848,28 +864,35 @@ def main() -> int:
         print("No benchmark rows selected", file=sys.stderr)
         return 1
 
-    cases = [build_case(row) for row in selected_rows]
-    results = run_remote_cases(
-        host=args.host,
-        mysearch_url=args.mysearch_url,
-        tavily_url=args.tavily_url,
-        tavily_bearer=args.tavily_bearer,
-        cases=cases,
-        mysearch_only=args.mysearch_only,
-    )
     reuse_path = Path(args.reuse_output_csv) if args.reuse_output_csv else output_path
     existing_order, existing_rows = load_existing_rows(reuse_path)
-    output_rows = merge_output_rows(
-        all_input_rows,
-        selected_rows,
-        results,
-        raw_dir,
-        existing_order=existing_order,
-        existing_rows=existing_rows,
-        preserve_tavily=args.mysearch_only,
-    )
-    write_output(output_path, output_rows)
-    print(f"Wrote {len(output_rows)} rows to {output_path}")
+    output_rows = [existing_rows[benchmark_id] for benchmark_id in existing_order if benchmark_id in existing_rows]
+
+    for batch_index, batch_rows in enumerate(batched_rows(selected_rows, args.chunk_size), start=1):
+        cases = [build_case(row) for row in batch_rows]
+        results = run_remote_cases(
+            host=args.host,
+            mysearch_url=args.mysearch_url,
+            tavily_url=args.tavily_url,
+            tavily_bearer=args.tavily_bearer,
+            cases=cases,
+            mysearch_only=args.mysearch_only,
+        )
+        output_rows = merge_output_rows(
+            all_input_rows,
+            batch_rows,
+            results,
+            raw_dir,
+            existing_order=existing_order,
+            existing_rows=existing_rows,
+            preserve_tavily=args.mysearch_only,
+        )
+        write_output(output_path, output_rows)
+        existing_order, existing_rows = load_existing_rows(output_path)
+        print(
+            f"Wrote {len(output_rows)} rows to {output_path} "
+            f"(batch {batch_index}/{len(batched_rows(selected_rows, args.chunk_size))})"
+        )
     return 0
 
 
