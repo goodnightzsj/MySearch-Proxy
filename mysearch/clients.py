@@ -957,77 +957,20 @@ class MySearchClient:
                 to_date=to_date,
             )
 
-        if self._should_rerank_resource_results(mode=mode, intent=resolved_intent):
-            reranked_results = self._rerank_resource_results(
-                query=query,
-                mode=mode,
-                results=list(result.get("results") or []),
-                include_domains=include_domains,
-            )
-            result["results"] = reranked_results
-            result["citations"] = self._align_citations_with_results(
-                results=reranked_results,
-                citations=list(result.get("citations") or []),
-            )
-        elif self._should_rerank_general_results(result_profile=decision.result_profile):
-            reranked_results = self._rerank_general_results(
-                query=query,
-                result_profile=decision.result_profile,
-                results=list(result.get("results") or []),
-                include_domains=include_domains,
-            )
-            result["results"] = reranked_results
-            result["citations"] = self._align_citations_with_results(
-                results=reranked_results,
-                citations=list(result.get("citations") or []),
-            )
-        result = self._apply_official_resource_policy(
+        result = self._finalize_search_result(
+            result,
             query=query,
             mode=mode,
             intent=resolved_intent,
-            result=result,
             include_domains=include_domains,
+            result_profile=decision.result_profile,
+            max_results=max_results,
         )
         final_official_mode = str(
             ((result.get("evidence") or {}) if isinstance(result.get("evidence"), dict) else {}).get(
                 "official_mode"
             )
             or "off"
-        )
-        if final_official_mode != "off" or self._should_rerank_resource_results(
-            mode=mode,
-            intent=resolved_intent,
-        ):
-            reranked_results = self._rerank_resource_results(
-                query=query,
-                mode=mode,
-                results=list(result.get("results") or []),
-                include_domains=include_domains,
-            )
-            result["results"] = reranked_results
-            result["citations"] = self._align_citations_with_results(
-                results=reranked_results,
-                citations=list(result.get("citations") or []),
-            )
-        elif self._should_rerank_general_results(result_profile=decision.result_profile):
-            reranked_results = self._rerank_general_results(
-                query=query,
-                result_profile=decision.result_profile,
-                results=list(result.get("results") or []),
-                include_domains=include_domains,
-            )
-            result["results"] = reranked_results
-            result["citations"] = self._align_citations_with_results(
-                results=reranked_results,
-                citations=list(result.get("citations") or []),
-            )
-        result = self._trim_search_payload(result, max_results=max_results)
-        result = self._augment_evidence_summary(
-            result,
-            query=query,
-            mode=mode,
-            intent=resolved_intent,
-            include_domains=include_domains,
         )
 
         needs_pdf_exa_boost = (
@@ -1099,12 +1042,14 @@ class MySearchClient:
                         result.setdefault("evidence", {})["low_confidence_exa_boost"] = True
                     if needs_pdf_exa_boost:
                         result.setdefault("evidence", {})["pdf_exa_boost"] = True
-                    result = self._augment_evidence_summary(
+                    result = self._finalize_search_result(
                         result,
                         query=query,
                         mode=mode,
                         intent=resolved_intent,
                         include_domains=include_domains,
+                        result_profile=decision.result_profile,
+                        max_results=max_results,
                     )
             except MySearchError:
                 pass
@@ -1152,12 +1097,14 @@ class MySearchClient:
                             citations=list(result.get("citations") or []),
                         )
                     result.setdefault("evidence", {})["pdf_tavily_boost"] = True
-                    result = self._augment_evidence_summary(
+                    result = self._finalize_search_result(
                         result,
                         query=query,
                         mode=mode,
                         intent=resolved_intent,
                         include_domains=include_domains,
+                        result_profile=decision.result_profile,
+                        max_results=max_results,
                     )
             except MySearchError:
                 pass
@@ -1203,12 +1150,14 @@ class MySearchClient:
                         citations=list(result.get("citations") or []),
                     )
                 result.setdefault("evidence", {})["pdf_title_enrichment"] = True
-                result = self._augment_evidence_summary(
+                result = self._finalize_search_result(
                     result,
                     query=query,
                     mode=mode,
                     intent=resolved_intent,
                     include_domains=include_domains,
+                    result_profile=decision.result_profile,
+                    max_results=max_results,
                 )
 
         evidence = result.get("evidence") or {}
@@ -2471,6 +2420,96 @@ class MySearchClient:
         evidence["conflicts"] = conflicts
         enriched["evidence"] = evidence
         return enriched
+
+    def _finalize_search_result(
+        self,
+        result: dict[str, Any],
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        include_domains: list[str] | None,
+        result_profile: Literal["web", "news", "resource"],
+        max_results: int,
+    ) -> dict[str, Any]:
+        finalized = dict(result)
+        if self._should_rerank_resource_results(mode=mode, intent=intent):
+            reranked_results = self._rerank_resource_results(
+                query=query,
+                mode=mode,
+                results=list(finalized.get("results") or []),
+                include_domains=include_domains,
+            )
+            finalized["results"] = reranked_results
+            finalized["citations"] = self._align_citations_with_results(
+                results=reranked_results,
+                citations=list(finalized.get("citations") or []),
+            )
+        elif self._should_rerank_general_results(result_profile=result_profile):
+            reranked_results = self._rerank_general_results(
+                query=query,
+                result_profile=result_profile,
+                results=list(finalized.get("results") or []),
+                include_domains=include_domains,
+            )
+            finalized["results"] = reranked_results
+            finalized["citations"] = self._align_citations_with_results(
+                results=reranked_results,
+                citations=list(finalized.get("citations") or []),
+            )
+
+        finalized = self._apply_official_resource_policy(
+            query=query,
+            mode=mode,
+            intent=intent,
+            result=finalized,
+            include_domains=include_domains,
+        )
+        final_official_mode = str(
+            (
+                (finalized.get("evidence") or {})
+                if isinstance(finalized.get("evidence"), dict)
+                else {}
+            ).get("official_mode")
+            or "off"
+        )
+        if final_official_mode != "off" or self._should_rerank_resource_results(
+            mode=mode,
+            intent=intent,
+        ):
+            reranked_results = self._rerank_resource_results(
+                query=query,
+                mode=mode,
+                results=list(finalized.get("results") or []),
+                include_domains=include_domains,
+            )
+            finalized["results"] = reranked_results
+            finalized["citations"] = self._align_citations_with_results(
+                results=reranked_results,
+                citations=list(finalized.get("citations") or []),
+            )
+        elif self._should_rerank_general_results(result_profile=result_profile):
+            reranked_results = self._rerank_general_results(
+                query=query,
+                result_profile=result_profile,
+                results=list(finalized.get("results") or []),
+                include_domains=include_domains,
+            )
+            finalized["results"] = reranked_results
+            finalized["citations"] = self._align_citations_with_results(
+                results=reranked_results,
+                citations=list(finalized.get("citations") or []),
+            )
+
+        finalized = self._trim_search_payload(finalized, max_results=max_results)
+        finalized = self._augment_evidence_summary(
+            finalized,
+            query=query,
+            mode=mode,
+            intent=intent,
+            include_domains=include_domains,
+        )
+        return finalized
 
     def _resolve_official_result_mode(
         self,
@@ -7005,6 +7044,8 @@ class MySearchClient:
     def _looks_like_canonical_pricing_result(self, *, hostname: str, path: str) -> bool:
         normalized_path = path.rstrip("/")
         path_segments = [segment for segment in normalized_path.split("/") if segment]
+        if hostname == "openai.com" and normalized_path in {"/business/chatgpt-pricing", "/chatgpt/pricing"}:
+            return False
         if ("/shop/buy" in normalized_path or "/buy-" in normalized_path) and len(path_segments) <= 3:
             return True
         if hostname.startswith("shop.") and "/product/" not in normalized_path and len(path_segments) <= 3:
