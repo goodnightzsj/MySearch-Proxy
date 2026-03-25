@@ -3890,10 +3890,11 @@ class MySearchClient:
         if (include_domains or strict_official) and not rescue_sensitive_query:
             return False
         results = list(result.get("results") or [])
-        if results:
-            extracted_answer = self._extract_result_event_answer(query=query, results=results)
-            if extracted_answer and not self._answer_looks_uncertain(extracted_answer):
-                return False
+        if self._looks_like_award_result_query(query_lower) and self._has_strong_award_result(
+            query=query,
+            results=results,
+        ):
+            return False
         sparse_results = len(results) < min(max_results, 3)
         weak_results = self._result_set_looks_weak_for_exa_rescue(
             query=query,
@@ -3938,10 +3939,6 @@ class MySearchClient:
         ):
             return True
         results = list(result.get("results") or [])
-        if results:
-            extracted_answer = self._extract_result_event_answer(query=query, results=results)
-            if extracted_answer and not self._answer_looks_uncertain(extracted_answer):
-                return True
         if self._looks_like_award_result_query(query_lower):
             return self._has_strong_award_result(query=query, results=results)
         return False
@@ -3957,10 +3954,6 @@ class MySearchClient:
         if not results:
             return True
         query_lower = query.lower()
-        if self._looks_like_result_event_query(query_lower):
-            extracted_answer = self._extract_result_event_answer(query=query, results=results)
-            if extracted_answer and not self._answer_looks_uncertain(extracted_answer):
-                return False
         if self._looks_like_award_result_query(query_lower):
             return not self._has_strong_award_result(query=query, results=results)
         if mode == "pdf":
@@ -8809,17 +8802,19 @@ class MySearchClient:
         )
         if weak_award_signal and current_answer and self._answer_looks_uncertain(current_answer):
             current_answer = ""
-        extracted_answer = self._extract_result_event_answer(
-            query=query,
-            results=result_items,
-        )
+        extracted_answer = ""
+        if not weak_award_signal:
+            extracted_answer = self._extract_result_event_answer(
+                query=query,
+                results=result_items,
+            )
         should_try_page_extraction = (
             strategy in {"verify", "deep"}
             or not current_answer
             or self._answer_looks_uncertain(current_answer)
             or result_event_query
         )
-        if not extracted_answer and should_try_page_extraction:
+        if not weak_award_signal and not extracted_answer and should_try_page_extraction:
             extracted_answer = self._extract_result_event_answer_from_top_page(
                 query=query,
                 results=result_items,
