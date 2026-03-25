@@ -222,6 +222,10 @@ SOCIAL_GATEWAY_CACHE_TTL_SECONDS = max(
     5,
     int(os.environ.get("SOCIAL_GATEWAY_CACHE_TTL_SECONDS", "60")),
 )
+SOCIAL_GATEWAY_TIMEOUT_SECONDS = max(
+    30,
+    int(os.environ.get("SOCIAL_GATEWAY_TIMEOUT_SECONDS", "120")),
+)
 USAGE_SYNC_TTL_SECONDS = int(os.environ.get("USAGE_SYNC_TTL_SECONDS", "300"))
 USAGE_SYNC_CONCURRENCY = max(1, int(os.environ.get("USAGE_SYNC_CONCURRENCY", "4")))
 DASHBOARD_AUTO_SYNC_ON_STATS = os.environ.get("DASHBOARD_AUTO_SYNC_ON_STATS", "0").strip().lower() in {
@@ -2097,6 +2101,7 @@ async def execute_social_search_attempt(query, body, state, model, max_results):
             f"{state['upstream_base_url']}{state['upstream_responses_path']}",
             json=upstream_payload,
             headers={"Authorization": f"Bearer {state['resolved_upstream_api_key']}"},
+            timeout=SOCIAL_GATEWAY_TIMEOUT_SECONDS,
         )
     except Exception as exc:
         latency_ms = int((time.monotonic() - start) * 1000)

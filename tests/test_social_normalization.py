@@ -61,8 +61,14 @@ class _FakeHttpClient:
         self._responses = list(responses)
         self.calls: list[dict[str, object]] = []
 
-    async def post(self, url: str, json: dict[str, object], headers: dict[str, str]) -> _FakeResponse:
-        self.calls.append({"url": url, "json": json, "headers": headers})
+    async def post(
+        self,
+        url: str,
+        json: dict[str, object],
+        headers: dict[str, str],
+        timeout: object | None = None,
+    ) -> _FakeResponse:
+        self.calls.append({"url": url, "json": json, "headers": headers, "timeout": timeout})
         return self._responses.pop(0)
 
 

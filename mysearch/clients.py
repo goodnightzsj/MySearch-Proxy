@@ -2677,8 +2677,28 @@ class MySearchClient:
         intent: ResolvedSearchIntent,
     ) -> dict[str, Any] | None:
         query_lower = query.lower()
-        if mode not in {"docs", "github", "pdf"} and intent not in {"resource", "tutorial"}:
+        if (
+            mode not in {"docs", "github", "pdf", "web", "news"}
+            and intent not in {"resource", "tutorial", "status"}
+        ):
             return None
+        if intent == "status" or self._looks_like_status_query(query_lower):
+            if "openai" in query_lower:
+                return {
+                    "title": "OpenAI Status",
+                    "url": "https://status.openai.com/",
+                    "snippet": "Official OpenAI status dashboard for incidents and service health.",
+                    "provider": "canonical-rescue",
+                    "matched_providers": ["canonical-rescue"],
+                }
+            if "cloudflare" in query_lower:
+                return {
+                    "title": "Cloudflare Status",
+                    "url": "https://www.cloudflarestatus.com/",
+                    "snippet": "Official Cloudflare status dashboard for incidents and service health.",
+                    "provider": "canonical-rescue",
+                    "matched_providers": ["canonical-rescue"],
+                }
         if "playwright" in query_lower and (
             "strict mode" in query_lower or "violation" in query_lower or "locator" in query_lower
         ):
@@ -2730,12 +2750,20 @@ class MySearchClient:
         rescue_url = str(rescue_candidate.get("url") or "")
         if rescue_url and any(str(item.get("url") or "") == rescue_url for item in official_candidates):
             return False
-        if "openai" in query_lower and ("webhook" in query_lower or "background mode" in query_lower):
-            return True
         top_candidate = official_candidates[0]
         top_url = str(top_candidate.get("url") or "")
         top_path = urlparse(top_url).path.lower()
         top_title = str(top_candidate.get("title") or "").lower()
+        if intent == "status" or self._looks_like_status_query(query_lower):
+            if self._looks_like_status_result(
+                url=top_url,
+                hostname=self._result_hostname(top_candidate),
+                title_text=top_title,
+            ):
+                return False
+            return True
+        if "openai" in query_lower and ("webhook" in query_lower or "background mode" in query_lower):
+            return True
         if self._looks_like_language_specific_sdk_reference_result(
             hostname=self._result_hostname(top_candidate),
             path=top_path,
@@ -3202,12 +3230,29 @@ class MySearchClient:
         excluded_x_handles: list[str] | None,
     ) -> RouteDecision:
         normalized_sources = sorted(set(sources or ["web"]))
+        query_lower = query.lower()
         policy = self._route_policy_for_request(
             query=query,
             mode=mode,
             intent=intent,
             include_content=include_content,
         )
+        if self._should_prefer_tavily_official_discovery(
+            query=query,
+            mode=mode,
+            intent=intent,
+            include_domains=include_domains,
+            include_content=include_content,
+        ):
+            policy = SearchRoutePolicy(
+                key=policy.key,
+                provider="tavily",
+                fallback_chain=("firecrawl", "exa"),
+                tavily_topic="general",
+                firecrawl_categories=policy.firecrawl_categories,
+                result_profile="resource",
+                allow_exa_rescue=policy.allow_exa_rescue,
+            )
 
         if provider != "auto":
             if provider == "tavily":
@@ -3272,7 +3317,15 @@ class MySearchClient:
                 sources=["x"],
                 result_profile="off",
             )
-        if policy.key == "tutorial":
+        if self._should_prefer_tavily_official_discovery(
+            query=query,
+            mode=mode,
+            intent=intent,
+            include_domains=include_domains,
+            include_content=include_content,
+        ):
+            reason = "严格官方 / 精确资源页优先用 Tavily 做发现，再由 Firecrawl 接正文验证"
+        elif policy.key == "tutorial":
             reason = "教程 / 排障类查询默认走 Tavily，优先拿社区解法，再用 Exa 补语义相邻案例"
         elif policy.key == "changelog":
             reason = "release / changelog 类查询默认走 Tavily，优先拿官方发布页与更新说明"
@@ -3328,6 +3381,7 @@ class MySearchClient:
             return intent
 
         query_lower = query.lower()
+
         if mode == "news":
             return "news"
         if self._looks_like_debugging_query(query_lower):
@@ -3377,6 +3431,39 @@ class MySearchClient:
         if include_content or mode in {"docs", "github", "pdf"} or intent in {"resource", "tutorial"}:
             return "balanced"
         return "fast"
+
+    def _should_prefer_tavily_official_discovery(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        include_domains: list[str] | None,
+        include_content: bool,
+    ) -> bool:
+        if include_content:
+            return False
+        if mode in {"github", "pdf"}:
+            return False
+        if include_domains and self._domains_prefer_firecrawl_discovery(include_domains):
+            return False
+        if not self._provider_can_serve(self.config.tavily):
+            return False
+        query_lower = query.lower()
+        if self._looks_like_api_docs_topic_query(query_lower):
+            return mode in {"docs", "web", "auto"} or intent == "resource"
+        if self._looks_like_pricing_query(query_lower):
+            return True
+        if self._looks_like_changelog_query(query_lower):
+            return True
+        if not self._should_use_strict_resource_policy(
+            query=query,
+            mode=mode,
+            intent=intent,
+            include_domains=include_domains,
+        ):
+            return False
+        return self._looks_like_official_query(query)
 
     def _route_policy_for_request(
         self,
@@ -5709,7 +5796,10 @@ class MySearchClient:
                 payload=payload,
                 key=key.key,
                 base_url=provider.base_url_for("social_search"),
-                timeout_seconds=min(self.config.timeout_seconds, 10),
+            timeout_seconds=max(
+                30,
+                int(getattr(self.config, "xai_social_timeout_seconds", 120) or 120),
+            ),
             )
             return self._normalize_social_gateway_response(
                 response=response,
@@ -8553,17 +8643,13 @@ class MySearchClient:
 
         current_answer = str(result.get("answer") or "").strip()
         result_items = list(result.get("results") or [])
-        if (
+        result_event_query = self._looks_like_result_event_query(query_lower)
+        weak_award_signal = (
             self._looks_like_award_result_query(query_lower)
             and not self._has_strong_award_result(query=query, results=result_items)
-        ):
-            if current_answer and self._answer_looks_uncertain(current_answer):
-                updated = dict(result)
-                updated["answer"] = ""
-                updated["evidence"] = dict(updated.get("evidence") or {})
-                updated["evidence"]["answer_source"] = "suppressed-provider-answer"
-                return updated
-            return result
+        )
+        if weak_award_signal and current_answer and self._answer_looks_uncertain(current_answer):
+            current_answer = ""
         extracted_answer = self._extract_result_event_answer(
             query=query,
             results=result_items,
@@ -8572,6 +8658,7 @@ class MySearchClient:
             strategy in {"verify", "deep"}
             or not current_answer
             or self._answer_looks_uncertain(current_answer)
+            or result_event_query
         )
         if not extracted_answer and should_try_page_extraction:
             extracted_answer = self._extract_result_event_answer_from_top_page(
@@ -8601,7 +8688,12 @@ class MySearchClient:
         query: str,
         results: list[dict[str, Any]],
     ) -> str:
-        for top in results[:3]:
+        candidates = sorted(
+            results[:5],
+            key=lambda item: self._result_event_page_priority(query=query, item=item),
+            reverse=True,
+        )
+        for top in candidates:
             url = str(top.get("url") or "").strip()
             if not url:
                 continue
@@ -8627,6 +8719,49 @@ class MySearchClient:
             if extracted_answer:
                 return extracted_answer
         return ""
+
+    def _result_event_page_priority(
+        self,
+        *,
+        query: str,
+        item: Mapping[str, Any],
+    ) -> int:
+        query_lower = query.lower()
+        title_text = str(item.get("title") or "").lower()
+        snippet_text = str(item.get("snippet") or "").lower()
+        content_text = str(item.get("content") or "").lower()
+        url = str(item.get("url") or "")
+        hostname = self._registered_domain(self._result_hostname({"url": url}))
+        score = 0
+        if hostname in {"nytimes.com", "npr.org", "pbs.org", "latimes.com", "washingtonpost.com", "apnews.com"}:
+            score += 4
+        if any(token in title_text or token in snippet_text for token in ("winner", "winners", "full results", "full list")):
+            score += 3
+        if self._looks_like_award_result_query(query_lower):
+            if any(
+                token in title_text or token in snippet_text or token in content_text
+                for token in self._award_query_category_markers(query_lower)
+            ):
+                score += 4
+            if "grammy" in query_lower and "grammy" in f"{title_text} {snippet_text} {content_text}":
+                score += 2
+            if "oscar" in query_lower and any(
+                token in f"{title_text} {snippet_text} {content_text}"
+                for token in ("oscar", "oscars", "academy awards")
+            ):
+                score += 2
+        if self._looks_like_box_office_query(query_lower):
+            if any(token in title_text or token in snippet_text for token in ("box office", "opening weekend", "highest-grossing", "biggest opening")):
+                score += 4
+        if self._looks_like_query_year_mismatch(query=query_lower, text=f"{title_text} {snippet_text} {content_text} {url}"):
+            score -= 5
+        if self._looks_like_award_prediction_result(
+            title_text=title_text,
+            snippet_text=snippet_text,
+            path=urlparse(url).path.lower(),
+        ):
+            score -= 4
+        return score
 
     def _answer_looks_uncertain(self, answer: str) -> bool:
         answer_lower = answer.lower()

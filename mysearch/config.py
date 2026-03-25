@@ -277,6 +277,7 @@ class ProviderConfig:
 class MySearchConfig:
     server_name: str
     timeout_seconds: int
+    xai_social_timeout_seconds: int
     xai_model: str
     max_parallel_workers: int
     search_cache_ttl_seconds: int
@@ -305,6 +306,7 @@ class MySearchConfig:
         return cls(
             server_name=_get_str("MYSEARCH_NAME", "MYSEARCH_SERVER_NAME", default="MySearch"),
             timeout_seconds=_get_int("MYSEARCH_TIMEOUT_SECONDS", 45),
+            xai_social_timeout_seconds=max(30, _get_int("MYSEARCH_XAI_SOCIAL_TIMEOUT_SECONDS", 120)),
             xai_model=_get_str(
                 "MYSEARCH_XAI_MODEL",
                 default="grok-4.20-beta-latest-non-reasoning",
