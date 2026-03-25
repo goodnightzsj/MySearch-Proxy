@@ -3973,6 +3973,21 @@ class MySearchClient:
         results: list[dict[str, Any]],
     ) -> bool:
         query_lower = query.lower()
+        trusted_result_domains = {
+            "abcnews.com",
+            "apnews.com",
+            "bbc.com",
+            "cnn.com",
+            "grammy.com",
+            "latimes.com",
+            "npr.org",
+            "nytimes.com",
+            "oscars.org",
+            "pbs.org",
+            "reuters.com",
+            "theacademy.com",
+            "washingtonpost.com",
+        }
         for item in results[:5]:
             hostname = self._result_hostname(item)
             registered_domain = self._registered_domain(hostname)
@@ -4012,7 +4027,12 @@ class MySearchClient:
                 snippet_text=snippet_text,
                 path=path,
             )
-            if winner_page or fact_match:
+            trusted_full_results_page = (
+                category_match
+                and registered_domain in trusted_result_domains
+                and self._result_event_page_priority(query=query, item=item) >= 8
+            )
+            if winner_page or fact_match or trusted_full_results_page:
                 return True
         return False
 
