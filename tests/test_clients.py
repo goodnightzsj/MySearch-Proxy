@@ -2229,7 +2229,7 @@ class MySearchClientTests(unittest.TestCase):
             include_answer=False,
         )
 
-        self.assertEqual(result["results"][0]["url"], "https://platform.openai.com/docs/api-reference/webhooks")
+        self.assertEqual(result["results"][0]["url"], "https://developers.openai.com/api/docs/guides/webhooks/")
         self.assertEqual(result["evidence"]["official_mode"], "strict")
 
     def test_search_strict_official_mode_prefers_topic_specific_docs_page_over_generic_reference(self) -> None:
@@ -3004,6 +3004,70 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertEqual(result["results"][0]["url"], "https://playwright.dev/docs/locators")
+        self.assertTrue(result["evidence"]["official_filter_applied"])
+        self.assertEqual(result["evidence"]["official_rescue_source"], "canonical-map")
+
+    def test_strict_docs_policy_promotes_known_openai_webhooks_guide_over_sdk_reference(self) -> None:
+        client = MySearchClient()
+
+        result = client._apply_official_resource_policy(
+            query="OpenAI webhooks official docs",
+            mode="docs",
+            intent="resource",
+            result={
+                "results": [
+                    {
+                        "provider": "firecrawl",
+                        "title": "Webhooks | OpenAI API Reference",
+                        "url": "https://developers.openai.com/api/reference/go/resources/webhooks",
+                        "snippet": "Go SDK reference for webhooks",
+                    },
+                    {
+                        "provider": "firecrawl",
+                        "title": "Webhooks | OpenAI API Reference",
+                        "url": "https://developers.openai.com/api/reference/python/resources/webhooks/",
+                        "snippet": "Python SDK reference for webhooks",
+                    },
+                ],
+                "citations": [],
+                "evidence": {},
+            },
+            include_domains=None,
+        )
+
+        self.assertEqual(result["results"][0]["url"], "https://developers.openai.com/api/docs/guides/webhooks/")
+        self.assertTrue(result["evidence"]["official_filter_applied"])
+        self.assertEqual(result["evidence"]["official_rescue_source"], "canonical-map")
+
+    def test_strict_docs_policy_promotes_known_openai_background_guide_over_reference_pages(self) -> None:
+        client = MySearchClient()
+
+        result = client._apply_official_resource_policy(
+            query="OpenAI Responses API background mode official docs",
+            mode="docs",
+            intent="resource",
+            result={
+                "results": [
+                    {
+                        "provider": "tavily",
+                        "title": "Create a model response | OpenAI API Reference",
+                        "url": "https://developers.openai.com/api/reference/resources/responses/methods/create/",
+                        "snippet": "Reference API page",
+                    },
+                    {
+                        "provider": "firecrawl",
+                        "title": "Realtime API with WebSocket | OpenAI API",
+                        "url": "https://developers.openai.com/api/docs/guides/realtime-websocket/",
+                        "snippet": "Another guide page",
+                    },
+                ],
+                "citations": [],
+                "evidence": {},
+            },
+            include_domains=None,
+        )
+
+        self.assertEqual(result["results"][0]["url"], "https://developers.openai.com/api/docs/guides/background/")
         self.assertTrue(result["evidence"]["official_filter_applied"])
         self.assertEqual(result["evidence"]["official_rescue_source"], "canonical-map")
 
