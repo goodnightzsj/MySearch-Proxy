@@ -3598,8 +3598,8 @@ class MySearchClient:
             return not self._has_canonical_pricing_result(results)
         if self._looks_like_changelog_query(query_lower):
             return not self._has_strong_changelog_result(query=query, results=results)
-        if self._looks_like_tutorial_query(query_lower):
-            return not self._has_strong_tutorial_result(query=query, results=results)
+        if self._looks_like_tutorial_query(query_lower) or self._looks_like_debugging_query(query_lower):
+            return not self._has_strong_tutorial_result(query=query, results=results, mode=mode)
         return False
 
     def _has_strong_award_result(
@@ -3766,11 +3766,13 @@ class MySearchClient:
         *,
         query: str,
         results: list[dict[str, Any]],
+        mode: SearchMode = "auto",
     ) -> bool:
         query_tokens = self._query_brand_tokens(query)
         precision_tokens = self._query_precision_tokens(query)
         exact_identifier_tokens = self._query_exact_identifier_tokens(query)
         debugging_query = self._looks_like_debugging_query(query.lower())
+        explicit_resource_mode = mode in {"docs", "github", "pdf"}
         for item in results[:5]:
             url = item.get("url", "")
             hostname = self._result_hostname(item)
@@ -3798,6 +3800,16 @@ class MySearchClient:
                 registered_domain=registered_domain,
                 query_tokens=query_tokens,
             ) or any(token in hostname for token in query_tokens)
+            brand_aligned_docs = self._looks_like_brand_aligned_tutorial_result(
+                hostname=hostname,
+                registered_domain=registered_domain,
+                path=path,
+                title_text=title_text,
+                snippet_text=snippet_text,
+                query_tokens=query_tokens,
+                path_precision_hits=path_hits,
+                exact_total_hits=exact_total_hits,
+            )
             debugging_match = self._looks_like_debugging_result(
                 hostname=hostname,
                 registered_domain=registered_domain,
@@ -3805,17 +3817,21 @@ class MySearchClient:
                 title_text=title_text,
                 snippet_text=snippet_text,
             )
-            if community_debug and (path_hits > 0 or exact_total_hits > 0 or "issue" in title_text):
+            if not explicit_resource_mode and community_debug and (
+                path_hits > 0 or exact_total_hits > 0 or "issue" in title_text
+            ):
                 return True
             if debugging_query:
-                if community_debug and debugging_match:
+                if not explicit_resource_mode and community_debug and debugging_match:
                     return True
-                if brand_aligned and debugging_match and (
+                if brand_aligned and brand_aligned_docs and debugging_match and (
                     exact_total_hits > 0 or path_hits >= 1 or total_hits >= 2
                 ):
                     return True
                 continue
-            if brand_aligned and (exact_total_hits > 0 or path_hits >= 2 or total_hits >= 3):
+            if brand_aligned and brand_aligned_docs and (
+                exact_total_hits > 0 or path_hits >= 2 or total_hits >= 3
+            ):
                 return True
         return False
 
@@ -4180,8 +4196,8 @@ class MySearchClient:
             self._looks_like_pricing_query(query_lower)
             and self._looks_like_canonical_pricing_result(hostname=hostname, path=path)
         )
-        tutorial_query = self._looks_like_tutorial_query(query_lower)
         debugging_query = self._looks_like_debugging_query(query_lower)
+        tutorial_query = self._looks_like_tutorial_query(query_lower) or debugging_query
         tutorial_community_match = int(
             tutorial_query
             and self._looks_like_tutorial_community_result(
@@ -4197,6 +4213,7 @@ class MySearchClient:
                 registered_domain=registered_domain,
                 path=path,
                 title_text=title_text,
+                snippet_text=(item.get("snippet") or "").lower(),
                 query_tokens=query_tokens,
                 path_precision_hits=path_precision_hits,
                 exact_total_hits=exact_total_hits,
@@ -4515,6 +4532,7 @@ class MySearchClient:
         registered_domain: str,
         path: str,
         title_text: str,
+        snippet_text: str,
         query_tokens: list[str],
         path_precision_hits: int,
         exact_total_hits: int,
@@ -4526,7 +4544,15 @@ class MySearchClient:
         if not brand_aligned:
             return False
         docs_path = any(marker in path for marker in ("/docs/", "/guide", "/api/", "/writing-tests", "/running-tests"))
-        return docs_path or path_precision_hits >= 1 or exact_total_hits > 0 or "tutorial" in title_text
+        tutorial_text = f"{title_text} {snippet_text}"
+        return (
+            docs_path
+            or path_precision_hits >= 1
+            or exact_total_hits > 0
+            or "tutorial" in tutorial_text
+            or "strict mode" in tutorial_text
+            or "hydration" in tutorial_text
+        )
 
     def _is_obvious_tutorial_blog_domain(self, registered_domain: str) -> bool:
         return registered_domain in {
@@ -6286,7 +6312,29 @@ class MySearchClient:
             title_text=(item.get("title") or "").lower(),
             query_tokens=exact_identifier_tokens,
         )
-        tutorial_query = self._looks_like_tutorial_query(query_lower)
+        tutorial_query = self._looks_like_tutorial_query(query_lower) or self._looks_like_debugging_query(query_lower)
+        tutorial_community_result = int(
+            tutorial_query
+            and self._looks_like_tutorial_community_result(
+                hostname=hostname,
+                registered_domain=self._registered_domain(hostname),
+                path=path,
+            )
+        )
+        tutorial_brand_aligned_resource = int(
+            tutorial_query
+            and not tutorial_community_result
+            and self._looks_like_brand_aligned_tutorial_result(
+                hostname=hostname,
+                registered_domain=self._registered_domain(hostname),
+                path=path,
+                title_text=(item.get("title") or "").lower(),
+                snippet_text=(item.get("snippet") or "").lower(),
+                query_tokens=query_tokens,
+                path_precision_hits=path_precision_hits,
+                exact_total_hits=exact_total_hits,
+            )
+        )
         tutorial_exact_identifier_match = int(
             tutorial_query and (exact_total_hits > 0 or exact_path_hits > 0)
         )
@@ -6444,6 +6492,8 @@ class MySearchClient:
             paper_landing_bonus,
             topic_path_hits,
             topic_total_hits,
+            tutorial_brand_aligned_resource,
+            1 - tutorial_community_result,
             tutorial_exact_identifier_match,
             non_generic_tutorial_docs,
             non_generic_official_landing,
@@ -7956,6 +8006,8 @@ class MySearchClient:
         if mode == "pdf":
             return ["pdf"]
         if mode == "news" or intent in {"news", "status"}:
+            return []
+        if intent == "tutorial":
             return []
         if mode in {"docs", "research"} or intent in {"resource", "tutorial"}:
             return ["research"]

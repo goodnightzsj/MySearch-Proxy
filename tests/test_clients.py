@@ -860,6 +860,31 @@ class MySearchClientTests(unittest.TestCase):
             "https://playwright.dev/docs/api/class-teststep",
         )
 
+    def test_rerank_resource_results_prefers_brand_aligned_debugging_docs_over_community_issue(self) -> None:
+        client = MySearchClient()
+
+        ranked = client._rerank_resource_results(
+            query="Playwright strict mode violation fix",
+            mode="docs",
+            results=[
+                {
+                    "provider": "exa",
+                    "title": "Playwright - Locator error :strict mode violation",
+                    "url": "https://stackoverflow.com/questions/76043713/playwright-locator-error-strict-mode-violation",
+                    "snippet": "Community workaround thread",
+                },
+                {
+                    "provider": "firecrawl",
+                    "title": "Locators | Playwright",
+                    "url": "https://playwright.dev/docs/locators",
+                    "snippet": "Locators are strict and strict mode violations happen when multiple elements match.",
+                },
+            ],
+            include_domains=None,
+        )
+
+        self.assertEqual(ranked[0]["url"], "https://playwright.dev/docs/locators")
+
     def test_exa_category_does_not_treat_tutorial_query_as_research_paper(self) -> None:
         client = MySearchClient()
 
@@ -908,6 +933,11 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertFalse(captured["include_content"])
+
+    def test_firecrawl_categories_skip_research_bucket_for_tutorial_queries(self) -> None:
+        client = MySearchClient()
+
+        self.assertEqual(client._firecrawl_categories("docs", "tutorial"), [])
 
     def test_life_query_skips_tavily_firecrawl_blend(self) -> None:
         client = MySearchClient()
@@ -2854,6 +2884,34 @@ class MySearchClientTests(unittest.TestCase):
                         "provider": "tavily",
                         "title": "Keep your Playwright tests structured with steps - Tim Deschryver",
                         "url": "https://timdeschryver.dev/blog/keep-your-playwright-tests-structured-with-steps",
+                        "snippet": "",
+                        "content": "",
+                    },
+                ]
+            },
+        )
+
+        self.assertTrue(weak)
+
+    def test_docs_tutorial_query_treats_community_only_results_as_weak(self) -> None:
+        client = MySearchClient()
+
+        weak = client._result_set_looks_weak_for_exa_rescue(
+            query="Playwright strict mode violation fix",
+            mode="docs",
+            result={
+                "results": [
+                    {
+                        "provider": "exa",
+                        "title": "Playwright - Locator error :strict mode violation",
+                        "url": "https://stackoverflow.com/questions/76043713/playwright-locator-error-strict-mode-violation",
+                        "snippet": "",
+                        "content": "",
+                    },
+                    {
+                        "provider": "exa",
+                        "title": "[BUG] strict mode violation when strict_selectors=False",
+                        "url": "https://github.com/microsoft/playwright/issues/19398",
                         "snippet": "",
                         "content": "",
                     },
