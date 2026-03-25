@@ -3996,6 +3996,27 @@ class MySearchClient:
         query_lower = query.lower()
         if not self._looks_like_award_result_query(query_lower):
             return query
+        year_match = re.search(r"\b(20\d{2})\b", query)
+        year = year_match.group(1) if year_match else ""
+        award_name = ""
+        if "grammy" in query_lower:
+            award_name = "Grammy"
+        elif "oscar" in query_lower or "academy awards" in query_lower:
+            award_name = "Oscars"
+        elif "golden globe" in query_lower:
+            award_name = "Golden Globes"
+        elif "bafta" in query_lower:
+            award_name = "BAFTA"
+        category = ""
+        category_markers = self._award_query_category_markers(query_lower)
+        if category_markers:
+            category = category_markers[0]
+
+        refined_parts = [part for part in [year, award_name, "winners list", category, "full results"] if part]
+        refined_query = " ".join(refined_parts).strip()
+        if refined_query:
+            return refined_query
+
         extra_terms = []
         if "winner" not in query_lower and "winners" not in query_lower:
             extra_terms.append("winners")
