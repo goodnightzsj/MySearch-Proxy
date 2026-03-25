@@ -3528,8 +3528,6 @@ class MySearchClient:
         include_domains: list[str] | None,
         include_content: bool,
     ) -> bool:
-        if include_content:
-            return False
         if mode in {"github", "pdf"}:
             return False
         if include_domains and self._domains_prefer_firecrawl_discovery(include_domains):
@@ -3537,18 +3535,29 @@ class MySearchClient:
         if not self._provider_can_serve(self.config.tavily):
             return False
         query_lower = query.lower()
-        if self._looks_like_api_docs_topic_query(query_lower):
-            return mode in {"docs", "web", "auto"} or intent == "resource"
-        if self._looks_like_pricing_query(query_lower):
-            return True
-        if self._looks_like_changelog_query(query_lower):
-            return True
-        if not self._should_use_strict_resource_policy(
+        exact_docs_topic = self._looks_like_api_docs_topic_query(query_lower)
+        pricing_query = self._looks_like_pricing_query(query_lower)
+        changelog_query = self._looks_like_changelog_query(query_lower)
+        strict_resource_policy = self._should_use_strict_resource_policy(
             query=query,
             mode=mode,
             intent=intent,
             include_domains=include_domains,
+        )
+        if include_content and not (
+            exact_docs_topic
+            or pricing_query
+            or changelog_query
+            or (strict_resource_policy and self._looks_like_official_query(query))
         ):
+            return False
+        if exact_docs_topic:
+            return mode in {"docs", "web", "auto"} or intent == "resource"
+        if pricing_query:
+            return True
+        if changelog_query:
+            return True
+        if not strict_resource_policy:
             return False
         return self._looks_like_official_query(query)
 

@@ -315,6 +315,57 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(decision.provider, "tavily")
         self.assertEqual(decision.fallback_chain, ["firecrawl"])
 
+    def test_exact_docs_topic_with_include_content_still_prefers_tavily_discovery(self) -> None:
+        client = _make_client(tavily_keys=["tv"], firecrawl_keys=["fc"])
+        client._probe_provider_status = lambda provider, key_count: {  # type: ignore[method-assign]
+            "status": "ok",
+            "error": "",
+            "checked_at": "2026-03-25T00:00:00+00:00",
+        }
+        decision = self._route(
+            client,
+            query="Playwright test.step docs",
+            mode="docs",
+            intent="resource",
+            include_content=True,
+        )
+        self.assertEqual(decision.provider, "tavily")
+        self.assertEqual(decision.fallback_chain, ["firecrawl"])
+
+    def test_strict_pricing_with_include_content_still_prefers_tavily_discovery(self) -> None:
+        client = _make_client(tavily_keys=["tv"], firecrawl_keys=["fc"])
+        client._probe_provider_status = lambda provider, key_count: {  # type: ignore[method-assign]
+            "status": "ok",
+            "error": "",
+            "checked_at": "2026-03-25T00:00:00+00:00",
+        }
+        decision = self._route(
+            client,
+            query="OpenAI API pricing official",
+            mode="web",
+            intent="resource",
+            include_content=True,
+        )
+        self.assertEqual(decision.provider, "tavily")
+        self.assertEqual(decision.fallback_chain, ["firecrawl"])
+
+    def test_strict_official_docs_with_include_content_still_prefers_tavily_discovery(self) -> None:
+        client = _make_client(tavily_keys=["tv"], firecrawl_keys=["fc"])
+        client._probe_provider_status = lambda provider, key_count: {  # type: ignore[method-assign]
+            "status": "ok",
+            "error": "",
+            "checked_at": "2026-03-25T00:00:00+00:00",
+        }
+        decision = self._route(
+            client,
+            query="OpenAI webhooks official docs",
+            mode="docs",
+            intent="resource",
+            include_content=True,
+        )
+        self.assertEqual(decision.provider, "tavily")
+        self.assertEqual(decision.fallback_chain, ["firecrawl"])
+
     def test_explicit_xai_provider(self) -> None:
         client = _make_client()
         decision = self._route(client, provider="xai")
