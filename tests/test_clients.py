@@ -890,6 +890,23 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertTrue(strong)
 
+    def test_has_strong_award_result_accepts_trusted_full_results_page(self) -> None:
+        client = MySearchClient()
+
+        strong = client._has_strong_award_result(
+            query="2026 Oscars best picture winner",
+            results=[
+                {
+                    "title": "Oscars 2026 full results: best picture, actor, actress",
+                    "url": "https://www.npr.org/2026/03/15/nx-s1-5739287/oscars-2026-full-results",
+                    "snippet": "",
+                    "content": "",
+                }
+            ],
+        )
+
+        self.assertTrue(strong)
+
     def test_extract_result_event_answer_prefers_prioritized_top_five_candidates(self) -> None:
         client = MySearchClient()
 
