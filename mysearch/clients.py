@@ -3978,13 +3978,16 @@ class MySearchClient:
         if not refined.get("results"):
             return result
         merged = self._merge_search_payloads(
-            primary_result=refined,
-            secondary_result=result,
+            primary_result=result,
+            secondary_result=refined,
             max_results=max_results,
         )
+        merged_results = list(merged.get("results") or [])
+        if not self._has_strong_award_result(query=query, results=merged_results):
+            return result
         refined_result = dict(result)
         refined_result["provider"] = "tavily"
-        refined_result["results"] = merged.get("results") or list(result.get("results") or [])
+        refined_result["results"] = merged_results
         refined_result["citations"] = merged.get("citations") or list(result.get("citations") or [])
         if merged.get("matched_results") is not None:
             refined_result["matched_results"] = merged.get("matched_results")

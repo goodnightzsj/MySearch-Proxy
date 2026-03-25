@@ -1981,7 +1981,16 @@ class ResultEventDiscoveryRefinementTests(unittest.TestCase):
             )
 
         refined_search.assert_called_once()
-        self.assertEqual(refined["results"][0]["url"], strong_item["url"])
+        self.assertIn(
+            strong_item["url"],
+            [item["url"] for item in refined["results"]],
+        )
+        self.assertTrue(
+            client._has_strong_award_result(
+                query="2026 Oscars best picture winner",
+                results=refined["results"],
+            )
+        )
         self.assertEqual(
             refined["route_debug"].get("query_refinement"),
             "award-result-tavily-refinement",
