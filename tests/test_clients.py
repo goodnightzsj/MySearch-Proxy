@@ -1963,6 +1963,71 @@ class MySearchClientTests(unittest.TestCase):
         )
         self.assertTrue(result["evidence"]["official_filter_reduced"])
 
+    def test_search_strict_official_mode_reapplies_after_exa_rescue(self) -> None:
+        client = MySearchClient()
+        client._provider_can_serve = lambda provider: provider.name in {"tavily", "exa"}  # type: ignore[method-assign]
+        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "ChatGPT Pricing | OpenAI",
+                    "url": "https://openai.com/business/chatgpt-pricing/",
+                    "snippet": "Generic pricing landing page",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "OpenAI API Pricing Guide",
+                    "url": "https://apidog.com/blog/openai-api-pricing/",
+                    "snippet": "Third-party pricing guide",
+                    "content": "",
+                },
+            ],
+            "citations": [
+                {"title": "ChatGPT Pricing | OpenAI", "url": "https://openai.com/business/chatgpt-pricing/"},
+                {"title": "OpenAI API Pricing Guide", "url": "https://apidog.com/blog/openai-api-pricing/"},
+            ],
+        }
+        client._search_exa = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "exa",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "exa",
+                    "source": "web",
+                    "title": "API Pricing | OpenAI",
+                    "url": "https://openai.com/api/pricing/",
+                    "snippet": "Canonical API pricing page",
+                    "content": "",
+                }
+            ],
+            "citations": [
+                {"title": "API Pricing | OpenAI", "url": "https://openai.com/api/pricing/"},
+            ],
+        }
+
+        result = client.search(
+            query="OpenAI pricing official",
+            mode="web",
+            strategy="verify",
+            provider="auto",
+            include_answer=False,
+        )
+
+        self.assertEqual(result["results"][0]["url"], "https://openai.com/api/pricing/")
+        self.assertEqual(result["provider"], "hybrid")
+        self.assertTrue(result["evidence"]["official_filter_applied"])
+        self.assertNotIn("strict-official-unmet", result["evidence"]["conflicts"])
+        self.assertEqual(result["summary"], "Top official match: API Pricing | OpenAI (openai.com)")
+
     def test_search_strict_official_mode_marks_filter_applied_when_all_results_are_official(self) -> None:
         client = MySearchClient()
         client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
