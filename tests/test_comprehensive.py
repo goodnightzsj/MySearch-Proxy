@@ -452,6 +452,16 @@ class IntentResolutionTests(unittest.TestCase):
         )
         self.assertEqual(result, "status")
 
+    def test_status_like_query_overrides_news_mode_intent(self) -> None:
+        client = _make_client()
+        result = client._resolve_intent(
+            query="OpenAI background mode latest status",
+            mode="news",
+            intent="auto",
+            sources=["web"],
+        )
+        self.assertEqual(result, "status")
+
     def test_box_office_query_resolves_to_news(self) -> None:
         client = _make_client()
         result = client._resolve_intent(
