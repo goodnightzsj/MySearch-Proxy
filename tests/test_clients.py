@@ -921,6 +921,23 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(refined, "2026 Grammy winners list album of the year full results")
 
+    def test_has_strong_award_result_rejects_generic_unrelated_winners_list(self) -> None:
+        client = MySearchClient()
+
+        strong = client._has_strong_award_result(
+            query="2026 Oscars best picture winner",
+            results=[
+                {
+                    "title": "SXSW 2026 Film & TV Festival Announces Jury and Special Award Winners",
+                    "url": "https://variety.com/2026/film/news/sxsw-2026-film-amp-tv-festival-award-winners-1236693418/",
+                    "snippet": "See the full winners list below.",
+                    "content": "",
+                }
+            ],
+        )
+
+        self.assertFalse(strong)
+
     def test_extract_result_event_answer_prefers_prioritized_top_five_candidates(self) -> None:
         client = MySearchClient()
 
