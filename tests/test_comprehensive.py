@@ -1863,5 +1863,64 @@ class ResultEventRescueTests(unittest.TestCase):
                 result=result,
             )
         )
+
+    def test_should_attempt_exa_rescue_allows_when_award_result_pages_are_weak(self) -> None:
+        client = _make_client(tavily_keys=["tv"], exa_keys=["exa"])
+        decision = RouteDecision(provider="tavily", reason="test", allow_exa_rescue=True)
+        result = {
+            "provider": "tavily",
+            "results": [
+                {
+                    "url": "https://variety.com/2026/film/news/sxsw-2026-film-amp-tv-festival-award-winners-1236693418/",
+                    "title": "SXSW 2026 Film & TV Festival award winners",
+                    "snippet": "One of the newest leading voices on the film awards season race while also providing commentary for the event.",
+                    "content": "Festival awards were announced at SXSW 2026.",
+                }
+            ],
+            "citations": [],
+            "answer": "",
+            "evidence": {},
+        }
+
+        self.assertTrue(
+            client._should_attempt_exa_rescue(
+                query="2026 Oscars best picture winner",
+                mode="news",
+                intent="news",
+                decision=decision,
+                result=result,
+                max_results=5,
+                include_domains=None,
+            )
+        )
+
+    def test_apply_result_event_answer_override_skips_weak_award_signal(self) -> None:
+        client = _make_client()
+        result = {
+            "provider": "tavily",
+            "results": [
+                {
+                    "url": "https://variety.com/2026/film/news/sxsw-2026-film-amp-tv-festival-award-winners-1236693418/",
+                    "title": "SXSW 2026 Film & TV Festival award winners",
+                    "snippet": "One of the newest leading voices on the film awards season race while also providing commentary for the event.",
+                    "content": "Festival awards were announced at SXSW 2026.",
+                }
+            ],
+            "citations": [],
+            "answer": "",
+            "evidence": {},
+        }
+
+        processed = client._apply_result_event_answer_override(
+            query="2026 Oscars best picture winner",
+            mode="news",
+            intent="news",
+            strategy="verify",
+            result=result,
+        )
+
+        self.assertEqual(processed.get("answer"), "")
+        self.assertNotIn("answer_source", processed.get("evidence") or {})
+
 if __name__ == "__main__":
     unittest.main()
