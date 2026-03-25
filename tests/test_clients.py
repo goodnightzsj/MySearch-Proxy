@@ -907,6 +907,20 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertTrue(strong)
 
+    def test_refined_award_result_query_rewrites_oscars_query(self) -> None:
+        client = MySearchClient()
+
+        refined = client._refined_award_result_query("2026 Oscars best picture winner")
+
+        self.assertEqual(refined, "2026 Oscars winners list best picture full results")
+
+    def test_refined_award_result_query_rewrites_grammy_query(self) -> None:
+        client = MySearchClient()
+
+        refined = client._refined_award_result_query("2026 Grammy album of the year winner")
+
+        self.assertEqual(refined, "2026 Grammy winners list album of the year full results")
+
     def test_extract_result_event_answer_prefers_prioritized_top_five_candidates(self) -> None:
         client = MySearchClient()
 
