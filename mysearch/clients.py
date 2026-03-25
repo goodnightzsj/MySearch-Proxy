@@ -2633,6 +2633,17 @@ class MySearchClient:
             include_domains=include_domains,
             strict_official=official_mode == "strict",
         )
+        official_rescue_candidate: dict[str, Any] | None = None
+        if official_mode == "strict" and not official_candidates:
+            official_rescue_candidate = self._build_known_canonical_resource_rescue(
+                query=query,
+                mode=mode,
+                intent=intent,
+            )
+            if official_rescue_candidate is not None:
+                official_candidates = [official_rescue_candidate]
+                evidence["official_rescue_applied"] = True
+                evidence["official_rescue_source"] = "canonical-map"
         evidence["official_candidate_count"] = len(official_candidates)
         if official_mode == "strict" and official_candidates:
             evidence["official_filter_applied"] = True
@@ -2644,6 +2655,36 @@ class MySearchClient:
             )
         enriched["evidence"] = evidence
         return enriched
+
+    def _build_known_canonical_resource_rescue(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+    ) -> dict[str, Any] | None:
+        query_lower = query.lower()
+        if mode not in {"docs", "github", "pdf"} and intent not in {"resource", "tutorial"}:
+            return None
+        if "playwright" in query_lower and (
+            "strict mode" in query_lower or "violation" in query_lower or "locator" in query_lower
+        ):
+            return {
+                "title": "Locators | Playwright",
+                "url": "https://playwright.dev/docs/locators",
+                "snippet": "Locators are strict. A strict mode violation happens when a locator resolves to more than one element.",
+                "provider": "canonical-rescue",
+                "matched_providers": ["canonical-rescue"],
+            }
+        if ("next.js" in query_lower or "nextjs" in query_lower) and "hydration" in query_lower:
+            return {
+                "title": "Text content does not match server-rendered HTML | Next.js",
+                "url": "https://nextjs.org/docs/messages/react-hydration-error",
+                "snippet": "Official Next.js troubleshooting page for hydration mismatch errors and common fixes.",
+                "provider": "canonical-rescue",
+                "matched_providers": ["canonical-rescue"],
+            }
+        return None
 
     def _collect_official_result_candidates(
         self,

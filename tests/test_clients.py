@@ -2921,6 +2921,38 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertTrue(weak)
 
+    def test_strict_docs_policy_injects_known_canonical_rescue_for_playwright_strict_mode(self) -> None:
+        client = MySearchClient()
+
+        result = client._apply_official_resource_policy(
+            query="Playwright strict mode violation fix",
+            mode="docs",
+            intent="tutorial",
+            result={
+                "results": [
+                    {
+                        "provider": "exa",
+                        "title": "Playwright - Locator error :strict mode violation",
+                        "url": "https://stackoverflow.com/questions/76043713/playwright-locator-error-strict-mode-violation",
+                        "snippet": "Community workaround thread",
+                    },
+                    {
+                        "provider": "firecrawl",
+                        "title": "Debugging Playwright Strict Mode Violations - Trey Mack",
+                        "url": "https://www.treymack.com/blog/debugging-playwright-strict-mode-violations/",
+                        "snippet": "Third-party debugging writeup",
+                    },
+                ],
+                "citations": [],
+                "evidence": {},
+            },
+            include_domains=None,
+        )
+
+        self.assertEqual(result["results"][0]["url"], "https://playwright.dev/docs/locators")
+        self.assertTrue(result["evidence"]["official_filter_applied"])
+        self.assertEqual(result["evidence"]["official_rescue_source"], "canonical-map")
+
     def test_rerank_general_web_prefers_status_page_for_status_queries(self) -> None:
         client = MySearchClient()
 
