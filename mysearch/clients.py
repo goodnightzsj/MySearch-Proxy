@@ -942,6 +942,23 @@ class MySearchClient:
             strategy=resolved_strategy,
             result=result,
         )
+        result = self._maybe_refine_tavily_result_event_discovery(
+            query=query,
+            mode=mode,
+            intent=resolved_intent,
+            result=result,
+            max_results=candidate_max_results,
+            include_domains=include_domains,
+            exclude_domains=exclude_domains,
+            from_date=from_date,
+        )
+        result = self._apply_result_event_answer_override(
+            query=query,
+            mode=mode,
+            intent=resolved_intent,
+            strategy=resolved_strategy,
+            result=result,
+        )
         if self._should_attempt_exa_rescue(
             query=query,
             mode=mode,
@@ -3918,6 +3935,77 @@ class MySearchClient:
         if weak_results and weak_result_signal:
             return True
         return sparse_results and (weak_result_signal or long_tail_signal)
+
+    def _maybe_refine_tavily_result_event_discovery(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        result: dict[str, Any],
+        max_results: int,
+        include_domains: list[str] | None,
+        exclude_domains: list[str] | None,
+        from_date: str | None,
+    ) -> dict[str, Any]:
+        query_lower = query.lower()
+        if result.get("provider") != "tavily":
+            return result
+        if include_domains:
+            return result
+        if not (
+            self._looks_like_award_result_query(query_lower)
+            and (mode == "news" or intent in {"news", "status"})
+        ):
+            return result
+        if self._has_strong_award_result(query=query, results=list(result.get("results") or [])):
+            return result
+        refined_query = self._refined_award_result_query(query)
+        if not refined_query or refined_query == query:
+            return result
+        days = self._infer_tavily_days(intent=intent, from_date=from_date)
+        refined = self._search_tavily(
+            query=refined_query,
+            max_results=max_results,
+            topic="news",
+            include_answer=False,
+            include_content=False,
+            include_domains=None,
+            exclude_domains=exclude_domains,
+            strategy="verify",
+            days=days,
+        )
+        if not refined.get("results"):
+            return result
+        merged = self._merge_search_payloads(
+            primary_result=refined,
+            secondary_result=result,
+            max_results=max_results,
+        )
+        refined_result = dict(result)
+        refined_result["provider"] = "tavily"
+        refined_result["results"] = merged.get("results") or list(result.get("results") or [])
+        refined_result["citations"] = merged.get("citations") or list(result.get("citations") or [])
+        if merged.get("matched_results") is not None:
+            refined_result["matched_results"] = merged.get("matched_results")
+        refined_result["route_debug"] = dict(refined_result.get("route_debug") or {})
+        refined_result["route_debug"]["query_refinement"] = "award-result-tavily-refinement"
+        return refined_result
+
+    def _refined_award_result_query(self, query: str) -> str:
+        query_lower = query.lower()
+        if not self._looks_like_award_result_query(query_lower):
+            return query
+        extra_terms = []
+        if "winner" not in query_lower and "winners" not in query_lower:
+            extra_terms.append("winners")
+        if "full results" not in query_lower:
+            extra_terms.append("full results")
+        if "winners list" not in query_lower:
+            extra_terms.append("winners list")
+        if not extra_terms:
+            return query
+        return f"{query} {' '.join(extra_terms)}".strip()
 
     def _should_skip_exa_rescue_for_result_event(
         self,

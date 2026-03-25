@@ -1753,6 +1753,9 @@ class ResultEventRescueTests(unittest.TestCase):
 
         client._should_attempt_exa_rescue = lambda **kwargs: True  # type: ignore[method-assign]
         client._apply_exa_rescue = lambda **kwargs: copy.deepcopy(rescued_result)  # type: ignore[method-assign]
+        client._maybe_refine_tavily_result_event_discovery = (  # type: ignore[method-assign]
+            lambda **kwargs: kwargs["result"]
+        )
         client.extract_url = lambda **kwargs: {  # type: ignore[method-assign]
             "url": kwargs["url"],
             "provider": "firecrawl",
@@ -1930,6 +1933,121 @@ class ResultEventNewsRankingTests(unittest.TestCase):
         )
 
         self.assertEqual(finalized["results"][0]["url"], strong_item["url"])
+
+
+class ResultEventDiscoveryRefinementTests(unittest.TestCase):
+    def test_refine_tavily_result_event_discovery_promotes_refined_candidates(self) -> None:
+        client = _make_client()
+        weak_item = {
+            "provider": "tavily",
+            "url": "https://variety.com/2026/film/news/sxsw-2026-film-amp-tv-festival-award-winners-1236693418/",
+            "title": "SXSW 2026 Film & TV Festival award winners",
+            "snippet": "Festival award winners were announced at SXSW 2026.",
+            "content": "",
+        }
+        strong_item = {
+            "provider": "tavily",
+            "url": "https://www.npr.org/2026/03/15/nx-s1-5739287/oscars-2026-winners-list-best-picture-actor-actress",
+            "title": "Oscars 2026 winners list: Best picture, actor, actress",
+            "snippet": "One Battle After Another wins best picture at the 2026 Oscars.",
+            "content": "",
+        }
+        initial_result = {
+            "provider": "tavily",
+            "results": [weak_item],
+            "citations": [{"url": weak_item["url"], "title": weak_item["title"]}],
+            "answer": "",
+            "route_debug": {},
+        }
+
+        with patch.object(
+            client,
+            "_search_tavily",
+            return_value={
+                "provider": "tavily",
+                "results": [strong_item],
+                "citations": [{"url": strong_item["url"], "title": strong_item["title"]}],
+            },
+        ) as refined_search:
+            refined = client._maybe_refine_tavily_result_event_discovery(
+                query="2026 Oscars best picture winner",
+                mode="news",
+                intent="news",
+                result=initial_result,
+                max_results=5,
+                include_domains=None,
+                exclude_domains=None,
+                from_date=None,
+            )
+
+        refined_search.assert_called_once()
+        self.assertEqual(refined["results"][0]["url"], strong_item["url"])
+        self.assertEqual(
+            refined["route_debug"].get("query_refinement"),
+            "award-result-tavily-refinement",
+        )
+
+    def test_postprocess_search_skips_exa_rescue_after_tavily_refinement(self) -> None:
+        client = _make_client()
+        weak_item = {
+            "provider": "tavily",
+            "url": "https://variety.com/2026/film/news/sxsw-2026-film-amp-tv-festival-award-winners-1236693418/",
+            "title": "SXSW 2026 Film & TV Festival award winners",
+            "snippet": "Festival award winners were announced at SXSW 2026.",
+            "content": "",
+        }
+        strong_item = {
+            "provider": "tavily",
+            "url": "https://www.npr.org/2026/03/15/nx-s1-5739287/oscars-2026-winners-list-best-picture-actor-actress",
+            "title": "Oscars 2026 winners list: Best picture, actor, actress",
+            "snippet": "One Battle After Another wins best picture at the 2026 Oscars.",
+            "content": "",
+        }
+        decision = RouteDecision(
+            provider="tavily",
+            reason="test",
+            allow_exa_rescue=True,
+            result_profile="news",
+        )
+        with patch.object(
+            client,
+            "_search_tavily",
+            return_value={
+                "provider": "tavily",
+                "results": [strong_item],
+                "citations": [{"url": strong_item["url"], "title": strong_item["title"]}],
+            },
+        ), patch.object(client, "_apply_exa_rescue") as exa_rescue:
+            result = client._postprocess_search(
+                result={
+                    "provider": "tavily",
+                    "results": [weak_item],
+                    "citations": [{"url": weak_item["url"], "title": weak_item["title"]}],
+                    "answer": "",
+                    "route_debug": {},
+                    "evidence": {},
+                },
+                query="2026 Oscars best picture winner",
+                mode="news",
+                provider="tavily",
+                resolved_intent="news",
+                resolved_strategy="verify",
+                decision=decision,
+                normalized_sources=["web"],
+                include_content=False,
+                effective_include_answer=False,
+                include_domains=None,
+                exclude_domains=None,
+                max_results=5,
+                candidate_max_results=15,
+                cacheable=False,
+                cache_key="",
+                from_date=None,
+                to_date=None,
+            )
+
+        exa_rescue.assert_not_called()
+        self.assertEqual(result["results"][0]["url"], strong_item["url"])
 
     def test_should_attempt_exa_rescue_allows_when_award_result_pages_are_weak(self) -> None:
         client = _make_client(tavily_keys=["tv"], exa_keys=["exa"])
