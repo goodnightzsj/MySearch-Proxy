@@ -963,6 +963,13 @@ class MySearchClient:
                 from_date=from_date,
                 to_date=to_date,
             )
+            result = self._apply_result_event_answer_override(
+                query=query,
+                mode=mode,
+                intent=resolved_intent,
+                strategy=resolved_strategy,
+                result=result,
+            )
 
         result = self._finalize_search_result(
             result,
@@ -972,6 +979,13 @@ class MySearchClient:
             include_domains=include_domains,
             result_profile=decision.result_profile,
             max_results=max_results,
+        )
+        result = self._apply_result_event_answer_override(
+            query=query,
+            mode=mode,
+            intent=resolved_intent,
+            strategy=resolved_strategy,
+            result=result,
         )
         final_official_mode = str(
             ((result.get("evidence") or {}) if isinstance(result.get("evidence"), dict) else {}).get(
@@ -3876,6 +3890,10 @@ class MySearchClient:
         if (include_domains or strict_official) and not rescue_sensitive_query:
             return False
         results = list(result.get("results") or [])
+        if results:
+            extracted_answer = self._extract_result_event_answer(query=query, results=results)
+            if extracted_answer and not self._answer_looks_uncertain(extracted_answer):
+                return False
         sparse_results = len(results) < min(max_results, 3)
         weak_results = self._result_set_looks_weak_for_exa_rescue(
             query=query,
@@ -3915,9 +3933,18 @@ class MySearchClient:
         ):
             return False
         evidence = result.get("evidence") or {}
-        return bool(str(result.get("answer") or "").strip()) and (
+        if bool(str(result.get("answer") or "").strip()) and (
             str(evidence.get("answer_source") or "") == "result-event-extraction"
-        )
+        ):
+            return True
+        results = list(result.get("results") or [])
+        if results:
+            extracted_answer = self._extract_result_event_answer(query=query, results=results)
+            if extracted_answer and not self._answer_looks_uncertain(extracted_answer):
+                return True
+        if self._looks_like_award_result_query(query_lower):
+            return self._has_strong_award_result(query=query, results=results)
+        return False
 
     def _result_set_looks_weak_for_exa_rescue(
         self,
@@ -3930,6 +3957,10 @@ class MySearchClient:
         if not results:
             return True
         query_lower = query.lower()
+        if self._looks_like_result_event_query(query_lower):
+            extracted_answer = self._extract_result_event_answer(query=query, results=results)
+            if extracted_answer and not self._answer_looks_uncertain(extracted_answer):
+                return False
         if self._looks_like_award_result_query(query_lower):
             return not self._has_strong_award_result(query=query, results=results)
         if mode == "pdf":

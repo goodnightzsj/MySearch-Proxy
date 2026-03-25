@@ -8,6 +8,7 @@ improvement opportunities.
 from __future__ import annotations
 
 import copy
+import inspect
 import io
 import os
 import sys
@@ -1707,5 +1708,160 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(result, 42)
 
 
+class ResultEventRescueTests(unittest.TestCase):
+    def test_should_skip_exa_rescue_when_strong_award_result_already_present(self) -> None:
+        client = _make_client()
+        result = {
+            "provider": "tavily",
+            "results": [
+                {
+                    "url": "https://www.grammy.com/news/2026-grammys-winners",
+                    "title": "2026 Grammy Awards winners",
+                    "snippet": "Bad Bunny wins Album of the Year at the 2026 Grammy Awards.",
+                    "content": "Album of the Year: Bad Bunny — DeBÍ TiRAR MáS FOToS.",
+                }
+            ],
+            "citations": [],
+            "answer": "",
+            "evidence": {},
+        }
+
+        self.assertTrue(
+            client._should_skip_exa_rescue_for_result_event(
+                query="2026 Grammy album of the year winner",
+                mode="news",
+                intent="news",
+                result=result,
+            )
+        )
+
+    def test_postprocess_search_reapplies_result_event_answer_after_finalize(self) -> None:
+        client = _make_client(tavily_keys=["tv"], exa_keys=["exa"])
+        strong_result = {
+            "url": "https://www.grammy.com/news/2026-grammys-winners",
+            "title": "2026 Grammy Awards winners",
+            "snippet": "Bad Bunny wins Album of the Year at the 2026 Grammy Awards.",
+            "content": "Album of the Year: Bad Bunny — DeBÍ TiRAR MáS FOToS.",
+        }
+        rescued_result = {
+            "provider": "exa",
+            "results": [strong_result],
+            "citations": [{"url": strong_result["url"], "title": strong_result["title"]}],
+            "answer": "",
+            "evidence": {},
+        }
+
+        client._should_attempt_exa_rescue = lambda **kwargs: True  # type: ignore[method-assign]
+        client._apply_exa_rescue = lambda **kwargs: copy.deepcopy(rescued_result)  # type: ignore[method-assign]
+        client.extract_url = lambda **kwargs: {  # type: ignore[method-assign]
+            "url": kwargs["url"],
+            "provider": "firecrawl",
+            "content": "Album of the Year: Bad Bunny — DeBÍ TiRAR MáS FOToS.",
+            "cache": {"extract": {"hit": False, "ttl_seconds": 300}},
+        }
+
+        def _finalize_search_result(result, **kwargs):  # type: ignore[no-untyped-def]
+            finalized = copy.deepcopy(result)
+            finalized["answer"] = ""
+            finalized["evidence"] = {}
+            return finalized
+
+        client._finalize_search_result = _finalize_search_result  # type: ignore[method-assign]
+
+        signature = inspect.signature(client._postprocess_search)
+        provided_args = {
+            "query": "2026 Grammy album of the year winner",
+            "mode": "news",
+            "provider": "auto",
+            "resolved_intent": "news",
+            "resolved_strategy": "verify",
+            "result": {
+                "provider": "tavily",
+                "results": [],
+                "citations": [],
+                "answer": "",
+                "evidence": {},
+            },
+            "decision": RouteDecision(provider="tavily", reason="test"),
+            "normalized_sources": ["web"],
+            "include_content": False,
+            "effective_include_answer": True,
+            "include_domains": None,
+            "exclude_domains": None,
+            "max_results": 5,
+            "candidate_max_results": 5,
+            "cacheable": False,
+            "cache_key": None,
+        }
+        call_args = {}
+        for name, parameter in signature.parameters.items():
+            if name in provided_args:
+                call_args[name] = provided_args[name]
+            elif parameter.default is not inspect._empty:
+                call_args[name] = parameter.default
+            else:
+                raise AssertionError(f"Unknown required parameter for _postprocess_search: {name}")
+
+        processed = client._postprocess_search(**call_args)
+
+        self.assertEqual(processed["evidence"]["answer_source"], "result-event-extraction")
+        self.assertIn("Bad Bunny", processed["answer"])
+
+
+
+    def test_should_attempt_exa_rescue_skips_when_result_event_answer_already_extractable(self) -> None:
+        client = _make_client(tavily_keys=["tv"], exa_keys=["exa"])
+        decision = RouteDecision(provider="tavily", reason="test", allow_exa_rescue=True)
+        result = {
+            "provider": "tavily",
+            "results": [
+                {
+                    "url": "https://www.grammy.com/news/2026-grammys-winners",
+                    "title": "2026 Grammy Awards winners",
+                    "snippet": "Bad Bunny wins Album of the Year at the 2026 Grammy Awards.",
+                    "content": "Album of the Year: Bad Bunny — DeBÍ TiRAR MáS FOToS.",
+                }
+            ],
+            "citations": [],
+            "answer": "",
+            "evidence": {},
+        }
+
+        self.assertFalse(
+            client._should_attempt_exa_rescue(
+                query="2026 Grammy album of the year winner",
+                mode="news",
+                intent="news",
+                decision=decision,
+                result=result,
+                max_results=5,
+                include_domains=None,
+            )
+        )
+
+    def test_result_set_not_weak_when_result_event_answer_already_extractable(self) -> None:
+        client = _make_client()
+        result = {
+            "provider": "tavily",
+            "results": [
+                {
+                    "url": "https://www.grammy.com/news/2026-grammys-winners",
+                    "title": "2026 Grammy Awards winners",
+                    "snippet": "Bad Bunny wins Album of the Year at the 2026 Grammy Awards.",
+                    "content": "Album of the Year: Bad Bunny — DeBÍ TiRAR MáS FOToS.",
+                }
+            ],
+            "citations": [],
+            "answer": "",
+            "evidence": {},
+        }
+
+        self.assertFalse(
+            client._result_set_looks_weak_for_exa_rescue(
+                query="2026 Grammy album of the year winner",
+                mode="news",
+                result=result,
+            )
+        )
 if __name__ == "__main__":
     unittest.main()
