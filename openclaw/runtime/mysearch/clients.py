@@ -2458,6 +2458,12 @@ class MySearchClient:
                 citations=list(finalized.get("citations") or []),
             )
 
+        finalized = self._apply_status_result_policy(
+            query=query,
+            mode=mode,
+            intent=intent,
+            result=finalized,
+        )
         finalized = self._apply_official_resource_policy(
             query=query,
             mode=mode,
@@ -2510,6 +2516,78 @@ class MySearchClient:
             include_domains=include_domains,
         )
         return finalized
+
+    def _apply_status_result_policy(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        query_lower = query.lower()
+        if intent != "status" and not self._looks_like_status_query(query_lower):
+            return result
+
+        enriched = dict(result)
+        results = [dict(item) for item in (enriched.get("results") or [])]
+        citations = list(enriched.get("citations") or [])
+        evidence = dict(enriched.get("evidence") or {})
+        status_results = [
+            item
+            for item in results
+            if self._looks_like_status_result(
+                url=str(item.get("url") or ""),
+                hostname=self._result_hostname(item),
+                title_text=str(item.get("title") or "").lower(),
+            )
+            and not self._is_obvious_official_community_result(
+                hostname=self._result_hostname(item),
+                path=urlparse(str(item.get("url") or "")).path.lower(),
+            )
+        ]
+        if status_results:
+            reordered = [
+                *status_results,
+                *[
+                    item
+                    for item in results
+                    if str(item.get("url") or "") not in {str(status.get("url") or "") for status in status_results}
+                ],
+            ]
+            if reordered != results:
+                evidence["status_filter_applied"] = True
+                enriched["results"] = reordered
+                enriched["citations"] = self._align_citations_with_results(
+                    results=reordered,
+                    citations=citations,
+                )
+            enriched["evidence"] = evidence
+            return enriched
+
+        rescue_candidate = self._build_known_canonical_resource_rescue(
+            query=query,
+            mode=mode,
+            intent=intent,
+        )
+        if rescue_candidate is None:
+            enriched["evidence"] = evidence
+            return enriched
+
+        rescue_url = str(rescue_candidate.get("url") or "")
+        deduped_results = [
+            rescue_candidate,
+            *[item for item in results if str(item.get("url") or "") != rescue_url],
+        ]
+        evidence["status_rescue_applied"] = True
+        evidence["status_rescue_source"] = "canonical-map"
+        enriched["results"] = deduped_results
+        enriched["citations"] = self._align_citations_with_results(
+            results=deduped_results,
+            citations=citations,
+        )
+        enriched["evidence"] = evidence
+        return enriched
 
     def _resolve_official_result_mode(
         self,
