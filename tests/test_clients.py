@@ -2930,6 +2930,89 @@ class MySearchClientTests(unittest.TestCase):
         self.assertTrue(result["evidence"]["official_filter_applied"])
         self.assertEqual(result["evidence"]["official_rescue_source"], "canonical-map")
 
+    def test_status_result_policy_rescues_openai_status_root_when_no_status_results_exist(self) -> None:
+        client = MySearchClient()
+
+        result = client._apply_status_result_policy(
+            query="OpenAI background mode latest status",
+            mode="web",
+            intent="status",
+            result={
+                "results": [
+                    {
+                        "provider": "tavily",
+                        "title": "Background mode requests stuck in queued status - OpenAI Developer Community",
+                        "url": "https://community.openai.com/t/background-mode-requests-stuck-in-queued-status-responses-api/1372058",
+                        "snippet": "",
+                        "content": "",
+                    },
+                    {
+                        "provider": "tavily",
+                        "title": "How Background Mode improves AI workflows",
+                        "url": "https://www.linkedin.com/posts/example_background-mode-openai",
+                        "snippet": "",
+                        "content": "",
+                    },
+                ],
+                "citations": [
+                    {
+                        "title": "Background mode requests stuck in queued status - OpenAI Developer Community",
+                        "url": "https://community.openai.com/t/background-mode-requests-stuck-in-queued-status-responses-api/1372058",
+                    },
+                    {
+                        "title": "How Background Mode improves AI workflows",
+                        "url": "https://www.linkedin.com/posts/example_background-mode-openai",
+                    },
+                ],
+                "evidence": {},
+            },
+        )
+
+        self.assertEqual(result["results"][0]["url"], "https://status.openai.com/")
+        self.assertTrue(result["evidence"]["status_rescue_applied"])
+        self.assertEqual(result["evidence"]["status_rescue_source"], "canonical-map")
+
+    def test_status_result_policy_promotes_status_results_over_discussion_threads(self) -> None:
+        client = MySearchClient()
+
+        result = client._apply_status_result_policy(
+            query="OpenAI background mode latest status",
+            mode="web",
+            intent="status",
+            result={
+                "results": [
+                    {
+                        "provider": "tavily",
+                        "title": "Background mode requests stuck in queued status - OpenAI Developer Community",
+                        "url": "https://community.openai.com/t/background-mode-requests-stuck-in-queued-status-responses-api/1372058",
+                        "snippet": "",
+                        "content": "",
+                    },
+                    {
+                        "provider": "tavily",
+                        "title": "Responses API errors when using background mode",
+                        "url": "https://status.openai.com/incidents/01KKMB9HWS1B9452FT6BV6KDD6",
+                        "snippet": "",
+                        "content": "",
+                    },
+                ],
+                "citations": [
+                    {
+                        "title": "Background mode requests stuck in queued status - OpenAI Developer Community",
+                        "url": "https://community.openai.com/t/background-mode-requests-stuck-in-queued-status-responses-api/1372058",
+                    },
+                    {
+                        "title": "Responses API errors when using background mode",
+                        "url": "https://status.openai.com/incidents/01KKMB9HWS1B9452FT6BV6KDD6",
+                    },
+                ],
+                "evidence": {},
+            },
+        )
+
+        self.assertEqual(result["results"][0]["url"], "https://status.openai.com/incidents/01KKMB9HWS1B9452FT6BV6KDD6")
+        self.assertTrue(result["evidence"]["status_filter_applied"])
+
     def test_changelog_weak_results_trigger_exa_rescue_signal(self) -> None:
         client = MySearchClient()
 
