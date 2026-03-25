@@ -4139,12 +4139,36 @@ class MySearchClient:
                 snippet_text=snippet_text,
                 path=path,
             )
+            prioritized_winner_page = winner_page and (
+                category_match
+                or self._result_event_page_priority(query=query, item=item) >= 8
+            )
             trusted_full_results_page = (
                 category_match
                 and registered_domain in trusted_result_domains
                 and self._result_event_page_priority(query=query, item=item) >= 8
             )
-            if winner_page or fact_match or trusted_full_results_page:
+            if prioritized_winner_page or fact_match or trusted_full_results_page:
+                return True
+        return False
+
+    def _can_attempt_award_page_extraction(
+        self,
+        *,
+        query: str,
+        results: list[dict[str, Any]],
+    ) -> bool:
+        for item in results[:5]:
+            title_text = (item.get("title") or "").lower()
+            snippet_text = (item.get("snippet") or "").lower()
+            path = urlparse(item.get("url", "")).path.lower()
+            if self._looks_like_award_winner_result(
+                title_text=title_text,
+                snippet_text=snippet_text,
+                path=path,
+            ):
+                return True
+            if self._result_event_page_priority(query=query, item=item) >= 8:
                 return True
         return False
 
@@ -8939,6 +8963,10 @@ class MySearchClient:
             self._looks_like_award_result_query(query_lower)
             and not self._has_strong_award_result(query=query, results=result_items)
         )
+        allow_award_page_extraction = (
+            self._looks_like_award_result_query(query_lower)
+            and self._can_attempt_award_page_extraction(query=query, results=result_items)
+        )
         if weak_award_signal and current_answer and self._answer_looks_uncertain(current_answer):
             current_answer = ""
         extracted_answer = ""
@@ -8953,7 +8981,11 @@ class MySearchClient:
             or self._answer_looks_uncertain(current_answer)
             or result_event_query
         )
-        if not weak_award_signal and not extracted_answer and should_try_page_extraction:
+        if (
+            not extracted_answer
+            and should_try_page_extraction
+            and (not weak_award_signal or allow_award_page_extraction)
+        ):
             extracted_answer = self._extract_result_event_answer_from_top_page(
                 query=query,
                 results=result_items,
