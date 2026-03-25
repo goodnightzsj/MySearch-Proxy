@@ -124,6 +124,17 @@ def parse_pipe_list(value: str) -> list[str]:
     return [item.strip() for item in (value or "").split("|") if item.strip()]
 
 
+def parse_optional_bool(value: Optional[str], default: bool) -> bool:
+    normalized = (value or "").strip().lower()
+    if not normalized:
+        return default
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
 def join_pipe_list(values: list[str]) -> str:
     return " | ".join(value for value in values if value)
 
@@ -257,7 +268,10 @@ def build_case(row: dict[str, str]) -> dict[str, object]:
         "strategy": strategy,
         "max_results": 5,
         "include_answer": True,
-        "include_content": mode in {"docs", "github", "pdf"},
+        "include_content": parse_optional_bool(
+            row.get("include_content"),
+            mode in {"docs", "github", "pdf"},
+        ),
     }
     if strict_domains:
         mysearch_args["include_domains"] = strict_domains

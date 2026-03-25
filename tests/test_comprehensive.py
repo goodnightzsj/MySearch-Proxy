@@ -281,7 +281,7 @@ class RoutingTests(unittest.TestCase):
             intent="resource",
         )
         self.assertEqual(decision.provider, "tavily")
-        self.assertEqual(decision.fallback_chain, ["firecrawl"])
+        self.assertEqual(decision.fallback_chain, ["firecrawl", "exa"])
 
     def test_strict_pricing_query_prefers_tavily_discovery(self) -> None:
         client = _make_client(tavily_keys=["tv"], firecrawl_keys=["fc"])
@@ -297,7 +297,7 @@ class RoutingTests(unittest.TestCase):
             intent="resource",
         )
         self.assertEqual(decision.provider, "tavily")
-        self.assertEqual(decision.fallback_chain, ["firecrawl"])
+        self.assertEqual(decision.fallback_chain, ["firecrawl", "exa"])
 
     def test_exact_docs_topic_prefers_tavily_discovery_before_firecrawl_extract(self) -> None:
         client = _make_client(tavily_keys=["tv"], firecrawl_keys=["fc"])
@@ -313,7 +313,7 @@ class RoutingTests(unittest.TestCase):
             intent="resource",
         )
         self.assertEqual(decision.provider, "tavily")
-        self.assertEqual(decision.fallback_chain, ["firecrawl"])
+        self.assertEqual(decision.fallback_chain, ["firecrawl", "exa"])
 
     def test_exact_docs_topic_with_include_content_still_prefers_tavily_discovery(self) -> None:
         client = _make_client(tavily_keys=["tv"], firecrawl_keys=["fc"])
@@ -330,7 +330,7 @@ class RoutingTests(unittest.TestCase):
             include_content=True,
         )
         self.assertEqual(decision.provider, "tavily")
-        self.assertEqual(decision.fallback_chain, ["firecrawl"])
+        self.assertEqual(decision.fallback_chain, ["firecrawl", "exa"])
 
     def test_strict_pricing_with_include_content_still_prefers_tavily_discovery(self) -> None:
         client = _make_client(tavily_keys=["tv"], firecrawl_keys=["fc"])
@@ -347,7 +347,7 @@ class RoutingTests(unittest.TestCase):
             include_content=True,
         )
         self.assertEqual(decision.provider, "tavily")
-        self.assertEqual(decision.fallback_chain, ["firecrawl"])
+        self.assertEqual(decision.fallback_chain, ["firecrawl", "exa"])
 
     def test_strict_official_docs_with_include_content_still_prefers_tavily_discovery(self) -> None:
         client = _make_client(tavily_keys=["tv"], firecrawl_keys=["fc"])
@@ -364,7 +364,34 @@ class RoutingTests(unittest.TestCase):
             include_content=True,
         )
         self.assertEqual(decision.provider, "tavily")
-        self.assertEqual(decision.fallback_chain, ["firecrawl"])
+        self.assertEqual(decision.fallback_chain, ["firecrawl", "exa"])
+
+    def test_strict_official_docs_keeps_tavily_primary_when_probe_is_degraded(self) -> None:
+        client = _make_client(tavily_keys=["tv"], firecrawl_keys=["fc"])
+
+        def _probe(provider, key_count):  # type: ignore[no-untyped-def]
+            if provider.name == "tavily":
+                return {
+                    "status": "network_error",
+                    "error": "timed out",
+                    "checked_at": "2026-03-25T00:00:00+00:00",
+                }
+            return {
+                "status": "ok",
+                "error": "",
+                "checked_at": "2026-03-25T00:00:00+00:00",
+            }
+
+        client._probe_provider_status = _probe  # type: ignore[method-assign]
+        decision = self._route(
+            client,
+            query="OpenAI webhooks official docs",
+            mode="docs",
+            intent="resource",
+            include_content=True,
+        )
+        self.assertEqual(decision.provider, "tavily")
+        self.assertEqual(decision.fallback_chain, ["firecrawl", "exa"])
 
     def test_explicit_xai_provider(self) -> None:
         client = _make_client()
