@@ -3322,13 +3322,14 @@ class MySearchClient:
             intent=intent,
             include_content=include_content,
         )
-        if self._should_prefer_tavily_official_discovery(
+        prefer_tavily_official_discovery = self._should_prefer_tavily_official_discovery(
             query=query,
             mode=mode,
             intent=intent,
             include_domains=include_domains,
             include_content=include_content,
-        ):
+        )
+        if prefer_tavily_official_discovery:
             policy = SearchRoutePolicy(
                 key=policy.key,
                 provider="tavily",
@@ -3402,15 +3403,20 @@ class MySearchClient:
                 sources=["x"],
                 result_profile="off",
             )
-        if self._should_prefer_tavily_official_discovery(
-            query=query,
-            mode=mode,
-            intent=intent,
-            include_domains=include_domains,
-            include_content=include_content,
-        ):
-            reason = "严格官方 / 精确资源页优先用 Tavily 做发现，再由 Firecrawl 接正文验证"
-        elif policy.key == "tutorial":
+        if prefer_tavily_official_discovery:
+            return RouteDecision(
+                provider="tavily",
+                reason="严格官方 / 精确资源页优先用 Tavily 做发现，再由 Firecrawl 接正文验证",
+                tavily_topic=policy.tavily_topic,
+                firecrawl_categories=list(policy.firecrawl_categories) or None,
+                fallback_chain=self._explicit_provider_fallback_chain(
+                    provider="tavily",
+                    policy=policy,
+                ),
+                result_profile=policy.result_profile,
+                allow_exa_rescue=policy.allow_exa_rescue,
+            )
+        if policy.key == "tutorial":
             reason = "教程 / 排障类查询默认走 Tavily，优先拿社区解法，再用 Exa 补语义相邻案例"
         elif policy.key == "changelog":
             reason = "release / changelog 类查询默认走 Tavily，优先拿官方发布页与更新说明"
