@@ -58,13 +58,17 @@ ADMIN_TOKENS_PATH = _normalize_path(
 )
 ADMIN_APP_KEY = _env_str("SOCIAL_GATEWAY_ADMIN_APP_KEY")
 CACHE_TTL_SECONDS = max(5, int(_env_str("SOCIAL_GATEWAY_CACHE_TTL_SECONDS", "60")))
+SOCIAL_GATEWAY_TIMEOUT_SECONDS = max(
+    30,
+    int(_env_str("SOCIAL_GATEWAY_TIMEOUT_SECONDS", "120")),
+)
 try:
     FALLBACK_MIN_RESULTS = max(1, int(_env_str("SOCIAL_GATEWAY_FALLBACK_MIN_RESULTS", "3")))
 except (TypeError, ValueError):
     FALLBACK_MIN_RESULTS = 3
 SOCIAL_SEARCH_MODEL = MODEL
 
-http_client = httpx.AsyncClient(timeout=60)
+http_client = httpx.AsyncClient(timeout=SOCIAL_GATEWAY_TIMEOUT_SECONDS)
 state_cache: dict[str, Any] = {"expires_at": 0.0, "value": None}
 state_lock: asyncio.Lock | None = None
 

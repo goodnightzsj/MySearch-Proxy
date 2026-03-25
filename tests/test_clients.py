@@ -556,6 +556,63 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(result["answer"], "Record of the Year winner: Not Like Us")
 
+    def test_apply_result_event_answer_override_checks_ranked_top_five_pages(self) -> None:
+        client = MySearchClient()
+        page_payloads = {
+            "https://example.com/one": {"content": ""},
+            "https://example.com/two": {"content": ""},
+            "https://example.com/three": {"content": ""},
+            "https://www.npr.org/2026/02/01/grammys": {
+                "content": (
+                    "Bad Bunny won album of the year for his album "
+                    "_DeBÍ TiRAR MáS FOToS_."
+                )
+            },
+        }
+        client.extract_url = lambda **kwargs: page_payloads.get(kwargs["url"], {"content": ""})  # type: ignore[method-assign]
+
+        result = client._apply_result_event_answer_override(
+            query="2026 Grammy Album of the Year winner",
+            mode="news",
+            intent="news",
+            strategy="balanced",
+            result={
+                "answer": "Coverage is still developing.",
+                "results": [
+                    {
+                        "title": "Awards red carpet highlights",
+                        "url": "https://example.com/one",
+                        "snippet": "",
+                        "content": "",
+                    },
+                    {
+                        "title": "Grammy predictions 2026",
+                        "url": "https://example.com/two",
+                        "snippet": "",
+                        "content": "",
+                    },
+                    {
+                        "title": "AOTY nominees recap",
+                        "url": "https://example.com/three",
+                        "snippet": "",
+                        "content": "",
+                    },
+                    {
+                        "title": "2026 Grammy winners and nominees",
+                        "url": "https://www.npr.org/2026/02/01/grammys",
+                        "snippet": "",
+                        "content": "",
+                    },
+                ],
+                "evidence": {},
+            },
+        )
+
+        self.assertEqual(
+            result["answer"],
+            "Album of the Year winner: DeBÍ TiRAR MáS FOToS by Bad Bunny",
+        )
+
     def test_apply_result_event_answer_override_uses_page_extraction_for_uncertain_balanced_answer(self) -> None:
         client = MySearchClient()
         client.extract_url = lambda **kwargs: {  # type: ignore[method-assign]
@@ -1165,7 +1222,7 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0]["timeout_seconds"], 10)
+        self.assertEqual(calls[0]["timeout_seconds"], 120)
         self.assertEqual(result["provider"], "tavily_social_fallback")
         self.assertEqual(result["results"][0]["url"], "https://x.com/OpenAI/status/123")
         self.assertEqual(result["fallback"]["from"], "xai_compatible")
@@ -2853,6 +2910,25 @@ class MySearchClientTests(unittest.TestCase):
             urls.index("https://developers.openai.com/api/docs/guides/background/"),
             urls.index("https://community.openai.com/t/background-mode-requests-stuck-in-queued-status-responses-api/1372058"),
         )
+
+    def test_official_policy_rescues_openai_status_root_when_status_query_is_empty(self) -> None:
+        client = MySearchClient()
+
+        result = client._apply_official_resource_policy(
+            query="OpenAI latest status official",
+            mode="web",
+            intent="status",
+            include_domains=["openai.com"],
+            result={
+                "results": [],
+                "citations": [],
+                "evidence": {},
+            },
+        )
+
+        self.assertEqual(result["results"][0]["url"], "https://status.openai.com/")
+        self.assertTrue(result["evidence"]["official_filter_applied"])
+        self.assertEqual(result["evidence"]["official_rescue_source"], "canonical-map")
 
     def test_changelog_weak_results_trigger_exa_rescue_signal(self) -> None:
         client = MySearchClient()
