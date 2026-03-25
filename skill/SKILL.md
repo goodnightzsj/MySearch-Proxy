@@ -454,6 +454,8 @@ MySearch 会自动回退到 `Tavily extract`。
 - 新闻 / 最新动态：默认 Tavily news
 - 文档 / GitHub / PDF / changelog / pricing：默认 Firecrawl
 - X / Twitter / 社交舆情：默认 xAI X search
+- 精确官方 docs topic、official pricing、official changelog 一类 query：先让 Tavily 命中 canonical 页面，再由 Firecrawl 接正文验证与抽取
+- 奖项 / 结果型事实题优先用 `mode="news"` + `strategy="verify"`；当主结果只有弱娱乐页时，runtime 会保持 Exa rescue 开启，而不是提前把弱页摘要写成最终答案
 - `official / 官方 / 官网`、`docs / pricing / changelog` 一类查询会进入更严格的官方结果模式；宁可明确说明“官方结果不足”，也不默认拿第三方结果补齐
 - `web` 和 `news` 会分开排序：`news` 更重时效与媒体质量，`web` 更重官方性与页面相关性
 - 同时要网页和社交：结果可能是 `hybrid`，但调用时不要传 `mode="hybrid"`；应使用 `sources=["web","x"]` 或拆成 `social + news`

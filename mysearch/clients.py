@@ -4317,7 +4317,7 @@ class MySearchClient:
         query: str,
         item: dict[str, Any],
         include_domains: list[str] | None,
-    ) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int]:
+    ) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int]:
         hostname = self._result_hostname(item)
         registered_domain = self._registered_domain(hostname)
         path = urlparse(item.get("url", "")).path.lower()
@@ -4329,6 +4329,7 @@ class MySearchClient:
         gossip_query = self._looks_like_gossip_query(query_lower)
         status_query = self._looks_like_status_query(query_lower)
         award_query = self._looks_like_award_result_query(query_lower)
+        result_event_query = self._looks_like_result_event_query(query_lower)
         precision_tokens = self._query_precision_tokens(query)
         path_precision_hits, total_precision_hits = self._query_precision_hit_counts(
             hostname=hostname,
@@ -4408,6 +4409,11 @@ class MySearchClient:
             )
             or (status_query and self._looks_like_brand_status_domain(hostname))
         )
+        result_event_priority = (
+            self._result_event_page_priority(query=query, item=item)
+            if result_event_query
+            else 0
+        )
         non_community_official = int(
             not (
                 status_query
@@ -4455,6 +4461,7 @@ class MySearchClient:
         content_score, snippet_score, title_score = self._result_quality_score(item)
         return (
             include_match,
+            result_event_priority,
             award_winner_page_match,
             award_category_match,
             non_award_prediction_page,

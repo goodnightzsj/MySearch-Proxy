@@ -1864,6 +1864,73 @@ class ResultEventRescueTests(unittest.TestCase):
             )
         )
 
+
+class ResultEventNewsRankingTests(unittest.TestCase):
+    def test_news_result_rank_prefers_winners_page_for_award_query(self) -> None:
+        client = _make_client()
+        weak_item = {
+            "url": "https://variety.com/2026/film/news/sxsw-2026-film-amp-tv-festival-award-winners-1236693418/",
+            "title": "SXSW 2026 Film & TV Festival award winners",
+            "snippet": "Festival award winners were announced at SXSW 2026.",
+            "content": "Festival awards were announced at SXSW 2026.",
+        }
+        strong_item = {
+            "url": "https://www.npr.org/2026/03/15/nx-s1-5739287/oscars-2026-winners-list-best-picture-actor-actress",
+            "title": "Oscars 2026 winners list: Best picture, actor, actress",
+            "snippet": "One Battle After Another wins best picture at the 2026 Oscars.",
+            "content": "Best Picture: One Battle After Another.",
+        }
+
+        weak_rank = client._news_result_rank(
+            query="2026 Oscars best picture winner",
+            item=weak_item,
+            include_domains=None,
+        )
+        strong_rank = client._news_result_rank(
+            query="2026 Oscars best picture winner",
+            item=strong_item,
+            include_domains=None,
+        )
+
+        self.assertGreater(strong_rank, weak_rank)
+
+    def test_finalize_search_result_reranks_award_results_by_winners_page_priority(self) -> None:
+        client = _make_client()
+        weak_item = {
+            "url": "https://variety.com/2026/film/news/sxsw-2026-film-amp-tv-festival-award-winners-1236693418/",
+            "title": "SXSW 2026 Film & TV Festival award winners",
+            "snippet": "Festival award winners were announced at SXSW 2026.",
+            "content": "Festival awards were announced at SXSW 2026.",
+        }
+        strong_item = {
+            "url": "https://www.npr.org/2026/03/15/nx-s1-5739287/oscars-2026-winners-list-best-picture-actor-actress",
+            "title": "Oscars 2026 winners list: Best picture, actor, actress",
+            "snippet": "One Battle After Another wins best picture at the 2026 Oscars.",
+            "content": "Best Picture: One Battle After Another.",
+        }
+        result = {
+            "provider": "tavily",
+            "results": [weak_item, strong_item],
+            "citations": [
+                {"url": weak_item["url"], "title": weak_item["title"]},
+                {"url": strong_item["url"], "title": strong_item["title"]},
+            ],
+            "answer": "",
+            "evidence": {},
+        }
+
+        finalized = client._finalize_search_result(
+            result,
+            query="2026 Oscars best picture winner",
+            mode="news",
+            intent="news",
+            include_domains=None,
+            result_profile="news",
+            max_results=5,
+        )
+
+        self.assertEqual(finalized["results"][0]["url"], strong_item["url"])
+
     def test_should_attempt_exa_rescue_allows_when_award_result_pages_are_weak(self) -> None:
         client = _make_client(tavily_keys=["tv"], exa_keys=["exa"])
         decision = RouteDecision(provider="tavily", reason="test", allow_exa_rescue=True)
