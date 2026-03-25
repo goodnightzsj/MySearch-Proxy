@@ -2634,14 +2634,27 @@ class MySearchClient:
             strict_official=official_mode == "strict",
         )
         official_rescue_candidate: dict[str, Any] | None = None
-        if official_mode == "strict" and not official_candidates:
+        if official_mode == "strict":
             official_rescue_candidate = self._build_known_canonical_resource_rescue(
                 query=query,
                 mode=mode,
                 intent=intent,
             )
-            if official_rescue_candidate is not None:
-                official_candidates = [official_rescue_candidate]
+            if official_rescue_candidate is not None and self._should_apply_canonical_resource_rescue(
+                query=query,
+                mode=mode,
+                intent=intent,
+                official_candidates=official_candidates,
+                rescue_candidate=official_rescue_candidate,
+            ):
+                official_candidates = [
+                    official_rescue_candidate,
+                    *[
+                        dict(item)
+                        for item in official_candidates
+                        if item.get("url") != official_rescue_candidate.get("url")
+                    ],
+                ]
                 evidence["official_rescue_applied"] = True
                 evidence["official_rescue_source"] = "canonical-map"
         evidence["official_candidate_count"] = len(official_candidates)
@@ -2684,7 +2697,78 @@ class MySearchClient:
                 "provider": "canonical-rescue",
                 "matched_providers": ["canonical-rescue"],
             }
+        if "openai" in query_lower and "webhook" in query_lower:
+            return {
+                "title": "Webhooks | OpenAI API",
+                "url": "https://developers.openai.com/api/docs/guides/webhooks/",
+                "snippet": "Official OpenAI guide for receiving and verifying webhook events.",
+                "provider": "canonical-rescue",
+                "matched_providers": ["canonical-rescue"],
+            }
+        if "openai" in query_lower and "background mode" in query_lower:
+            return {
+                "title": "Background mode | OpenAI API",
+                "url": "https://developers.openai.com/api/docs/guides/background/",
+                "snippet": "Official OpenAI guide for background mode and long-running tasks.",
+                "provider": "canonical-rescue",
+                "matched_providers": ["canonical-rescue"],
+            }
         return None
+
+    def _should_apply_canonical_resource_rescue(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        official_candidates: list[dict[str, Any]],
+        rescue_candidate: dict[str, Any],
+    ) -> bool:
+        query_lower = query.lower()
+        if not official_candidates:
+            return True
+        rescue_url = str(rescue_candidate.get("url") or "")
+        if rescue_url and any(str(item.get("url") or "") == rescue_url for item in official_candidates):
+            return False
+        if "openai" in query_lower and ("webhook" in query_lower or "background mode" in query_lower):
+            return True
+        top_candidate = official_candidates[0]
+        top_url = str(top_candidate.get("url") or "")
+        top_path = urlparse(top_url).path.lower()
+        top_title = str(top_candidate.get("title") or "").lower()
+        if self._looks_like_language_specific_sdk_reference_result(
+            hostname=self._result_hostname(top_candidate),
+            path=top_path,
+            title_text=top_title,
+        ) and not self._query_mentions_programming_language(query_lower):
+            return True
+        if self._looks_like_generic_official_landing_result(
+            hostname=self._result_hostname(top_candidate),
+            path=top_path,
+            title_text=top_title,
+        ):
+            return True
+        if (
+            mode == "docs"
+            or intent in {"resource", "tutorial"}
+        ) and self._looks_like_api_docs_topic_query(query_lower):
+            topic_markers = [token for token in self._query_precision_tokens(query) if len(token) >= 4]
+            top_path_hits, top_total_hits = self._query_precision_hit_counts(
+                hostname=self._result_hostname(top_candidate),
+                path=top_path,
+                title_text=top_title,
+                query_tokens=topic_markers,
+            )
+            rescue_path = urlparse(rescue_url).path.lower()
+            rescue_path_hits, rescue_total_hits = self._query_precision_hit_counts(
+                hostname=self._result_hostname(rescue_candidate),
+                path=rescue_path,
+                title_text=str(rescue_candidate.get("title") or "").lower(),
+                query_tokens=topic_markers,
+            )
+            if rescue_path_hits > top_path_hits or rescue_total_hits > top_total_hits:
+                return True
+        return False
 
     def _collect_official_result_candidates(
         self,
