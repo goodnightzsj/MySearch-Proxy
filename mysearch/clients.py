@@ -3383,6 +3383,8 @@ class MySearchClient:
         query_lower = query.lower()
 
         if mode == "news":
+            if self._looks_like_status_query(query_lower):
+                return "status"
             return "news"
         if self._looks_like_debugging_query(query_lower):
             return "tutorial"
@@ -9003,11 +9005,40 @@ class MySearchClient:
         entity = entity.strip(" \t\r\n-:;,.\"'“”‘’")
         if len(entity) < 2:
             return ""
+        if self._looks_like_publisher_fragment(entity):
+            return ""
         if reject_substrings:
             entity_lower = entity.lower()
             if any(token in entity_lower for token in reject_substrings):
                 return ""
         return entity
+
+    def _looks_like_publisher_fragment(self, entity: str) -> bool:
+        entity_lower = entity.lower().strip()
+        known_outlets = {
+            "npr",
+            "ap",
+            "reuters",
+            "billboard",
+            "variety",
+            "bbc",
+            "bbc news",
+            "abc news",
+            "cbs news",
+            "pbs",
+            "today",
+            "usa today",
+            "rolling stone",
+            "grammy.com",
+            "grammys.com",
+        }
+        if entity_lower in known_outlets:
+            return True
+        if ".com" in entity_lower:
+            return True
+        if re.fullmatch(r"[A-Z]{2,6}", entity):
+            return entity_lower in known_outlets
+        return False
 
     def _looks_like_query_year_mismatch(self, *, query: str, text: str) -> bool:
         query_years = {year for year in re.findall(r"\b20\d{2}\b", query)}
