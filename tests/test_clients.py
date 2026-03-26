@@ -6566,6 +6566,51 @@ class MySearchClientTests(unittest.TestCase):
         firecrawl_claims = [claim for claim in claim_texts if "Firecrawl" in claim]
         self.assertLessEqual(len(firecrawl_claims), 2)
 
+    def test_research_claim_evidence_prefers_supporting_docs_before_curated_comparisons(self) -> None:
+        client = MySearchClient()
+        query = "compare Tavily and Firecrawl for AI agent web retrieval 2026"
+
+        claims = client._build_research_claim_evidence(
+            query=query,
+            mode="research",
+            ordered_results=[
+                {
+                    "provider": "tavily",
+                    "title": "Firecrawl vs Tavily: Complete Comparison for AI Agents",
+                    "url": "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                    "snippet": "Firecrawl handles full web extraction while Tavily focuses on search APIs.",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Search API - Tavily",
+                    "url": "https://docs.tavily.com/documentation/api-reference/search",
+                    "snippet": "Tavily exposes a search API built for agent web retrieval.",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Firecrawl vs. Tavily for RAG and agent pipelines",
+                    "url": "https://blog.apify.com/firecrawl-vs-tavily-for-rag-and-agent-pipelines/",
+                    "snippet": "Third-party comparison of Firecrawl and Tavily.",
+                },
+            ],
+            pages=[],
+            citations=[],
+            comparison_like=True,
+            include_domains=None,
+            authoritative_preferred=False,
+        )
+
+        claim_texts = [str(item.get("claim") or "") for item in claims]
+        supporting_index = next(
+            index for index, claim in enumerate(claim_texts)
+            if "Tavily exposes a search API" in claim
+        )
+        curated_index = next(
+            index for index, claim in enumerate(claim_texts)
+            if "Firecrawl vs. Tavily for RAG and agent pipelines" in claim
+        )
+        self.assertLess(supporting_index, curated_index)
+
     def test_research_report_uses_supporting_wording_without_authoritative_sources(self) -> None:
         client = MySearchClient()
 
