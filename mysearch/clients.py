@@ -12356,7 +12356,13 @@ class MySearchClient:
                     break
         if (
             web_answer
-            and (comparison_like or authoritative_research)
+            and comparison_like
+            and (authoritative_source_count > 0 or supporting_source_count > 0)
+        ):
+            web_answer = ""
+        elif (
+            web_answer
+            and authoritative_research
             and (authoritative_source_count > 0 or supporting_source_count > 0)
             and anchor_tokens
             and not self._research_summary_mentions_anchor_tokens(web_answer, anchor_tokens)
