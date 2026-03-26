@@ -2206,6 +2206,7 @@ class MySearchClient:
                 query_tokens=query_tokens,
                 include_domains=include_domains,
             )
+            snippet_text = (normalized.get("snippet") or "").lower()
             brand_domain_match = (
                 bool(flags["include_match"])
                 or bool(flags["registered_domain_label_match"])
@@ -2227,12 +2228,21 @@ class MySearchClient:
                 or self._is_obvious_official_community_result(hostname=hostname, path=path)
             )
             supportive_candidate = bool(flags["non_third_party"]) and (
-                bool(flags["include_match"])
-                or bool(flags["registered_domain_label_match"])
-                or bool(flags["host_brand_match"])
-                or (
-                    bool(flags["docs_shape_match"])
-                    and bool(flags["title_brand_match"])
+                (
+                    bool(flags["include_match"])
+                    or bool(flags["registered_domain_label_match"])
+                    or bool(flags["host_brand_match"])
+                    or (
+                        bool(flags["docs_shape_match"])
+                        and bool(flags["title_brand_match"])
+                    )
+                )
+                or self._looks_like_supporting_research_target(
+                    url=normalized.get("url", ""),
+                    hostname=hostname,
+                    title_text=title_text,
+                    snippet_text=snippet_text,
+                    mode=effective_mode,
                 )
             )
             if community_candidate:
@@ -2656,6 +2666,100 @@ class MySearchClient:
         )
         return any(marker in path for marker in authoritative_path_markers) or any(
             marker in title_text for marker in authoritative_title_markers
+        )
+
+    def _looks_like_research_marketing_or_blog_result(
+        self,
+        *,
+        hostname: str,
+        path: str,
+        title_text: str,
+        snippet_text: str,
+    ) -> bool:
+        normalized_path = path.rstrip("/")
+        marketing_path_markers = (
+            "/article/",
+            "/articles/",
+            "/blog/",
+            "/blogs/",
+            "/insights/",
+            "/learn/",
+            "/news/",
+            "/post/",
+            "/posts/",
+            "/resources/",
+        )
+        if any(marker in normalized_path for marker in marketing_path_markers):
+            return True
+        title_tokens = f" {title_text} "
+        snippet_tokens = f" {snippet_text} "
+        marketing_title_markers = (
+            " alternatives ",
+            " best ",
+            " comparison ",
+            " complete guide ",
+            " landscape ",
+            " seo ",
+            " top ",
+            " vs ",
+        )
+        if any(marker in title_tokens for marker in marketing_title_markers):
+            return True
+        if hostname.startswith("www.") and any(
+            marker in snippet_tokens
+            for marker in (" ai search ", " ai seo ", " better pricing ", " complete guide ")
+        ):
+            return True
+        return False
+
+    def _looks_like_supporting_research_target(
+        self,
+        *,
+        url: str,
+        hostname: str,
+        title_text: str,
+        snippet_text: str,
+        mode: SearchMode,
+    ) -> bool:
+        path = urlparse(url).path.lower()
+        if self._looks_like_research_marketing_or_blog_result(
+            hostname=hostname,
+            path=path,
+            title_text=title_text,
+            snippet_text=snippet_text,
+        ):
+            return False
+        if mode == "pdf":
+            return self._looks_like_pdf_url(url) or (
+                hostname == "arxiv.org" and path.startswith("/abs/")
+            )
+        hostname_labels = [item for item in hostname.split(".") if item]
+        docs_host = any(
+            label in {"api", "developer", "developers", "docs", "help", "platform", "reference", "support"}
+            for label in hostname_labels
+        )
+        docs_path_markers = (
+            "/api",
+            "/documentation",
+            "/docs",
+            "/guide",
+            "/guides",
+            "/manual",
+            "/reference",
+            "/references",
+        )
+        docs_title_markers = (
+            "api reference",
+            "developer documentation",
+            "documentation",
+            "docs",
+            "manual",
+            "reference",
+        )
+        return (
+            docs_host
+            or any(marker in path for marker in docs_path_markers)
+            or any(marker in title_text for marker in docs_title_markers)
         )
 
     def _candidate_result_budget(
@@ -10049,6 +10153,18 @@ class MySearchClient:
                 citation_title_lines.append(line)
             if len(citation_title_lines) >= 4:
                 break
+        ordered_title_lines: list[str] = []
+        for item in ordered_results:
+            url = (item.get("url") or "").strip()
+            title = (item.get("title") or url_to_title.get(url) or "").strip()
+            if not title:
+                continue
+            domain = self._registered_domain(self._result_hostname(item))
+            line = f"{title} ({domain})" if domain and domain not in title.lower() else title
+            if line not in ordered_title_lines:
+                ordered_title_lines.append(line)
+            if len(ordered_title_lines) >= 4:
+                break
         query_lower = query.lower()
         comparison_like = (
             web_search.get("intent") in {"comparison", "exploratory"}
@@ -10056,25 +10172,35 @@ class MySearchClient:
             or self._looks_like_exploratory_query(query_lower)
             or any(token in query_lower for token in ("best ", "top ", "compare ", "comparison "))
         )
-        authoritative_source_count = int(evidence.get("authoritative_source_count") or 0)
-        supporting_source_count = int(evidence.get("supporting_source_count") or 0)
-        community_source_count = int(evidence.get("community_source_count") or 0)
+        selected_cluster_counts = {
+            str(key): int(value or 0)
+            for key, value in dict(evidence.get("selected_candidate_cluster_counts") or {}).items()
+        }
+        if selected_cluster_counts:
+            authoritative_source_count = int(selected_cluster_counts.get("official") or 0)
+            supporting_source_count = int(selected_cluster_counts.get("supporting") or 0)
+            community_source_count = int(selected_cluster_counts.get("community") or 0)
+        else:
+            authoritative_source_count = int(evidence.get("authoritative_source_count") or 0)
+            supporting_source_count = int(evidence.get("supporting_source_count") or 0)
+            community_source_count = int(evidence.get("community_source_count") or 0)
+        preferred_title_lines = ordered_title_lines or citation_title_lines
         primary_finding = executive_summary_override or web_answer or social_answer
         if not primary_finding and comparison_like:
-            if authoritative_source_count > 0 and citation_title_lines:
+            if authoritative_source_count > 0 and preferred_title_lines:
                 primary_finding = (
                     "Authoritative sources and corroborating analysis were found; "
-                    f"the strongest anchors include {', '.join(citation_title_lines[:3])}."
+                    f"the strongest anchors include {', '.join(preferred_title_lines[:3])}."
                 )
-            elif supporting_source_count > 0 and citation_title_lines:
+            elif supporting_source_count > 0 and preferred_title_lines:
                 primary_finding = (
                     "Supporting sources and corroborating analysis were found; "
-                    f"the strongest anchors include {', '.join(citation_title_lines[:3])}."
+                    f"the strongest anchors include {', '.join(preferred_title_lines[:3])}."
                 )
-            elif citation_title_lines:
+            elif preferred_title_lines:
                 primary_finding = (
                     "The strongest available evidence is comparative rather than authoritative; "
-                    f"recurring source clusters include {', '.join(citation_title_lines[:3])}."
+                    f"recurring source clusters include {', '.join(preferred_title_lines[:3])}."
                 )
             else:
                 primary_finding = (
@@ -10087,13 +10213,13 @@ class MySearchClient:
         if not primary_finding:
             return {}
 
-        supporting = citation_title_lines[:] if comparison_like and citation_title_lines else highlights[:]
+        supporting = preferred_title_lines[:] if comparison_like and preferred_title_lines else highlights[:]
         if supporting and supporting[0] == primary_finding:
             supporting = supporting[1:]
 
         key_findings: list[str] = []
-        if comparison_like and citation_title_lines:
-            key_findings.extend(citation_title_lines[:3])
+        if comparison_like and preferred_title_lines:
+            key_findings.extend(preferred_title_lines[:3])
         else:
             for item in highlights[:3]:
                 if item not in key_findings:
@@ -10179,7 +10305,7 @@ class MySearchClient:
             for item in (evidence.get("conflicts") or [])
             if item and item != "social-search-unavailable"
         ]
-        top_sources = citation_title_lines[:4]
+        top_sources = (ordered_title_lines or citation_title_lines)[:4]
 
         comparison_lens: list[str] = []
         if comparison_like:
@@ -10795,7 +10921,7 @@ class MySearchClient:
             claims_by_key = fallback_claims_by_key
             claim_order = fallback_claim_order
         claims: list[dict[str, Any]] = []
-        for key in claim_order[:4]:
+        for order_index, key in enumerate(claim_order):
             entry = claims_by_key[key]
             entry["source_count"] = len(entry["sources"])
             entry["provider_count"] = len(entry["providers"])
@@ -10805,7 +10931,36 @@ class MySearchClient:
                 provider_count=int(entry["provider_count"] or 0),
                 cluster_count=int(entry["cluster_count"] or 0),
             )
+            entry["_order_index"] = order_index
             claims.append(entry)
+        if authoritative_preferred and not any(
+            any(cluster in {"official", "supporting"} for cluster in (entry.get("clusters") or []))
+            for entry in claims
+        ):
+            fallback_entry = self._research_authoritative_claim_fallback(
+                query=query,
+                mode=mode,
+                ordered_results=ordered_results,
+                include_domains=include_domains,
+                authoritative_preferred=authoritative_preferred,
+            )
+            if fallback_entry:
+                claims.append(fallback_entry)
+        claims.sort(
+            key=lambda entry: (
+                -self._research_claim_best_cluster_rank(
+                    clusters=[str(item) for item in (entry.get("clusters") or []) if item],
+                    authoritative_preferred=authoritative_preferred,
+                ),
+                -self._research_claim_support_rank(str(entry.get("support_level") or "")),
+                -int(entry.get("source_count") or 0),
+                -int(entry.get("provider_count") or 0),
+                int(entry.get("_order_index") or 0),
+            )
+        )
+        for entry in claims:
+            entry.pop("_order_index", None)
+        claims = claims[:4]
         return claims
 
     def _research_claim_text(
@@ -11082,6 +11237,96 @@ class MySearchClient:
         if detail_bits:
             return f"supported by {', '.join(detail_bits)}"
         return ""
+
+    def _research_claim_support_rank(self, support_level: str) -> int:
+        return {
+            "cross-provider": 4,
+            "multi-source": 3,
+            "corroborated": 2,
+            "single-source": 1,
+        }.get(support_level, 0)
+
+    def _research_claim_best_cluster_rank(
+        self,
+        *,
+        clusters: list[str],
+        authoritative_preferred: bool,
+    ) -> int:
+        if not clusters:
+            return 0
+        if authoritative_preferred:
+            weights = {
+                "official": 5,
+                "supporting": 4,
+                "general": 3,
+                "project": 3,
+                "curated": 2,
+                "directory": 1,
+                "listicle": 1,
+                "community": 0,
+            }
+        else:
+            weights = {
+                "project": 5,
+                "curated": 4,
+                "general": 3,
+                "supporting": 3,
+                "official": 3,
+                "listicle": 2,
+                "directory": 1,
+                "community": 0,
+            }
+        return max(weights.get(cluster, 0) for cluster in clusters)
+
+    def _research_authoritative_claim_fallback(
+        self,
+        *,
+        query: str,
+        mode: str,
+        ordered_results: list[dict[str, Any]],
+        include_domains: list[str] | None,
+        authoritative_preferred: bool,
+    ) -> dict[str, Any]:
+        resolved_mode = cast(SearchMode, mode if mode in SEARCH_MODES else "web")
+        for item in ordered_results:
+            cluster_label = self._research_result_cluster_label(
+                query=query,
+                mode=resolved_mode,
+                item=item,
+                include_domains=include_domains,
+                authoritative_preferred=authoritative_preferred,
+            )
+            if cluster_label not in {"official", "supporting"}:
+                continue
+            title = (item.get("title") or "").strip()
+            claim = self._normalize_research_claim_text(title, comparison_like=True)
+            if not claim:
+                continue
+            source_label = title or (
+                self._registered_domain(self._result_hostname(item)) or (item.get("url") or "")
+            )
+            return {
+                "claim": claim,
+                "sources": [source_label] if source_label else [],
+                "providers": [
+                    provider
+                    for provider in (item.get("matched_providers") or [item.get("provider", "")])
+                    if provider
+                ],
+                "clusters": [cluster_label],
+                "source_count": 1 if source_label else 0,
+                "provider_count": len(
+                    [
+                        provider
+                        for provider in (item.get("matched_providers") or [item.get("provider", "")])
+                        if provider
+                    ]
+                ),
+                "cluster_count": 1,
+                "support_level": "single-source",
+                "_order_index": -1,
+            }
+        return {}
 
     def _research_excerpt_has_substantive_claim(self, text: str) -> bool:
         normalized = " " + re.sub(r"\s+", " ", text.lower()).strip() + " "

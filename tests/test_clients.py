@@ -5619,6 +5619,90 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(evidence["supporting_source_count"], 2)
         self.assertEqual(evidence["selected_candidate_cluster_counts"], {"supporting": 2})
 
+    def test_research_result_cluster_label_downgrades_marketing_blog_for_authoritative_queries(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        label = client._research_result_cluster_label(
+            query="best approach for official docs retrieval in agentic search 2026",
+            mode="docs",
+            item={
+                "title": "AI & SEO: How to Optimize for AI Search and Agents in 2026",
+                "url": "https://www.vezadigital.com/post/ai-seo-how-to-optimize-for-ai-search-agents",
+                "snippet": "Learn how AI is reshaping SEO in 2026 and how to optimize for AI search and agents.",
+            },
+            include_domains=None,
+            authoritative_preferred=True,
+        )
+
+        self.assertEqual(label, "general")
+
+    def test_research_result_cluster_label_keeps_product_docs_as_supporting_for_authoritative_queries(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        label = client._research_result_cluster_label(
+            query="best approach for official docs retrieval in agentic search 2026",
+            mode="docs",
+            item={
+                "title": "Agentic retrieval in Azure AI Search",
+                "url": "https://docs.azure.cn/en-us/search/agentic-retrieval-overview",
+                "snippet": "Access to this page requires authorization.",
+            },
+            include_domains=None,
+            authoritative_preferred=True,
+        )
+
+        self.assertEqual(label, "supporting")
+
+    def test_research_selection_prefers_supporting_docs_over_marketing_blogs(
+        self,
+    ) -> None:
+        client = MySearchClient()
+        query = "best approach for official docs retrieval in agentic search 2026"
+
+        selected, evidence = client._select_research_candidate_results(
+            query=query,
+            mode="docs",
+            intent="comparison",
+            max_results=3,
+            web_results=[],
+            docs_rescue_results=[
+                {
+                    "provider": "tavily",
+                    "title": "AI & SEO: How to Optimize for AI Search and Agents in 2026",
+                    "url": "https://www.vezadigital.com/post/ai-seo-how-to-optimize-for-ai-search-agents",
+                    "snippet": "Learn how AI is reshaping SEO in 2026 and how to optimize for AI search and agents.",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Agentic retrieval in Azure AI Search",
+                    "url": "https://docs.azure.cn/en-us/search/agentic-retrieval-overview",
+                    "snippet": "Access to this page requires authorization.",
+                },
+            ],
+            tavily_support_results=[],
+            exa_results=[],
+            include_domains=None,
+            authoritative_preferred=True,
+        )
+
+        self.assertEqual(
+            [item["url"] for item in selected[:2]],
+            [
+                "https://docs.azure.cn/en-us/search/agentic-retrieval-overview",
+                "https://www.vezadigital.com/post/ai-seo-how-to-optimize-for-ai-search-agents",
+            ],
+        )
+        self.assertEqual(evidence["authoritative_source_count"], 0)
+        self.assertEqual(evidence["supporting_source_count"], 1)
+        self.assertEqual(
+            evidence["selected_candidate_cluster_counts"],
+            {"supporting": 1, "general": 1},
+        )
+
     def test_research_claim_evidence_skips_schema_noise_from_method_pages(self) -> None:
         client = MySearchClient()
         query = "compare OpenAI Responses API and Batch API for long-running tasks 2026"
@@ -5738,6 +5822,38 @@ class MySearchClientTests(unittest.TestCase):
         self.assertNotIn("March 14th", claim)
         self.assertNotIn("![]", claim)
 
+    def test_research_claim_evidence_promotes_supporting_claim_fallback(self) -> None:
+        client = MySearchClient()
+        query = "best approach for official docs retrieval in agentic search 2026"
+
+        claims = client._build_research_claim_evidence(
+            query=query,
+            mode="docs",
+            ordered_results=[
+                {
+                    "provider": "tavily",
+                    "title": "Firecrawl vs Tavily comparison",
+                    "url": "https://example.com/comparison",
+                    "snippet": "Firecrawl handles extraction while Tavily focuses on search.",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Agentic retrieval in Azure AI Search",
+                    "url": "https://docs.azure.cn/en-us/search/agentic-retrieval-overview",
+                    "snippet": "Access to this page requires authorization.",
+                },
+            ],
+            pages=[],
+            citations=[],
+            comparison_like=True,
+            include_domains=None,
+            authoritative_preferred=True,
+        )
+
+        self.assertTrue(claims)
+        self.assertEqual(claims[0]["claim"], "Agentic retrieval in Azure AI Search")
+        self.assertIn("supporting", claims[0]["clusters"])
+
     def test_research_report_uses_supporting_wording_without_authoritative_sources(self) -> None:
         client = MySearchClient()
 
@@ -5791,8 +5907,67 @@ class MySearchClientTests(unittest.TestCase):
             "Supporting sources and corroborating analysis were found",
             sections["executive_summary"],
         )
+
+    def test_research_report_comparison_prefers_selected_candidates_over_extra_citations(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        sections = client._build_research_report_sections(
+            query="best approach for official docs retrieval in agentic search 2026",
+            web_search={"intent": "comparison", "provider": "hybrid", "answer": ""},
+            ordered_results=[
+                {
+                    "provider": "tavily",
+                    "matched_providers": ["tavily", "exa"],
+                    "title": "Agentic retrieval in Azure AI Search",
+                    "url": "https://docs.azure.cn/en-us/search/agentic-retrieval-overview",
+                    "snippet": "Access to this page requires authorization.",
+                }
+            ],
+            pages=[],
+            citations=[
+                {
+                    "title": "Agentic retrieval in Azure AI Search",
+                    "url": "https://docs.azure.cn/en-us/search/agentic-retrieval-overview",
+                },
+                {
+                    "title": "AI & SEO Guide (2026) Optimize for AI Search & Agents - Veza Digital",
+                    "url": "https://www.vezadigital.com/post/ai-seo-how-to-optimize-for-ai-search-agents",
+                },
+                {
+                    "title": "The Agentic Browser Landscape in 2026: A Complete Guide",
+                    "url": "https://www.nohackspod.com/the-agentic-browser-landscape-in-2026",
+                },
+            ],
+            social=None,
+            evidence={
+                "providers_consulted": ["tavily", "exa"],
+                "research_plan": {"web_mode": "docs", "scrape_top_n": 2},
+                "confidence": "medium",
+                "citation_count": 3,
+                "source_diversity": 3,
+                "authoritative_source_count": 1,
+                "supporting_source_count": 1,
+                "community_source_count": 0,
+                "page_count": 0,
+                "selected_candidate_domains": ["azure.cn"],
+                "selected_candidate_cluster_counts": {"supporting": 1},
+                "authoritative_research": True,
+            },
+            executive_summary_override="",
+        )
+
+        self.assertIn(
+            "Supporting sources and corroborating analysis were found; the strongest anchors include Agentic retrieval in Azure AI Search (azure.cn).",
+            sections["executive_summary"],
+        )
+        self.assertEqual(
+            sections["top_sources"],
+            ["Agentic retrieval in Azure AI Search (azure.cn)"],
+        )
         self.assertNotIn("Authoritative sources", sections["executive_summary"])
-        self.assertIn("supporting=2", sections["source_mix"])
+        self.assertIn("supporting=1", sections["source_mix"])
 
     def test_research_claim_text_prefers_substantive_excerpt_for_comparison_pages(self) -> None:
         client = MySearchClient()
