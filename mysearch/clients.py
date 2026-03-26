@@ -7004,6 +7004,7 @@ class MySearchClient:
         fallback_results = self._diversify_social_results(
             fallback_results,
             max_results=max_results,
+            max_per_identity=1,
         )
         if not fallback_results:
             raise MySearchError(fallback_reason)
