@@ -1320,6 +1320,20 @@ class MySearchClient:
         if "low-source-diversity" in conflicts and resolved_strategy in {"fast", "balanced"}:
             evidence["retry_hint"] = "consider strategy=verify for broader source diversity"
             result["evidence"] = evidence
+        if (
+            self._looks_like_award_result_query(query.lower())
+            and (mode == "news" or resolved_intent in {"news", "status"})
+            and result.get("results")
+        ):
+            filtered_results = self._filter_strong_award_results(
+                query=query,
+                results=list(result.get("results") or []),
+            )
+            result["results"] = filtered_results[:max_results]
+            result["citations"] = self._align_citations_with_results(
+                results=list(result.get("results") or []),
+                citations=list(result.get("citations") or []),
+            )
         result["summary"] = self._build_search_summary_fallback(
             query=query,
             mode=mode,
@@ -5151,6 +5165,12 @@ class MySearchClient:
                 healthy.append(provider_name)
             else:
                 degraded.append(provider_name)
+        if self._should_keep_tavily_primary_when_degraded(policy=policy):
+            selected = "tavily"
+            remaining = [
+                item for item in [*healthy, *degraded] if item != selected
+            ]
+            return selected, remaining or None
         if healthy:
             selected = healthy[0]
             remaining = [
@@ -5162,6 +5182,18 @@ class MySearchClient:
         if not healthy and not degraded:
             return policy.provider, list(policy.fallback_chain) or None
         return policy.provider, list(policy.fallback_chain) or None
+
+    def _should_keep_tavily_primary_when_degraded(
+        self,
+        *,
+        policy: SearchRoutePolicy,
+    ) -> bool:
+        if policy.provider != "tavily":
+            return False
+        if policy.key not in {"news", "award_result", "status"}:
+            return False
+        tavily_status = self._provider_live_status(self.config.tavily)
+        return tavily_status not in {None, "auth_error", "ok"}
 
     def _provider_config_for_name(self, provider_name: ProviderName) -> ProviderConfig:
         if provider_name == "tavily":
@@ -5442,8 +5474,10 @@ class MySearchClient:
             and (mode == "news" or intent in {"news", "status"})
         ):
             return result
-        if self._has_strong_award_result(query=query, results=list(result.get("results") or [])):
-            return result
+        initial_strong_result = self._has_strong_award_result(
+            query=query,
+            results=list(result.get("results") or []),
+        )
         refined_query = self._refined_award_result_query(query)
         days = self._infer_tavily_days(intent=intent, from_date=from_date)
         search_query = refined_query or query
@@ -5453,7 +5487,7 @@ class MySearchClient:
             (self._result_event_page_priority(query=query, item=item) for item in list(result.get("results") or [])),
             default=-1,
         )
-        if refined_query and refined_query != query:
+        if not initial_strong_result and refined_query and refined_query != query:
             refined = self._search_tavily(
                 query=refined_query,
                 max_results=max_results,
@@ -5474,7 +5508,8 @@ class MySearchClient:
                 refinement_tags.append("award-result-tavily-refinement")
         merged_results = list(merged.get("results") or [])
         if not self._has_strong_award_result(query=query, results=merged_results):
-            for trusted_domains in self._award_result_trusted_domain_groups(query):
+            trusted_domain_groups = self._award_result_trusted_domain_groups(query)
+            for group_index, trusted_domains in enumerate(trusted_domain_groups):
                 focused = self._search_tavily(
                     query=search_query,
                     max_results=max_results,
@@ -5496,9 +5531,18 @@ class MySearchClient:
                 merged_results = list(merged.get("results") or [])
                 refinement_tags.append("award-result-trusted-domain-refinement")
                 if self._has_strong_award_result(query=query, results=merged_results):
+                    if (
+                        group_index == 0
+                        and len(trusted_domain_groups) > 1
+                    ):
+                        continue
                     break
         merged_results = list(merged.get("results") or [])
         if merged_results:
+            merged_results = self._filter_strong_award_results(
+                query=query,
+                results=merged_results,
+            )
             merged_results = sorted(
                 merged_results,
                 key=lambda item: self._news_result_rank(
@@ -5660,6 +5704,12 @@ class MySearchClient:
             "theacademy.com",
             "washingtonpost.com",
         }
+        official_award_domains = {
+            "grammy.com",
+            "grammys.com",
+            "oscars.org",
+            "theacademy.com",
+        }
         for item in results[:5]:
             hostname = self._result_hostname(item)
             registered_domain = self._registered_domain(hostname)
@@ -5667,15 +5717,34 @@ class MySearchClient:
             title_text = (item.get("title") or "").lower()
             snippet_text = (item.get("snippet") or "").lower()
             content_text = (item.get("content") or "").lower()
+            winner_page = self._looks_like_award_winner_result(
+                title_text=title_text,
+                snippet_text=snippet_text,
+                path=path,
+            )
             if self._looks_like_award_prediction_result(
                 title_text=title_text,
                 snippet_text=snippet_text,
                 path=path,
             ):
                 continue
+            if (
+                not winner_page
+                and self._looks_like_award_recap_or_gallery_result(
+                    title_text=title_text,
+                    snippet_text=snippet_text,
+                    path=path,
+                )
+            ):
+                continue
             if self._looks_like_query_year_mismatch(
                 query=query_lower,
                 text=f"{title_text} {snippet_text} {content_text} {path}",
+            ):
+                continue
+            if self._looks_like_generic_award_archive_result(
+                title_text=title_text,
+                path=path,
             ):
                 continue
             if registered_domain in {"facebook.com", "instagram.com", "tiktok.com", "youtube.com"}:
@@ -5694,9 +5763,9 @@ class MySearchClient:
                 content_text=content_text,
                 path=path,
             )
-            winner_page = self._looks_like_award_winner_result(
+            award_coverage_page = self._looks_like_award_coverage_page(
+                query_lower=query_lower,
                 title_text=title_text,
-                snippet_text=snippet_text,
                 path=path,
             )
             prioritized_winner_page = winner_page and (
@@ -5705,10 +5774,29 @@ class MySearchClient:
             )
             trusted_full_results_page = (
                 category_match
+                and award_coverage_page
                 and registered_domain in trusted_result_domains
                 and self._result_event_page_priority(query=query, item=item) >= 8
             )
-            if prioritized_winner_page or fact_match or trusted_full_results_page:
+            official_award_page = (
+                registered_domain in official_award_domains
+                and not self._looks_like_award_nomination_result(
+                    title_text=title_text,
+                    snippet_text=snippet_text,
+                    path=path,
+                )
+                and not self._looks_like_query_year_mismatch(
+                    query=query_lower,
+                    text=f"{title_text} {snippet_text} {content_text} {path}",
+                )
+                and self._result_event_page_priority(query=query, item=item) >= 8
+            )
+            if (
+                prioritized_winner_page
+                or (fact_match and award_coverage_page)
+                or trusted_full_results_page
+                or official_award_page
+            ):
                 return True
         return False
 
@@ -5731,6 +5819,103 @@ class MySearchClient:
             if self._result_event_page_priority(query=query, item=item) >= 8:
                 return True
         return False
+
+    def _filter_strong_award_results(
+        self,
+        *,
+        query: str,
+        results: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not results or not self._has_strong_award_result(query=query, results=results):
+            return results
+        query_lower = query.lower()
+        trusted_result_domains = {
+            "abcnews.com",
+            "apnews.com",
+            "bbc.com",
+            "cnn.com",
+            "grammy.com",
+            "grammys.com",
+            "latimes.com",
+            "npr.org",
+            "nytimes.com",
+            "oscars.org",
+            "pbs.org",
+            "reuters.com",
+            "theacademy.com",
+            "washingtonpost.com",
+        }
+        filtered_results: list[dict[str, Any]] = []
+        for item in results:
+            url = str(item.get("url") or "")
+            registered_domain = self._registered_domain(self._result_hostname(item))
+            path = urlparse(url).path.lower()
+            title_text = str(item.get("title") or "").lower()
+            snippet_text = str(item.get("snippet") or "").lower()
+            content_text = str(item.get("content") or "").lower()
+            if self._looks_like_query_year_mismatch(
+                query=query_lower,
+                text=f"{title_text} {snippet_text} {content_text} {path}",
+            ):
+                continue
+            if self._looks_like_generic_award_archive_result(
+                title_text=title_text,
+                path=path,
+            ):
+                continue
+            winner_page = self._looks_like_award_winner_result(
+                title_text=title_text,
+                snippet_text=snippet_text,
+                path=path,
+            )
+            if (
+                not winner_page
+                and self._looks_like_award_recap_or_gallery_result(
+                    title_text=title_text,
+                    snippet_text=snippet_text,
+                    path=path,
+                )
+            ):
+                continue
+            category_match = self._looks_like_award_category_match(
+                query_lower=query_lower,
+                title_text=title_text,
+                snippet_text=snippet_text,
+                content_text=content_text,
+                path=path,
+            )
+            fact_match = self._looks_like_award_fact_match(
+                query_lower=query_lower,
+                title_text=title_text,
+                snippet_text=snippet_text,
+                content_text=content_text,
+                path=path,
+            )
+            award_coverage_page = self._looks_like_award_coverage_page(
+                query_lower=query_lower,
+                title_text=title_text,
+                path=path,
+            )
+            official_award_page = registered_domain in {
+                "grammy.com",
+                "grammys.com",
+                "oscars.org",
+                "theacademy.com",
+            }
+            trusted_media_page = (
+                registered_domain in trusted_result_domains
+                and award_coverage_page
+                and category_match
+            )
+            if not (
+                official_award_page
+                or winner_page
+                or (fact_match and award_coverage_page)
+                or trusted_media_page
+            ):
+                continue
+            filtered_results.append(item)
+        return filtered_results or results
 
     def _has_strong_pdf_match(
         self,
@@ -6520,6 +6705,44 @@ class MySearchClient:
         category_markers = self._award_query_category_markers(query_lower)
         return bool(category_markers) and any(marker in text for marker in category_markers)
 
+    def _looks_like_award_coverage_page(
+        self,
+        *,
+        query_lower: str,
+        title_text: str,
+        path: str,
+    ) -> bool:
+        title_path = f"{title_text} {path}"
+        brand_markers = self._award_query_brand_markers(query_lower)
+        if brand_markers and any(marker in title_path for marker in brand_markers):
+            return True
+        winner_markers = [
+            "complete winners",
+            "full list",
+            "full results",
+            "winner list",
+            "winners list",
+        ]
+        if any(marker in title_path for marker in winner_markers):
+            return True
+        category_markers = self._award_query_category_markers(query_lower)
+        return bool(category_markers) and any(marker in title_path for marker in category_markers)
+
+    def _looks_like_generic_award_archive_result(
+        self,
+        *,
+        title_text: str,
+        path: str,
+    ) -> bool:
+        text = f"{title_text} {path}"
+        archive_markers = [
+            "academy awards search",
+            "awards database",
+            "awards search",
+            "/awardsdatabase",
+        ]
+        return any(marker in text for marker in archive_markers)
+
     def _looks_like_award_fact_match(
         self,
         *,
@@ -6595,6 +6818,29 @@ class MySearchClient:
             "way too early",
         ]
         return any(marker in text for marker in prediction_markers)
+
+    def _looks_like_award_recap_or_gallery_result(
+        self,
+        *,
+        title_text: str,
+        snippet_text: str,
+        path: str,
+    ) -> bool:
+        text = f"{title_text} {snippet_text} {path}"
+        weak_page_markers = [
+            "gallery",
+            "live blog",
+            "live updates",
+            "live-news",
+            "live news",
+            "liveblog",
+            "photos",
+            "recap",
+            "red carpet",
+            "week in",
+            "winning streak",
+        ]
+        return any(marker in text for marker in weak_page_markers)
 
     def _looks_like_news_article_result(self, item: dict[str, Any]) -> bool:
         path = urlparse(item.get("url", "")).path.lower()
@@ -10583,6 +10829,17 @@ class MySearchClient:
             markers.extend(["record of the year", "最佳歌曲"])
         return markers
 
+    def _award_query_brand_markers(self, query_lower: str) -> list[str]:
+        if "grammy" in query_lower:
+            return ["grammy", "grammys", "grammy awards"]
+        if "oscar" in query_lower or "academy awards" in query_lower:
+            return ["oscar", "oscars", "academy awards", "academy award"]
+        if "golden globe" in query_lower:
+            return ["golden globe", "golden globes"]
+        if "bafta" in query_lower:
+            return ["bafta"]
+        return []
+
     def _looks_like_box_office_query(self, query_lower: str) -> bool:
         keywords = [
             "box office",
@@ -10974,9 +11231,27 @@ class MySearchClient:
         score = 0
         if hostname in {"nytimes.com", "npr.org", "pbs.org", "latimes.com", "washingtonpost.com", "apnews.com"}:
             score += 4
+        if (
+            hostname in {"grammy.com", "grammys.com", "oscars.org", "theacademy.com"}
+            and not self._looks_like_award_nomination_result(
+                title_text=title_text,
+                snippet_text=snippet_text,
+                path=urlparse(url).path.lower(),
+            )
+            and not self._looks_like_query_year_mismatch(
+                query=query_lower,
+                text=f"{title_text} {snippet_text} {content_text} {url}",
+            )
+        ):
+            score += 6
         if any(token in title_text or token in snippet_text for token in ("winner", "winners", "full results", "full list")):
             score += 3
         if self._looks_like_award_result_query(query_lower):
+            award_coverage_page = self._looks_like_award_coverage_page(
+                query_lower=query_lower,
+                title_text=title_text,
+                path=urlparse(url).path.lower(),
+            )
             if any(
                 token in title_text or token in snippet_text or token in content_text
                 for token in self._award_query_category_markers(query_lower)
@@ -10989,17 +11264,47 @@ class MySearchClient:
                 for token in ("oscar", "oscars", "academy awards")
             ):
                 score += 2
+            if award_coverage_page:
+                score += 2
+            elif not self._looks_like_award_winner_result(
+                title_text=title_text,
+                snippet_text=snippet_text,
+                path=urlparse(url).path.lower(),
+            ):
+                score -= 4
         if self._looks_like_box_office_query(query_lower):
             if any(token in title_text or token in snippet_text for token in ("box office", "opening weekend", "highest-grossing", "biggest opening")):
                 score += 4
         if self._looks_like_query_year_mismatch(query=query_lower, text=f"{title_text} {snippet_text} {content_text} {url}"):
             score -= 5
+        if (
+            self._looks_like_award_result_query(query_lower)
+            and self._looks_like_generic_award_archive_result(
+                title_text=title_text,
+                path=urlparse(url).path.lower(),
+            )
+        ):
+            score -= 6
         if self._looks_like_award_prediction_result(
             title_text=title_text,
             snippet_text=snippet_text,
             path=urlparse(url).path.lower(),
         ):
             score -= 4
+        if (
+            self._looks_like_award_result_query(query_lower)
+            and self._looks_like_award_recap_or_gallery_result(
+                title_text=title_text,
+                snippet_text=snippet_text,
+                path=urlparse(url).path.lower(),
+            )
+            and not self._looks_like_award_winner_result(
+                title_text=title_text,
+                snippet_text=snippet_text,
+                path=urlparse(url).path.lower(),
+            )
+        ):
+            score -= 5
         return score
 
     def _answer_looks_uncertain(self, answer: str) -> bool:
@@ -11306,10 +11611,10 @@ class MySearchClient:
         return False
 
     def _looks_like_query_year_mismatch(self, *, query: str, text: str) -> bool:
-        query_years = {year for year in re.findall(r"\b20\d{2}\b", query)}
+        query_years = {year for year in re.findall(r"\b(?:19|20)\d{2}\b", query)}
         if not query_years:
             return False
-        result_years = {year for year in re.findall(r"\b20\d{2}\b", text)}
+        result_years = {year for year in re.findall(r"\b(?:19|20)\d{2}\b", text)}
         if not result_years:
             return False
         return query_years.isdisjoint(result_years)
