@@ -1855,6 +1855,7 @@ class MySearchClient:
             exa_unique_url_count=len(exa_unique_urls),
             exa_promoted_page_count=len(exa_promoted_urls),
             authoritative_source_count=research_selection_meta["authoritative_source_count"],
+            supporting_source_count=research_selection_meta["supporting_source_count"],
             community_source_count=research_selection_meta["community_source_count"],
             selected_candidate_count=len(research_candidate_results),
             selected_candidate_domains=research_selection_meta["selected_candidate_domains"],
@@ -2291,6 +2292,7 @@ class MySearchClient:
         if not combined:
             return [], {
                 "authoritative_source_count": 0,
+                "supporting_source_count": 0,
                 "community_source_count": 0,
                 "selected_candidate_domains": [],
                 "selected_candidate_cluster_counts": {},
@@ -2375,6 +2377,7 @@ class MySearchClient:
                 cluster_counts[cluster_label] = cluster_counts.get(cluster_label, 0) + 1
             return selected, {
                 "authoritative_source_count": 0,
+                "supporting_source_count": 0,
                 "community_source_count": sum(
                     1
                     for item in selected
@@ -2466,11 +2469,9 @@ class MySearchClient:
             )
             cluster_counts[cluster_label] = cluster_counts.get(cluster_label, 0) + 1
         return ordered, {
-            "authoritative_source_count": min(
-                len(ordered),
-                len(official_candidates) + len(supporting_candidates),
-            ),
-            "community_source_count": min(len(ordered), len(community_candidates)),
+            "authoritative_source_count": int(cluster_counts.get("official") or 0),
+            "supporting_source_count": int(cluster_counts.get("supporting") or 0),
+            "community_source_count": int(cluster_counts.get("community") or 0),
             "selected_candidate_domains": selected_domains[:5],
             "selected_candidate_cluster_counts": cluster_counts,
         }
@@ -3421,6 +3422,7 @@ class MySearchClient:
         exa_unique_url_count: int,
         exa_promoted_page_count: int,
         authoritative_source_count: int,
+        supporting_source_count: int,
         community_source_count: int,
         selected_candidate_count: int,
         selected_candidate_domains: list[str],
@@ -3496,6 +3498,7 @@ class MySearchClient:
             "exa_unique_url_count": exa_unique_url_count,
             "exa_promoted_page_count": exa_promoted_page_count,
             "authoritative_source_count": effective_authoritative_source_count,
+            "supporting_source_count": max(supporting_source_count, 0),
             "community_source_count": community_source_count,
             "selected_candidate_count": selected_candidate_count,
             "selected_candidate_domains": selected_candidate_domains[:5],
@@ -10054,12 +10057,18 @@ class MySearchClient:
             or any(token in query_lower for token in ("best ", "top ", "compare ", "comparison "))
         )
         authoritative_source_count = int(evidence.get("authoritative_source_count") or 0)
+        supporting_source_count = int(evidence.get("supporting_source_count") or 0)
         community_source_count = int(evidence.get("community_source_count") or 0)
         primary_finding = executive_summary_override or web_answer or social_answer
         if not primary_finding and comparison_like:
             if authoritative_source_count > 0 and citation_title_lines:
                 primary_finding = (
                     "Authoritative sources and corroborating analysis were found; "
+                    f"the strongest anchors include {', '.join(citation_title_lines[:3])}."
+                )
+            elif supporting_source_count > 0 and citation_title_lines:
+                primary_finding = (
+                    "Supporting sources and corroborating analysis were found; "
                     f"the strongest anchors include {', '.join(citation_title_lines[:3])}."
                 )
             elif citation_title_lines:
@@ -10115,7 +10124,7 @@ class MySearchClient:
         docs_rescue_count = int(evidence.get("docs_rescue_result_count") or 0)
         if docs_rescue_count > 0:
             provider_roles.append(
-                f"Docs rescue surfaced {docs_rescue_count} authoritative or product-native candidate result(s)."
+                f"Docs rescue surfaced {docs_rescue_count} product-native or supporting candidate result(s)."
             )
         if social_answer:
             provider_roles.append("xAI added social or synthesis context to the research pass.")
@@ -10140,6 +10149,8 @@ class MySearchClient:
             coverage_bits.append(f"source_domains={source_diversity}")
         if authoritative_source_count > 0:
             coverage_bits.append(f"authoritative_sources={authoritative_source_count}")
+        if supporting_source_count > 0:
+            coverage_bits.append(f"supporting_sources={supporting_source_count}")
         if community_source_count > 0:
             coverage_bits.append(f"community_sources={community_source_count}")
         confidence = str(evidence.get("confidence") or "").strip()
@@ -10378,6 +10389,7 @@ class MySearchClient:
                 bit
                 for bit in (
                     f"authoritative={authoritative_source_count}" if authoritative_source_count > 0 else "",
+                    f"supporting={supporting_source_count}" if supporting_source_count > 0 else "",
                     f"community={community_source_count}" if community_source_count > 0 else "",
                     f"domains={', '.join(evidence.get('selected_candidate_domains') or [])}"
                     if evidence.get("selected_candidate_domains")
@@ -10809,7 +10821,12 @@ class MySearchClient:
         )
         excerpt = re.sub(r"\s+", " ", excerpt).strip()
         if excerpt:
-            first_sentence = re.split(r"(?<=[.!?。！？])\s+", excerpt, maxsplit=1)[0].strip()
+            sentence_ready_excerpt = re.sub(r"\bvs\.\s+", "vs ", excerpt, flags=re.IGNORECASE)
+            first_sentence = re.split(
+                r"(?<=[.!?。！？])\s+",
+                sentence_ready_excerpt,
+                maxsplit=1,
+            )[0].strip()
             cleaned_excerpt = self._normalize_research_claim_text(
                 first_sentence,
                 comparison_like=comparison_like,
@@ -10828,6 +10845,8 @@ class MySearchClient:
                         return cleaned_title
                     return ""
                 if not self._research_excerpt_looks_like_noise(cleaned_excerpt):
+                    if comparison_like and self._research_excerpt_has_substantive_claim(cleaned_excerpt):
+                        return cleaned_excerpt
                     excerpt_tokens = set(re.findall(r"[a-z0-9]+", cleaned_excerpt.lower()))
                     title_tokens = set(re.findall(r"[a-z0-9]+", cleaned_title.lower()))
                     if cleaned_title and title_tokens and excerpt_tokens and (
@@ -10835,6 +10854,8 @@ class MySearchClient:
                     ):
                         return cleaned_title
                     return cleaned_excerpt
+        if cleaned_title and comparison_like and self._research_claim_is_generic(cleaned_title):
+            return ""
         return cleaned_title
 
     def _normalize_research_claim_text(
@@ -10844,12 +10865,19 @@ class MySearchClient:
         comparison_like: bool,
     ) -> str:
         compact = text.replace("**", " ").replace("__", " ")
+        compact = re.sub(r"!\[[^\]]*\]\([^)]+\)", " ", compact)
         compact = re.sub(
             r"(?i)\b(copy\s+markdown|open\s+in\s+chatgpt|view\s+as\s+markdown|copy\s+page|view\s+page)\b",
             " ",
             compact,
         )
+        compact = re.sub(r"\s*#+\s*", " ", compact)
         compact = compact.replace("*", " ")
+        compact = re.sub(
+            r"(?i)\b(master this essential documentation concept|quick definition|table of contents)\b",
+            " ",
+            compact,
+        )
         compact = re.sub(r"\s+", " ", compact).strip(" -|:;,.")
         heading_match = re.match(
             r"^#\s*[A-Z][A-Za-z0-9'’&./() \-]{1,80}?\s+"
@@ -10859,6 +10887,22 @@ class MySearchClient:
         )
         if heading_match:
             compact = heading_match.group(1).strip()
+        compact = re.sub(
+            r"(?i)^[A-Z][A-Za-z0-9'’&./() \-]{5,100}\s+"
+            r"[A-Z][a-z]+\s+\d{1,2}(?:st|nd|rd|th),\s+\d{4}\s+by\s+"
+            r"[A-Z][A-Za-z.'\-]+(?:\s+[A-Z][A-Za-z.'\-]+){0,3}\s+(?:abstract\s+)?",
+            "",
+            compact,
+        )
+        compact = re.sub(r"(?i)^comparison\s+", "", compact).strip()
+        compact = re.sub(r"(?i)^abstract\s+", "", compact).strip()
+        compact = re.sub(
+            r"(?i)^[A-Z][a-z]+\s+\d{1,2}(?:st|nd|rd|th),\s+\d{4}\s+by\s+"
+            r"[A-Z][A-Za-z.'\-]+(?:\s+[A-Z][A-Za-z.'\-]+){0,3}(?=\s+(?:abstract\b|$))\s*",
+            "",
+            compact,
+        )
+        compact = re.sub(r"(?i)^abstract\s+", "", compact).strip()
         compact = re.sub(r"^[#>*`\-\d\.\)\s]+", "", compact).strip()
         compact = re.sub(r"\[[^\]]+\]\([^)]+\)", "", compact).strip()
         compact = re.sub(r"https?://\S+", "", compact).strip()
@@ -10957,9 +11001,15 @@ class MySearchClient:
                 "api guide",
                 "api reference",
                 "best mcp servers",
+                "best practices",
                 "compare models",
+                "complete comparison",
+                "definition examples",
+                "ultimate guide",
             )
         ):
+            return True
+        if "alternatives" in normalized:
             return True
         tokens = normalized.split()
         generic_tokens = {
@@ -10985,6 +11035,11 @@ class MySearchClient:
             "tool",
             "tools",
         }
+        if ("vs" in tokens or "versus" in tokens) and any(
+            marker in normalized
+            for marker in ("comparison", "compare", "guide", "alternatives")
+        ):
+            return True
         meaningful_tokens = [token for token in tokens if token not in generic_tokens]
         if not meaningful_tokens and len(tokens) <= 4:
             return True
@@ -11028,6 +11083,35 @@ class MySearchClient:
             return f"supported by {', '.join(detail_bits)}"
         return ""
 
+    def _research_excerpt_has_substantive_claim(self, text: str) -> bool:
+        normalized = " " + re.sub(r"\s+", " ", text.lower()).strip() + " "
+        if len(normalized.split()) < 7:
+            return False
+        return any(
+            marker in normalized
+            for marker in (
+                " is ",
+                " are ",
+                " can ",
+                " handles ",
+                " supports ",
+                " allows ",
+                " enables ",
+                " helps ",
+                " uses ",
+                " provides ",
+                " delivers ",
+                " integrates ",
+                " explores ",
+                " designed to ",
+                " suited to ",
+                " better suited ",
+                " unlike ",
+                " compared with ",
+                " compared to ",
+            )
+        )
+
     def _research_excerpt_looks_like_navigation_noise(self, text: str) -> bool:
         lowered = text.lower()
         return any(
@@ -11044,6 +11128,10 @@ class MySearchClient:
                 "marketing copy",
                 "copy markdown",
                 "view as markdown",
+                "access to this page requires authorization",
+                "exit editor mode",
+                "focus mode note",
+                "ask learn",
             )
         )
 
@@ -11058,6 +11146,9 @@ class MySearchClient:
                 "cached input",
                 "output tokens",
                 "endpoints v1/chat",
+                "ready to build",
+                "table of contents",
+                "back to all posts",
                 "you signed in with another tab",
                 "method not allowed",
                 "\"error\"",
