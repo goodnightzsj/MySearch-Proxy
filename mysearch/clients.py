@@ -2188,6 +2188,8 @@ class MySearchClient:
             "youtu.be",
         }
         directory_domains = {
+            "capterra.com",
+            "g2.com",
             "mcp-ai.org",
             "mcp.so",
             "mcpmarket.com",
@@ -2195,11 +2197,12 @@ class MySearchClient:
             "mcpserverfinder.com",
             "mcpservers.org",
             "pulsemcp.com",
+            "sourceforge.net",
             "toolhunter.cc",
         }
         if authoritative_preferred:
             effective_mode: SearchMode = mode if mode in {"docs", "github", "pdf"} else "docs"
-            query_tokens = self._query_brand_tokens(query)
+            query_tokens = self._research_authoritative_query_tokens(query)
             flags = self._resource_result_flags(
                 mode=effective_mode,
                 item=normalized,
@@ -2216,43 +2219,55 @@ class MySearchClient:
                     and bool(flags["title_brand_match"])
                 )
             )
-            official_candidate = brand_domain_match and self._result_matches_official_policy(
-                item=normalized,
+            authoritative_target = self._looks_like_authoritative_research_target(
+                url=normalized.get("url", ""),
+                hostname=hostname,
+                title_text=title_text,
                 mode=effective_mode,
-                query_tokens=query_tokens,
-                include_domains=include_domains,
-                strict_official=False,
             )
+            if query_tokens:
+                official_candidate = brand_domain_match and self._result_matches_official_policy(
+                    item=normalized,
+                    mode=effective_mode,
+                    query_tokens=query_tokens,
+                    include_domains=include_domains,
+                    strict_official=False,
+                )
+            else:
+                official_candidate = bool(flags["non_third_party"]) and authoritative_target and not self._looks_like_research_marketing_or_blog_result(
+                    hostname=hostname,
+                    path=path,
+                    title_text=title_text,
+                    snippet_text=snippet_text,
+                )
             community_candidate = (
                 not bool(flags["non_third_party"])
                 or self._is_obvious_official_community_result(hostname=hostname, path=path)
             )
             supportive_candidate = bool(flags["non_third_party"]) and (
-                (
-                    bool(flags["include_match"])
-                    or bool(flags["registered_domain_label_match"])
-                    or bool(flags["host_brand_match"])
-                    or (
-                        bool(flags["docs_shape_match"])
-                        and bool(flags["title_brand_match"])
-                    )
-                )
-                or self._looks_like_supporting_research_target(
+                self._looks_like_supporting_research_target(
                     url=normalized.get("url", ""),
                     hostname=hostname,
                     title_text=title_text,
                     snippet_text=snippet_text,
                     mode=effective_mode,
                 )
+                or (
+                    bool(query_tokens)
+                    and (
+                        bool(flags["include_match"])
+                        or bool(flags["registered_domain_label_match"])
+                        or bool(flags["host_brand_match"])
+                        or (
+                            bool(flags["docs_shape_match"])
+                            and bool(flags["title_brand_match"])
+                        )
+                    )
+                )
             )
             if community_candidate:
                 return "community"
-            if official_candidate and self._looks_like_authoritative_research_target(
-                url=normalized.get("url", ""),
-                hostname=hostname,
-                title_text=title_text,
-                mode=effective_mode,
-            ):
+            if official_candidate and authoritative_target:
                 return "official"
             if official_candidate or supportive_candidate:
                 return "supporting"
@@ -2461,12 +2476,13 @@ class MySearchClient:
                 include_domains=include_domains,
             )
 
-        ordered = [
-            *official_candidates,
-            *supporting_candidates,
-            *general_candidates,
-            *community_candidates,
-        ][:max_results]
+        ordered = self._assemble_authoritative_research_candidates(
+            official_candidates=official_candidates,
+            supporting_candidates=supporting_candidates,
+            general_candidates=general_candidates,
+            community_candidates=community_candidates,
+            max_results=max_results,
+        )
         selected_domains = self._collect_source_domains(results=ordered, citations=[])
         cluster_counts: dict[str, int] = {}
         for item in ordered:
@@ -2614,6 +2630,64 @@ class MySearchClient:
             )
         ]
         return [*selected, *remaining]
+
+    def _assemble_authoritative_research_candidates(
+        self,
+        *,
+        official_candidates: list[dict[str, Any]],
+        supporting_candidates: list[dict[str, Any]],
+        general_candidates: list[dict[str, Any]],
+        community_candidates: list[dict[str, Any]],
+        max_results: int,
+    ) -> list[dict[str, Any]]:
+        anchor_candidates = [*official_candidates, *supporting_candidates]
+        if max_results <= 0:
+            return []
+        if not anchor_candidates:
+            return [*general_candidates, *community_candidates][:max_results]
+
+        ordered = anchor_candidates[:max_results]
+        remaining = max_results - len(ordered)
+        if remaining <= 0:
+            return ordered
+
+        anchor_count = len(ordered)
+        general_limit = min(2 if anchor_count >= 2 else 3, remaining)
+        ordered.extend(general_candidates[:general_limit])
+        remaining = max_results - len(ordered)
+        if remaining > 0:
+            community_limit = min(1, remaining)
+            ordered.extend(community_candidates[:community_limit])
+            remaining = max_results - len(ordered)
+        if remaining > 0:
+            ordered.extend(general_candidates[general_limit : general_limit + remaining])
+            remaining = max_results - len(ordered)
+        if remaining > 0:
+            ordered.extend(community_candidates[1 : 1 + remaining])
+        return ordered[:max_results]
+
+    def _research_authoritative_query_tokens(self, query: str) -> list[str]:
+        generic_tokens = {
+            "agent",
+            "agentic",
+            "agents",
+            "approach",
+            "best",
+            "build",
+            "docs",
+            "documentation",
+            "guide",
+            "official",
+            "retrieval",
+            "search",
+            "workflow",
+            "workflows",
+        }
+        return [
+            token
+            for token in self._query_brand_tokens(query)
+            if token not in generic_tokens
+        ]
 
     def _looks_like_authoritative_research_target(
         self,
