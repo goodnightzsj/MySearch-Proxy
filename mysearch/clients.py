@@ -1570,7 +1570,13 @@ class MySearchClient:
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
             )
-        if authoritative_research and research_plan["web_mode"] in {"web", "docs"}:
+        if (
+            authoritative_research
+            or (
+                self._looks_like_comparison_query(query.lower())
+                and bool(self._research_comparison_entities(query))
+            )
+        ) and research_plan["web_mode"] in {"web", "docs", "exploratory", "research"}:
             research_tasks["docs_rescue"] = lambda: self._run_research_docs_rescue(
                 query=query,
                 strategy="balanced" if resolved_strategy == "fast" else resolved_strategy,
@@ -2314,12 +2320,6 @@ class MySearchClient:
                 )
             )
         )
-        project_candidate = bool(flags["non_third_party"]) and project_brand_match and (
-            not comparison_like
-            or comparison_marker
-        )
-        if project_candidate:
-            return "project"
         branded_marketing_candidate = comparison_like and project_brand_match and any(
             marker in title_text or marker in path
             for marker in (
@@ -2331,6 +2331,28 @@ class MySearchClient:
                 "/alternatives/",
             )
         )
+        supporting_candidate = (
+            comparison_like
+            and bool(flags["non_third_party"])
+            and project_brand_match
+            and bool(flags["docs_shape_match"])
+            and not comparison_marker
+            and not branded_marketing_candidate
+            and not self._looks_like_research_marketing_or_blog_result(
+                hostname=hostname,
+                path=path,
+                title_text=title_text,
+                snippet_text=snippet_text,
+            )
+        )
+        project_candidate = bool(flags["non_third_party"]) and project_brand_match and (
+            not comparison_like
+            or comparison_marker
+        )
+        if project_candidate:
+            return "project"
+        if supporting_candidate:
+            return "supporting"
         if branded_marketing_candidate:
             return "listicle"
         if registered_domain in directory_domains or (
@@ -2373,6 +2395,7 @@ class MySearchClient:
 
         if not authoritative_preferred:
             project_candidates: list[dict[str, Any]] = []
+            supporting_candidates: list[dict[str, Any]] = []
             curated_candidates: list[dict[str, Any]] = []
             listicle_candidates: list[dict[str, Any]] = []
             directory_candidates: list[dict[str, Any]] = []
@@ -2389,6 +2412,8 @@ class MySearchClient:
                     community_candidates.append(item)
                 elif cluster_label == "project":
                     project_candidates.append(item)
+                elif cluster_label == "supporting":
+                    supporting_candidates.append(item)
                 elif cluster_label == "directory":
                     directory_candidates.append(item)
                 elif cluster_label == "listicle":
@@ -2407,6 +2432,13 @@ class MySearchClient:
                     query=query,
                     result_profile="web",
                     results=curated_candidates,
+                    include_domains=include_domains,
+                )
+            if len(supporting_candidates) > 1:
+                supporting_candidates = self._rerank_resource_results(
+                    query=query,
+                    mode="docs",
+                    results=supporting_candidates,
                     include_domains=include_domains,
                 )
             if len(community_candidates) > 1:
@@ -2433,6 +2465,7 @@ class MySearchClient:
             selected = self._assemble_non_authoritative_research_candidates(
                 query=query,
                 project_candidates=project_candidates,
+                supporting_candidates=supporting_candidates,
                 curated_candidates=curated_candidates,
                 listicle_candidates=listicle_candidates,
                 directory_candidates=directory_candidates,
@@ -2452,7 +2485,7 @@ class MySearchClient:
                 cluster_counts[cluster_label] = cluster_counts.get(cluster_label, 0) + 1
             return selected, {
                 "authoritative_source_count": 0,
-                "supporting_source_count": 0,
+                "supporting_source_count": int(cluster_counts.get("supporting") or 0),
                 "community_source_count": sum(
                     1
                     for item in selected
@@ -2686,6 +2719,7 @@ class MySearchClient:
         *,
         query: str,
         project_candidates: list[dict[str, Any]],
+        supporting_candidates: list[dict[str, Any]],
         curated_candidates: list[dict[str, Any]],
         listicle_candidates: list[dict[str, Any]],
         directory_candidates: list[dict[str, Any]],
@@ -2716,6 +2750,11 @@ class MySearchClient:
             diversified_projects.append(item)
 
         ordered = diversified_projects[:2]
+        remaining = max_results - len(ordered)
+        if remaining <= 0:
+            return ordered
+
+        ordered.extend(supporting_candidates[: min(2, remaining)])
         remaining = max_results - len(ordered)
         if remaining <= 0:
             return ordered
@@ -11077,7 +11116,7 @@ class MySearchClient:
         preferred_order = (
             ["official", "supporting", "general", "community"]
             if authoritative_preferred
-            else ["project", "curated", "listicle", "directory", "community"]
+            else ["project", "supporting", "curated", "listicle", "directory", "community"]
         )
         return sorted(
             cluster_buckets.values(),
