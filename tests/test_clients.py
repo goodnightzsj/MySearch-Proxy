@@ -1791,6 +1791,61 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["results"][0]["url"], "https://x.com/OpenAI/status/123")
         self.assertEqual(result["fallback"]["from"], "xai_compatible")
 
+    def test_xai_compatible_search_falls_back_when_gateway_returns_non_x_urls(self) -> None:
+        client = MySearchClient()
+        provider = client.config.xai
+        provider.search_mode = "compatible"
+        provider.default_paths["social_search"] = "/social/search"
+        provider.alternate_base_urls["social_search"] = "http://gateway.example/v1"
+        client._get_key_or_raise = lambda provider: type(  # type: ignore[method-assign]
+            "Record",
+            (),
+            {"key": "gateway-token", "source": "env"},
+        )()
+        client._request_json = lambda **kwargs: {  # type: ignore[method-assign]
+            "query": kwargs["payload"]["query"],
+            "results": [
+                {
+                    "title": "OpenAI Status",
+                    "url": "https://status.openai.com/",
+                    "text": "Status page",
+                }
+            ],
+        }
+        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "Fallback social summary",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "OpenAI on X",
+                    "url": "https://x.com/OpenAI/status/456",
+                    "snippet": "Latest OpenAI post",
+                    "content": "",
+                }
+            ],
+            "citations": [{"title": "OpenAI on X", "url": "https://x.com/OpenAI/status/456"}],
+        }
+
+        result = client._search_xai_compatible(
+            query="OpenAI pricing reactions on X",
+            sources=["x"],
+            max_results=5,
+            allowed_x_handles=None,
+            excluded_x_handles=None,
+            from_date=None,
+            to_date=None,
+            include_x_images=False,
+            include_x_videos=False,
+        )
+
+        self.assertEqual(result["provider"], "tavily_social_fallback")
+        self.assertEqual(result["results"][0]["url"], "https://x.com/OpenAI/status/456")
+        self.assertIn("no x.com/twitter.com results", result["fallback"]["reason"])
+
     def test_social_search_reuses_search_cache_for_repeated_x_queries(self) -> None:
         client = MySearchClient()
         client.config.search_cache_ttl_seconds = 60
