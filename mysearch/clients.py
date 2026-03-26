@@ -6646,9 +6646,14 @@ class MySearchClient:
                 "url": item.get("url", ""),
                 "snippet": item.get("snippet", ""),
                 "content": item.get("content", ""),
+                "author": self._social_result_identity(item),
             }
             for item in tavily_result.get("results", [])
         ]
+        fallback_results = self._diversify_social_results(
+            fallback_results,
+            max_results=max_results,
+        )
         if not fallback_results:
             raise MySearchError(fallback_reason)
         return {
@@ -6966,6 +6971,7 @@ class MySearchClient:
             from_date=from_date,
             to_date=to_date,
         )
+        results = self._diversify_social_results(results, max_results=10)
         citations = self._extract_social_gateway_citations(response, results)
         answer = (
             response.get("answer")
@@ -6991,6 +6997,49 @@ class MySearchClient:
         if warning:
             normalized["warning"] = warning
         return normalized
+
+    def _social_result_identity(self, item: dict[str, Any]) -> str:
+        author = str(
+            item.get("author")
+            or item.get("handle")
+            or item.get("username")
+            or ""
+        ).strip()
+        if author:
+            return author.lstrip("@").strip().lower()
+        title = str(item.get("title") or "").strip()
+        handle_match = re.search(r"\(@?([A-Za-z0-9_]{1,32})\)", title)
+        if handle_match:
+            return handle_match.group(1).strip().lower()
+        url = str(item.get("url") or "").strip()
+        parsed = urlparse(url)
+        if parsed.netloc.lower().endswith(("x.com", "twitter.com")):
+            path_parts = [part for part in parsed.path.split("/") if part]
+            if path_parts:
+                candidate = path_parts[0].strip().lstrip("@")
+                if candidate and candidate.lower() not in {"i", "search", "home", "explore", "status"}:
+                    return candidate.lower()
+        return ""
+
+    def _diversify_social_results(
+        self,
+        results: list[dict[str, Any]],
+        *,
+        max_results: int,
+        max_per_identity: int = 2,
+    ) -> list[dict[str, Any]]:
+        diversified: list[dict[str, Any]] = []
+        counts: dict[str, int] = {}
+        for item in results:
+            identity = self._social_result_identity(item)
+            if identity and counts.get(identity, 0) >= max_per_identity:
+                continue
+            diversified.append(item)
+            if identity:
+                counts[identity] = counts.get(identity, 0) + 1
+            if len(diversified) >= max_results:
+                break
+        return diversified
 
     def _filter_social_results_by_date(
         self,
