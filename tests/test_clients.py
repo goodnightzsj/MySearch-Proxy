@@ -162,7 +162,7 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertFalse(should_blend)
 
-    def test_dispatch_single_provider_for_news_result_query_requests_content_in_verify(self) -> None:
+    def test_dispatch_single_provider_for_news_result_query_keeps_tavily_in_discovery_mode(self) -> None:
         client = MySearchClient()
         captured: dict[str, object] = {}
 
@@ -196,7 +196,7 @@ class MySearchClientTests(unittest.TestCase):
             strategy="verify",
         )
 
-        self.assertTrue(captured["include_content"])
+        self.assertFalse(captured["include_content"])
 
     def test_news_rerank_prefers_award_winners_page_over_nominations_page(self) -> None:
         client = MySearchClient()
