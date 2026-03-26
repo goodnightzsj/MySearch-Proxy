@@ -7147,6 +7147,34 @@ class MySearchClientTests(unittest.TestCase):
         )
         self.assertEqual(sorted(deduped[0]["matched_providers"]), ["canonical_research_docs", "tavily"])
 
+    def test_dedupe_research_results_replaces_non_substantive_snippet_from_canonical_docs(self) -> None:
+        client = MySearchClient()
+
+        deduped = client._dedupe_research_results_for_report(
+            [
+                {
+                    "provider": "tavily",
+                    "title": "Search API - Tavily",
+                    "url": "https://docs.tavily.com/documentation/api-reference/search",
+                    "snippet": "Search API",
+                }
+            ],
+            [
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Search API - Tavily",
+                    "url": "https://docs.tavily.com/documentation/api-reference/search",
+                    "snippet": "Tavily exposes a search API built for agent web retrieval and real-time discovery.",
+                }
+            ],
+        )
+
+        self.assertEqual(len(deduped), 1)
+        self.assertEqual(
+            deduped[0]["snippet"],
+            "Tavily exposes a search API built for agent web retrieval and real-time discovery.",
+        )
+
     def test_research_claim_evidence_prefers_non_navigation_snippet_over_noisy_page_excerpt(self) -> None:
         client = MySearchClient()
 
