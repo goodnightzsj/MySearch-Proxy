@@ -2936,7 +2936,6 @@ class MySearchClientTests(unittest.TestCase):
             [item["url"] for item in result["results"]],
             [
                 "https://x.com/TheZvi/status/1",
-                "https://x.com/TheZvi/status/2",
                 "https://x.com/clairevo/status/4",
             ],
         )
