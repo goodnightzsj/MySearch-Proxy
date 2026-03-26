@@ -539,24 +539,48 @@ class MCPClient:
         }
         headers, _ = self._post(payload, self.headers, timeout=20, retries=5)
         self.session_id = headers.get("mcp-session-id")
+        if not self.session_id:
+            return
         notif_headers = dict(self.headers)
-        if self.session_id:
-            notif_headers["mcp-session-id"] = self.session_id
+        notif_headers["mcp-session-id"] = self.session_id
         notif = {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}
-        self._post(notif, notif_headers, timeout=20, retries=5)
+        try:
+            self._post(notif, notif_headers, timeout=20, retries=5)
+        except RuntimeError as exc:
+            detail = str(exc)
+            if "Missing mcp-session-id header" in detail or ("HTTP 404" in detail and "mcp-session-id" in detail):
+                self.session_id = None
+                return
+            raise
 
     def call_tool(self, tool_name, arguments):
-        headers = dict(self.headers)
-        if self.session_id:
-            headers["mcp-session-id"] = self.session_id
         payload = {
             "jsonrpc": "2.0",
             "id": 2,
             "method": "tools/call",
             "params": {"name": tool_name, "arguments": arguments},
         }
-        _, response_payload = self._post(payload, headers, timeout=120, retries=4)
-        return response_payload
+        last_error = None
+        for attempt in range(2):
+            headers = dict(self.headers)
+            if self.session_id:
+                headers["mcp-session-id"] = self.session_id
+            try:
+                _, response_payload = self._post(payload, headers, timeout=120, retries=4)
+                return response_payload
+            except RuntimeError as exc:
+                last_error = exc
+                detail = str(exc)
+                needs_reconnect = (
+                    "Missing mcp-session-id header" in detail
+                    or ("HTTP 404" in detail and "mcp-session-id" in detail)
+                )
+                if not needs_reconnect or attempt == 1:
+                    raise
+                self.initialize()
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("unreachable MCP call state")
 
 
 def timed_tool_runs(client, tool_name, arguments, repeat_runs):
