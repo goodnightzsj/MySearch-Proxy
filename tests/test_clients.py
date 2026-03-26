@@ -6688,6 +6688,20 @@ class MySearchClientTests(unittest.TestCase):
         self.assertIn("https://docs.exa.ai/reference/search", urls)
         self.assertIn("https://www.firecrawl.dev/compare/firecrawl-vs-exa", urls)
 
+    def test_research_known_provider_doc_results_include_exa_tavily_comparison_page(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        results = client._research_known_provider_doc_results(
+            "compare Exa and Tavily for AI agent web retrieval 2026"
+        )
+
+        urls = [item["url"] for item in results]
+        self.assertIn("https://docs.exa.ai/reference/search", urls)
+        self.assertIn("https://docs.tavily.com/documentation/api-reference/search", urls)
+        self.assertIn("https://exa.ai/versus/tavily", urls)
+
     def test_research_known_provider_doc_results_include_firecrawl_apify_comparison_page(
         self,
     ) -> None:
@@ -6700,7 +6714,7 @@ class MySearchClientTests(unittest.TestCase):
         urls = [item["url"] for item in results]
         self.assertIn("https://docs.firecrawl.dev/api-reference/endpoint/extract", urls)
         self.assertIn("https://docs.apify.com/api", urls)
-        self.assertIn("https://blog.apify.com/firecrawl-vs-apify/", urls)
+        self.assertIn("https://www.firecrawl.dev/compare/firecrawl-vs-apify", urls)
 
     def test_research_known_provider_doc_results_include_firecrawl_compare_hub_for_unknown_pair(
         self,
@@ -6845,8 +6859,8 @@ class MySearchClientTests(unittest.TestCase):
             web_results=[
                 {
                     "provider": "canonical_research_projects",
-                    "title": "Firecrawl vs. Apify: 2026 guide for AI and data teams",
-                    "url": "https://blog.apify.com/firecrawl-vs-apify/",
+                    "title": "Firecrawl vs Apify: Complete Comparison for AI Agents & RAG (2026)",
+                    "url": "https://www.firecrawl.dev/compare/firecrawl-vs-apify",
                     "snippet": "Direct first-party comparison page.",
                 },
                 {
@@ -6883,7 +6897,7 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         top_urls = [item["url"] for item in selected[:4]]
-        self.assertEqual(top_urls[0], "https://blog.apify.com/firecrawl-vs-apify/")
+        self.assertEqual(top_urls[0], "https://www.firecrawl.dev/compare/firecrawl-vs-apify")
         self.assertIn(
             top_urls[1],
             {
@@ -8030,7 +8044,42 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         top_urls = [item["url"] for item in result["web_search"]["results"][:5]]
-        self.assertIn("https://blog.apify.com/firecrawl-vs-apify/", top_urls)
+        self.assertEqual(top_urls[0], "https://www.firecrawl.dev/compare/firecrawl-vs-apify")
+        self.assertIn("https://www.firecrawl.dev/compare/firecrawl-vs-apify", top_urls)
+        self.assertIn("https://docs.apify.com/api", top_urls)
+
+    def test_research_secondary_fallback_prioritizes_project_page_for_comparison_docs_mode(
+        self,
+    ) -> None:
+        client = MySearchClient()
+        canonical_results = client._research_known_provider_doc_results(
+            "compare Firecrawl and Apify for AI agent web retrieval 2026"
+        )
+
+        result = client._build_research_secondary_fallback_result(
+            query="compare Firecrawl and Apify for AI agent web retrieval 2026",
+            mode="docs",
+            intent="exploratory",
+            strategy="deep",
+            source_result={
+                "provider": "canonical_research_docs",
+                "results": canonical_results,
+                "citations": [
+                    {
+                        "url": item.get("url"),
+                        "title": item.get("title"),
+                        "provider": item.get("provider"),
+                    }
+                    for item in canonical_results
+                ],
+            },
+            include_domains=None,
+            fallback_to="canonical_research_docs",
+            fallback_reason="test",
+        )
+
+        top_urls = [item["url"] for item in result["results"][:4]]
+        self.assertEqual(top_urls[0], "https://www.firecrawl.dev/compare/firecrawl-vs-apify")
         self.assertIn("https://docs.apify.com/api", top_urls)
 
     def test_research_canonical_vendor_fallback_for_firecrawl_unknown_pair_includes_compare_hub(
