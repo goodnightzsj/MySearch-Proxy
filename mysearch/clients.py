@@ -3830,10 +3830,7 @@ class MySearchClient:
                 include_content
                 and intent != "tutorial"
                 and not self._looks_like_changelog_query(query.lower())
-            ) or (
-                result_event_query
-                and mode == "news"
-                and strategy in {"verify", "deep"}
+                and not (result_event_query and mode == "news")
             )
             return self._search_tavily(
                 query=query,
