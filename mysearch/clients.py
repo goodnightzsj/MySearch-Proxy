@@ -2001,6 +2001,18 @@ class MySearchClient:
             return [query]
         brand_prefix = ""
         first_words = parts[0].split()
+        generic_tokens = {
+            "api",
+            "docs",
+            "documentation",
+            "guide",
+            "guides",
+            "official",
+            "openai",
+            "resource",
+            "resources",
+            "reference",
+        }
         if first_words:
             candidate = first_words[0].strip(" ,.;:")
             if candidate and candidate[0].isalpha() and candidate[0].isupper():
@@ -2008,11 +2020,21 @@ class MySearchClient:
         queries: list[str] = [query]
         for part in parts[:3]:
             candidate = part
-            if brand_prefix and brand_prefix.lower() not in candidate.lower():
+            meaningful_tokens = [
+                token
+                for token in self._query_precision_tokens(candidate)
+                if token not in generic_tokens
+            ]
+            if (
+                brand_prefix
+                and brand_prefix.lower() not in candidate.lower()
+                and not meaningful_tokens
+            ):
                 candidate = f"{brand_prefix} {candidate}"
             if context:
                 queries.append(f"{candidate} official docs {context}".strip())
             queries.append(f"{candidate} official docs".strip())
+            queries.extend(self._research_known_provider_doc_queries(candidate))
         deduped: list[str] = []
         seen: set[str] = set()
         for candidate in queries:
@@ -2025,6 +2047,25 @@ class MySearchClient:
             seen.add(dedupe_key)
             deduped.append(normalized_candidate)
         return deduped
+
+    def _research_known_provider_doc_queries(self, entity: str) -> list[str]:
+        lowered = entity.lower()
+        if "tavily" in lowered:
+            return [
+                "Tavily search api docs",
+                "Tavily extract docs",
+            ]
+        if "firecrawl" in lowered:
+            return [
+                "Firecrawl scrape docs",
+                "Firecrawl extract docs",
+            ]
+        if re.search(r"\bexa\b", lowered):
+            return [
+                "Exa search docs",
+                "Exa contents docs",
+            ]
+        return []
 
     def _run_research_docs_rescue(
         self,
