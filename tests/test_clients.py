@@ -1785,7 +1785,7 @@ class MySearchClientTests(unittest.TestCase):
             include_x_videos=False,
         )
 
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 3)
         self.assertEqual(calls[0]["timeout_seconds"], 120)
         self.assertEqual(result["provider"], "tavily_social_fallback")
         self.assertEqual(result["results"][0]["url"], "https://x.com/OpenAI/status/123")
@@ -1963,6 +1963,13 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(
             [item["url"] for item in result["results"]],
+            [
+                "https://x.com/TheZvi/status/1",
+                "https://x.com/ArjunKalsy/status/4",
+            ],
+        )
+        self.assertEqual(
+            [item["url"] for item in result["citations"]],
             [
                 "https://x.com/TheZvi/status/1",
                 "https://x.com/ArjunKalsy/status/4",
