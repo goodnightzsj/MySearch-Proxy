@@ -2339,12 +2339,20 @@ class MySearchClient:
                     "against Exa's semantic search and discovery APIs."
                 ),
             },
-            frozenset({"firecrawl", "apify"}): {
-                "title": "Firecrawl vs. Apify: 2026 guide for AI and data teams",
-                "url": "https://blog.apify.com/firecrawl-vs-apify/",
+            frozenset({"exa", "tavily"}): {
+                "title": "Exa vs Tavily: 5x More Results & Content Filtering",
+                "url": "https://exa.ai/versus/tavily",
                 "snippet": (
-                    "Apify compares Firecrawl's unified AI-driven scraping API with "
-                    "Apify's broader scraping platform and actor ecosystem."
+                    "Exa compares semantic search, result volume, and content filtering "
+                    "against Tavily for AI search workflows."
+                ),
+            },
+            frozenset({"firecrawl", "apify"}): {
+                "title": "Firecrawl vs Apify: Complete Comparison for AI Agents & RAG (2026)",
+                "url": "https://www.firecrawl.dev/compare/firecrawl-vs-apify",
+                "snippet": (
+                    "Firecrawl compares AI-ready scraping, extraction, and agent workflows "
+                    "against Apify's actor platform and scraping ecosystem."
                 ),
             },
         }
@@ -2591,6 +2599,27 @@ class MySearchClient:
                 merged["matched_providers"] = matched_providers
             deduped.append(merged)
         return deduped
+
+    def _prioritize_research_project_results(
+        self,
+        results: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        project_results = [
+            item
+            for item in results
+            if str(item.get("provider") or "") == "canonical_research_projects"
+        ]
+        if not project_results:
+            return results
+        other_results = [
+            item
+            for item in results
+            if str(item.get("provider") or "") != "canonical_research_projects"
+        ]
+        return self._dedupe_research_results_for_report(
+            project_results,
+            other_results,
+        )
 
     def _research_result_cluster_label(
         self,
@@ -4454,6 +4483,38 @@ class MySearchClient:
                 results=results,
                 include_domains=include_domains,
             )
+        if (
+            fallback_to == "canonical_research_docs"
+            and self._looks_like_comparison_query(query.lower())
+            and results
+        ):
+            project_results = [
+                item
+                for item in results
+                if str(item.get("provider") or "") == "canonical_research_projects"
+            ]
+            if project_results:
+                results = self._prioritize_research_project_results(results)
+            if not project_results:
+                selected_results, _ = self._select_research_candidate_results(
+                    query=query,
+                    mode=mode,
+                    intent=intent,
+                    max_results=len(results),
+                    web_results=results,
+                    docs_rescue_results=[],
+                    tavily_support_results=[],
+                    exa_results=[],
+                    include_domains=include_domains,
+                    authoritative_preferred=self._research_prefers_authoritative_sources(
+                        query=query,
+                        mode=mode,
+                        intent=intent,
+                        include_domains=include_domains,
+                    ),
+                )
+                if selected_results:
+                    results = selected_results
         fallback_result["results"] = results
         fallback_result["citations"] = self._align_citations_with_results(
             results=results,
@@ -4466,6 +4527,19 @@ class MySearchClient:
             result=fallback_result,
             include_domains=include_domains,
         )
+        if (
+            fallback_to == "canonical_research_docs"
+            and self._looks_like_comparison_query(query.lower())
+            and fallback_result.get("results")
+        ):
+            reprioritized_results = self._prioritize_research_project_results(
+                list(fallback_result.get("results") or [])
+            )
+            fallback_result["results"] = reprioritized_results
+            fallback_result["citations"] = self._align_citations_with_results(
+                results=reprioritized_results,
+                citations=list(fallback_result.get("citations") or []),
+            )
         fallback_result = self._trim_search_payload(fallback_result, max_results=len(results) or 5)
         fallback_result = self._augment_evidence_summary(
             fallback_result,
