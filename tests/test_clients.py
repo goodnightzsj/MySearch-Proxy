@@ -849,6 +849,39 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertFalse(should_rescue)
 
+    def test_result_event_answer_source_does_not_skip_exa_rescue_for_weak_award_results(self) -> None:
+        client = MySearchClient()
+        client._provider_can_serve = lambda provider: provider.name == "exa"  # type: ignore[method-assign]
+
+        should_rescue = client._should_attempt_exa_rescue(
+            query="2026 Grammy Album of the Year winner",
+            mode="news",
+            intent="news",
+            decision=RouteDecision(
+                provider="tavily",
+                reason="test",
+                result_profile="news",
+                allow_exa_rescue=True,
+            ),
+            result={
+                "provider": "tavily",
+                "answer": "Album of the Year winner: Unknown Artist",
+                "results": [
+                    {
+                        "title": "SXSW 2026 Film & TV Festival award winners",
+                        "url": "https://variety.com/2026/film/news/sxsw-2026-film-amp-tv-festival-award-winners-1236693418/",
+                        "snippet": "See the full winners list below.",
+                        "content": "Festival awards were announced at SXSW 2026.",
+                    }
+                ],
+                "evidence": {"answer_source": "result-event-extraction"},
+            },
+            max_results=5,
+            include_domains=None,
+        )
+
+        self.assertTrue(should_rescue)
+
     def test_has_strong_award_result_considers_top_five_results(self) -> None:
         client = MySearchClient()
 
@@ -937,6 +970,36 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertFalse(strong)
+
+    def test_search_tavily_rewrites_award_result_query_for_news(self) -> None:
+        client = MySearchClient()
+        captured: dict[str, object] = {}
+
+        class _Key:
+            key = "tv"
+            source = "env"
+
+        client._get_key_or_raise = lambda provider: _Key()  # type: ignore[method-assign]
+
+        def fake_request_json(**kwargs):  # type: ignore[no-untyped-def]
+            captured.update(kwargs["payload"])
+            return {"query": kwargs["payload"]["query"], "results": []}
+
+        client._request_json = fake_request_json  # type: ignore[method-assign]
+
+        result = client._search_tavily(
+            query="2026 Oscars best picture winner",
+            max_results=5,
+            topic="news",
+            include_answer=True,
+            include_content=False,
+            include_domains=None,
+            exclude_domains=None,
+            strategy="verify",
+        )
+
+        self.assertEqual(captured["query"], "2026 Oscars winners list best picture full results")
+        self.assertEqual(result["query"], "2026 Oscars winners list best picture full results")
 
     def test_extract_result_event_answer_prefers_prioritized_top_five_candidates(self) -> None:
         client = MySearchClient()
