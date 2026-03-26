@@ -11632,6 +11632,8 @@ class MySearchClient:
                         if len(trailing_excerpt.split()) >= 3:
                             return trailing_excerpt
                 if cleaned_title and self._research_excerpt_looks_like_navigation_noise(cleaned_excerpt):
+                    if comparison_like and self._research_claim_is_generic(cleaned_title):
+                        return ""
                     return cleaned_title
                 if self._research_excerpt_looks_like_schema_noise(cleaned_excerpt):
                     if cleaned_title and not self._research_claim_is_generic(cleaned_title):
@@ -12028,6 +12030,8 @@ class MySearchClient:
                 "exit editor mode",
                 "focus mode note",
                 "ask learn",
+                "sign up at tavily.com",
+                "why use these skills",
             )
         )
 
