@@ -11499,12 +11499,16 @@ class MySearchClient:
                     "sources": [],
                     "providers": [],
                     "clusters": [],
+                    "domains": [],
                 }
                 target_order.append(claim_key)
             entry = target_claims[claim_key]
             source_label = title or (self._registered_domain(self._result_hostname(item)) or url)
             if source_label and source_label not in entry["sources"]:
                 entry["sources"].append(source_label)
+            domain = self._registered_domain(self._result_hostname(item))
+            if domain and domain not in entry["domains"]:
+                entry["domains"].append(domain)
             for provider in (
                 item.get("matched_providers")
                 or [item.get("provider", "")]
@@ -11567,8 +11571,35 @@ class MySearchClient:
         )
         for entry in claims:
             entry.pop("_order_index", None)
-        claims = claims[:4]
+        claims = self._diversify_research_claims_by_domain(claims, limit=4)
         return claims
+
+    def _diversify_research_claims_by_domain(
+        self,
+        claims: list[dict[str, Any]],
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        if len(claims) <= limit:
+            return claims
+
+        selected: list[dict[str, Any]] = []
+        deferred: list[dict[str, Any]] = []
+        used_domains: set[str] = set()
+        for entry in claims:
+            domains = [str(item) for item in (entry.get("domains") or []) if item]
+            if domains and all(domain in used_domains for domain in domains):
+                deferred.append(entry)
+                continue
+            selected.append(entry)
+            used_domains.update(domains)
+            if len(selected) >= limit:
+                return selected
+        for entry in deferred:
+            if len(selected) >= limit:
+                break
+            selected.append(entry)
+        return selected[:limit]
 
     def _research_claim_text(
         self,
@@ -11614,6 +11645,12 @@ class MySearchClient:
                     if cleaned_title and title_tokens and excerpt_tokens and (
                         len(title_tokens & excerpt_tokens) >= max(2, min(len(title_tokens), 3))
                     ):
+                        if (
+                            comparison_like
+                            and self._research_claim_is_generic(cleaned_title)
+                            and self._research_excerpt_has_substantive_claim(cleaned_excerpt)
+                        ):
+                            return cleaned_excerpt
                         return cleaned_title
                     return cleaned_excerpt
         if cleaned_title and comparison_like and self._research_claim_is_generic(cleaned_title):
@@ -11958,8 +11995,10 @@ class MySearchClient:
                 " uses ",
                 " provides ",
                 " delivers ",
+                " exposes ",
                 " integrates ",
                 " explores ",
+                " built for ",
                 " designed to ",
                 " suited to ",
                 " better suited ",
