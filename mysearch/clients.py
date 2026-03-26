@@ -2281,12 +2281,16 @@ class MySearchClient:
                     strict_official=False,
                 )
             else:
+                host_authoritative = self._looks_like_authoritative_research_host(
+                    hostname=hostname,
+                    path=path,
+                )
                 official_candidate = bool(flags["non_third_party"]) and authoritative_target and not self._looks_like_research_marketing_or_blog_result(
                     hostname=hostname,
                     path=path,
                     title_text=title_text,
                     snippet_text=snippet_text,
-                )
+                ) and host_authoritative
             community_candidate = (
                 not bool(flags["non_third_party"])
                 or self._is_obvious_official_community_result(hostname=hostname, path=path)
@@ -2309,6 +2313,20 @@ class MySearchClient:
                             bool(flags["docs_shape_match"])
                             and bool(flags["title_brand_match"])
                         )
+                    )
+                )
+                or (
+                    not bool(query_tokens)
+                    and self._looks_like_supporting_research_target(
+                        url=normalized.get("url", ""),
+                        hostname=hostname,
+                        title_text=title_text,
+                        snippet_text=snippet_text,
+                        mode=effective_mode,
+                    )
+                    and self._looks_like_authoritative_research_host(
+                        hostname=hostname,
+                        path=path,
                     )
                 )
             )
@@ -2468,6 +2486,18 @@ class MySearchClient:
                     results=project_candidates,
                     include_domains=include_domains,
                 )
+            if project_candidates:
+                indexed_project_candidates = list(enumerate(project_candidates))
+                project_candidates = [
+                    item
+                    for _, item in sorted(
+                        indexed_project_candidates,
+                        key=lambda pair: (
+                            self._research_project_candidate_kind_rank(pair[1]),
+                            pair[0],
+                        ),
+                    )
+                ]
             if len(curated_candidates) > 1:
                 curated_candidates = self._rerank_general_results(
                     query=query,
@@ -2481,6 +2511,10 @@ class MySearchClient:
                     mode="docs",
                     results=supporting_candidates,
                     include_domains=include_domains,
+                )
+            if supporting_candidates:
+                supporting_candidates = self._diversify_results_by_registered_domain(
+                    supporting_candidates
                 )
             if len(community_candidates) > 1:
                 community_candidates = self._rerank_general_results(
@@ -2818,6 +2852,35 @@ class MySearchClient:
         ordered.extend(community_candidates[:remaining])
         return ordered[:max_results]
 
+    def _diversify_results_by_registered_domain(
+        self,
+        results: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        diversified: list[dict[str, Any]] = []
+        seen_domains: set[str] = set()
+        for item in results:
+            registered_domain = self._registered_domain(
+                self._result_hostname(item)
+            )
+            domain_key = registered_domain or str(item.get("url") or "")
+            if domain_key in seen_domains:
+                continue
+            seen_domains.add(domain_key)
+            diversified.append(item)
+        return diversified
+
+    def _research_project_candidate_kind_rank(self, item: dict[str, Any]) -> int:
+        url = str(item.get("url") or "")
+        title_text = str(item.get("title") or "").lower()
+        path = urlparse(url).path.lower()
+        if any(marker in path for marker in ("/alternatives/", "/compare", "/comparison")):
+            return 0
+        if any(marker in f" {title_text} " for marker in (" vs ", " versus ", " comparison ", " compare ")):
+            return 1
+        if "/blog/" in path:
+            return 3
+        return 2
+
     def _assemble_authoritative_research_candidates(
         self,
         *,
@@ -2963,6 +3026,42 @@ class MySearchClient:
         )
         return any(marker in path for marker in authoritative_path_markers) or any(
             marker in title_text for marker in authoritative_title_markers
+        )
+
+    def _looks_like_authoritative_research_host(
+        self,
+        *,
+        hostname: str,
+        path: str,
+    ) -> bool:
+        host = hostname.lower()
+        normalized_path = path.lower()
+        if any(
+            host.startswith(prefix)
+            for prefix in (
+                "api.",
+                "developer.",
+                "developers.",
+                "docs.",
+            )
+        ):
+            return True
+        if any(marker in host for marker in (".docs.", ".developer.", ".developers.")):
+            return True
+        return any(
+            marker in normalized_path
+            for marker in (
+                "/api/docs",
+                "/api/reference",
+                "/api-reference",
+                "/docs/",
+                "/documentation/",
+                "/guide/",
+                "/guides/",
+                "/manual",
+                "/reference/",
+                "/references/",
+            )
         )
 
     def _looks_like_research_marketing_or_blog_result(
