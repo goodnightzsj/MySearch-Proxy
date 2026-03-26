@@ -1246,6 +1246,52 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(ranked[0]["url"], "https://arxiv.org/abs/2501.12948")
 
+    def test_has_strong_pdf_match_ignores_pdf_mirror_and_aggregator_results(self) -> None:
+        client = MySearchClient()
+
+        strong_match = client._has_strong_pdf_match(
+            query="Qwen3 technical report pdf",
+            results=[
+                {
+                    "title": "Qwen3 Technical Report",
+                    "url": "https://cdn.jsdelivr.net/npm/qwen3-paper/Qwen3-Technical-Report.pdf",
+                },
+                {
+                    "title": "Qwen3 Technical Report",
+                    "url": "https://www.scribd.com/document/999999999/Qwen3-Technical-Report",
+                },
+            ],
+        )
+
+        self.assertFalse(strong_match)
+
+    def test_pdf_rerank_prefers_canonical_arxiv_page_over_pdf_mirror(self) -> None:
+        client = MySearchClient()
+
+        ranked = client._rerank_resource_results(
+            query="Qwen3 technical report pdf",
+            mode="pdf",
+            results=[
+                {
+                    "provider": "firecrawl",
+                    "title": "Qwen3 Technical Report",
+                    "url": "https://cdn.jsdelivr.net/npm/qwen3-paper/Qwen3-Technical-Report.pdf",
+                    "snippet": "Mirror PDF",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Qwen3 Technical Report",
+                    "url": "https://arxiv.org/abs/2505.09388",
+                    "snippet": "Canonical arXiv page",
+                    "content": "",
+                },
+            ],
+            include_domains=["arxiv.org"],
+        )
+
+        self.assertEqual(ranked[0]["url"], "https://arxiv.org/abs/2505.09388")
+
     def test_canonical_result_url_rewrites_arxiv_html_variant_to_abs(self) -> None:
         client = MySearchClient()
 

@@ -4275,6 +4275,7 @@ class MySearchClient:
         for item in results[:3]:
             url = item.get("url", "")
             hostname = self._result_hostname(item)
+            registered_domain = self._registered_domain(hostname)
             path = urlparse(url).path.lower()
             title_text = (item.get("title") or "").lower()
             path_hits, total_hits = self._query_precision_hit_counts(
@@ -4295,6 +4296,13 @@ class MySearchClient:
             paper_shape = self._looks_like_pdf_url(url) or any(
                 marker in path for marker in ("/abs/", "/html/")
             )
+            mirror_or_aggregator = self._is_obvious_pdf_mirror_or_aggregator_result(
+                hostname=hostname,
+                registered_domain=registered_domain,
+                path=path,
+            )
+            if mirror_or_aggregator:
+                continue
             if (
                 compound_tokens
                 and compound_match
@@ -4332,6 +4340,28 @@ class MySearchClient:
             "tutorial",
         )
         return any(marker in title_text for marker in derivative_markers)
+
+    def _is_obvious_pdf_mirror_or_aggregator_result(
+        self,
+        *,
+        hostname: str,
+        registered_domain: str,
+        path: str,
+    ) -> bool:
+        mirror_domains = {
+            "docdroid.net",
+            "issuu.com",
+            "jsdelivr.net",
+            "researchgate.net",
+            "scribd.com",
+            "slideshare.net",
+        }
+        if registered_domain in mirror_domains:
+            return True
+        if hostname == "cdn.jsdelivr.net":
+            return True
+        normalized_path = (path or "").lower()
+        return "/npm/" in normalized_path and ".pdf" in normalized_path
 
     def _has_canonical_pricing_result(self, results: list[dict[str, Any]]) -> bool:
         for item in results[:5]:
@@ -7053,6 +7083,29 @@ class MySearchClient:
                 query_tokens=paper_subject_tokens,
             )
         )
+        canonical_paper_source = int(
+            mode == "pdf"
+            and (
+                (
+                    hostname == "arxiv.org"
+                    and any(marker in path for marker in ("/abs/", "/html/", "/pdf/"))
+                )
+                or (
+                    hostname == "openreview.net"
+                    and "/forum" in path
+                )
+            )
+        )
+        non_pdf_mirror_aggregator = int(
+            not (
+                mode == "pdf"
+                and self._is_obvious_pdf_mirror_or_aggregator_result(
+                    hostname=hostname,
+                    registered_domain=self._registered_domain(hostname),
+                    path=path,
+                )
+            )
+        )
         non_paper_compound_mismatch = int(
             not (
                 mode == "pdf"
@@ -7118,6 +7171,8 @@ class MySearchClient:
             canonical_status_page_match,
             status_page_match,
             non_status_api_endpoint,
+            canonical_paper_source,
+            non_pdf_mirror_aggregator,
             paper_subject_exact_match,
             primary_named_paper_bonus,
             non_derivative_paper_bonus,
