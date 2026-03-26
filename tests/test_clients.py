@@ -131,9 +131,8 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(result, "news")
 
-    def test_news_route_policy_prefers_exa_primary_for_award_result_queries(self) -> None:
+    def test_news_route_policy_keeps_tavily_primary_for_award_result_queries(self) -> None:
         client = MySearchClient()
-        client._provider_can_serve = lambda provider: provider.name == "exa"  # type: ignore[method-assign]
 
         policy = client._route_policy_for_request(
             query="2026 Oscars best picture winner",
@@ -143,8 +142,9 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertEqual(policy.key, "award_result")
-        self.assertEqual(policy.provider, "exa")
-        self.assertEqual(policy.fallback_chain, ("tavily",))
+        self.assertEqual(policy.provider, "tavily")
+        self.assertEqual(policy.fallback_chain, ("exa",))
+        self.assertTrue(policy.allow_exa_rescue)
 
     def test_news_verify_does_not_enable_tavily_firecrawl_blend(self) -> None:
         client = MySearchClient()
@@ -1001,6 +1001,80 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(captured["query"], "2026 Oscars winners list best picture full results")
         self.assertEqual(result["query"], "2026 Oscars winners list best picture full results")
+
+    def test_tavily_award_result_refinement_queries_trusted_domains_when_general_results_are_weak(self) -> None:
+        client = MySearchClient()
+        include_domain_calls: list[tuple[str, ...] | None] = []
+
+        def fake_search_tavily(  # type: ignore[no-untyped-def]
+            *,
+            query,
+            max_results,
+            topic,
+            include_answer,
+            include_content,
+            include_domains,
+            exclude_domains,
+            strategy,
+            days=None,
+        ):
+            include_domain_calls.append(tuple(include_domains) if include_domains else None)
+            if include_domains == ["grammy.com"]:
+                return {
+                    "provider": "tavily",
+                    "results": [
+                        {
+                            "provider": "tavily",
+                            "title": "2026 GRAMMYs winners: Album Of The Year",
+                            "url": "https://grammy.com/news/2026-grammys-winners-album-of-the-year",
+                            "snippet": "Album Of The Year winner DeBÍ TiRAR MáS FOToS.",
+                            "content": "",
+                        }
+                    ],
+                    "citations": [
+                        {
+                            "title": "2026 GRAMMYs winners: Album Of The Year",
+                            "url": "https://grammy.com/news/2026-grammys-winners-album-of-the-year",
+                        }
+                    ],
+                }
+            return {"provider": "tavily", "results": [], "citations": []}
+
+        client._search_tavily = fake_search_tavily  # type: ignore[method-assign]
+
+        result = client._maybe_refine_tavily_result_event_discovery(
+            query="2026 Grammy album of the year winner",
+            mode="news",
+            intent="news",
+            result={
+                "provider": "tavily",
+                "results": [
+                    {
+                        "provider": "tavily",
+                        "title": "Singer Kehlani Sets April 24 Release for Self-Titled Fifth Album",
+                        "url": "https://example.com/kehlani",
+                        "snippet": "The two-time GRAMMY winner shared news on Tuesday.",
+                        "content": "",
+                    }
+                ],
+                "citations": [],
+                "route_debug": {},
+            },
+            max_results=5,
+            include_domains=None,
+            exclude_domains=None,
+            from_date=None,
+        )
+
+        self.assertIn(("grammy.com",), include_domain_calls)
+        self.assertEqual(
+            result["results"][0]["url"],
+            "https://grammy.com/news/2026-grammys-winners-album-of-the-year",
+        )
+        self.assertIn(
+            "award-result-trusted-domain-refinement",
+            str(result.get("route_debug", {}).get("query_refinement") or ""),
+        )
 
     def test_extract_result_event_answer_prefers_prioritized_top_five_candidates(self) -> None:
         client = MySearchClient()

@@ -154,10 +154,11 @@ _MODE_PROVIDER_POLICY: dict[str, SearchRoutePolicy] = {
     ),
     "award_result": SearchRoutePolicy(
         key="award_result",
-        provider="exa",
-        fallback_chain=("tavily",),
+        provider="tavily",
+        fallback_chain=("exa",),
         tavily_topic="news",
         result_profile="news",
+        allow_exa_rescue=True,
     ),
     "status": SearchRoutePolicy(
         key="status",
@@ -3632,7 +3633,6 @@ class MySearchClient:
         if (
             self._looks_like_award_result_query(query_lower)
             and (intent == "news" or mode == "news")
-            and self._provider_can_serve(self.config.exa)
         ):
             return _MODE_PROVIDER_POLICY["award_result"]
         if intent == "news" or mode == "news" or self._looks_like_news_query(query_lower):
@@ -3971,29 +3971,78 @@ class MySearchClient:
         if self._has_strong_award_result(query=query, results=list(result.get("results") or [])):
             return result
         refined_query = self._refined_award_result_query(query)
-        if not refined_query or refined_query == query:
-            return result
         days = self._infer_tavily_days(intent=intent, from_date=from_date)
-        refined = self._search_tavily(
-            query=refined_query,
-            max_results=max_results,
-            topic="news",
-            include_answer=False,
-            include_content=False,
-            include_domains=None,
-            exclude_domains=exclude_domains,
-            strategy="verify",
-            days=days,
+        search_query = refined_query or query
+        merged = dict(result)
+        refinement_tags: list[str] = []
+        original_best_priority = max(
+            (self._result_event_page_priority(query=query, item=item) for item in list(result.get("results") or [])),
+            default=-1,
         )
-        if not refined.get("results"):
-            return result
-        merged = self._merge_search_payloads(
-            primary_result=result,
-            secondary_result=refined,
-            max_results=max_results,
-        )
+        if refined_query and refined_query != query:
+            refined = self._search_tavily(
+                query=refined_query,
+                max_results=max_results,
+                topic="news",
+                include_answer=False,
+                include_content=False,
+                include_domains=None,
+                exclude_domains=exclude_domains,
+                strategy="verify",
+                days=days,
+            )
+            if refined.get("results"):
+                merged = self._merge_search_payloads(
+                    primary_result=merged,
+                    secondary_result=refined,
+                    max_results=max_results,
+                )
+                refinement_tags.append("award-result-tavily-refinement")
         merged_results = list(merged.get("results") or [])
         if not self._has_strong_award_result(query=query, results=merged_results):
+            for trusted_domains in self._award_result_trusted_domain_groups(query):
+                focused = self._search_tavily(
+                    query=search_query,
+                    max_results=max_results,
+                    topic="news",
+                    include_answer=False,
+                    include_content=False,
+                    include_domains=trusted_domains,
+                    exclude_domains=exclude_domains,
+                    strategy="verify",
+                    days=days,
+                )
+                if not focused.get("results"):
+                    continue
+                merged = self._merge_search_payloads(
+                    primary_result=merged,
+                    secondary_result=focused,
+                    max_results=max_results,
+                )
+                merged_results = list(merged.get("results") or [])
+                refinement_tags.append("award-result-trusted-domain-refinement")
+                if self._has_strong_award_result(query=query, results=merged_results):
+                    break
+        merged_results = list(merged.get("results") or [])
+        if merged_results:
+            merged_results = sorted(
+                merged_results,
+                key=lambda item: self._news_result_rank(
+                    query=query,
+                    item=item,
+                    include_domains=None,
+                ),
+                reverse=True,
+            )[:max_results]
+            merged["results"] = merged_results
+        merged_best_priority = max(
+            (self._result_event_page_priority(query=query, item=item) for item in merged_results),
+            default=-1,
+        )
+        if (
+            not self._has_strong_award_result(query=query, results=merged_results)
+            and merged_best_priority <= original_best_priority
+        ):
             return result
         refined_result = dict(result)
         refined_result["provider"] = "tavily"
@@ -4002,7 +4051,8 @@ class MySearchClient:
         if merged.get("matched_results") is not None:
             refined_result["matched_results"] = merged.get("matched_results")
         refined_result["route_debug"] = dict(refined_result.get("route_debug") or {})
-        refined_result["route_debug"]["query_refinement"] = "award-result-tavily-refinement"
+        if refinement_tags:
+            refined_result["route_debug"]["query_refinement"] = ",".join(refinement_tags)
         return refined_result
 
     def _refined_award_result_query(self, query: str) -> str:
@@ -4040,6 +4090,32 @@ class MySearchClient:
         if not extra_terms:
             return query
         return f"{query} {' '.join(extra_terms)}".strip()
+
+    def _award_result_trusted_domain_groups(self, query: str) -> list[list[str]]:
+        query_lower = query.lower()
+        if "grammy" in query_lower:
+            return [
+                ["grammy.com"],
+                ["npr.org", "pbs.org", "reuters.com", "billboard.com", "abcnews.go.com"],
+            ]
+        if "oscar" in query_lower or "academy awards" in query_lower:
+            return [
+                ["oscars.org", "theacademy.com"],
+                ["apnews.com", "npr.org", "reuters.com", "nytimes.com", "abcnews.go.com"],
+            ]
+        if "golden globe" in query_lower:
+            return [
+                ["goldenglobes.com"],
+                ["reuters.com", "variety.com", "nytimes.com", "apnews.com"],
+            ]
+        if "bafta" in query_lower:
+            return [
+                ["bafta.org"],
+                ["reuters.com", "bbc.com", "apnews.com", "theguardian.com"],
+            ]
+        return [
+            ["reuters.com", "apnews.com", "npr.org", "nytimes.com"],
+        ]
 
     def _should_skip_exa_rescue_for_result_event(
         self,
