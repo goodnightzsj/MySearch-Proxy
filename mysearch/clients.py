@@ -6902,53 +6902,72 @@ class MySearchClient:
         if include_x_videos:
             payload["include_x_videos"] = True
 
-        try:
-            response = self._request_json(
-                provider=provider,
-                method="POST",
-                path=search_path,
-                payload=payload,
-                key=key.key,
-                base_url=provider.base_url_for("social_search"),
-            timeout_seconds=max(
-                30,
-                int(getattr(self.config, "xai_social_timeout_seconds", 120) or 120),
-            ),
+        last_error: MySearchError | None = None
+        for attempt in range(2):
+            try:
+                response = self._request_json(
+                    provider=provider,
+                    method="POST",
+                    path=search_path,
+                    payload=payload,
+                    key=key.key,
+                    base_url=provider.base_url_for("social_search"),
+                    timeout_seconds=max(
+                        30,
+                        int(getattr(self.config, "xai_social_timeout_seconds", 120) or 120),
+                    ),
+                )
+                normalized = self._normalize_social_gateway_response(
+                    response=response,
+                    query=query,
+                    transport=key.source,
+                    from_date=from_date,
+                    to_date=to_date,
+                )
+                if normalized.get("results"):
+                    return normalized
+                last_error = MySearchError(
+                    "xai compatible returned no x.com/twitter.com results"
+                )
+                break
+            except MySearchHTTPError as exc:
+                if exc.is_auth_error:
+                    raise
+                last_error = exc
+                if attempt == 0 and self._is_retryable_social_gateway_error(exc):
+                    continue
+                break
+            except MySearchError as exc:
+                last_error = exc
+                if attempt == 0 and self._is_retryable_social_gateway_error(exc):
+                    continue
+                break
+
+        return self._search_tavily_social_fallback(
+            query=query,
+            max_results=max_results,
+            from_date=from_date,
+            to_date=to_date,
+            fallback_reason=str(last_error or "xai compatible search failed"),
+        )
+
+    def _is_retryable_social_gateway_error(self, exc: Exception) -> bool:
+        if isinstance(exc, MySearchHTTPError) and exc.status_code in {429, 502, 503, 504}:
+            return True
+        detail_text = str(exc).lower()
+        return any(
+            marker in detail_text
+            for marker in (
+                "timed out",
+                "timeout",
+                "tls connect error",
+                "curl: (35)",
+                "connection reset",
+                "temporarily unavailable",
+                "bad gateway",
+                "eof",
             )
-            normalized = self._normalize_social_gateway_response(
-                response=response,
-                query=query,
-                transport=key.source,
-                from_date=from_date,
-                to_date=to_date,
-            )
-            if normalized.get("results"):
-                return normalized
-            return self._search_tavily_social_fallback(
-                query=query,
-                max_results=max_results,
-                from_date=from_date,
-                to_date=to_date,
-                fallback_reason="xai compatible returned no x.com/twitter.com results",
-            )
-        except MySearchHTTPError as exc:
-            if exc.is_auth_error:
-                raise
-            return self._search_tavily_social_fallback(
-                query=query,
-                max_results=max_results,
-                from_date=from_date,
-                to_date=to_date,
-                fallback_reason=str(exc),
-            )
-        except MySearchError as exc:
-            return self._search_tavily_social_fallback(
-                query=query,
-                max_results=max_results,
-                from_date=from_date,
-                to_date=to_date,
-                fallback_reason=str(exc),
-            )
+        )
 
     def _search_tavily_social_fallback(
         self,

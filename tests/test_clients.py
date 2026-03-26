@@ -1785,7 +1785,7 @@ class MySearchClientTests(unittest.TestCase):
             include_x_videos=False,
         )
 
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0]["timeout_seconds"], 120)
         self.assertEqual(result["provider"], "tavily_social_fallback")
         self.assertEqual(result["results"][0]["url"], "https://x.com/OpenAI/status/123")
@@ -1845,6 +1845,64 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["provider"], "tavily_social_fallback")
         self.assertEqual(result["results"][0]["url"], "https://x.com/OpenAI/status/456")
         self.assertIn("no x.com/twitter.com results", result["fallback"]["reason"])
+
+    def test_xai_compatible_search_retries_transient_gateway_error_before_fallback(
+        self,
+    ) -> None:
+        client = MySearchClient()
+        provider = client.config.xai
+        provider.search_mode = "compatible"
+        provider.default_paths["social_search"] = "/social/search"
+        provider.alternate_base_urls["social_search"] = "http://gateway.example/v1"
+        client._get_key_or_raise = lambda provider: type(  # type: ignore[method-assign]
+            "Record",
+            (),
+            {"key": "gateway-token", "source": "env"},
+        )()
+
+        calls: list[dict[str, Any]] = []
+
+        def fake_request_json(**kwargs: Any) -> dict[str, Any]:
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise MySearchHTTPError(
+                    provider="xai",
+                    status_code=502,
+                    detail=(
+                        "AppChatReverse: Chat failed, Failed to perform, curl: (35) "
+                        "TLS connect error"
+                    ),
+                    url="http://gateway.example/v1/social/search",
+                )
+            return {
+                "query": kwargs["payload"]["query"],
+                "results": [
+                    {
+                        "title": "OpenAI",
+                        "url": "https://x.com/OpenAI/status/789",
+                        "text": "Latest OpenAI pricing reactions",
+                    }
+                ],
+                "tool_usage": {"social_search_calls": 1},
+            }
+
+        client._request_json = fake_request_json  # type: ignore[method-assign]
+
+        result = client._search_xai_compatible(
+            query="OpenAI pricing reactions on X",
+            sources=["x"],
+            max_results=5,
+            allowed_x_handles=None,
+            excluded_x_handles=None,
+            from_date=None,
+            to_date=None,
+            include_x_images=False,
+            include_x_videos=False,
+        )
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(result["provider"], "custom_social")
+        self.assertEqual(result["results"][0]["url"], "https://x.com/OpenAI/status/789")
 
     def test_tavily_social_fallback_diversifies_repeated_handles(self) -> None:
         client = MySearchClient()
