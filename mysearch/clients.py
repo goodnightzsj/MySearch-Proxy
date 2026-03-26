@@ -2292,24 +2292,44 @@ class MySearchClient:
             " ".join(entity_tokens).lower()
             for entity_tokens in self._research_comparison_entities(query)
         }
-        if (
-            any("tavily" in entity for entity in entity_texts)
-            and any("firecrawl" in entity for entity in entity_texts)
-        ):
-            comparison_url = "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily"
-            if comparison_url not in seen_urls:
-                seen_urls.add(comparison_url)
-                injected.append(
-                    {
-                        "provider": "canonical_research_projects",
-                        "title": "Firecrawl vs Tavily - Firecrawl",
-                        "url": comparison_url,
-                        "snippet": (
-                            "Firecrawl positions itself as an extraction-first workflow with scrape "
-                            "and structured extraction, while Tavily focuses on search and retrieval APIs."
-                        ),
-                    }
-                )
+        comparison_projects: dict[frozenset[str], dict[str, str]] = {
+            frozenset({"firecrawl", "tavily"}): {
+                "title": "Firecrawl vs Tavily - Firecrawl",
+                "url": "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                "snippet": (
+                    "Firecrawl positions itself as an extraction-first workflow with scrape "
+                    "and structured extraction, while Tavily focuses on search and retrieval APIs."
+                ),
+            },
+            frozenset({"firecrawl", "exa"}): {
+                "title": "Firecrawl vs Exa - Firecrawl",
+                "url": "https://www.firecrawl.dev/compare/firecrawl-vs-exa",
+                "snippet": (
+                    "Firecrawl compares extraction-first crawling and structured data workflows "
+                    "against Exa's semantic search and discovery APIs."
+                ),
+            },
+        }
+        entity_brands = {
+            brand
+            for brand in ("tavily", "firecrawl", "exa")
+            if any(brand in entity for entity in entity_texts)
+        }
+        for pair, item in comparison_projects.items():
+            if not pair.issubset(entity_brands):
+                continue
+            comparison_url = item["url"]
+            if comparison_url in seen_urls:
+                continue
+            seen_urls.add(comparison_url)
+            injected.append(
+                {
+                    "provider": "canonical_research_projects",
+                    "title": item["title"],
+                    "url": comparison_url,
+                    "snippet": item["snippet"],
+                }
+            )
         return injected
 
     def _research_generic_vendor_doc_results(self, query: str) -> list[dict[str, Any]]:
