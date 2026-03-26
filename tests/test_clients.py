@@ -6603,6 +6603,19 @@ class MySearchClientTests(unittest.TestCase):
         self.assertIn("https://docs.exa.ai/reference/search", urls)
         self.assertIn("https://www.firecrawl.dev/compare/firecrawl-vs-exa", urls)
 
+    def test_research_known_provider_doc_results_include_firecrawl_compare_hub_for_unknown_pair(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        results = client._research_known_provider_doc_results(
+            "compare Firecrawl and Apify for AI agent web retrieval 2026"
+        )
+
+        urls = [item["url"] for item in results]
+        self.assertIn("https://docs.firecrawl.dev/api-reference/endpoint/extract", urls)
+        self.assertIn("https://www.firecrawl.dev/compare", urls)
+
     def test_authoritative_research_selection_diversifies_supporting_vendor_docs_by_domain(
         self,
     ) -> None:
@@ -7828,6 +7841,33 @@ class MySearchClientTests(unittest.TestCase):
 
         top_urls = [item["url"] for item in result["web_search"]["results"][:5]]
         self.assertIn("https://www.firecrawl.dev/compare/firecrawl-vs-exa", top_urls)
+
+    def test_research_canonical_vendor_fallback_for_firecrawl_unknown_pair_includes_compare_hub(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        def failing_search(**kwargs):  # type: ignore[no-untyped-def]
+            raise MySearchError("provider unavailable")
+
+        client.search = failing_search  # type: ignore[method-assign]
+        client.extract_url = lambda **kwargs: {  # type: ignore[method-assign]
+            "url": kwargs["url"],
+            "provider": "firecrawl",
+            "content": f"content for {kwargs['url']}",
+            "cache": {"extract": {"hit": False, "ttl_seconds": 300}},
+        }
+
+        result = client.research(
+            query="compare Firecrawl and Apify for AI agent web retrieval 2026",
+            mode="research",
+            strategy="deep",
+            include_social=False,
+            scrape_top_n=2,
+        )
+
+        top_urls = [item["url"] for item in result["web_search"]["results"][:5]]
+        self.assertIn("https://www.firecrawl.dev/compare", top_urls)
 
     def test_dedupe_research_results_preserves_matched_providers(self) -> None:
         client = MySearchClient()

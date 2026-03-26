@@ -2315,12 +2315,14 @@ class MySearchClient:
             for brand in ("tavily", "firecrawl", "exa")
             if any(brand in entity for entity in entity_texts)
         }
+        injected_pair_project = False
         for pair, item in comparison_projects.items():
             if not pair.issubset(entity_brands):
                 continue
             comparison_url = item["url"]
             if comparison_url in seen_urls:
                 continue
+            injected_pair_project = True
             seen_urls.add(comparison_url)
             injected.append(
                 {
@@ -2328,6 +2330,25 @@ class MySearchClient:
                     "title": item["title"],
                     "url": comparison_url,
                     "snippet": item["snippet"],
+                }
+            )
+        generic_comparison_hub = "https://www.firecrawl.dev/compare"
+        if (
+            "firecrawl" in entity_brands
+            and len(entity_texts) >= 2
+            and not injected_pair_project
+            and generic_comparison_hub not in seen_urls
+        ):
+            seen_urls.add(generic_comparison_hub)
+            injected.append(
+                {
+                    "provider": "canonical_research_projects",
+                    "title": "Compare Firecrawl with Alternatives | In-depth Tool Comparisons",
+                    "url": generic_comparison_hub,
+                    "snippet": (
+                        "Firecrawl maintains first-party comparison pages covering extraction, "
+                        "search, and RAG trade-offs against alternative tooling."
+                    ),
                 }
             )
         return injected
