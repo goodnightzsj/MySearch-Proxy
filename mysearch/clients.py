@@ -7524,13 +7524,28 @@ class MySearchClient:
             }
             return cached_social_result
 
-        return self._search_tavily_social_fallback(
-            query=query,
-            max_results=max_results,
-            from_date=from_date,
-            to_date=to_date,
-            fallback_reason=str(last_error or "xai compatible search failed"),
-        )
+        fallback_reason = str(last_error or "xai compatible search failed")
+        try:
+            tavily_fallback_result = self._search_tavily_social_fallback(
+                query=query,
+                max_results=max_results,
+                from_date=from_date,
+                to_date=to_date,
+                fallback_reason=fallback_reason,
+            )
+        except MySearchError as fallback_exc:
+            return self._build_social_unavailable_result(
+                query=query,
+                fallback_reason=f"{fallback_reason} | tavily_social_fallback failed: {fallback_exc}",
+            )
+        if tavily_fallback_result.get("results"):
+            self._cache_set("social", social_cache_key, tavily_fallback_result)
+            return self._annotate_cache(
+                tavily_fallback_result,
+                namespace="social",
+                hit=False,
+            )
+        return tavily_fallback_result
 
     def _is_retryable_social_gateway_error(self, exc: Exception) -> bool:
         if isinstance(exc, MySearchHTTPError) and exc.status_code in {429, 502, 503, 504}:
@@ -7604,6 +7619,28 @@ class MySearchClient:
                 "to": "tavily_social_fallback",
                 "reason": fallback_reason[:200],
             },
+        }
+
+    def _build_social_unavailable_result(
+        self,
+        *,
+        query: str,
+        fallback_reason: str,
+    ) -> dict[str, Any]:
+        reason = fallback_reason[:200]
+        return {
+            "provider": "social_unavailable",
+            "transport": "",
+            "query": query,
+            "answer": "",
+            "results": [],
+            "citations": [],
+            "fallback": {
+                "from": "xai_compatible",
+                "to": "social_unavailable",
+                "reason": reason,
+            },
+            "summary": f"Social/X search unavailable: {reason}",
         }
 
     def _scrape_firecrawl(
