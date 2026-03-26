@@ -7470,7 +7470,15 @@ class MySearchClient:
         cleaned = re.sub(r"\s+", " ", (title_text or "").strip())
         if not cleaned:
             return True
-        return bool(re.fullmatch(r"[A-Za-z][A-Za-z &]+ > [A-Za-z][A-Za-z ,&()/-]+", cleaned))
+        if re.fullmatch(r"[A-Za-z][A-Za-z &]+ > [A-Za-z][A-Za-z ,&()/-]+", cleaned):
+            return True
+        lowered = cleaned.lower()
+        return bool(
+            re.fullmatch(
+                r"arxiv:\d{4}\.\d{4,5}(?:v\d+)?(?: \[[a-z.\-]+\])?(?: \d{1,2} [a-z]{3} \d{4})?",
+                lowered,
+            )
+        )
 
     def _fetch_arxiv_title(self, url: str) -> str:
         canonical_url = self._canonical_result_url(url)

@@ -1350,6 +1350,13 @@ class MySearchClientTests(unittest.TestCase):
             "https://arxiv.org/abs/2501.12948",
         )
 
+    def test_generic_arxiv_title_detection_accepts_arxiv_id_format(self) -> None:
+        client = MySearchClient()
+
+        self.assertTrue(
+            client._looks_like_generic_arxiv_subject_title("arXiv:2505.09388v1 [cs.CL] 14 May 2025")
+        )
+
     def test_pdf_query_tokenization_keeps_short_model_suffix(self) -> None:
         client = MySearchClient()
 
