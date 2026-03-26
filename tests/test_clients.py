@@ -2160,6 +2160,70 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["provider"], "social_unavailable")
         self.assertTrue(result["cache"]["social_unavailable"]["hit"])
 
+    def test_xai_compatible_search_uses_gateway_outage_cache_for_different_query(self) -> None:
+        client = MySearchClient()
+        provider = client.config.xai
+        provider.search_mode = "compatible"
+        provider.default_paths["social_search"] = "/social/search"
+        provider.alternate_base_urls["social_search"] = "http://gateway.example/v1"
+        client._get_key_or_raise = lambda provider: type(  # type: ignore[method-assign]
+            "Record",
+            (),
+            {"key": "gateway-token", "source": "env"},
+        )()
+
+        gateway_cache_key = client._build_social_gateway_cache_key(
+            base_url="http://gateway.example/v1",
+            path="/social/search",
+        )
+        client._cache_set(
+            "social_gateway",
+            gateway_cache_key,
+            client._build_social_gateway_unavailable_result(
+                base_url="http://gateway.example/v1",
+                fallback_reason="502 bad gateway",
+            ),
+        )
+
+        def fail_request_json(**kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("custom social should not run when gateway outage cache exists")
+
+        client._request_json = fail_request_json  # type: ignore[method-assign]
+        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "Fallback social summary",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "OpenAI on X",
+                    "url": "https://x.com/OpenAI/status/777",
+                    "snippet": "Latest OpenAI post",
+                    "content": "",
+                }
+            ],
+            "citations": [{"title": "OpenAI on X", "url": "https://x.com/OpenAI/status/777"}],
+        }
+
+        result = client._search_xai_compatible(
+            query="OpenAI webhooks reactions on X",
+            sources=["x"],
+            max_results=5,
+            allowed_x_handles=None,
+            excluded_x_handles=None,
+            from_date=None,
+            to_date=None,
+            include_x_images=False,
+            include_x_videos=False,
+        )
+
+        self.assertEqual(result["provider"], "tavily_social_fallback")
+        self.assertTrue(result["cache"]["social_gateway"]["hit"])
+        self.assertFalse(result["cache"]["social"]["hit"])
+        self.assertEqual(result["results"][0]["url"], "https://x.com/OpenAI/status/777")
+
     def test_xai_compatible_search_returns_structured_unavailable_result_when_all_social_paths_fail(
         self,
     ) -> None:
@@ -2216,6 +2280,15 @@ class MySearchClientTests(unittest.TestCase):
         self.assertIsNotNone(cached_result)
         assert cached_result is not None
         self.assertEqual(cached_result["provider"], "social_unavailable")
+
+        gateway_cache_key = client._build_social_gateway_cache_key(
+            base_url="http://gateway.example/v1",
+            path="/social/search",
+        )
+        gateway_cached = client._cache_get("social_gateway", gateway_cache_key)
+        self.assertIsNotNone(gateway_cached)
+        assert gateway_cached is not None
+        self.assertEqual(gateway_cached["provider"], "social_gateway_unavailable")
 
     def test_xai_compatible_search_clears_social_unavailable_cache_on_success(self) -> None:
         client = MySearchClient()
