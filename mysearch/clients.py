@@ -2285,6 +2285,54 @@ class MySearchClient:
             return "community"
         if registered_domain == "github.com":
             return "project"
+        comparison_like = self._looks_like_comparison_query(query.lower())
+        query_tokens = self._research_non_authoritative_query_tokens(query)
+        flags = self._resource_result_flags(
+            mode=mode,
+            item=normalized,
+            query_tokens=query_tokens,
+            include_domains=include_domains,
+        )
+        project_brand_match = (
+            bool(flags["include_match"])
+            or bool(flags["registered_domain_label_match"])
+            or bool(flags["host_brand_match"])
+        )
+        comparison_marker = (
+            " vs " in f" {title_text} "
+            or " versus " in f" {title_text} "
+            or " compare " in f" {title_text} "
+            or " comparison " in f" {title_text} "
+            or any(
+                marker in path
+                for marker in (
+                    "-vs-",
+                    "/compare",
+                    "/comparison",
+                    "/comparisons/",
+                    "/versus/",
+                )
+            )
+        )
+        project_candidate = bool(flags["non_third_party"]) and project_brand_match and (
+            not comparison_like
+            or comparison_marker
+        )
+        if project_candidate:
+            return "project"
+        branded_marketing_candidate = comparison_like and project_brand_match and any(
+            marker in title_text or marker in path
+            for marker in (
+                "alternatives",
+                "pricing",
+                "best ",
+                "top ",
+                "/pricing",
+                "/alternatives/",
+            )
+        )
+        if branded_marketing_candidate:
+            return "listicle"
         if registered_domain in directory_domains or (
             "mcp" in hostname and any(marker in path for marker in ("/server/", "/servers/"))
         ):
@@ -2382,13 +2430,15 @@ class MySearchClient:
                     results=listicle_candidates,
                     include_domains=include_domains,
                 )
-            selected = [
-                *project_candidates,
-                *curated_candidates,
-                *listicle_candidates,
-                *directory_candidates,
-                *community_candidates,
-            ][:max_results]
+            selected = self._assemble_non_authoritative_research_candidates(
+                query=query,
+                project_candidates=project_candidates,
+                curated_candidates=curated_candidates,
+                listicle_candidates=listicle_candidates,
+                directory_candidates=directory_candidates,
+                community_candidates=community_candidates,
+                max_results=max_results,
+            )
             selected_domains = self._collect_source_domains(results=selected, citations=[])
             cluster_counts: dict[str, int] = {}
             for item in selected:
@@ -2631,6 +2681,63 @@ class MySearchClient:
         ]
         return [*selected, *remaining]
 
+    def _assemble_non_authoritative_research_candidates(
+        self,
+        *,
+        query: str,
+        project_candidates: list[dict[str, Any]],
+        curated_candidates: list[dict[str, Any]],
+        listicle_candidates: list[dict[str, Any]],
+        directory_candidates: list[dict[str, Any]],
+        community_candidates: list[dict[str, Any]],
+        max_results: int,
+    ) -> list[dict[str, Any]]:
+        if max_results <= 0:
+            return []
+        if not self._looks_like_comparison_query(query.lower()):
+            return [
+                *project_candidates,
+                *curated_candidates,
+                *listicle_candidates,
+                *directory_candidates,
+                *community_candidates,
+            ][:max_results]
+
+        diversified_projects: list[dict[str, Any]] = []
+        seen_project_domains: set[str] = set()
+        for item in project_candidates:
+            registered_domain = self._registered_domain(
+                self._result_hostname(item)
+            )
+            domain_key = registered_domain or str(item.get("url") or "")
+            if domain_key in seen_project_domains:
+                continue
+            seen_project_domains.add(domain_key)
+            diversified_projects.append(item)
+
+        ordered = diversified_projects[:2]
+        remaining = max_results - len(ordered)
+        if remaining <= 0:
+            return ordered
+
+        ordered.extend(curated_candidates[:remaining])
+        remaining = max_results - len(ordered)
+        if remaining <= 0:
+            return ordered
+
+        ordered.extend(listicle_candidates[:remaining])
+        remaining = max_results - len(ordered)
+        if remaining <= 0:
+            return ordered
+
+        ordered.extend(directory_candidates[:remaining])
+        remaining = max_results - len(ordered)
+        if remaining <= 0:
+            return ordered
+
+        ordered.extend(community_candidates[:remaining])
+        return ordered[:max_results]
+
     def _assemble_authoritative_research_candidates(
         self,
         *,
@@ -2680,6 +2787,42 @@ class MySearchClient:
             "official",
             "retrieval",
             "search",
+            "workflow",
+            "workflows",
+        }
+        return [
+            token
+            for token in self._query_brand_tokens(query)
+            if token not in generic_tokens
+        ]
+
+    def _research_non_authoritative_query_tokens(self, query: str) -> list[str]:
+        generic_tokens = {
+            "agent",
+            "agentic",
+            "agents",
+            "ai",
+            "analysis",
+            "approach",
+            "best",
+            "build",
+            "code",
+            "compare",
+            "comparison",
+            "docs",
+            "documentation",
+            "guide",
+            "guides",
+            "latest",
+            "mcp",
+            "official",
+            "retrieval",
+            "search",
+            "server",
+            "servers",
+            "tool",
+            "tools",
+            "web",
             "workflow",
             "workflows",
         }
