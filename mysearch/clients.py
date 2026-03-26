@@ -248,14 +248,17 @@ class MySearchClient:
         self._cache_ttls = {
             "search": self.config.search_cache_ttl_seconds,
             "extract": self.config.extract_cache_ttl_seconds,
+            "social": max(self.config.search_cache_ttl_seconds, 300),
         }
         self._cache_store: dict[str, dict[str, dict[str, Any]]] = {
             "search": {},
             "extract": {},
+            "social": {},
         }
         self._cache_stats: dict[str, dict[str, int]] = {
             "search": {"hits": 0, "misses": 0},
             "extract": {"hits": 0, "misses": 0},
+            "social": {"hits": 0, "misses": 0},
         }
         self._cache_max_entries = 256
         self._provider_probe_ttl_seconds = 300
@@ -520,6 +523,32 @@ class MySearchClient:
                 "formats": formats,
                 "only_main_content": only_main_content,
                 "provider": provider,
+            },
+        )
+
+    def _build_social_cache_key(
+        self,
+        *,
+        query: str,
+        max_results: int,
+        allowed_x_handles: list[str] | None,
+        excluded_x_handles: list[str] | None,
+        from_date: str | None,
+        to_date: str | None,
+        include_x_images: bool,
+        include_x_videos: bool,
+    ) -> str:
+        return self._build_cache_key(
+            "social",
+            {
+                "query": query,
+                "max_results": max_results,
+                "allowed_x_handles": sorted(set(allowed_x_handles or [])),
+                "excluded_x_handles": sorted(set(excluded_x_handles or [])),
+                "from_date": from_date or "",
+                "to_date": to_date or "",
+                "include_x_images": include_x_images,
+                "include_x_videos": include_x_videos,
             },
         )
 
@@ -7377,6 +7406,16 @@ class MySearchClient:
             payload["include_x_images"] = True
         if include_x_videos:
             payload["include_x_videos"] = True
+        social_cache_key = self._build_social_cache_key(
+            query=query,
+            max_results=max_results,
+            allowed_x_handles=allowed_x_handles,
+            excluded_x_handles=excluded_x_handles,
+            from_date=from_date,
+            to_date=to_date,
+            include_x_images=include_x_images,
+            include_x_videos=include_x_videos,
+        )
 
         retry_attempts = 3
         last_error: MySearchError | None = None
@@ -7402,7 +7441,12 @@ class MySearchClient:
                     to_date=to_date,
                 )
                 if normalized.get("results"):
-                    return normalized
+                    self._cache_set("social", social_cache_key, normalized)
+                    return self._annotate_cache(
+                        normalized,
+                        namespace="social",
+                        hit=False,
+                    )
                 last_error = MySearchError(
                     "xai compatible returned no x.com/twitter.com results"
                 )
@@ -7419,6 +7463,20 @@ class MySearchClient:
                 if attempt < retry_attempts - 1 and self._is_retryable_social_gateway_error(exc):
                     continue
                 break
+
+        cached_social_result = self._cache_get("social", social_cache_key)
+        if cached_social_result and cached_social_result.get("results"):
+            cached_social_result = self._annotate_cache(
+                cached_social_result,
+                namespace="social",
+                hit=True,
+            )
+            cached_social_result["fallback"] = {
+                "from": "xai_compatible",
+                "to": "social_last_good_cache",
+                "reason": str(last_error or "xai compatible search failed")[:200],
+            }
+            return cached_social_result
 
         return self._search_tavily_social_fallback(
             query=query,
