@@ -11524,8 +11524,8 @@ class MySearchClient:
             )
             if cluster_label and cluster_label not in entry["clusters"]:
                 entry["clusters"].append(cluster_label)
-            if len(claim_order) >= 4 and all(
-                len(claims_by_key[key]["sources"]) >= 1 for key in claim_order[:4]
+            if len(claim_order) >= 8 and all(
+                len(claims_by_key[key]["sources"]) >= 1 for key in claim_order[:8]
             ):
                 continue
         if not claim_order:
