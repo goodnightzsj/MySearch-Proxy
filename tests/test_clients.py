@@ -6687,6 +6687,7 @@ class MySearchClientTests(unittest.TestCase):
 
         urls = [item["url"] for item in results]
         self.assertIn("https://docs.firecrawl.dev/api-reference/endpoint/extract", urls)
+        self.assertIn("https://docs.apify.com/api", urls)
         self.assertIn("https://www.firecrawl.dev/compare", urls)
 
     def test_authoritative_research_selection_diversifies_supporting_vendor_docs_by_domain(
@@ -7940,6 +7941,7 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         top_urls = [item["url"] for item in result["web_search"]["results"][:5]]
+        self.assertIn("https://docs.apify.com/api", top_urls)
         self.assertIn("https://www.firecrawl.dev/compare", top_urls)
 
     def test_dedupe_research_results_preserves_matched_providers(self) -> None:

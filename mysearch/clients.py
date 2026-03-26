@@ -2206,6 +2206,14 @@ class MySearchClient:
                     "snippet": "Exa provides a search API for semantic web retrieval and content discovery.",
                 },
             ],
+            "apify": [
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Apify API documentation",
+                    "url": "https://docs.apify.com/api",
+                    "snippet": "Apify exposes a REST API for running actors, retrieving datasets, and automating large-scale web scraping workflows.",
+                },
+            ],
         }
 
     def _research_canonical_doc_snippet_for_url(self, url: str) -> str:
