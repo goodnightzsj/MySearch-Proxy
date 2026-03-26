@@ -2166,6 +2166,11 @@ class MySearchClient:
                 "Exa search docs",
                 "Exa contents docs",
             ]
+        if "apify" in lowered:
+            return [
+                "Apify api docs",
+                "Apify actors docs",
+            ]
         return []
 
     def _research_canonical_doc_catalog(self) -> dict[str, list[dict[str, Any]]]:
@@ -2334,10 +2339,21 @@ class MySearchClient:
                     "against Exa's semantic search and discovery APIs."
                 ),
             },
+            frozenset({"firecrawl", "apify"}): {
+                "title": "Firecrawl vs. Apify: 2026 guide for AI and data teams",
+                "url": "https://blog.apify.com/firecrawl-vs-apify/",
+                "snippet": (
+                    "Apify compares Firecrawl's unified AI-driven scraping API with "
+                    "Apify's broader scraping platform and actor ecosystem."
+                ),
+            },
         }
+        tracked_brands = set(catalog.keys())
+        for pair in comparison_projects:
+            tracked_brands.update(pair)
         entity_brands = {
             brand
-            for brand in ("tavily", "firecrawl", "exa")
+            for brand in tracked_brands
             if any(brand in entity for entity in entity_texts)
         }
         injected_pair_project = False
@@ -2884,6 +2900,10 @@ class MySearchClient:
                     results=supporting_candidates,
                     include_domains=include_domains,
                 )
+                supporting_candidates = self._diversify_research_supporting_candidates(
+                    query=query,
+                    candidates=supporting_candidates,
+                )
             if supporting_candidates:
                 indexed_supporting_candidates = list(enumerate(supporting_candidates))
                 supporting_candidates = [
@@ -3180,6 +3200,57 @@ class MySearchClient:
                 indexed_remaining,
                 key=lambda pair: (
                     self._research_official_candidate_kind_rank(pair[1]),
+                    pair[0],
+                ),
+            )
+        ]
+        return [*selected, *remaining]
+
+    def _diversify_research_supporting_candidates(
+        self,
+        *,
+        query: str,
+        candidates: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        entities = self._research_comparison_entities(query)
+        if len(entities) < 2 or len(candidates) < 2:
+            return candidates
+        indexed_remaining = list(enumerate(candidates))
+        selected: list[dict[str, Any]] = []
+        for entity_tokens in entities:
+            matches = [
+                (index, item)
+                for index, item in indexed_remaining
+                if self._research_result_matches_entity(
+                    item=item,
+                    entity_tokens=entity_tokens,
+                )
+            ]
+            if not matches:
+                continue
+            best_index, best_item = min(
+                matches,
+                key=lambda pair: (
+                    self._research_supporting_candidate_kind_rank(
+                        pair[1],
+                        query=query,
+                    ),
+                    pair[0],
+                ),
+            )
+            selected.append(best_item)
+            indexed_remaining = [
+                pair for pair in indexed_remaining if pair[0] != best_index
+            ]
+        remaining = [
+            item
+            for _, item in sorted(
+                indexed_remaining,
+                key=lambda pair: (
+                    self._research_supporting_candidate_kind_rank(
+                        pair[1],
+                        query=query,
+                    ),
                     pair[0],
                 ),
             )
