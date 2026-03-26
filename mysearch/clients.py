@@ -1663,6 +1663,10 @@ class MySearchClient:
         docs_rescue_results.extend(
             self._research_known_provider_doc_results(query)
         )
+        if authoritative_research:
+            docs_rescue_results.extend(
+                self._research_generic_vendor_doc_results(query)
+            )
         docs_rescue_provider = docs_rescue.get("provider", "") if docs_rescue and not research_errors.get("docs_rescue") else ""
         tavily_support = research_results.get("tavily_support")
         tavily_support_results = (
@@ -2125,6 +2129,65 @@ class MySearchClient:
                     seen_urls.add(url)
                     injected.append(dict(item))
         return injected
+
+    def _research_generic_vendor_doc_results(self, query: str) -> list[dict[str, Any]]:
+        query_lower = query.lower()
+        if not any(
+            marker in query_lower
+            for marker in (
+                "official docs",
+                "docs retrieval",
+                "documentation retrieval",
+                "agentic search",
+                "web retrieval",
+            )
+        ):
+            return []
+        generic_tokens = {
+            "agent",
+            "agentic",
+            "agents",
+            "ai",
+            "approach",
+            "best",
+            "docs",
+            "documentation",
+            "guide",
+            "guides",
+            "official",
+            "retrieval",
+            "search",
+            "web",
+            "workflow",
+            "workflows",
+        }
+        specific_tokens = [
+            token
+            for token in self._query_precision_tokens(query)
+            if token not in generic_tokens
+        ]
+        if specific_tokens:
+            return []
+        return [
+            {
+                "provider": "canonical_research_docs",
+                "title": "Search API - Tavily",
+                "url": "https://docs.tavily.com/documentation/api-reference/search",
+                "snippet": "Official Tavily Search API reference for web retrieval and search workflows.",
+            },
+            {
+                "provider": "canonical_research_docs",
+                "title": "Extract - Firecrawl Docs",
+                "url": "https://docs.firecrawl.dev/api-reference/endpoint/extract",
+                "snippet": "Official Firecrawl extract API reference for structured extraction workflows.",
+            },
+            {
+                "provider": "canonical_research_docs",
+                "title": "Search - Exa Docs",
+                "url": "https://docs.exa.ai/reference/search",
+                "snippet": "Official Exa search API reference for semantic web retrieval.",
+            },
+        ]
 
     def _run_research_docs_rescue(
         self,
