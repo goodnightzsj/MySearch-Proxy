@@ -5564,6 +5564,60 @@ class MySearchClientTests(unittest.TestCase):
             evidence["selected_candidate_cluster_counts"],
             {"official": 4},
         )
+        self.assertEqual(evidence["authoritative_source_count"], 4)
+        self.assertEqual(evidence["supporting_source_count"], 0)
+
+    def test_research_selection_tracks_supporting_sources_separately(self) -> None:
+        client = MySearchClient()
+        query = "compare Docsie and Parseur for document parsing automation"
+
+        original_cluster_label = client._research_result_cluster_label
+        original_rerank_resource = client._rerank_resource_results
+        original_rerank_general = client._rerank_general_results
+        cluster_by_url = {
+            "https://docsie.io/blog/document-parsing-comparison/": "supporting",
+            "https://parseur.com/blog/document-parsing-comparison/": "supporting",
+        }
+
+        client._research_result_cluster_label = lambda **kwargs: cluster_by_url[  # type: ignore[method-assign]
+            kwargs["item"]["url"]
+        ]
+        client._rerank_resource_results = lambda **kwargs: list(kwargs["results"])  # type: ignore[method-assign]
+        client._rerank_general_results = lambda **kwargs: list(kwargs["results"])  # type: ignore[method-assign]
+        try:
+            _, evidence = client._select_research_candidate_results(
+                query=query,
+                mode="docs",
+                intent="comparison",
+                max_results=4,
+                web_results=[],
+                docs_rescue_results=[
+                    {
+                        "provider": "tavily",
+                        "title": "Docsie document parsing comparison",
+                        "url": "https://docsie.io/blog/document-parsing-comparison/",
+                        "snippet": "Docsie compares document parsing workflows.",
+                    },
+                    {
+                        "provider": "tavily",
+                        "title": "Parseur document parsing comparison",
+                        "url": "https://parseur.com/blog/document-parsing-comparison/",
+                        "snippet": "Parseur compares document parsing workflows.",
+                    },
+                ],
+                tavily_support_results=[],
+                exa_results=[],
+                include_domains=None,
+                authoritative_preferred=True,
+            )
+        finally:
+            client._research_result_cluster_label = original_cluster_label  # type: ignore[method-assign]
+            client._rerank_resource_results = original_rerank_resource  # type: ignore[method-assign]
+            client._rerank_general_results = original_rerank_general  # type: ignore[method-assign]
+
+        self.assertEqual(evidence["authoritative_source_count"], 0)
+        self.assertEqual(evidence["supporting_source_count"], 2)
+        self.assertEqual(evidence["selected_candidate_cluster_counts"], {"supporting": 2})
 
     def test_research_claim_evidence_skips_schema_noise_from_method_pages(self) -> None:
         client = MySearchClient()
@@ -5622,6 +5676,146 @@ class MySearchClientTests(unittest.TestCase):
         self.assertTrue(
             all("keys are strings" not in str(item.get("claim") or "").lower() for item in claims)
         )
+
+    def test_research_claim_text_prefers_substantive_excerpt_for_comparison_queries(self) -> None:
+        client = MySearchClient()
+
+        claim = client._research_claim_text(
+            title="Agentic Search: Definition, Examples & Best Practices (2025)",
+            excerpt=(
+                "# Agentic Search Master this essential documentation concept "
+                "## Quick Definition Agentic Search is an AI-powered search methodology "
+                "where intelligent agents autonomously use multiple tools."
+            ),
+            comparison_like=True,
+        )
+
+        self.assertIn("Agentic Search is an AI-powered search methodology", claim)
+        self.assertNotIn("Best Practices", claim)
+
+    def test_research_claim_text_drops_generic_comparison_cta(self) -> None:
+        client = MySearchClient()
+
+        claim = client._research_claim_text(
+            title="5 Tavily Alternatives for Better Pricing, Performance, and Extraction Depth",
+            excerpt=(
+                "### Ready to build? Start getting Web Data for free and scale seamlessly "
+                "as your project expands. No credit card needed."
+            ),
+            comparison_like=True,
+        )
+
+        self.assertEqual(claim, "")
+
+    def test_research_claim_text_falls_back_to_title_for_authorization_shell(self) -> None:
+        client = MySearchClient()
+
+        claim = client._research_claim_text(
+            title="Agentic retrieval in Azure AI Search",
+            excerpt=(
+                "Exit editor mode Ask LearnAsk LearnFocus mode Note "
+                "Access to this page requires authorization."
+            ),
+            comparison_like=True,
+        )
+
+        self.assertEqual(claim, "Agentic retrieval in Azure AI Search")
+
+    def test_research_claim_text_strips_markdown_images_and_byline(self) -> None:
+        client = MySearchClient()
+
+        claim = client._research_claim_text(
+            title="Implementing and Optimizing Agentic Search | Lorre Atlan, PhD",
+            excerpt=(
+                "March 14th, 2026 by Lorre ![](hero.png) "
+                "Abstract This project explores four distinct approaches to agentic search "
+                "over Markdown and documentation corpora."
+            ),
+            comparison_like=True,
+        )
+
+        self.assertIn("This project explores four distinct approaches", claim)
+        self.assertNotIn("March 14th", claim)
+        self.assertNotIn("![]", claim)
+
+    def test_research_report_uses_supporting_wording_without_authoritative_sources(self) -> None:
+        client = MySearchClient()
+
+        sections = client._build_research_report_sections(
+            query="compare Docsie and Parseur for document parsing automation",
+            web_search={"intent": "comparison", "provider": "hybrid", "answer": ""},
+            ordered_results=[
+                {
+                    "provider": "tavily",
+                    "title": "Docsie document parsing comparison",
+                    "url": "https://docsie.io/blog/document-parsing-comparison/",
+                    "snippet": "Docsie compares document parsing automation trade-offs.",
+                },
+                {
+                    "provider": "exa",
+                    "title": "Parseur document parsing comparison",
+                    "url": "https://parseur.com/blog/document-parsing-comparison/",
+                    "snippet": "Parseur compares document parsing automation trade-offs.",
+                },
+            ],
+            pages=[],
+            citations=[
+                {
+                    "title": "Docsie document parsing comparison",
+                    "url": "https://docsie.io/blog/document-parsing-comparison/",
+                },
+                {
+                    "title": "Parseur document parsing comparison",
+                    "url": "https://parseur.com/blog/document-parsing-comparison/",
+                },
+            ],
+            social=None,
+            evidence={
+                "providers_consulted": ["tavily", "exa"],
+                "research_plan": {"web_mode": "exploratory", "scrape_top_n": 2},
+                "confidence": "medium",
+                "citation_count": 2,
+                "source_diversity": 2,
+                "authoritative_source_count": 0,
+                "supporting_source_count": 2,
+                "community_source_count": 0,
+                "page_count": 0,
+                "selected_candidate_domains": ["docsie.io", "parseur.com"],
+                "selected_candidate_cluster_counts": {"supporting": 2},
+                "authoritative_research": True,
+            },
+            executive_summary_override="",
+        )
+
+        self.assertIn(
+            "Supporting sources and corroborating analysis were found",
+            sections["executive_summary"],
+        )
+        self.assertNotIn("Authoritative sources", sections["executive_summary"])
+        self.assertIn("supporting=2", sections["source_mix"])
+
+    def test_research_claim_text_prefers_substantive_excerpt_for_comparison_pages(self) -> None:
+        client = MySearchClient()
+
+        claim = client._research_claim_text(
+            title="Firecrawl vs Tavily: Complete Comparison for AI Agents & RAG",
+            excerpt="Comparison Firecrawl vs. Tavily Firecrawl handles full web extraction while Tavily is better suited to summary-first retrieval.",
+            comparison_like=True,
+        )
+
+        self.assertIn("Firecrawl handles full web extraction", claim)
+        self.assertNotIn("Complete Comparison for AI Agents", claim)
+
+    def test_research_claim_text_drops_generic_comparison_title_when_excerpt_is_cta(self) -> None:
+        client = MySearchClient()
+
+        claim = client._research_claim_text(
+            title="5 Tavily Alternatives for Better Pricing, Performance, and Extraction Depth",
+            excerpt="Ready to build? Start getting Web Data for free and scale seamlessly as your project expands. No credit card needed.",
+            comparison_like=True,
+        )
+
+        self.assertEqual(claim, "")
 
     def test_research_comparison_queries_downrank_community_results(self) -> None:
         client = MySearchClient()
