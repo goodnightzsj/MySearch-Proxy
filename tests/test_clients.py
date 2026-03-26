@@ -1097,6 +1097,23 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertFalse(strong)
 
+    def test_has_strong_award_result_rejects_roundup_official_feature_page(self) -> None:
+        client = MySearchClient()
+
+        strong = client._has_strong_award_result(
+            query="2026 Grammy album of the year winner",
+            results=[
+                {
+                    "title": "1-Minute Roundup: Album Of The Year | GRAMMY.com",
+                    "url": "https://grammy.com/news/1-minute-roundup-album-of-the-year",
+                    "snippet": "See the full list of winners and nominees from the 2026 Grammys.",
+                    "content": "",
+                }
+            ],
+        )
+
+        self.assertFalse(strong)
+
     def test_result_event_page_priority_downranks_award_gallery_pages(self) -> None:
         client = MySearchClient()
 
@@ -1212,6 +1229,40 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertLess(flashback_priority, winners_priority)
+
+    def test_filter_strong_award_results_drops_irrelevant_winners_page_with_wrong_award_context(self) -> None:
+        client = MySearchClient()
+
+        filtered = client._filter_strong_award_results(
+            query="2026 Grammy album of the year winner",
+            results=[
+                {
+                    "title": "2026 Grammys: See The Full Winners & Nominees List",
+                    "url": "https://grammy.com/news/2026-grammys-nominations-full-winners-nominees-list",
+                    "snippet": "Kendrick Lamar and SZA win the Grammy for Record Of The Year at the 2026 Grammys.",
+                    "content": "",
+                },
+                {
+                    "title": "Grammy Award: Album Of The Year",
+                    "url": "https://www.grammy.com/award/album-of-the-year/",
+                    "snippet": "Bad Bunny's win for Album of the Year at the 2026 Grammy Awards for DeBÍ TiRAR MáS FOToS.",
+                    "content": "",
+                },
+                {
+                    "title": "Here's How You Can Stream The 37th Annual GLAAD Awards Online For Free - Billboard",
+                    "url": "https://www.billboard.com/culture/product-recommendations/how-to-watch-2026-glaad-awards-online-free-1236202623/",
+                    "snippet": "Other notable winners included KATSEYE, who won outstanding breakthrough music artist.",
+                    "content": "",
+                },
+            ],
+        )
+
+        urls = [item["url"] for item in filtered]
+        self.assertIn("https://www.grammy.com/award/album-of-the-year/", urls)
+        self.assertNotIn(
+            "https://www.billboard.com/culture/product-recommendations/how-to-watch-2026-glaad-awards-online-free-1236202623/",
+            urls,
+        )
 
     def test_search_tavily_rewrites_award_result_query_for_news(self) -> None:
         client = MySearchClient()
@@ -1641,6 +1692,56 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertEqual(answer, "Album of the Year winner: Bad Bunny")
+
+    def test_extract_result_event_answer_skips_conflicting_award_snippet_before_exact_category_page(self) -> None:
+        client = MySearchClient()
+
+        answer = client._extract_result_event_answer(
+            query="2026 Grammy album of the year winner",
+            results=[
+                {
+                    "title": "First Look: Album Of The Year",
+                    "url": "https://grammy.com/news/first-look-album-of-the-year",
+                    "snippet": "Kendrick Lamar and SZA win the Grammy for Record Of The Year at the 2026 Grammys.",
+                    "content": "",
+                },
+                {
+                    "title": "Grammy Award: Album Of The Year",
+                    "url": "https://www.grammy.com/award/album-of-the-year/",
+                    "snippet": "Bad Bunny's win for Album Of The Year at the 2026 Grammy Awards for DeBÍ TiRAR MáS FOToS.",
+                    "content": "",
+                },
+            ],
+        )
+
+        self.assertEqual(answer, "Album of the Year winner: Bad Bunny")
+
+    def test_result_event_page_priority_penalizes_conflicting_award_feature_page(self) -> None:
+        client = MySearchClient()
+
+        conflicting = {
+            "title": "First Look: Album Of The Year",
+            "url": "https://grammy.com/news/first-look-album-of-the-year",
+            "snippet": "Kendrick Lamar and SZA win the Grammy for Record Of The Year at the 2026 Grammys.",
+            "content": "",
+        }
+        exact = {
+            "title": "Grammy Award: Album Of The Year",
+            "url": "https://www.grammy.com/award/album-of-the-year/",
+            "snippet": "Bad Bunny's win for Album Of The Year at the 2026 Grammy Awards for DeBÍ TiRAR MáS FOToS.",
+            "content": "",
+        }
+
+        conflicting_score = client._result_event_page_priority(
+            query="2026 Grammy album of the year winner",
+            item=conflicting,
+        )
+        exact_score = client._result_event_page_priority(
+            query="2026 Grammy album of the year winner",
+            item=exact,
+        )
+
+        self.assertLess(conflicting_score, exact_score)
 
     def test_apply_result_event_answer_override_does_not_extract_from_weak_award_mentions(self) -> None:
         client = MySearchClient()

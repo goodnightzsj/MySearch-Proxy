@@ -6032,7 +6032,6 @@ class MySearchClient:
                     snippet_text=snippet_text,
                     path=path,
                 )
-                and not winner_page
             )
             if self._looks_like_award_prediction_result(
                 title_text=title_text,
@@ -6054,6 +6053,13 @@ class MySearchClient:
             if self._looks_like_query_year_mismatch(
                 query=query_lower,
                 text=f"{title_text} {snippet_text} {content_text} {path}",
+            ):
+                continue
+            if self._looks_like_award_category_conflict(
+                query_lower=query_lower,
+                title_text=title_text,
+                snippet_text=snippet_text,
+                content_text=content_text,
             ):
                 continue
             if self._looks_like_generic_award_archive_result(
@@ -6172,6 +6178,13 @@ class MySearchClient:
                 text=f"{title_text} {snippet_text} {content_text} {path}",
             ):
                 continue
+            if self._looks_like_award_category_conflict(
+                query_lower=query_lower,
+                title_text=title_text,
+                snippet_text=snippet_text,
+                content_text=content_text,
+            ):
+                continue
             if self._looks_like_generic_award_archive_result(
                 title_text=title_text,
                 path=path,
@@ -6189,7 +6202,6 @@ class MySearchClient:
                     snippet_text=snippet_text,
                     path=path,
                 )
-                and not winner_page
             )
             if weak_official_feature:
                 continue
@@ -6227,6 +6239,12 @@ class MySearchClient:
                 "oscars.org",
                 "theacademy.com",
             }
+            prioritized_winner_page = winner_page and (
+                category_match
+                or award_coverage_page
+                or registered_domain in trusted_result_domains
+                or official_award_page
+            )
             trusted_media_page = (
                 registered_domain in trusted_result_domains
                 and award_coverage_page
@@ -6234,7 +6252,7 @@ class MySearchClient:
             )
             if not (
                 official_award_page
-                or winner_page
+                or prioritized_winner_page
                 or (fact_match and award_coverage_page)
                 or trusted_media_page
             ):
@@ -7088,6 +7106,9 @@ class MySearchClient:
         text = f"{title_text} {snippet_text} {path}"
         weak_markers = [
             "flashback",
+            "1-minute roundup",
+            "minute roundup",
+            "roundup",
             "throughout the decades",
             "must-watch moments",
             "artist |",
@@ -11185,6 +11206,35 @@ class MySearchClient:
             markers.extend(["record of the year", "最佳歌曲"])
         return markers
 
+    def _award_query_competing_category_markers(self, query_lower: str) -> list[str]:
+        markers: list[str] = []
+        if any(token in query_lower for token in ("album of the year", "aoty", "最佳专辑")):
+            markers.extend(["record of the year", "song of the year", "best new artist"])
+        if any(token in query_lower for token in ("record of the year", "最佳歌曲")):
+            markers.extend(["album of the year", "song of the year", "best new artist"])
+        if "best picture" in query_lower or "最佳影片" in query_lower or "最佳电影" in query_lower:
+            markers.extend(["best actor", "best actress", "supporting actor", "supporting actress"])
+        return markers
+
+    def _looks_like_award_category_conflict(
+        self,
+        *,
+        query_lower: str,
+        title_text: str,
+        snippet_text: str,
+        content_text: str,
+    ) -> bool:
+        category_markers = self._award_query_category_markers(query_lower)
+        if not category_markers:
+            return False
+        body_text = f"{snippet_text} {content_text}".lower()
+        if any(marker in body_text for marker in category_markers):
+            return False
+        if not any(marker in title_text.lower() for marker in category_markers):
+            return False
+        competing_markers = self._award_query_competing_category_markers(query_lower)
+        return any(marker in body_text for marker in competing_markers)
+
     def _award_query_brand_markers(self, query_lower: str) -> list[str]:
         if "grammy" in query_lower:
             return ["grammy", "grammys", "grammy awards"]
@@ -11635,12 +11685,17 @@ class MySearchClient:
             score -= 5
         if (
             self._looks_like_award_result_query(query_lower)
-            and self._looks_like_weak_official_award_feature_result(
+            and self._looks_like_award_category_conflict(
+                query_lower=query_lower,
                 title_text=title_text,
                 snippet_text=snippet_text,
-                path=urlparse(url).path.lower(),
+                content_text=content_text,
             )
-            and not self._looks_like_award_winner_result(
+        ):
+            score -= 10
+        if (
+            self._looks_like_award_result_query(query_lower)
+            and self._looks_like_weak_official_award_feature_result(
                 title_text=title_text,
                 snippet_text=snippet_text,
                 path=urlparse(url).path.lower(),
@@ -11712,20 +11767,71 @@ class MySearchClient:
             return ""
 
         query_lower = query.lower()
+        award_query = self._looks_like_award_result_query(query_lower)
         signal_texts: list[str] = []
         for item in self._result_event_candidates(query=query, results=results, limit=5):
-            for key in ("title", "snippet", "content"):
-                value = str(item.get(key) or "").strip()
-                if value:
-                    signal_texts.append(value)
+            title_text = str(item.get("title") or "").strip()
+            snippet_text = str(item.get("snippet") or "").strip()
+            content_text = str(item.get("content") or "").strip()
+            path = urlparse(str(item.get("url") or "")).path.lower()
+            if (
+                award_query
+                and self._looks_like_award_category_conflict(
+                    query_lower=query_lower,
+                    title_text=title_text,
+                    snippet_text=snippet_text,
+                    content_text=content_text,
+                )
+            ):
+                continue
+            candidate_texts = [text for text in (content_text, snippet_text) if text]
+            title_only_allowed = (
+                not award_query
+                or self._looks_like_award_winner_result(
+                    title_text=title_text.lower(),
+                    snippet_text="",
+                    path=path,
+                )
+                or "winner" in title_text.lower()
+                or "winners" in title_text.lower()
+            )
+            if title_only_allowed and title_text:
+                candidate_texts.append(title_text)
+            for text in candidate_texts:
+                if not text:
+                    continue
+                answer = self._extract_result_event_answer_from_text(
+                    query_lower=query_lower,
+                    text=text,
+                )
+                if answer:
+                    return answer
+            combined_item_text = "\n".join(
+                value for value in (snippet_text, content_text, title_text) if value
+            )
+            if combined_item_text:
+                signal_texts.append(combined_item_text)
         if not signal_texts:
             return ""
 
         combined_text = "\n".join(signal_texts)
+        return self._extract_result_event_answer_from_text(
+            query_lower=query_lower,
+            text=combined_text,
+        )
+
+    def _extract_result_event_answer_from_text(
+        self,
+        *,
+        query_lower: str,
+        text: str,
+    ) -> str:
+        if not text:
+            return ""
 
         if "best picture" in query_lower or "最佳影片" in query_lower:
             entity = self._extract_named_fact_entity(
-                combined_text,
+                text,
                 patterns=[
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+won[^\n]{0,80}\bbest picture\b",
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+is\s+the\s+(?:20\d{2}\s+)?best picture winner",
@@ -11741,7 +11847,7 @@ class MySearchClient:
 
         if "best actor" in query_lower or "最佳男主角" in query_lower:
             entity = self._extract_named_fact_entity(
-                combined_text,
+                text,
                 patterns=[
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+won[^\n]{0,80}\bbest actor\b",
                     r"([A-Z][A-Za-z0-9'’&.\- ]{2,100})\s+wins\s+best actor",
@@ -11763,11 +11869,11 @@ class MySearchClient:
                 return f"Best Actor winner: {entity}"
 
         if any(token in query_lower for token in ("album of the year", "aoty", "最佳专辑")):
-            entity = self._extract_album_of_the_year_entity(combined_text)
+            entity = self._extract_album_of_the_year_entity(text)
             if entity:
                 return f"Album of the Year winner: {entity}"
             entity = self._extract_named_fact_entity(
-                combined_text,
+                text,
                 patterns=[
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+(?:won|wins)[^\n]{0,80}\balbum of the year\b",
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+[–—:]\s*album of the year",
@@ -11798,7 +11904,7 @@ class MySearchClient:
 
         if "record of the year" in query_lower or "最佳歌曲" in query_lower:
             entity = self._extract_named_fact_entity(
-                combined_text,
+                text,
                 patterns=[
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+(?:won|wins)[^\n]{0,80}\brecord of the year\b",
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+[–—:]\s*record of the year",
@@ -11821,7 +11927,7 @@ class MySearchClient:
 
         if self._looks_like_box_office_query(query_lower):
             entity = self._extract_named_fact_entity(
-                combined_text,
+                text,
                 patterns=[
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+(?:becomes|become|became|scores|scored|tops|topped)[^\n]{0,80}(?:highest-grossing|biggest opening|opening weekend|box office)",
                     r"([A-Z][A-Za-z0-9:,'’&\\- ]{2,100})\s+(?:becomes|become|became|scores|scored|tops|topped)[^\n]{0,80}(?:highest-grossing|biggest opening|opening weekend|box office)",
@@ -11907,6 +12013,31 @@ class MySearchClient:
             )
             if album:
                 return album
+        artist_only_patterns = [
+            r"([A-Z][A-Za-z0-9&'’.\- ]{1,80})['’]s win for album of the year",
+            r"([A-Z][A-Za-z0-9&'’.\- ]{1,80})['’]s album of the year win",
+        ]
+        for pattern in artist_only_patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            artist = self._clean_extracted_fact_entity(
+                match.group(1),
+                reject_substrings=[
+                    "award",
+                    "winner",
+                    "nominee",
+                    "nominees",
+                    "best new artist",
+                    "his album",
+                    "her album",
+                    "their album",
+                    "its album",
+                    "the album",
+                ],
+            )
+            if artist:
+                return artist
         return ""
 
     def _extract_named_fact_entity(
@@ -11939,6 +12070,7 @@ class MySearchClient:
         entity = re.sub(r"^(?:winner|winners)\s*[:\-]\s*", "", entity, flags=re.IGNORECASE)
         entity = re.sub(r"['’]s\s+win\b.*$", "", entity, flags=re.IGNORECASE)
         entity = re.split(r"\s+(?:with|which|that|during|for)\s+", entity, maxsplit=1)[0]
+        entity = re.split(r"\s*\|\s*", entity, maxsplit=1)[0]
         entity = re.split(r",\s*(?:[\"“]|[A-Z][A-Za-z])", entity, maxsplit=1)[0]
         entity = re.split(r",\s*(?:marking|while|as|where|when)\b", entity, maxsplit=1, flags=re.IGNORECASE)[0]
         entity = re.split(r"\s{2,}", entity, maxsplit=1)[0]
@@ -11970,7 +12102,9 @@ class MySearchClient:
             "today",
             "usa today",
             "rolling stone",
+            "grammy",
             "grammy.com",
+            "grammys",
             "grammys.com",
         }
         if entity_lower in known_outlets:
