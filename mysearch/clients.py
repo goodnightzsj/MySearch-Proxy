@@ -249,18 +249,21 @@ class MySearchClient:
             "search": self.config.search_cache_ttl_seconds,
             "extract": self.config.extract_cache_ttl_seconds,
             "social": max(self.config.search_cache_ttl_seconds, 300),
+            "social_gateway": 45,
             "social_unavailable": 30,
         }
         self._cache_store: dict[str, dict[str, dict[str, Any]]] = {
             "search": {},
             "extract": {},
             "social": {},
+            "social_gateway": {},
             "social_unavailable": {},
         }
         self._cache_stats: dict[str, dict[str, int]] = {
             "search": {"hits": 0, "misses": 0},
             "extract": {"hits": 0, "misses": 0},
             "social": {"hits": 0, "misses": 0},
+            "social_gateway": {"hits": 0, "misses": 0},
             "social_unavailable": {"hits": 0, "misses": 0},
         }
         self._cache_max_entries = 256
@@ -558,6 +561,20 @@ class MySearchClient:
                 "to_date": to_date or "",
                 "include_x_images": include_x_images,
                 "include_x_videos": include_x_videos,
+            },
+        )
+
+    def _build_social_gateway_cache_key(
+        self,
+        *,
+        base_url: str,
+        path: str,
+    ) -> str:
+        return self._build_cache_key(
+            "social_gateway",
+            {
+                "base_url": (base_url or "").rstrip("/"),
+                "path": path,
             },
         )
 
@@ -7572,10 +7589,20 @@ class MySearchClient:
             include_x_images=include_x_images,
             include_x_videos=include_x_videos,
         )
+        social_gateway_cache_key = self._build_social_gateway_cache_key(
+            base_url=provider.base_url_for("social_search"),
+            path=search_path,
+        )
         cached_social_result = self._cache_get("social", social_cache_key)
         cached_social_unavailable = None
+        cached_social_gateway_unavailable = None
         if not (cached_social_result and cached_social_result.get("results")):
             cached_social_unavailable = self._cache_get("social_unavailable", social_cache_key)
+            if not cached_social_unavailable:
+                cached_social_gateway_unavailable = self._cache_get(
+                    "social_gateway",
+                    social_gateway_cache_key,
+                )
         if cached_social_unavailable:
             return self._annotate_cache(
                 cached_social_unavailable,
@@ -7585,51 +7612,70 @@ class MySearchClient:
 
         retry_attempts = 3
         last_error: MySearchError | None = None
-        for attempt in range(retry_attempts):
-            try:
-                response = self._request_json(
-                    provider=provider,
-                    method="POST",
-                    path=search_path,
-                    payload=payload,
-                    key=key.key,
-                    base_url=provider.base_url_for("social_search"),
-                    timeout_seconds=max(
-                        30,
-                        int(getattr(self.config, "xai_social_timeout_seconds", 120) or 120),
+        if cached_social_gateway_unavailable:
+            last_error = MySearchError(
+                str(
+                    cached_social_gateway_unavailable.get("fallback", {}).get("reason")
+                    or cached_social_gateway_unavailable.get("summary")
+                    or "social gateway unavailable"
+                )
+            )
+        else:
+            for attempt in range(retry_attempts):
+                try:
+                    response = self._request_json(
+                        provider=provider,
+                        method="POST",
+                        path=search_path,
+                        payload=payload,
+                        key=key.key,
+                        base_url=provider.base_url_for("social_search"),
+                        timeout_seconds=max(
+                            30,
+                            int(getattr(self.config, "xai_social_timeout_seconds", 120) or 120),
+                        ),
+                    )
+                    normalized = self._normalize_social_gateway_response(
+                        response=response,
+                        query=query,
+                        transport=key.source,
+                        from_date=from_date,
+                        to_date=to_date,
+                    )
+                    if normalized.get("results"):
+                        self._cache_delete("social_gateway", social_gateway_cache_key)
+                        self._cache_delete("social_unavailable", social_cache_key)
+                        self._cache_set("social", social_cache_key, normalized)
+                        return self._annotate_cache(
+                            normalized,
+                            namespace="social",
+                            hit=False,
+                        )
+                    last_error = MySearchError(
+                        "xai compatible returned no x.com/twitter.com results"
+                    )
+                    break
+                except MySearchHTTPError as exc:
+                    if exc.is_auth_error:
+                        raise
+                    last_error = exc
+                    if attempt < retry_attempts - 1 and self._is_retryable_social_gateway_error(exc):
+                        continue
+                    break
+                except MySearchError as exc:
+                    last_error = exc
+                    if attempt < retry_attempts - 1 and self._is_retryable_social_gateway_error(exc):
+                        continue
+                    break
+            if last_error and self._is_retryable_social_gateway_error(last_error):
+                self._cache_set(
+                    "social_gateway",
+                    social_gateway_cache_key,
+                    self._build_social_gateway_unavailable_result(
+                        base_url=provider.base_url_for("social_search"),
+                        fallback_reason=str(last_error),
                     ),
                 )
-                normalized = self._normalize_social_gateway_response(
-                    response=response,
-                    query=query,
-                    transport=key.source,
-                    from_date=from_date,
-                    to_date=to_date,
-                )
-                if normalized.get("results"):
-                    self._cache_delete("social_unavailable", social_cache_key)
-                    self._cache_set("social", social_cache_key, normalized)
-                    return self._annotate_cache(
-                        normalized,
-                        namespace="social",
-                        hit=False,
-                    )
-                last_error = MySearchError(
-                    "xai compatible returned no x.com/twitter.com results"
-                )
-                break
-            except MySearchHTTPError as exc:
-                if exc.is_auth_error:
-                    raise
-                last_error = exc
-                if attempt < retry_attempts - 1 and self._is_retryable_social_gateway_error(exc):
-                    continue
-                break
-            except MySearchError as exc:
-                last_error = exc
-                if attempt < retry_attempts - 1 and self._is_retryable_social_gateway_error(exc):
-                    continue
-                break
 
         if cached_social_result and cached_social_result.get("results"):
             cached_social_result = self._annotate_cache(
@@ -7667,11 +7713,18 @@ class MySearchClient:
         if tavily_fallback_result.get("results"):
             self._cache_delete("social_unavailable", social_cache_key)
             self._cache_set("social", social_cache_key, tavily_fallback_result)
-            return self._annotate_cache(
+            result = self._annotate_cache(
                 tavily_fallback_result,
                 namespace="social",
                 hit=False,
             )
+            if cached_social_gateway_unavailable:
+                result = self._annotate_cache(
+                    result,
+                    namespace="social_gateway",
+                    hit=True,
+                )
+            return result
         return tavily_fallback_result
 
     def _is_retryable_social_gateway_error(self, exc: Exception) -> bool:
@@ -7768,6 +7821,27 @@ class MySearchClient:
                 "reason": reason,
             },
             "summary": f"Social/X search unavailable: {reason}",
+        }
+
+    def _build_social_gateway_unavailable_result(
+        self,
+        *,
+        base_url: str,
+        fallback_reason: str,
+    ) -> dict[str, Any]:
+        reason = fallback_reason[:200]
+        return {
+            "provider": "social_gateway_unavailable",
+            "transport": "",
+            "base_url": base_url,
+            "results": [],
+            "citations": [],
+            "fallback": {
+                "from": "xai_compatible",
+                "to": "social_gateway_unavailable",
+                "reason": reason,
+            },
+            "summary": f"Social/X gateway unavailable: {reason}",
         }
 
     def _scrape_firecrawl(
