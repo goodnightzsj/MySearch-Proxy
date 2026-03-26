@@ -6276,12 +6276,21 @@ class MySearchClient:
                 int(getattr(self.config, "xai_social_timeout_seconds", 120) or 120),
             ),
             )
-            return self._normalize_social_gateway_response(
+            normalized = self._normalize_social_gateway_response(
                 response=response,
                 query=query,
                 transport=key.source,
                 from_date=from_date,
                 to_date=to_date,
+            )
+            if normalized.get("results"):
+                return normalized
+            return self._search_tavily_social_fallback(
+                query=query,
+                max_results=max_results,
+                from_date=from_date,
+                to_date=to_date,
+                fallback_reason="xai compatible returned no x.com/twitter.com results",
             )
         except MySearchHTTPError as exc:
             if exc.is_auth_error:
@@ -6614,6 +6623,9 @@ class MySearchClient:
             if not isinstance(item, dict):
                 continue
             url = item.get("url") or item.get("link") or ""
+            hostname = self._clean_hostname(urlparse(url).netloc)
+            if hostname and not hostname.endswith(("x.com", "twitter.com")):
+                continue
             content = (
                 item.get("content")
                 or item.get("full_text")
