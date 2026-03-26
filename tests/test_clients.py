@@ -1292,6 +1292,52 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(ranked[0]["url"], "https://arxiv.org/abs/2505.09388")
 
+    def test_has_strong_pdf_match_ignores_variant_qwen3_reports_for_base_query(self) -> None:
+        client = MySearchClient()
+
+        strong_match = client._has_strong_pdf_match(
+            query="Qwen3 technical report pdf",
+            results=[
+                {
+                    "title": "Qwen3-Omni Technical Report",
+                    "url": "https://arxiv.org/abs/2509.17765",
+                },
+                {
+                    "title": "Qwen3-VL Technical Report",
+                    "url": "https://arxiv.org/abs/2511.21631",
+                },
+            ],
+        )
+
+        self.assertFalse(strong_match)
+
+    def test_pdf_rerank_prefers_base_qwen3_report_over_variant_reports(self) -> None:
+        client = MySearchClient()
+
+        ranked = client._rerank_resource_results(
+            query="Qwen3 technical report pdf",
+            mode="pdf",
+            include_domains=["arxiv.org"],
+            results=[
+                {
+                    "provider": "tavily",
+                    "title": "Qwen3-Omni Technical Report",
+                    "url": "https://arxiv.org/abs/2509.17765",
+                    "snippet": "Variant report",
+                    "content": "",
+                },
+                {
+                    "provider": "exa",
+                    "title": "Qwen3 Technical Report",
+                    "url": "https://arxiv.org/abs/2505.09388",
+                    "snippet": "Base report",
+                    "content": "",
+                },
+            ],
+        )
+
+        self.assertEqual(ranked[0]["url"], "https://arxiv.org/abs/2505.09388")
+
     def test_canonical_result_url_rewrites_arxiv_html_variant_to_abs(self) -> None:
         client = MySearchClient()
 

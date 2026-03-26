@@ -4272,6 +4272,7 @@ class MySearchClient:
             precision_tokens=precision_tokens,
         )
         compound_tokens = self._paper_query_compound_tokens(query)
+        exact_base_report_query = self._looks_like_exact_base_paper_query(query)
         for item in results[:3]:
             url = item.get("url", "")
             hostname = self._result_hostname(item)
@@ -4302,6 +4303,11 @@ class MySearchClient:
                 path=path,
             )
             if mirror_or_aggregator:
+                continue
+            if exact_base_report_query and self._looks_like_variant_base_paper_result(
+                query=query,
+                title_text=title_text,
+            ):
                 continue
             if (
                 compound_tokens
@@ -4340,6 +4346,34 @@ class MySearchClient:
             "tutorial",
         )
         return any(marker in title_text for marker in derivative_markers)
+
+    def _looks_like_exact_base_paper_query(self, query: str) -> bool:
+        query_lower = (query or "").lower()
+        return "technical report" in query_lower and bool(self._base_report_subject_token(query))
+
+    def _base_report_subject_token(self, query: str) -> str:
+        compound_tokens = self._paper_query_compound_tokens(query)
+        if len(compound_tokens) == 1:
+            return compound_tokens[0]
+        for token in self._query_brand_tokens(query):
+            if token not in {"technical", "report"}:
+                return token
+        return ""
+
+    def _looks_like_variant_base_paper_result(self, *, query: str, title_text: str) -> bool:
+        if not self._looks_like_exact_base_paper_query(query):
+            return False
+        base_token = self._base_report_subject_token(query)
+        if not base_token:
+            return False
+        base = re.escape(base_token)
+        normalized_title = re.sub(r"\s+", " ", (title_text or "").strip().lower())
+        if re.match(rf"^\s*(?:\[[^\]]+\]\s*)?{base}\s+technical report\b", normalized_title):
+            return False
+        return re.match(
+            rf"^\s*(?:\[[^\]]+\]\s*)?{base}(?:[-\s][a-z0-9]+)+\s+technical report\b",
+            normalized_title,
+        ) is not None
 
     def _is_obvious_pdf_mirror_or_aggregator_result(
         self,
@@ -7083,6 +7117,20 @@ class MySearchClient:
                 query_tokens=paper_subject_tokens,
             )
         )
+        exact_base_report_title_match = int(
+            mode == "pdf"
+            and self._looks_like_exact_base_paper_query(query)
+            and not self._looks_like_variant_base_paper_result(
+                query=query,
+                title_text=(item.get("title") or "").lower(),
+            )
+            and bool(
+                re.match(
+                    rf"^\s*(?:\[[^\]]+\]\s*)?{re.escape(self._base_report_subject_token(query))}\s+technical report\b",
+                    (item.get("title") or "").lower(),
+                )
+            )
+        )
         canonical_paper_source = int(
             mode == "pdf"
             and (
@@ -7171,6 +7219,7 @@ class MySearchClient:
             canonical_status_page_match,
             status_page_match,
             non_status_api_endpoint,
+            exact_base_report_title_match,
             canonical_paper_source,
             non_pdf_mirror_aggregator,
             paper_subject_exact_match,
