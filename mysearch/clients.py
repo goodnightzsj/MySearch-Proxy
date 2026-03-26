@@ -6902,8 +6902,9 @@ class MySearchClient:
         if include_x_videos:
             payload["include_x_videos"] = True
 
+        retry_attempts = 3
         last_error: MySearchError | None = None
-        for attempt in range(2):
+        for attempt in range(retry_attempts):
             try:
                 response = self._request_json(
                     provider=provider,
@@ -6934,12 +6935,12 @@ class MySearchClient:
                 if exc.is_auth_error:
                     raise
                 last_error = exc
-                if attempt == 0 and self._is_retryable_social_gateway_error(exc):
+                if attempt < retry_attempts - 1 and self._is_retryable_social_gateway_error(exc):
                     continue
                 break
             except MySearchError as exc:
                 last_error = exc
-                if attempt == 0 and self._is_retryable_social_gateway_error(exc):
+                if attempt < retry_attempts - 1 and self._is_retryable_social_gateway_error(exc):
                     continue
                 break
 
@@ -7017,7 +7018,7 @@ class MySearchClient:
             "citations": self._align_citations_with_results(
                 results=fallback_results,
                 citations=list(tavily_result.get("citations") or []),
-            ),
+            )[: len(fallback_results)],
             "fallback": {
                 "from": "xai_compatible",
                 "to": "tavily_social_fallback",
