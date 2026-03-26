@@ -2606,7 +2606,7 @@ class MySearchClientTests(unittest.TestCase):
             include_x_videos=False,
         )
 
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 1)
         self.assertEqual(result["provider"], "custom_social")
         self.assertEqual(result["results"][0]["url"], "https://x.com/OpenAI/status/999")
         self.assertEqual(result["fallback"]["to"], "social_last_good_cache")
@@ -2943,6 +2943,141 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(result["provider"], "custom_social")
         self.assertIsNone(client._cache_get("social_unavailable", cache_key))
+
+    def test_xai_compatible_search_returns_last_good_cache_after_retryable_gateway_error(
+        self,
+    ) -> None:
+        client = MySearchClient()
+        provider = client.config.xai
+        provider.search_mode = "compatible"
+        provider.default_paths["social_search"] = "/social/search"
+        provider.alternate_base_urls["social_search"] = "http://gateway.example/v1"
+        client._get_key_or_raise = lambda provider: type(  # type: ignore[method-assign]
+            "Record",
+            (),
+            {"key": "gateway-token", "source": "env"},
+        )()
+
+        cache_key = client._build_social_cache_key(
+            query="OpenAI webhooks reactions on X",
+            max_results=5,
+            allowed_x_handles=None,
+            excluded_x_handles=None,
+            from_date=None,
+            to_date=None,
+            include_x_images=False,
+            include_x_videos=False,
+        )
+        client._cache_set(
+            "social",
+            cache_key,
+            {
+                "provider": "custom_social",
+                "transport": "env",
+                "query": "OpenAI webhooks reactions on X",
+                "answer": "Cached social result",
+                "results": [
+                    {
+                        "provider": "custom_social",
+                        "source": "x",
+                        "title": "Cached social result",
+                        "url": "https://x.com/OpenAI/status/999",
+                        "snippet": "Cached post",
+                        "content": "",
+                    }
+                ],
+                "citations": [{"title": "Cached social result", "url": "https://x.com/OpenAI/status/999"}],
+            },
+        )
+
+        timeout_calls: list[int] = []
+
+        def fake_request_json(**kwargs):  # type: ignore[no-untyped-def]
+            timeout_calls.append(int(kwargs["timeout_seconds"]))
+            raise MySearchError("tls connect error")
+
+        def fail_tavily(**kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("tavily fallback should not run when last-good cache is available")
+
+        client._request_json = fake_request_json  # type: ignore[method-assign]
+        client._search_tavily = fail_tavily  # type: ignore[method-assign]
+
+        result = client._search_xai_compatible(
+            query="OpenAI webhooks reactions on X",
+            sources=["x"],
+            max_results=5,
+            allowed_x_handles=None,
+            excluded_x_handles=None,
+            from_date=None,
+            to_date=None,
+            include_x_images=False,
+            include_x_videos=False,
+        )
+
+        self.assertEqual(timeout_calls, [120])
+        self.assertEqual(result["provider"], "custom_social")
+        self.assertTrue(result["cache"]["social"]["hit"])
+        self.assertEqual(result["fallback"]["to"], "social_last_good_cache")
+
+    def test_xai_compatible_search_treats_configured_social_timeout_as_total_budget(self) -> None:
+        client = MySearchClient()
+        provider = client.config.xai
+        provider.search_mode = "compatible"
+        provider.default_paths["social_search"] = "/social/search"
+        provider.alternate_base_urls["social_search"] = "http://gateway.example/v1"
+        client._get_key_or_raise = lambda provider: type(  # type: ignore[method-assign]
+            "Record",
+            (),
+            {"key": "gateway-token", "source": "env"},
+        )()
+        client.config.xai_social_timeout_seconds = 120
+
+        timeout_calls: list[int] = []
+        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "Fallback social summary",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "OpenAI on X",
+                    "url": "https://x.com/OpenAI/status/777",
+                    "snippet": "Latest OpenAI post",
+                    "content": "",
+                }
+            ],
+            "citations": [{"title": "OpenAI on X", "url": "https://x.com/OpenAI/status/777"}],
+        }
+
+        current_time = [0.0]
+
+        def fake_monotonic() -> float:
+            return current_time[0]
+
+        def timed_out_request_json(**kwargs):  # type: ignore[no-untyped-def]
+            timeout_calls.append(int(kwargs["timeout_seconds"]))
+            current_time[0] = 121.0
+            raise MySearchError("xai request timeout after 120s")
+
+        client._request_json = timed_out_request_json  # type: ignore[method-assign]
+
+        with patch("mysearch.clients.time.monotonic", side_effect=fake_monotonic):
+            result = client._search_xai_compatible(
+                query="GPT-5.4 reactions on X",
+                sources=["x"],
+                max_results=5,
+                allowed_x_handles=None,
+                excluded_x_handles=None,
+                from_date=None,
+                to_date=None,
+                include_x_images=False,
+                include_x_videos=False,
+            )
+
+        self.assertEqual(timeout_calls, [120])
+        self.assertEqual(result["provider"], "tavily_social_fallback")
 
     def test_tavily_social_fallback_diversifies_repeated_handles(self) -> None:
         client = MySearchClient()

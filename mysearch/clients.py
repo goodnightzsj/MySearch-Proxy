@@ -6,6 +6,7 @@ import copy
 import hashlib
 import html
 import json
+import math
 import re
 import sys
 import threading
@@ -8384,6 +8385,11 @@ class MySearchClient:
             )
 
         retry_attempts = 3
+        total_social_timeout = max(
+            30,
+            int(getattr(self.config, "xai_social_timeout_seconds", 120) or 120),
+        )
+        social_deadline = time.monotonic() + total_social_timeout
         last_error: MySearchError | None = None
         if cached_social_gateway_unavailable:
             last_error = MySearchError(
@@ -8395,6 +8401,10 @@ class MySearchClient:
             )
         else:
             for attempt in range(retry_attempts):
+                remaining_budget = social_deadline - time.monotonic()
+                if remaining_budget <= 0:
+                    break
+                remaining_timeout = max(1, math.ceil(remaining_budget))
                 try:
                     response = self._request_json(
                         provider=provider,
@@ -8403,10 +8413,7 @@ class MySearchClient:
                         payload=payload,
                         key=key.key,
                         base_url=provider.base_url_for("social_search"),
-                        timeout_seconds=max(
-                            30,
-                            int(getattr(self.config, "xai_social_timeout_seconds", 120) or 120),
-                        ),
+                        timeout_seconds=remaining_timeout,
                     )
                     normalized = self._normalize_social_gateway_response(
                         response=response,
@@ -8432,11 +8439,35 @@ class MySearchClient:
                     if exc.is_auth_error:
                         raise
                     last_error = exc
+                    if cached_social_result and self._is_retryable_social_gateway_error(exc):
+                        cached_social_result = self._annotate_cache(
+                            cached_social_result,
+                            namespace="social",
+                            hit=True,
+                        )
+                        cached_social_result["fallback"] = {
+                            "from": "xai_compatible",
+                            "to": "social_last_good_cache",
+                            "reason": str(exc)[:200],
+                        }
+                        return cached_social_result
                     if attempt < retry_attempts - 1 and self._is_retryable_social_gateway_error(exc):
                         continue
                     break
                 except MySearchError as exc:
                     last_error = exc
+                    if cached_social_result and self._is_retryable_social_gateway_error(exc):
+                        cached_social_result = self._annotate_cache(
+                            cached_social_result,
+                            namespace="social",
+                            hit=True,
+                        )
+                        cached_social_result["fallback"] = {
+                            "from": "xai_compatible",
+                            "to": "social_last_good_cache",
+                            "reason": str(exc)[:200],
+                        }
+                        return cached_social_result
                     if attempt < retry_attempts - 1 and self._is_retryable_social_gateway_error(exc):
                         continue
                     break
