@@ -6359,6 +6359,17 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(claim, "")
 
+    def test_research_claim_text_drops_agent_skills_navigation_shell(self) -> None:
+        client = MySearchClient()
+
+        claim = client._research_claim_text(
+            title="Tavily Agent Skills - Tavily Docs",
+            excerpt="Skip to main content /tavily-ai/skills Get API Key Available Skills",
+            comparison_like=True,
+        )
+
+        self.assertEqual(claim, "")
+
     def test_research_claim_text_drops_code_example_noise(self) -> None:
         client = MySearchClient()
 
@@ -6610,6 +6621,40 @@ class MySearchClientTests(unittest.TestCase):
             if "Firecrawl vs. Tavily for RAG and agent pipelines" in claim
         )
         self.assertLess(supporting_index, curated_index)
+
+    def test_research_claim_evidence_uses_canonical_vendor_doc_snippet_for_weak_supporting_result(self) -> None:
+        client = MySearchClient()
+        query = "compare Tavily and Firecrawl for AI agent web retrieval 2026"
+
+        claims = client._build_research_claim_evidence(
+            query=query,
+            mode="research",
+            ordered_results=[
+                {
+                    "provider": "tavily",
+                    "title": "Firecrawl vs Tavily: Complete Comparison for AI Agents",
+                    "url": "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                    "snippet": "Firecrawl handles full web extraction while Tavily focuses on search APIs.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "matched_providers": ["canonical_research_docs", "tavily"],
+                    "title": "Search API - Tavily",
+                    "url": "https://docs.tavily.com/documentation/api-reference/search",
+                    "snippet": "tavily.com",
+                },
+            ],
+            pages=[],
+            citations=[],
+            comparison_like=True,
+            include_domains=None,
+            authoritative_preferred=False,
+        )
+
+        claim_texts = [str(item.get("claim") or "") for item in claims]
+        self.assertTrue(
+            any("Tavily exposes a search API for web retrieval" in claim for claim in claim_texts)
+        )
 
     def test_research_report_uses_supporting_wording_without_authoritative_sources(self) -> None:
         client = MySearchClient()
@@ -7333,6 +7378,64 @@ class MySearchClientTests(unittest.TestCase):
         self.assertIn("## Source Clusters", summary)
         self.assertIn("| Candidate | Cluster | Provider Support | Evidence Note |", summary)
         self.assertIn("## Decision Table", summary)
+
+    def test_research_report_shortlist_uses_canonical_note_for_supporting_docs(self) -> None:
+        client = MySearchClient()
+
+        sections = client._build_research_report_sections(
+            query="compare Tavily and Firecrawl for AI agent web retrieval 2026",
+            web_search={"intent": "comparison", "answer": ""},
+            ordered_results=[
+                {
+                    "provider": "tavily",
+                    "matched_providers": ["tavily"],
+                    "title": "Firecrawl vs Tavily: Complete Comparison for AI Agents & RAG (2026)",
+                    "url": "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                    "snippet": "Firecrawl handles full web extraction while Tavily focuses on search APIs.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "matched_providers": ["canonical_research_docs", "tavily"],
+                    "title": "Search API - Tavily",
+                    "url": "https://docs.tavily.com/documentation/api-reference/search",
+                    "snippet": "tavily.com",
+                },
+            ],
+            pages=[
+                {
+                    "url": "https://docs.tavily.com/documentation/api-reference/search",
+                    "excerpt": "Copy markdown Search docs Suggested Open in ChatGPT",
+                    "content": "",
+                }
+            ],
+            citations=[
+                {
+                    "title": "Firecrawl vs Tavily: Complete Comparison for AI Agents & RAG (2026)",
+                    "url": "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                },
+                {
+                    "title": "Search API - Tavily",
+                    "url": "https://docs.tavily.com/documentation/api-reference/search",
+                },
+            ],
+            social=None,
+            evidence={
+                "providers_consulted": ["tavily", "canonical_research_docs"],
+                "citation_count": 2,
+                "confidence": "medium",
+                "research_plan": {"scrape_top_n": 2, "web_mode": "research"},
+                "selected_candidate_domains": ["firecrawl.dev", "tavily.com"],
+                "selected_candidate_cluster_counts": {"project": 1, "supporting": 1},
+                "selected_supporting_source_count": 1,
+                "authoritative_research": False,
+            },
+        )
+
+        search_row = next(
+            row for row in (sections.get("comparison_rows") or [])
+            if row.get("candidate") == "Search API"
+        )
+        self.assertIn("Tavily exposes a search API for web retrieval", str(search_row.get("note") or ""))
 
     def test_research_report_sections_promote_non_generic_top_claim_into_executive_summary(self) -> None:
         client = MySearchClient()

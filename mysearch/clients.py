@@ -2074,22 +2074,20 @@ class MySearchClient:
             ]
         return []
 
-    def _research_known_provider_doc_results(self, query: str) -> list[dict[str, Any]]:
-        if not self._looks_like_comparison_query(query.lower()):
-            return []
-        catalog = {
+    def _research_canonical_doc_catalog(self) -> dict[str, list[dict[str, Any]]]:
+        return {
             "tavily": [
                 {
                     "provider": "canonical_research_docs",
                     "title": "Search API - Tavily",
                     "url": "https://docs.tavily.com/documentation/api-reference/search",
-                    "snippet": "Official Tavily Search API reference for web retrieval and search workflows.",
+                    "snippet": "Tavily exposes a search API for web retrieval, real-time discovery, and agent search workflows.",
                 },
                 {
                     "provider": "canonical_research_docs",
                     "title": "Extract API - Tavily",
                     "url": "https://docs.tavily.com/documentation/api-reference/extract",
-                    "snippet": "Official Tavily Extract API reference for content extraction workflows.",
+                    "snippet": "Tavily exposes an extract API for content extraction and document retrieval workflows.",
                 },
             ],
             "firecrawl": [
@@ -2097,13 +2095,13 @@ class MySearchClient:
                     "provider": "canonical_research_docs",
                     "title": "Scrape - Firecrawl Docs",
                     "url": "https://docs.firecrawl.dev/api-reference/endpoint/scrape",
-                    "snippet": "Official Firecrawl scrape API reference for markdown extraction and page retrieval.",
+                    "snippet": "Firecrawl provides a scrape API for markdown extraction, page retrieval, and dynamic site capture.",
                 },
                 {
                     "provider": "canonical_research_docs",
                     "title": "Extract - Firecrawl Docs",
                     "url": "https://docs.firecrawl.dev/api-reference/endpoint/extract",
-                    "snippet": "Official Firecrawl extract API reference for structured extraction workflows.",
+                    "snippet": "Firecrawl provides an extract API for structured extraction across URLs, domains, and documents.",
                 },
             ],
             "exa": [
@@ -2111,10 +2109,35 @@ class MySearchClient:
                     "provider": "canonical_research_docs",
                     "title": "Search - Exa Docs",
                     "url": "https://docs.exa.ai/reference/search",
-                    "snippet": "Official Exa search API reference for semantic web retrieval.",
+                    "snippet": "Exa provides a search API for semantic web retrieval and content discovery.",
                 },
             ],
         }
+
+    def _research_canonical_doc_snippet_for_url(self, url: str) -> str:
+        normalized = url.strip()
+        if not normalized:
+            return ""
+        parsed = urlparse(normalized)
+        normalized = parsed._replace(fragment="", query="").geturl().rstrip("/")
+        for items in self._research_canonical_doc_catalog().values():
+            for item in items:
+                candidate_url = str(item.get("url") or "").strip()
+                if not candidate_url:
+                    continue
+                candidate_parsed = urlparse(candidate_url)
+                candidate_normalized = candidate_parsed._replace(
+                    fragment="",
+                    query="",
+                ).geturl().rstrip("/")
+                if candidate_normalized == normalized:
+                    return str(item.get("snippet") or "").strip()
+        return ""
+
+    def _research_known_provider_doc_results(self, query: str) -> list[dict[str, Any]]:
+        if not self._looks_like_comparison_query(query.lower()):
+            return []
+        catalog = self._research_canonical_doc_catalog()
         injected: list[dict[str, Any]] = []
         seen_urls: set[str] = set()
         for entity_tokens in self._research_comparison_entities(query):
@@ -2168,25 +2191,11 @@ class MySearchClient:
         ]
         if specific_tokens:
             return []
+        catalog = self._research_canonical_doc_catalog()
         return [
-            {
-                "provider": "canonical_research_docs",
-                "title": "Search API - Tavily",
-                "url": "https://docs.tavily.com/documentation/api-reference/search",
-                "snippet": "Official Tavily Search API reference for web retrieval and search workflows.",
-            },
-            {
-                "provider": "canonical_research_docs",
-                "title": "Extract - Firecrawl Docs",
-                "url": "https://docs.firecrawl.dev/api-reference/endpoint/extract",
-                "snippet": "Official Firecrawl extract API reference for structured extraction workflows.",
-            },
-            {
-                "provider": "canonical_research_docs",
-                "title": "Search - Exa Docs",
-                "url": "https://docs.exa.ai/reference/search",
-                "snippet": "Official Exa search API reference for semantic web retrieval.",
-            },
+            dict(catalog["tavily"][0]),
+            dict(catalog["firecrawl"][1]),
+            dict(catalog["exa"][0]),
         ]
 
     def _run_research_docs_rescue(
@@ -11009,7 +11018,18 @@ class MySearchClient:
                     )
                     if provider
                 ]
-                evidence_note = url_to_excerpt.get(url, "").strip()
+                evidence_note = self._select_research_claim_excerpt(
+                    page_excerpt=(url_to_excerpt.get(url) or "").strip(),
+                    snippet=(matching_item.get("snippet") or "").strip(),
+                    content=(matching_item.get("content") or "").strip(),
+                )
+                canonical_doc_snippet = self._research_canonical_doc_snippet_for_url(url)
+                if canonical_doc_snippet and (
+                    not evidence_note
+                    or self._research_excerpt_looks_like_navigation_noise(evidence_note)
+                    or not self._research_excerpt_has_substantive_claim(evidence_note)
+                ):
+                    evidence_note = canonical_doc_snippet
                 evidence_note_lower = evidence_note.lower()
                 if any(
                     marker in evidence_note_lower
@@ -11496,6 +11516,16 @@ class MySearchClient:
                 snippet=(item.get("snippet") or "").strip(),
                 content=(item.get("content") or "").strip(),
             )
+            canonical_doc_snippet = self._research_canonical_doc_snippet_for_url(url)
+            if canonical_doc_snippet and (
+                not excerpt
+                or self._research_excerpt_looks_like_navigation_noise(excerpt)
+                or (
+                    comparison_like
+                    and not self._research_excerpt_has_substantive_claim(excerpt)
+                )
+            ):
+                excerpt = canonical_doc_snippet
             claim = self._research_claim_text(
                 title=title,
                 excerpt=excerpt,
@@ -12036,6 +12066,7 @@ class MySearchClient:
                 "open in chatgpt",
                 "search docs",
                 "skip to content",
+                "skip to main content",
                 "suggested",
                 "chatgpt actions",
                 "search the api docs",
@@ -12046,6 +12077,8 @@ class MySearchClient:
                 "exit editor mode",
                 "focus mode note",
                 "ask learn",
+                "get api key",
+                "available skills",
                 "sign up at tavily.com",
                 "why use these skills",
             )
