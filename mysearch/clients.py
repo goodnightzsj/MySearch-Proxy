@@ -2572,6 +2572,20 @@ class MySearchClient:
                     include_domains=include_domains,
                 )
             if supporting_candidates:
+                indexed_supporting_candidates = list(enumerate(supporting_candidates))
+                supporting_candidates = [
+                    item
+                    for _, item in sorted(
+                        indexed_supporting_candidates,
+                        key=lambda pair: (
+                            self._research_supporting_candidate_kind_rank(
+                                pair[1],
+                                query=query,
+                            ),
+                            pair[0],
+                        ),
+                    )
+                ]
                 supporting_candidates = self._diversify_results_by_registered_domain(
                     supporting_candidates
                 )
@@ -2938,6 +2952,41 @@ class MySearchClient:
             return 1
         if "/blog/" in path:
             return 3
+        return 2
+
+    def _research_supporting_candidate_kind_rank(
+        self,
+        item: dict[str, Any],
+        *,
+        query: str,
+    ) -> int:
+        url = str(item.get("url") or "")
+        title_text = str(item.get("title") or "").lower()
+        path = urlparse(url).path.lower()
+        comparison_like = self._looks_like_comparison_query(query.lower())
+        capability_markers = (
+            "search",
+            "extract",
+            "scrape",
+            "crawl",
+            "retrieval",
+            "api reference",
+        )
+        if any(marker in path for marker in ("/api-reference/", "/api-reference", "/reference/")) and any(
+            marker in title_text or marker in path for marker in capability_markers
+        ):
+            return 0
+        if any(marker in path for marker in ("/endpoint/scrape", "/endpoint/extract", "/features/scrape")):
+            return 0
+        if any(marker in title_text for marker in capability_markers):
+            return 1
+        if comparison_like and any(
+            marker in path or marker in title_text
+            for marker in ("agent-builder", "agent skills", "integrations")
+        ):
+            return 4
+        if "/blog/" in path:
+            return 5
         return 2
 
     def _assemble_authoritative_research_candidates(
