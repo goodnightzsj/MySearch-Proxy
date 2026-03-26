@@ -5965,6 +5965,20 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(evidence["selected_candidate_cluster_counts"]["project"], 1)
         self.assertEqual(evidence["selected_candidate_cluster_counts"]["curated"], 1)
 
+    def test_research_authoritative_rescue_queries_add_known_provider_doc_queries_for_comparison(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        queries = client._research_authoritative_rescue_queries(
+            "compare Tavily and Firecrawl for AI agent web retrieval 2026"
+        )
+
+        self.assertIn("Tavily search api docs", queries)
+        self.assertIn("Tavily extract docs", queries)
+        self.assertIn("Firecrawl scrape docs", queries)
+        self.assertIn("Firecrawl extract docs", queries)
+
     def test_research_selection_prefers_supporting_vendor_docs_before_curated_comparisons(
         self,
     ) -> None:
