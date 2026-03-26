@@ -5756,6 +5756,132 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(label, "directory")
 
+    def test_research_result_cluster_label_marks_first_party_provider_site_as_project(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        label = client._research_result_cluster_label(
+            query="compare Tavily and Firecrawl for AI agent web retrieval 2026",
+            mode="research",
+            item={
+                "title": "Firecrawl vs Tavily: Complete Comparison for AI Agents & RAG (2026)",
+                "url": "https://www.firecrawl.dev/blog/tavily-comparison",
+                "snippet": "First-party Firecrawl comparison of extraction and search trade-offs.",
+            },
+            include_domains=None,
+            authoritative_preferred=False,
+        )
+
+        self.assertEqual(label, "project")
+
+    def test_research_result_cluster_label_demotes_generic_first_party_page_for_comparison(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        label = client._research_result_cluster_label(
+            query="compare Tavily and Firecrawl for AI agent web retrieval 2026",
+            mode="research",
+            item={
+                "title": "5 Tavily Alternatives for Better Pricing, Performance, and Extraction Depth",
+                "url": "https://www.firecrawl.dev/blog/tavily-alternatives",
+                "snippet": "Compare alternative AI search APIs and extraction tooling.",
+            },
+            include_domains=None,
+            authoritative_preferred=False,
+        )
+
+        self.assertEqual(label, "listicle")
+
+    def test_research_selection_prefers_first_party_project_sites_over_curated_comparisons(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        selected, evidence = client._select_research_candidate_results(
+            query="compare Tavily and Firecrawl for AI agent web retrieval 2026",
+            mode="research",
+            intent="comparison",
+            max_results=4,
+            web_results=[
+                {
+                    "provider": "exa",
+                    "title": "Exa vs Tavily vs Firecrawl: Which Web Search MCP Should You Use in Production?",
+                    "url": "https://www.sagentum.com/blog/exa-vs-tavily-vs-firecrawl",
+                    "snippet": "Third-party comparison.",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Firecrawl vs Tavily: Complete Comparison for AI Agents & RAG (2026)",
+                    "url": "https://www.firecrawl.dev/blog/tavily-comparison",
+                    "snippet": "First-party Firecrawl comparison of extraction and search trade-offs.",
+                },
+            ],
+            docs_rescue_results=[],
+            tavily_support_results=[],
+            exa_results=[],
+            include_domains=None,
+            authoritative_preferred=False,
+        )
+
+        self.assertEqual(
+            [item["url"] for item in selected[:2]],
+            [
+                "https://www.firecrawl.dev/blog/tavily-comparison",
+                "https://www.sagentum.com/blog/exa-vs-tavily-vs-firecrawl",
+            ],
+        )
+        self.assertEqual(evidence["selected_candidate_cluster_counts"]["project"], 1)
+        self.assertEqual(evidence["selected_candidate_cluster_counts"]["curated"], 1)
+
+    def test_research_selection_limits_project_results_to_one_domain_for_comparison_queries(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        selected, evidence = client._select_research_candidate_results(
+            query="compare Tavily and Firecrawl for AI agent web retrieval 2026",
+            mode="research",
+            intent="comparison",
+            max_results=4,
+            web_results=[
+                {
+                    "provider": "tavily",
+                    "title": "Firecrawl vs Tavily: Complete Comparison for AI Agents & RAG (2026)",
+                    "url": "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                    "snippet": "Direct first-party comparison page.",
+                },
+                {
+                    "provider": "exa",
+                    "title": "Firecrawl - The Web Data API for AI",
+                    "url": "https://www.firecrawl.dev/blog/firecrawl-vs-tavily",
+                    "snippet": "Direct first-party comparison page for Firecrawl and Tavily.",
+                },
+                {
+                    "provider": "exa",
+                    "title": "Exa vs Tavily vs Firecrawl: Which Web Search MCP Should You Use in Production?",
+                    "url": "https://www.sagentum.com/blog/exa-vs-tavily-vs-firecrawl",
+                    "snippet": "Third-party comparison.",
+                },
+            ],
+            docs_rescue_results=[],
+            tavily_support_results=[],
+            exa_results=[],
+            include_domains=None,
+            authoritative_preferred=False,
+        )
+
+        self.assertEqual(
+            [item["url"] for item in selected[:2]],
+            [
+                "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                "https://www.sagentum.com/blog/exa-vs-tavily-vs-firecrawl",
+            ],
+        )
+        self.assertEqual(evidence["selected_candidate_cluster_counts"]["project"], 1)
+        self.assertEqual(evidence["selected_candidate_cluster_counts"]["curated"], 1)
+
     def test_research_claim_evidence_skips_schema_noise_from_method_pages(self) -> None:
         client = MySearchClient()
         query = "compare OpenAI Responses API and Batch API for long-running tasks 2026"
