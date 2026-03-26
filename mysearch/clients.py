@@ -13039,6 +13039,29 @@ class MySearchClient:
         include_domains: list[str] | None,
         authoritative_preferred: bool,
     ) -> list[dict[str, Any]]:
+        if not ordered_results and citations:
+            ordered_results = [
+                {
+                    "provider": (
+                        "canonical_research_docs"
+                        if self._research_is_canonical_vendor_doc(str(citation.get("url") or ""))
+                        else "citation"
+                    ),
+                    "matched_providers": [
+                        "canonical_research_docs"
+                        if self._research_is_canonical_vendor_doc(str(citation.get("url") or ""))
+                        else "citation"
+                    ],
+                    "title": (citation.get("title") or "").strip(),
+                    "url": (citation.get("url") or "").strip(),
+                    "snippet": self._research_canonical_doc_snippet_for_url(
+                        str(citation.get("url") or "")
+                    ),
+                    "content": "",
+                }
+                for citation in citations
+                if (citation.get("url") or "").strip()
+            ]
         if not ordered_results:
             return []
 

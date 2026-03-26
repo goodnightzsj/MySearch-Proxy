@@ -9221,6 +9221,34 @@ class MySearchClientTests(unittest.TestCase):
         self.assertTrue(claims)
         self.assertIn("create large batches", claims[0]["claim"].lower())
 
+    def test_research_claim_evidence_can_hydrate_from_canonical_citations_without_ordered_results(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        claims = client._build_research_claim_evidence(
+            query="best approach for official docs retrieval in agentic search 2026",
+            mode="docs",
+            ordered_results=[],
+            pages=[],
+            citations=[
+                {
+                    "title": "Search API - Tavily",
+                    "url": "https://docs.tavily.com/documentation/api-reference/search",
+                },
+                {
+                    "title": "Search - Exa Docs",
+                    "url": "https://docs.exa.ai/reference/search",
+                },
+            ],
+            comparison_like=True,
+            include_domains=None,
+            authoritative_preferred=True,
+        )
+
+        self.assertTrue(claims)
+        self.assertIn("search api", claims[0]["claim"].lower())
+
     def test_research_report_sections_include_claim_evidence_and_source_clusters(self) -> None:
         client = MySearchClient()
 
