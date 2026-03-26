@@ -6283,6 +6283,7 @@ class MySearchClientTests(unittest.TestCase):
                 "https://docs.tavily.com/documentation/api-reference/extract",
                 "https://docs.firecrawl.dev/api-reference/endpoint/scrape",
                 "https://docs.firecrawl.dev/api-reference/endpoint/extract",
+                "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
             ],
         )
 
@@ -6420,6 +6421,20 @@ class MySearchClientTests(unittest.TestCase):
             top_urls.index("https://r2r-docs.sciphi.ai/documentation/retrieval/agentic-rag"),
         )
         self.assertEqual(evidence["supporting_source_count"], 2)
+
+    def test_research_known_provider_doc_results_include_first_party_comparison_page(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        results = client._research_known_provider_doc_results(
+            "compare Tavily and Firecrawl for AI agent web retrieval 2026"
+        )
+
+        urls = [item["url"] for item in results]
+        self.assertIn("https://docs.tavily.com/documentation/api-reference/search", urls)
+        self.assertIn("https://docs.firecrawl.dev/api-reference/endpoint/extract", urls)
+        self.assertIn("https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily", urls)
 
     def test_authoritative_research_selection_diversifies_supporting_vendor_docs_by_domain(
         self,
@@ -7585,6 +7600,40 @@ class MySearchClientTests(unittest.TestCase):
         self.assertIn("https://docs.tavily.com/documentation/api-reference/search", top_urls)
         self.assertIn("https://docs.exa.ai/reference/search", top_urls)
         self.assertGreaterEqual(result["evidence"]["supporting_source_count"], 1)
+
+    def test_research_canonical_vendor_fallback_for_comparison_includes_first_party_project_page(
+        self,
+    ) -> None:
+        client = MySearchClient()
+        client._provider_can_serve = lambda provider: provider.name != "xai"  # type: ignore[method-assign]
+        client._resolve_research_plan = lambda **kwargs: {  # type: ignore[method-assign]
+            "web_mode": "research",
+            "web_max_results": kwargs["web_max_results"],
+            "social_max_results": kwargs["social_max_results"],
+            "scrape_top_n": kwargs["scrape_top_n"],
+        }
+
+        def failing_search(**kwargs):  # type: ignore[no-untyped-def]
+            raise MySearchError("provider unavailable")
+
+        client.search = failing_search  # type: ignore[method-assign]
+        client.extract_url = lambda **kwargs: {  # type: ignore[method-assign]
+            "url": kwargs["url"],
+            "provider": "firecrawl",
+            "content": f"content for {kwargs['url']}",
+            "cache": {"extract": {"hit": False, "ttl_seconds": 300}},
+        }
+
+        result = client.research(
+            query="compare Tavily and Firecrawl for AI agent web retrieval 2026",
+            mode="research",
+            strategy="deep",
+            include_social=False,
+            scrape_top_n=2,
+        )
+
+        top_urls = [item["url"] for item in result["web_search"]["results"][:5]]
+        self.assertIn("https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily", top_urls)
 
     def test_dedupe_research_results_preserves_matched_providers(self) -> None:
         client = MySearchClient()

@@ -2279,6 +2279,28 @@ class MySearchClient:
                         continue
                     seen_urls.add(url)
                     injected.append(dict(item))
+        entity_texts = {
+            " ".join(entity_tokens).lower()
+            for entity_tokens in self._research_comparison_entities(query)
+        }
+        if (
+            any("tavily" in entity for entity in entity_texts)
+            and any("firecrawl" in entity for entity in entity_texts)
+        ):
+            comparison_url = "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily"
+            if comparison_url not in seen_urls:
+                seen_urls.add(comparison_url)
+                injected.append(
+                    {
+                        "provider": "canonical_research_projects",
+                        "title": "Firecrawl vs Tavily - Firecrawl",
+                        "url": comparison_url,
+                        "snippet": (
+                            "Firecrawl positions itself as an extraction-first workflow with scrape "
+                            "and structured extraction, while Tavily focuses on search and retrieval APIs."
+                        ),
+                    }
+                )
         return injected
 
     def _research_generic_vendor_doc_results(self, query: str) -> list[dict[str, Any]]:
