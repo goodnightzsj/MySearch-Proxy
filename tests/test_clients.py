@@ -5172,6 +5172,307 @@ class MySearchClientTests(unittest.TestCase):
         self.assertIn("## Source Mix", result["summary"])
         self.assertIn("## Top Sources", result["summary"])
 
+    def test_research_cluster_label_demotes_official_blog_and_forum_below_docs(self) -> None:
+        client = MySearchClient()
+        query = "compare OpenAI Responses API and Batch API for long-running tasks 2026"
+
+        official_doc = {
+            "title": "Background mode guide - OpenAI API",
+            "url": "https://developers.openai.com/api/docs/guides/background/",
+            "snippet": "Official documentation for background mode.",
+        }
+        official_blog = {
+            "title": "From prompts to products: One year of Responses",
+            "url": "https://developers.openai.com/blog/one-year-of-responses/",
+            "snippet": "Developer story about Responses API use cases.",
+        }
+        official_forum = {
+            "title": "Batch API is took so long - OpenAI Developer Community",
+            "url": "https://community.openai.com/t/batch-api-is-took-so-long/948219",
+            "snippet": "Community discussion about queue times.",
+        }
+
+        self.assertEqual(
+            client._research_result_cluster_label(
+                query=query,
+                mode="docs",
+                item=official_doc,
+                include_domains=None,
+                authoritative_preferred=True,
+            ),
+            "official",
+        )
+        self.assertEqual(
+            client._research_result_cluster_label(
+                query=query,
+                mode="docs",
+                item=official_blog,
+                include_domains=None,
+                authoritative_preferred=True,
+            ),
+            "supporting",
+        )
+        self.assertEqual(
+            client._research_result_cluster_label(
+                query=query,
+                mode="docs",
+                item=official_forum,
+                include_domains=None,
+                authoritative_preferred=True,
+            ),
+            "community",
+        )
+
+    def test_research_selection_prefers_official_docs_before_blog_and_forum(self) -> None:
+        client = MySearchClient()
+        query = "compare OpenAI Responses API and Batch API for long-running tasks 2026"
+
+        selected, evidence = client._select_research_candidate_results(
+            query=query,
+            mode="docs",
+            intent="comparison",
+            max_results=4,
+            web_results=[
+                {
+                    "provider": "tavily",
+                    "title": "From prompts to products: One year of Responses",
+                    "url": "https://developers.openai.com/blog/one-year-of-responses/",
+                    "snippet": "Developer story about Responses API use cases.",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Batch API is took so long - OpenAI Developer Community",
+                    "url": "https://community.openai.com/t/batch-api-is-took-so-long/948219",
+                    "snippet": "Community discussion about queue times.",
+                },
+            ],
+            docs_rescue_results=[],
+            tavily_support_results=[],
+            exa_results=[
+                {
+                    "provider": "exa",
+                    "title": "Background mode guide - OpenAI API",
+                    "url": "https://developers.openai.com/api/docs/guides/background/",
+                    "snippet": "Official documentation for background mode.",
+                }
+            ],
+            include_domains=None,
+            authoritative_preferred=True,
+        )
+
+        self.assertEqual(
+            [item["url"] for item in selected[:3]],
+            [
+                "https://developers.openai.com/api/docs/guides/background/",
+                "https://developers.openai.com/blog/one-year-of-responses/",
+                "https://community.openai.com/t/batch-api-is-took-so-long/948219",
+            ],
+        )
+        self.assertEqual(
+            evidence["selected_candidate_cluster_counts"],
+            {"official": 1, "supporting": 1, "community": 1},
+        )
+
+    def test_research_docs_mode_runs_docs_rescue_for_authoritative_comparison_queries(self) -> None:
+        client = MySearchClient()
+        client._provider_can_serve = lambda provider: provider.name not in {"xai", "exa"}  # type: ignore[method-assign]
+
+        def fake_search(**kwargs):  # type: ignore[no-untyped-def]
+            if kwargs["intent"] == "resource" and kwargs["provider"] == "tavily":
+                return {
+                    "provider": "tavily",
+                    "intent": "resource",
+                    "strategy": "deep",
+                    "answer": "",
+                    "results": [
+                        {
+                            "provider": "tavily",
+                            "title": "Background mode guide - OpenAI API",
+                            "url": "https://developers.openai.com/api/docs/guides/background/",
+                            "snippet": "Official guide for background mode.",
+                            "content": "",
+                        },
+                        {
+                            "provider": "tavily",
+                            "title": "Batch API guide - OpenAI API",
+                            "url": "https://developers.openai.com/api/docs/guides/batch/",
+                            "snippet": "Official guide for the Batch API.",
+                            "content": "",
+                        },
+                    ],
+                    "citations": [
+                        {
+                            "title": "Background mode guide - OpenAI API",
+                            "url": "https://developers.openai.com/api/docs/guides/background/",
+                        },
+                        {
+                            "title": "Batch API guide - OpenAI API",
+                            "url": "https://developers.openai.com/api/docs/guides/batch/",
+                        },
+                    ],
+                    "evidence": {
+                        "providers_consulted": ["tavily"],
+                        "verification": "single-provider",
+                        "citation_count": 2,
+                        "source_diversity": 1,
+                        "source_domains": ["openai.com"],
+                        "official_source_count": 2,
+                        "official_mode": "strict",
+                        "confidence": "high",
+                        "conflicts": [],
+                    },
+                }
+            return {
+                "provider": "tavily",
+                "intent": "exploratory",
+                "strategy": "deep",
+                "answer": "",
+                "results": [
+                    {
+                        "provider": "tavily",
+                        "title": "From prompts to products: One year of Responses",
+                        "url": "https://developers.openai.com/blog/one-year-of-responses/",
+                        "snippet": "Developer story about Responses API use cases.",
+                        "content": "",
+                    },
+                    {
+                        "provider": "tavily",
+                        "title": "Batch API is took so long - OpenAI Developer Community",
+                        "url": "https://community.openai.com/t/batch-api-is-took-so-long/948219",
+                        "snippet": "Community discussion about queue times.",
+                        "content": "",
+                    },
+                ],
+                "citations": [
+                    {
+                        "title": "From prompts to products: One year of Responses",
+                        "url": "https://developers.openai.com/blog/one-year-of-responses/",
+                    },
+                    {
+                        "title": "Batch API is took so long - OpenAI Developer Community",
+                        "url": "https://community.openai.com/t/batch-api-is-took-so-long/948219",
+                    },
+                ],
+                "evidence": {
+                    "providers_consulted": ["tavily"],
+                    "verification": "single-provider",
+                    "citation_count": 2,
+                    "source_diversity": 1,
+                    "source_domains": ["openai.com"],
+                    "official_source_count": 2,
+                    "official_mode": "strict",
+                    "confidence": "high",
+                    "conflicts": [],
+                },
+            }
+
+        client.search = fake_search  # type: ignore[method-assign]
+        client.extract_url = lambda **kwargs: {  # type: ignore[method-assign]
+            "url": kwargs["url"],
+            "provider": "firecrawl",
+            "content": f"authoritative content for {kwargs['url']}",
+            "cache": {"extract": {"hit": False, "ttl_seconds": 300}},
+        }
+
+        result = client.research(
+            query="compare OpenAI Responses API and Batch API for long-running tasks 2026",
+            mode="web",
+            strategy="deep",
+            include_social=False,
+            scrape_top_n=2,
+        )
+
+        self.assertIn(
+            result["pages"][0]["url"],
+            {
+                "https://developers.openai.com/api/docs/guides/background/",
+                "https://developers.openai.com/api/docs/guides/batch/",
+            },
+        )
+        self.assertIn(
+            result["citations"][0]["url"],
+            {
+                "https://developers.openai.com/api/docs/guides/background/",
+                "https://developers.openai.com/api/docs/guides/batch/",
+            },
+        )
+        self.assertGreaterEqual(result["evidence"]["docs_rescue_result_count"], 2)
+        self.assertGreaterEqual(result["evidence"]["authoritative_source_count"], 2)
+
+    def test_research_selection_diversifies_official_candidates_across_comparison_entities(self) -> None:
+        client = MySearchClient()
+        query = "compare OpenAI Responses API and Batch API for long-running tasks 2026"
+
+        selected, evidence = client._select_research_candidate_results(
+            query=query,
+            mode="docs",
+            intent="comparison",
+            max_results=4,
+            web_results=[],
+            docs_rescue_results=[
+                {
+                    "provider": "tavily",
+                    "title": "Batch API - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/guides/batch/",
+                    "snippet": "Official Batch API guide.",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Create batch | OpenAI API Reference",
+                    "url": "https://developers.openai.com/api/reference/resources/batches/methods/create/",
+                    "snippet": "Create a batch request.",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Migrate to the Responses API - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/guides/migrate-to-responses/",
+                    "snippet": "Migration guide for the Responses API.",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Create a model response | OpenAI API Reference",
+                    "url": "https://developers.openai.com/api/reference/resources/responses/methods/create/",
+                    "snippet": "Create a model response.",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Batch API - Inference.net Documentation",
+                    "url": "https://docs.inference.net/features/batch-api",
+                    "snippet": "Third-party docs for Batch API.",
+                },
+            ],
+            tavily_support_results=[],
+            exa_results=[],
+            include_domains=None,
+            authoritative_preferred=True,
+        )
+
+        self.assertEqual(
+            [item["url"] for item in selected[:2]],
+            [
+                "https://developers.openai.com/api/docs/guides/migrate-to-responses/",
+                "https://developers.openai.com/api/docs/guides/batch/",
+            ],
+        )
+        self.assertEqual(
+            client._research_result_cluster_label(
+                query=query,
+                mode="docs",
+                item={
+                    "title": "Batch API - Inference.net Documentation",
+                    "url": "https://docs.inference.net/features/batch-api",
+                    "snippet": "Third-party docs for Batch API.",
+                },
+                include_domains=None,
+                authoritative_preferred=True,
+            ),
+            "community",
+        )
+        self.assertEqual(
+            evidence["selected_candidate_cluster_counts"],
+            {"official": 4},
+        )
+
     def test_research_comparison_queries_downrank_community_results(self) -> None:
         client = MySearchClient()
         client._provider_can_serve = lambda provider: provider.name != "xai"  # type: ignore[method-assign]
