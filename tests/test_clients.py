@@ -6348,6 +6348,17 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(claim, "")
 
+    def test_research_claim_text_drops_agent_skills_signup_shell(self) -> None:
+        client = MySearchClient()
+
+        claim = client._research_claim_text(
+            title="Tavily Agent Skills - Tavily Docs",
+            excerpt="Sign up at tavily.com Why Use These Skills? Build agent workflows faster with reusable skills.",
+            comparison_like=True,
+        )
+
+        self.assertEqual(claim, "")
+
     def test_research_claim_text_drops_code_example_noise(self) -> None:
         client = MySearchClient()
 
