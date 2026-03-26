@@ -5455,6 +5455,8 @@ class MySearchClientTests(unittest.TestCase):
         client = MySearchClient()
 
         claims = client._build_research_claim_evidence(
+            query="migrate to responses api",
+            mode="docs",
             ordered_results=[
                 {
                     "provider": "exa",
@@ -5483,11 +5485,15 @@ class MySearchClientTests(unittest.TestCase):
                 },
             ],
             comparison_like=True,
+            include_domains=None,
+            authoritative_preferred=True,
         )
 
         self.assertEqual(len(claims), 1)
         self.assertEqual(sorted(claims[0]["providers"]), ["exa", "tavily"])
         self.assertEqual(len(claims[0]["sources"]), 2)
+        self.assertEqual(claims[0]["support_level"], "cross-provider")
+        self.assertIn("official", claims[0]["clusters"])
 
     def test_research_report_sections_include_claim_evidence_and_source_clusters(self) -> None:
         client = MySearchClient()
@@ -5540,14 +5546,22 @@ class MySearchClientTests(unittest.TestCase):
         summary = client._render_research_report(sections)
 
         self.assertIn("claim_evidence", sections)
+        self.assertIn("consensus_snapshot", sections)
         self.assertIn("source_clusters", sections)
         self.assertIn("decision_table", sections)
         self.assertEqual(sections["claim_evidence"][0]["providers"], ["exa", "tavily"])
+        self.assertIn(
+            sections["claim_evidence"][0]["support_level"],
+            {"single-source", "corroborated", "multi-source", "cross-provider"},
+        )
         self.assertEqual(sections["source_clusters"][0]["label"], "project")
         self.assertEqual(sections["source_clusters"][0]["tier"], "primary")
         self.assertGreater(sections["source_clusters"][0]["weight"], 0)
         self.assertEqual(sections["decision_table"][0]["fit"], "project-native source")
+        self.assertIn("support", sections["consensus_snapshot"][0].lower())
         self.assertIn("## Claim-Level Evidence", summary)
+        self.assertIn("## Consensus Snapshot", summary)
+        self.assertIn("Support:", summary)
         self.assertIn("## Source Clusters", summary)
         self.assertIn("| Candidate | Cluster | Provider Support | Evidence Note |", summary)
         self.assertIn("## Decision Table", summary)
