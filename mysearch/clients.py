@@ -2305,19 +2305,7 @@ class MySearchClient:
         if not self._looks_like_comparison_query(query.lower()):
             return []
         catalog = self._research_canonical_doc_catalog()
-        injected: list[dict[str, Any]] = []
         seen_urls: set[str] = set()
-        for entity_tokens in self._research_comparison_entities(query):
-            entity_text = " ".join(entity_tokens).lower()
-            for brand, items in catalog.items():
-                if brand not in entity_text:
-                    continue
-                for item in items:
-                    url = str(item.get("url") or "")
-                    if not url or url in seen_urls:
-                        continue
-                    seen_urls.add(url)
-                    injected.append(dict(item))
         entity_texts = {
             " ".join(entity_tokens).lower()
             for entity_tokens in self._research_comparison_entities(query)
@@ -2364,6 +2352,7 @@ class MySearchClient:
             for brand in tracked_brands
             if any(brand in entity for entity in entity_texts)
         }
+        project_results: list[dict[str, Any]] = []
         injected_pair_project = False
         for pair, item in comparison_projects.items():
             if not pair.issubset(entity_brands):
@@ -2373,7 +2362,7 @@ class MySearchClient:
                 continue
             injected_pair_project = True
             seen_urls.add(comparison_url)
-            injected.append(
+            project_results.append(
                 {
                     "provider": "canonical_research_projects",
                     "title": item["title"],
@@ -2389,7 +2378,7 @@ class MySearchClient:
             and generic_comparison_hub not in seen_urls
         ):
             seen_urls.add(generic_comparison_hub)
-            injected.append(
+            project_results.append(
                 {
                     "provider": "canonical_research_projects",
                     "title": "Compare Firecrawl with Alternatives | In-depth Tool Comparisons",
@@ -2400,7 +2389,19 @@ class MySearchClient:
                     ),
                 }
             )
-        return injected
+        supporting_results: list[dict[str, Any]] = []
+        for entity_tokens in self._research_comparison_entities(query):
+            entity_text = " ".join(entity_tokens).lower()
+            for brand, items in catalog.items():
+                if brand not in entity_text:
+                    continue
+                for item in items:
+                    url = str(item.get("url") or "")
+                    if not url or url in seen_urls:
+                        continue
+                    seen_urls.add(url)
+                    supporting_results.append(dict(item))
+        return [*project_results, *supporting_results]
 
     def _research_generic_vendor_doc_results(self, query: str) -> list[dict[str, Any]]:
         query_lower = query.lower()

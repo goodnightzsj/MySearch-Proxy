@@ -6517,11 +6517,11 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(
             [item["url"] for item in results],
             [
+                "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
                 "https://docs.tavily.com/documentation/api-reference/search",
                 "https://docs.tavily.com/documentation/api-reference/extract",
                 "https://docs.firecrawl.dev/api-reference/endpoint/scrape",
                 "https://docs.firecrawl.dev/api-reference/endpoint/extract",
-                "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
             ],
         )
 
@@ -6670,6 +6670,7 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         urls = [item["url"] for item in results]
+        self.assertEqual(urls[0], "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily")
         self.assertIn("https://docs.tavily.com/documentation/api-reference/search", urls)
         self.assertIn("https://docs.firecrawl.dev/api-reference/endpoint/extract", urls)
         self.assertIn("https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily", urls)
@@ -6684,6 +6685,7 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         urls = [item["url"] for item in results]
+        self.assertEqual(urls[0], "https://www.firecrawl.dev/compare/firecrawl-vs-exa")
         self.assertIn("https://docs.firecrawl.dev/api-reference/endpoint/extract", urls)
         self.assertIn("https://docs.exa.ai/reference/search", urls)
         self.assertIn("https://www.firecrawl.dev/compare/firecrawl-vs-exa", urls)
@@ -6698,6 +6700,7 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         urls = [item["url"] for item in results]
+        self.assertEqual(urls[0], "https://exa.ai/versus/tavily")
         self.assertIn("https://docs.exa.ai/reference/search", urls)
         self.assertIn("https://docs.tavily.com/documentation/api-reference/search", urls)
         self.assertIn("https://exa.ai/versus/tavily", urls)
@@ -6712,6 +6715,7 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         urls = [item["url"] for item in results]
+        self.assertEqual(urls[0], "https://www.firecrawl.dev/compare/firecrawl-vs-apify")
         self.assertIn("https://docs.firecrawl.dev/api-reference/endpoint/extract", urls)
         self.assertIn("https://docs.apify.com/api", urls)
         self.assertIn("https://www.firecrawl.dev/compare/firecrawl-vs-apify", urls)
@@ -6726,6 +6730,7 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         urls = [item["url"] for item in results]
+        self.assertEqual(urls[0], "https://www.firecrawl.dev/compare")
         self.assertIn("https://www.firecrawl.dev/compare", urls)
 
     def test_authoritative_research_selection_diversifies_supporting_vendor_docs_by_domain(
