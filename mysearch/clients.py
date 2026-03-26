@@ -8894,7 +8894,11 @@ class MySearchClient:
             from_date=from_date,
             to_date=to_date,
         )
-        results = self._diversify_social_results(results, max_results=10)
+        results = self._diversify_social_results(
+            results,
+            max_results=10,
+            max_per_identity=1,
+        )
         citations = self._extract_social_gateway_citations(response, results)
         answer = (
             response.get("answer")
