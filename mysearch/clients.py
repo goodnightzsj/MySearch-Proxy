@@ -4996,10 +4996,12 @@ class MySearchClient:
             marker_pattern = re.escape(marker)
             patterns = [
                 rf"{marker_pattern}(?:\s+winner)?\s*[–—:]",
+                rf"{marker_pattern}\s*\.\s*winner\s*[\.\-–—: ]",
                 rf"{marker_pattern}(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)\b",
                 rf"[\"“'‘][^\"”’'\n]{{2,100}}[\"”’'‘]\s+is\s+the\s+(?:20\d{{2}}\s+)?{marker_pattern}\s+winner",
                 rf"[\"“'‘][^\"”’'\n]{{2,100}}[\"”’'‘]\s+(?:won|wins)\s+{marker_pattern}",
                 rf"[A-Z][A-Za-z0-9'’&.\- ]{{2,100}}\s+(?:won|wins)\s+{marker_pattern}",
+                rf"[A-Z][A-Za-z0-9'’&.\- ]{{2,100}}\s+(?:won|wins)[^\n]{{0,40}}\b{marker_pattern}\b",
             ]
             if any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns):
                 return True
@@ -9243,6 +9245,7 @@ class MySearchClient:
                 patterns=[
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+won[^\n]{0,80}\bbest picture\b",
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+is\s+the\s+(?:20\d{2}\s+)?best picture winner",
+                    r"best picture\s*\.\s*winner\s*[\.\-–—: ]+\s*([^\n.;]{2,100})",
                     r"best picture\s*[–—:]\s*[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]",
                     r"best picture(?:\s+winner)?(?:\s*[–—:]|\s+was|\s+is|\s+goes to|\s+went to)\s+[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]",
                     r"best picture\s*[–—:]\s*([^\n.;]{2,100})",
@@ -9284,9 +9287,11 @@ class MySearchClient:
                 patterns=[
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+(?:won|wins)[^\n]{0,80}\balbum of the year\b",
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+[–—:]\s*album of the year",
+                    r"album of the year\s*\.\s*winner\s*[\.\-–—: ]+\s*([^\n.;]{2,100})",
                     r"album of the year\s*[–—:]\s*([^\n.;]{2,100})",
                     r"album of the year(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)?\s+([^\n.;]{2,100})",
                     r"([^\n.;]{2,100})\s+won\s+album of the year",
+                    r"([^\n.;]{2,100})\s+(?:won|wins)[^\n]{0,40}\balbum of the year\b",
                 ],
                 reject_substrings=[
                     "award",
@@ -9447,7 +9452,7 @@ class MySearchClient:
     ) -> str:
         entity = re.sub(r"\s+", " ", value).strip(" \t\r\n-:;,.\"'“”‘’")
         entity = re.sub(r"^(?:winner|winners)\s*[:\-]\s*", "", entity, flags=re.IGNORECASE)
-        entity = re.split(r"\s+(?:with|which|that|after|during|for)\s+", entity, maxsplit=1)[0]
+        entity = re.split(r"\s+(?:with|which|that|during|for)\s+", entity, maxsplit=1)[0]
         entity = re.split(r",\s*(?:[\"“]|[A-Z][A-Za-z])", entity, maxsplit=1)[0]
         entity = re.split(r",\s*(?:marking|while|as|where|when)\b", entity, maxsplit=1, flags=re.IGNORECASE)[0]
         entity = re.split(r"\s{2,}", entity, maxsplit=1)[0]
