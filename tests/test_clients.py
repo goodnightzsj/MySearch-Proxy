@@ -7034,6 +7034,17 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(entities, [("openai", "responses"), ("openai", "batch")])
 
+    def test_research_comparison_entities_ignore_generic_dimension_subjects(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        entities = client._research_comparison_entities(
+            "compare React useEffectEvent docs guidance and community migration advice"
+        )
+
+        self.assertEqual(entities, [("react", "useeffectevent")])
+
     def test_research_known_provider_doc_results_injects_canonical_docs_for_comparison(
         self,
     ) -> None:
@@ -7085,6 +7096,26 @@ class MySearchClientTests(unittest.TestCase):
                 "title": "API - Mobile Engagement Platform | API & SDK Documentation",
                 "url": "https://batch.com/docs/api",
                 "snippet": "Batch exposes an API for campaigns and messaging workflows.",
+            },
+            include_domains=None,
+            authoritative_preferred=True,
+        )
+
+        self.assertEqual(label, "general")
+
+    def test_research_result_cluster_label_downgrades_non_entity_official_docs_in_single_entity_comparison(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        label = client._research_result_cluster_label(
+            query="compare React useEffectEvent docs guidance and community migration advice",
+            mode="docs",
+            item={
+                "provider": "tavily",
+                "title": "Migrations documentation - GitHub Docs",
+                "url": "https://docs.github.com/en/migrations",
+                "snippet": "Documentation for migrations into GitHub.",
             },
             include_domains=None,
             authoritative_preferred=True,
