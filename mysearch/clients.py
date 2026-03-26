@@ -1616,18 +1616,16 @@ class MySearchClient:
             self.config.firecrawl
         )
         research_tasks: dict[str, Callable[[], Any]] = {
-            "web": lambda: self.search(
+            "web": lambda: self._run_research_web_discovery(
                 query=discovery_query,
                 mode=discovery_mode,
                 intent=discovery_intent,
                 strategy=resolved_strategy,
-                provider="tavily" if discovery_mode in {"web", "news"} else "auto",
-                sources=["web"],
                 max_results=research_plan["web_max_results"],
                 include_content=discovery_include_content,
-                include_answer=True,
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
+                authoritative_research=authoritative_research,
             )
         }
         if (
@@ -1716,7 +1714,11 @@ class MySearchClient:
                     exa_discovery=exa_discovery,
                     include_domains=include_domains,
                 )
-            elif research_results.get("docs_rescue") and not research_errors.get("docs_rescue"):
+            elif (
+                research_results.get("docs_rescue")
+                and not research_errors.get("docs_rescue")
+                and (research_results["docs_rescue"].get("results") or [])
+            ):
                 web_search = self._build_research_secondary_fallback_result(
                     query=query,
                     mode=research_plan["web_mode"],
@@ -1727,7 +1729,11 @@ class MySearchClient:
                     fallback_to="docs_rescue",
                     fallback_reason="primary web discovery failed",
                 )
-            elif research_results.get("tavily_support") and not research_errors.get("tavily_support"):
+            elif (
+                research_results.get("tavily_support")
+                and not research_errors.get("tavily_support")
+                and (research_results["tavily_support"].get("results") or [])
+            ):
                 web_search = self._build_research_secondary_fallback_result(
                     query=query,
                     mode=research_plan["web_mode"],
@@ -2094,28 +2100,18 @@ class MySearchClient:
         }
 
     def _research_authoritative_rescue_queries(self, query: str) -> list[str]:
-        normalized = re.sub(r"\b20\d{2}\b", "", query).strip()
-        query_lower = normalized.lower()
-        if not self._looks_like_comparison_query(query_lower):
+        subjects = self._research_parse_comparison_subjects(query)
+        if not subjects:
             return [query]
+        normalized = re.sub(r"\b20\d{2}\b", "", query).strip()
         match = re.search(
             r"^\s*compare\s+(.+?)(?:\s+for\s+(.+))?$",
             normalized,
             re.IGNORECASE,
         )
-        if not match:
-            return [query]
-        subjects = match.group(1).strip()
-        context = (match.group(2) or "").strip(" ,.;:")
-        parts = [
-            item.strip(" ,.;:")
-            for item in re.split(r"\s+(?:and|vs\.?|versus)\s+", subjects, flags=re.IGNORECASE)
-            if item.strip(" ,.;:")
-        ]
-        if len(parts) < 2:
-            return [query]
+        context = (match.group(2) or "").strip(" ,.;:") if match else ""
         brand_prefix = ""
-        first_words = parts[0].split()
+        first_words = subjects[0].split()
         generic_tokens = {
             "api",
             "docs",
@@ -2133,17 +2129,12 @@ class MySearchClient:
             if candidate and candidate[0].isalpha() and candidate[0].isupper():
                 brand_prefix = candidate
         queries: list[str] = [query]
-        for part in parts[:3]:
+        for part in subjects[:3]:
             candidate = part
-            meaningful_tokens = [
-                token
-                for token in self._query_precision_tokens(candidate)
-                if token not in generic_tokens
-            ]
-            if (
-                brand_prefix
-                and brand_prefix.lower() not in candidate.lower()
-                and not meaningful_tokens
+            if self._research_subject_should_inherit_brand_prefix(
+                subject=candidate,
+                brand_prefix=brand_prefix,
+                generic_tokens=generic_tokens,
             ):
                 candidate = f"{brand_prefix} {candidate}"
             if context:
@@ -2315,6 +2306,22 @@ class MySearchClient:
             "intent": intent,
         }
 
+    def _research_prefers_tavily_discovery(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        authoritative_research: bool,
+    ) -> bool:
+        if mode == "web" and not authoritative_research:
+            return True
+        if mode == "news" or intent == "news":
+            return True
+        if authoritative_research and self._research_primary_vendor_brand(query):
+            return True
+        return False
+
     def _research_known_provider_doc_results(self, query: str) -> list[dict[str, Any]]:
         if not self._looks_like_comparison_query(query.lower()):
             return []
@@ -2472,20 +2479,40 @@ class MySearchClient:
         exclude_domains: list[str] | None,
     ) -> dict[str, Any]:
         merged_result: dict[str, Any] | None = None
+        primary_vendor_brand = self._research_primary_vendor_brand(query)
         for rescue_query in self._research_authoritative_rescue_queries(query):
-            current_result = self.search(
-                query=rescue_query,
-                mode="docs",
-                intent="resource",
-                strategy=strategy,
-                provider="tavily",
-                sources=["web"],
-                max_results=max_results,
-                include_content=False,
-                include_answer=False,
-                include_domains=include_domains,
-                exclude_domains=exclude_domains,
-            )
+            try:
+                current_result = self.search(
+                    query=rescue_query,
+                    mode="docs",
+                    intent="resource",
+                    strategy=strategy,
+                    provider="tavily",
+                    sources=["web"],
+                    max_results=max_results,
+                    include_content=False,
+                    include_answer=False,
+                    include_domains=include_domains,
+                    exclude_domains=exclude_domains,
+                )
+            except MySearchError:
+                if primary_vendor_brand:
+                    try:
+                        current_result = self._run_research_tavily_discovery(
+                            query=rescue_query,
+                            mode="docs",
+                            intent="resource",
+                            strategy=strategy,
+                            max_results=max_results,
+                            include_content=False,
+                            include_answer=False,
+                            include_domains=include_domains,
+                            exclude_domains=exclude_domains,
+                        )
+                    except MySearchError:
+                        continue
+                else:
+                    continue
             if merged_result is None:
                 merged_result = dict(current_result)
                 continue
@@ -2513,6 +2540,106 @@ class MySearchClient:
             "results": [],
             "citations": [],
         }
+
+    def _run_research_web_discovery(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        strategy: SearchStrategy,
+        max_results: int,
+        include_content: bool,
+        include_domains: list[str] | None,
+        exclude_domains: list[str] | None,
+        authoritative_research: bool,
+    ) -> dict[str, Any]:
+        prefers_tavily = self._research_prefers_tavily_discovery(
+            query=query,
+            mode=mode,
+            intent=intent,
+            authoritative_research=authoritative_research,
+        )
+        if not prefers_tavily:
+            return self.search(
+                query=query,
+                mode=mode,
+                intent=intent,
+                strategy=strategy,
+                provider="auto",
+                sources=["web"],
+                max_results=max_results,
+                include_content=include_content,
+                include_answer=True,
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+            )
+
+        try:
+            return self.search(
+                query=query,
+                mode=mode,
+                intent=intent,
+                strategy=strategy,
+                provider="tavily",
+                sources=["web"],
+                max_results=max_results,
+                include_content=include_content,
+                include_answer=True,
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+            )
+        except MySearchError:
+            return self._run_research_tavily_discovery(
+                query=query,
+                mode=mode,
+                intent=intent,
+                strategy=strategy,
+                max_results=max_results,
+                include_content=include_content,
+                include_answer=True,
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+            )
+
+    def _run_research_tavily_discovery(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        strategy: SearchStrategy,
+        max_results: int,
+        include_content: bool,
+        include_answer: bool,
+        include_domains: list[str] | None,
+        exclude_domains: list[str] | None,
+    ) -> dict[str, Any]:
+        tavily_result = self._search_tavily(
+            query=query,
+            max_results=max_results,
+            topic="news" if mode == "news" or intent == "news" else "general",
+            include_answer=include_answer,
+            include_content=include_content,
+            include_domains=include_domains,
+            exclude_domains=exclude_domains,
+            strategy="advanced" if strategy in {"verify", "deep"} else "fast",
+        )
+        tavily_result["query"] = query
+        tavily_result["intent"] = intent
+        tavily_result["strategy"] = strategy
+        if mode in {"docs", "github", "pdf"}:
+            tavily_result["results"] = self._rerank_resource_results(
+                query=query,
+                mode=mode,
+                results=list(tavily_result.get("results") or []),
+                include_domains=include_domains,
+            )[:max_results]
+            tavily_result["citations"] = self._align_citations_with_results(
+                results=list(tavily_result.get("results") or []),
+                citations=list(tavily_result.get("citations") or []),
+            )
+        return tavily_result
 
     def _looks_like_technical_research_query(self, query_lower: str) -> bool:
         technical_markers = (
@@ -2682,6 +2809,7 @@ class MySearchClient:
         if authoritative_preferred:
             effective_mode: SearchMode = mode if mode in {"docs", "github", "pdf"} else "docs"
             query_tokens = self._research_authoritative_query_tokens(query)
+            primary_vendor_brand = self._research_primary_vendor_brand(query)
             flags = self._resource_result_flags(
                 mode=effective_mode,
                 item=normalized,
@@ -2696,6 +2824,13 @@ class MySearchClient:
                 or (
                     bool(flags["docs_shape_match"])
                     and bool(flags["title_brand_match"])
+                )
+            )
+            primary_vendor_match = (
+                not primary_vendor_brand
+                or self._research_item_matches_brand_token(
+                    item=normalized,
+                    brand_token=primary_vendor_brand,
                 )
             )
             authoritative_target = self._looks_like_authoritative_research_target(
@@ -2727,6 +2862,8 @@ class MySearchClient:
                 not bool(flags["non_third_party"])
                 or self._is_obvious_official_community_result(hostname=hostname, path=path)
             )
+            if primary_vendor_brand and not primary_vendor_match:
+                official_candidate = False
             supportive_candidate = bool(flags["non_third_party"]) and (
                 self._looks_like_supporting_research_target(
                     url=normalized.get("url", ""),
@@ -2762,6 +2899,8 @@ class MySearchClient:
                     )
                 )
             )
+            if primary_vendor_brand and not primary_vendor_match:
+                supportive_candidate = False
             if community_candidate:
                 return "community"
             if official_candidate and authoritative_target:
@@ -3122,6 +3261,56 @@ class MySearchClient:
         }
 
     def _research_comparison_entities(self, query: str) -> list[tuple[str, ...]]:
+        subjects = self._research_parse_comparison_subjects(query)
+        if not subjects:
+            return []
+        brand_prefix = ""
+        first_words = subjects[0].split()
+        if first_words:
+            candidate = first_words[0].strip(" ,.;:")
+            if candidate and candidate[0].isalpha() and candidate[0].isupper():
+                brand_prefix = candidate
+        generic_tokens = {
+            "api",
+            "docs",
+            "documentation",
+            "guide",
+            "guides",
+            "official",
+            "resource",
+            "resources",
+            "reference",
+        }
+        ambiguous_product_tokens = self._research_ambiguous_product_tokens()
+        entities: list[tuple[str, ...]] = []
+        seen: set[tuple[str, ...]] = set()
+        for part in subjects[:4]:
+            candidate = part
+            if self._research_subject_should_inherit_brand_prefix(
+                subject=candidate,
+                brand_prefix=brand_prefix,
+                generic_tokens=generic_tokens,
+            ):
+                candidate = f"{brand_prefix} {candidate}"
+            tokens_list = [
+                token
+                for token in self._query_precision_tokens(candidate)
+                if token not in generic_tokens
+            ]
+            if brand_prefix and brand_prefix.lower() in candidate.lower():
+                ambiguous_tokens = [
+                    token for token in tokens_list if token in ambiguous_product_tokens
+                ]
+                if ambiguous_tokens:
+                    tokens_list = [brand_prefix.lower(), *ambiguous_tokens]
+            tokens = tuple(dict.fromkeys(tokens_list))
+            if not tokens or tokens in seen:
+                continue
+            seen.add(tokens)
+            entities.append(tokens)
+        return entities
+
+    def _research_parse_comparison_subjects(self, query: str) -> list[str]:
         normalized = re.sub(r"\b20\d{2}\b", "", query).strip()
         query_lower = normalized.lower()
         if not self._looks_like_comparison_query(query_lower):
@@ -3134,11 +3323,56 @@ class MySearchClient:
         if not match:
             return []
         subjects = match.group(1).strip()
-        parts = [
+        return [
             item.strip(" ,.;:")
             for item in re.split(r"\s+(?:and|vs\.?|versus)\s+", subjects, flags=re.IGNORECASE)
             if item.strip(" ,.;:")
         ]
+
+    def _research_ambiguous_product_tokens(self) -> set[str]:
+        return {
+            "assistants",
+            "audio",
+            "background",
+            "batch",
+            "chat",
+            "embeddings",
+            "files",
+            "images",
+            "realtime",
+            "responses",
+            "webhooks",
+        }
+
+    def _research_subject_should_inherit_brand_prefix(
+        self,
+        *,
+        subject: str,
+        brand_prefix: str,
+        generic_tokens: set[str],
+    ) -> bool:
+        if not brand_prefix or brand_prefix.lower() in subject.lower():
+            return False
+        meaningful_tokens = [
+            token
+            for token in self._query_precision_tokens(subject)
+            if token not in generic_tokens
+        ]
+        if not meaningful_tokens:
+            return True
+        ambiguous_product_tokens = self._research_ambiguous_product_tokens()
+        return all(token in ambiguous_product_tokens for token in meaningful_tokens)
+
+    def _research_primary_vendor_brand(self, query: str) -> str:
+        subjects = self._research_parse_comparison_subjects(query)
+        if len(subjects) < 2:
+            return ""
+        first_words = subjects[0].split()
+        if not first_words:
+            return ""
+        brand_prefix = first_words[0].strip(" ,.;:")
+        if not brand_prefix or not brand_prefix[0].isalpha() or not brand_prefix[0].isupper():
+            return ""
         generic_tokens = {
             "api",
             "docs",
@@ -3146,24 +3380,39 @@ class MySearchClient:
             "guide",
             "guides",
             "official",
-            "openai",
             "resource",
             "resources",
             "reference",
         }
-        entities: list[tuple[str, ...]] = []
-        seen: set[tuple[str, ...]] = set()
-        for part in parts[:4]:
-            tokens = tuple(
-                token
-                for token in self._query_precision_tokens(part)
-                if token not in generic_tokens
-            )
-            if not tokens or tokens in seen:
+        inherited_subject_found = False
+        for subject in subjects[1:]:
+            if brand_prefix.lower() in subject.lower():
                 continue
-            seen.add(tokens)
-            entities.append(tokens)
-        return entities
+            if self._research_subject_should_inherit_brand_prefix(
+                subject=subject,
+                brand_prefix=brand_prefix,
+                generic_tokens=generic_tokens,
+            ):
+                inherited_subject_found = True
+                continue
+            return ""
+        return brand_prefix.lower() if inherited_subject_found else ""
+
+    def _research_item_matches_brand_token(
+        self,
+        *,
+        item: dict[str, Any],
+        brand_token: str,
+    ) -> bool:
+        text = " ".join(
+            [
+                self._result_hostname(item),
+                str(item.get("url") or ""),
+                str(item.get("title") or ""),
+                str(item.get("snippet") or ""),
+            ]
+        ).lower()
+        return brand_token in text
 
     def _research_result_matches_entity(
         self,
