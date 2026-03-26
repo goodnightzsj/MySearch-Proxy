@@ -249,16 +249,19 @@ class MySearchClient:
             "search": self.config.search_cache_ttl_seconds,
             "extract": self.config.extract_cache_ttl_seconds,
             "social": max(self.config.search_cache_ttl_seconds, 300),
+            "social_unavailable": 30,
         }
         self._cache_store: dict[str, dict[str, dict[str, Any]]] = {
             "search": {},
             "extract": {},
             "social": {},
+            "social_unavailable": {},
         }
         self._cache_stats: dict[str, dict[str, int]] = {
             "search": {"hits": 0, "misses": 0},
             "extract": {"hits": 0, "misses": 0},
             "social": {"hits": 0, "misses": 0},
+            "social_unavailable": {"hits": 0, "misses": 0},
         }
         self._cache_max_entries = 256
         self._provider_probe_ttl_seconds = 300
@@ -406,6 +409,12 @@ class MySearchClient:
                 "expires_at": now + ttl_seconds,
                 "value": json.loads(json.dumps(value)),
             }
+
+    def _cache_delete(self, namespace: str, cache_key: str) -> None:
+        if namespace not in self._cache_store:
+            return
+        with self._cache_lock:
+            self._cache_store[namespace].pop(cache_key, None)
 
     def _build_cache_key(self, namespace: str, payload: dict[str, Any]) -> str:
         serialized = json.dumps(
@@ -7522,6 +7531,16 @@ class MySearchClient:
             include_x_images=include_x_images,
             include_x_videos=include_x_videos,
         )
+        cached_social_result = self._cache_get("social", social_cache_key)
+        cached_social_unavailable = None
+        if not (cached_social_result and cached_social_result.get("results")):
+            cached_social_unavailable = self._cache_get("social_unavailable", social_cache_key)
+        if cached_social_unavailable:
+            return self._annotate_cache(
+                cached_social_unavailable,
+                namespace="social_unavailable",
+                hit=True,
+            )
 
         retry_attempts = 3
         last_error: MySearchError | None = None
@@ -7547,6 +7566,7 @@ class MySearchClient:
                     to_date=to_date,
                 )
                 if normalized.get("results"):
+                    self._cache_delete("social_unavailable", social_cache_key)
                     self._cache_set("social", social_cache_key, normalized)
                     return self._annotate_cache(
                         normalized,
@@ -7570,7 +7590,6 @@ class MySearchClient:
                     continue
                 break
 
-        cached_social_result = self._cache_get("social", social_cache_key)
         if cached_social_result and cached_social_result.get("results"):
             cached_social_result = self._annotate_cache(
                 cached_social_result,
@@ -7594,11 +7613,18 @@ class MySearchClient:
                 fallback_reason=fallback_reason,
             )
         except MySearchError as fallback_exc:
-            return self._build_social_unavailable_result(
+            social_unavailable_result = self._build_social_unavailable_result(
                 query=query,
                 fallback_reason=f"{fallback_reason} | tavily_social_fallback failed: {fallback_exc}",
             )
+            self._cache_set("social_unavailable", social_cache_key, social_unavailable_result)
+            return self._annotate_cache(
+                social_unavailable_result,
+                namespace="social_unavailable",
+                hit=False,
+            )
         if tavily_fallback_result.get("results"):
+            self._cache_delete("social_unavailable", social_cache_key)
             self._cache_set("social", social_cache_key, tavily_fallback_result)
             return self._annotate_cache(
                 tavily_fallback_result,
