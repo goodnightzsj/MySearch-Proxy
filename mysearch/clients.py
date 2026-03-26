@@ -2318,6 +2318,21 @@ class MySearchClient:
                 continue
             best = max(variants, key=self._result_quality_score)
             merged = self._canonicalize_result_item(dict(best))
+            canonical_variant = next(
+                (
+                    variant for variant in variants
+                    if str(variant.get("provider") or "") == "canonical_research_docs"
+                ),
+                None,
+            )
+            if canonical_variant:
+                canonical_snippet = str(canonical_variant.get("snippet") or "").strip()
+                merged_snippet = str(merged.get("snippet") or "").strip()
+                if canonical_snippet and (
+                    not merged_snippet
+                    or len(merged_snippet.split()) < 8
+                ):
+                    merged["snippet"] = canonical_snippet
             matched_providers = sorted(
                 provider for provider in providers_by_key.get(dedupe_key, set()) if provider
             )
