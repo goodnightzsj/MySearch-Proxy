@@ -1846,6 +1846,30 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["results"][0]["url"], "https://x.com/OpenAI/status/456")
         self.assertIn("no x.com/twitter.com results", result["fallback"]["reason"])
 
+    def test_social_queries_disable_official_resource_mode_even_with_status_like_intent(self) -> None:
+        client = MySearchClient()
+
+        self.assertEqual(
+            client._resolve_official_result_mode(
+                query="OpenAI pricing reactions on X",
+                mode="social",
+                intent="status",
+                include_domains=None,
+            ),
+            "off",
+        )
+
+    def test_social_queries_skip_canonical_resource_rescue(self) -> None:
+        client = MySearchClient()
+
+        self.assertIsNone(
+            client._build_known_canonical_resource_rescue(
+                query="OpenAI pricing reactions on X",
+                mode="social",
+                intent="status",
+            )
+        )
+
     def test_social_search_reuses_search_cache_for_repeated_x_queries(self) -> None:
         client = MySearchClient()
         client.config.search_cache_ttl_seconds = 60

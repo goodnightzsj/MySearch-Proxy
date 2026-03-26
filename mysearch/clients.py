@@ -2646,6 +2646,8 @@ class MySearchClient:
         intent: ResolvedSearchIntent,
         include_domains: list[str] | None,
     ) -> str:
+        if mode == "social":
+            return "off"
         if self._should_use_strict_resource_policy(
             query=query,
             mode=mode,
@@ -2665,6 +2667,8 @@ class MySearchClient:
         intent: ResolvedSearchIntent,
         include_domains: list[str] | None,
     ) -> bool:
+        if mode == "social":
+            return False
         query_lower = query.lower()
         explicit_resource_mode = mode in {"docs", "github", "pdf"}
         if include_domains:
@@ -2803,6 +2807,8 @@ class MySearchClient:
         mode: SearchMode,
         intent: ResolvedSearchIntent,
     ) -> dict[str, Any] | None:
+        if mode == "social":
+            return None
         query_lower = query.lower()
         if (
             mode not in {"docs", "github", "pdf", "web", "news"}
