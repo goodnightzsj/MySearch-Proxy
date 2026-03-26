@@ -5858,6 +5858,25 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(label, "listicle")
 
+    def test_research_result_cluster_label_marks_first_party_docs_as_supporting_for_comparison(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        label = client._research_result_cluster_label(
+            query="compare Tavily and Firecrawl for AI agent web retrieval 2026",
+            mode="research",
+            item={
+                "title": "Search API - Tavily",
+                "url": "https://docs.tavily.com/documentation/api-reference/search",
+                "snippet": "Search API reference for Tavily web retrieval and extraction workflows.",
+            },
+            include_domains=None,
+            authoritative_preferred=False,
+        )
+
+        self.assertEqual(label, "supporting")
+
     def test_research_selection_prefers_first_party_project_sites_over_curated_comparisons(
         self,
     ) -> None:
@@ -5945,6 +5964,64 @@ class MySearchClientTests(unittest.TestCase):
         )
         self.assertEqual(evidence["selected_candidate_cluster_counts"]["project"], 1)
         self.assertEqual(evidence["selected_candidate_cluster_counts"]["curated"], 1)
+
+    def test_research_selection_prefers_supporting_vendor_docs_before_curated_comparisons(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        selected, evidence = client._select_research_candidate_results(
+            query="compare Tavily and Firecrawl for AI agent web retrieval 2026",
+            mode="research",
+            intent="comparison",
+            max_results=5,
+            web_results=[
+                {
+                    "provider": "exa",
+                    "title": "Exa vs Tavily vs Firecrawl: Which Web Search MCP Should You Use in Production?",
+                    "url": "https://www.sagentum.com/blog/exa-vs-tavily-vs-firecrawl",
+                    "snippet": "Third-party comparison.",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Firecrawl vs Tavily: Complete Comparison for AI Agents & RAG (2026)",
+                    "url": "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                    "snippet": "Direct first-party comparison page.",
+                },
+            ],
+            docs_rescue_results=[
+                {
+                    "provider": "tavily",
+                    "title": "Search API - Tavily",
+                    "url": "https://docs.tavily.com/documentation/api-reference/search",
+                    "snippet": "Search API reference for Tavily web retrieval and extraction workflows.",
+                },
+                {
+                    "provider": "firecrawl",
+                    "title": "Scrape - Firecrawl",
+                    "url": "https://docs.firecrawl.dev/features/scrape",
+                    "snippet": "Scrape pages for clean markdown and structured extraction.",
+                },
+            ],
+            tavily_support_results=[],
+            exa_results=[],
+            include_domains=None,
+            authoritative_preferred=False,
+        )
+
+        self.assertEqual(
+            [item["url"] for item in selected[:4]],
+            [
+                "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                "https://docs.tavily.com/documentation/api-reference/search",
+                "https://docs.firecrawl.dev/features/scrape",
+                "https://www.sagentum.com/blog/exa-vs-tavily-vs-firecrawl",
+            ],
+        )
+        self.assertEqual(evidence["selected_candidate_cluster_counts"]["project"], 1)
+        self.assertEqual(evidence["selected_candidate_cluster_counts"]["supporting"], 2)
+        self.assertEqual(evidence["selected_candidate_cluster_counts"]["curated"], 1)
+        self.assertEqual(evidence["supporting_source_count"], 2)
 
     def test_research_claim_evidence_skips_schema_noise_from_method_pages(self) -> None:
         client = MySearchClient()
