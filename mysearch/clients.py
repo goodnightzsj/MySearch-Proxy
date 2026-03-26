@@ -3217,6 +3217,18 @@ class MySearchClient:
             ]
         else:
             anchor_candidates = [*official_candidates, *supporting_candidates]
+        if prefer_canonical_vendor_docs and len(general_candidates) > 1:
+            indexed_general_candidates = list(enumerate(general_candidates))
+            general_candidates = [
+                item
+                for _, item in sorted(
+                    indexed_general_candidates,
+                    key=lambda pair: (
+                        self._research_vendor_doc_general_candidate_kind_rank(pair[1]),
+                        pair[0],
+                    ),
+                )
+            ]
         if max_results <= 0:
             return []
         if not anchor_candidates:
@@ -3228,7 +3240,10 @@ class MySearchClient:
             return ordered
 
         anchor_count = len(ordered)
-        general_limit = min(2 if anchor_count >= 2 else 3, remaining)
+        if prefer_canonical_vendor_docs and anchor_count >= 2:
+            general_limit = min(1, remaining)
+        else:
+            general_limit = min(2 if anchor_count >= 2 else 3, remaining)
         ordered.extend(general_candidates[:general_limit])
         remaining = max_results - len(ordered)
         if remaining > 0:
@@ -3241,6 +3256,37 @@ class MySearchClient:
         if remaining > 0:
             ordered.extend(community_candidates[1 : 1 + remaining])
         return ordered[:max_results]
+
+    def _research_vendor_doc_general_candidate_kind_rank(
+        self,
+        item: dict[str, Any],
+    ) -> int:
+        url = str(item.get("url") or "")
+        hostname = self._result_hostname(item)
+        title_text = str(item.get("title") or "").lower()
+        snippet_text = str(item.get("snippet") or "").lower()
+        path = urlparse(url).path.lower()
+        docs_markers = (
+            "docs",
+            "documentation",
+            "guide",
+            "guides",
+            "retrieval",
+            "search api",
+            "api reference",
+            "reference",
+        )
+        if any(marker in title_text or marker in snippet_text for marker in docs_markers):
+            return 0
+        if any(marker in path for marker in ("/docs", "/documentation", "/guide", "/guides")):
+            return 0
+        if hostname == "arxiv.org" or "/abs/" in path or path.endswith(".pdf") or "/pdf/" in path:
+            return 4
+        if "/blog/" in path or any(
+            domain in hostname for domain in ("medium.com", "substack.com", "towardsai.net")
+        ):
+            return 3
+        return 2
 
     def _research_authoritative_query_tokens(self, query: str) -> list[str]:
         generic_tokens = {

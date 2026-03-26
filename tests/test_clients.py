@@ -5937,6 +5937,52 @@ class MySearchClientTests(unittest.TestCase):
             ],
         )
 
+    def test_authoritative_vendor_doc_selection_prefers_docs_like_general_tail_over_papers_and_blogs(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        ordered = client._assemble_authoritative_research_candidates(
+            official_candidates=[
+                {"url": "https://docs.tavily.com/documentation/api-reference/search", "title": "Search API - Tavily"},
+            ],
+            supporting_candidates=[
+                {"url": "https://docs.firecrawl.dev/api-reference/endpoint/extract", "title": "Extract - Firecrawl Docs"},
+            ],
+            general_candidates=[
+                {
+                    "url": "https://arxiv.org/abs/2602.05014",
+                    "title": "Document Structure-Aware Reasoning to Enhance Agentic Search",
+                    "snippet": "Research paper on agentic search.",
+                },
+                {
+                    "url": "https://example.com/guides/official-docs-retrieval",
+                    "title": "Guide to official docs retrieval for agentic search",
+                    "snippet": "A practical guide to vendor documentation retrieval workflows.",
+                },
+                {
+                    "url": "https://www.firecrawl.dev/blog/best-ai-search-engines-agents",
+                    "title": "Best AI Search Engines for Agents and Workflows in 2026 - Firecrawl",
+                    "snippet": "Marketing overview of AI search engines for agents.",
+                },
+            ],
+            community_candidates=[
+                {"url": "https://community.example.com/post", "title": "Community 1"},
+            ],
+            max_results=4,
+            prefer_canonical_vendor_docs=True,
+        )
+
+        self.assertEqual(
+            [item["url"] for item in ordered],
+            [
+                "https://docs.tavily.com/documentation/api-reference/search",
+                "https://docs.firecrawl.dev/api-reference/endpoint/extract",
+                "https://example.com/guides/official-docs-retrieval",
+                "https://community.example.com/post",
+            ],
+        )
+
     def test_research_result_cluster_label_marks_software_directory_as_directory(
         self,
     ) -> None:
