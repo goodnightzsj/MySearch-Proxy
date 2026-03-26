@@ -2331,6 +2331,7 @@ class MySearchClient:
                 if canonical_snippet and (
                     not merged_snippet
                     or len(merged_snippet.split()) < 8
+                    or not self._research_excerpt_has_substantive_claim(merged_snippet)
                 ):
                     merged["snippet"] = canonical_snippet
             matched_providers = sorted(
