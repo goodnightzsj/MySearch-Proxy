@@ -10373,7 +10373,9 @@ class MySearchClient:
             if (citation.get("url") or "").strip()
         }
         claims_by_key: dict[str, dict[str, Any]] = {}
+        fallback_claims_by_key: dict[str, dict[str, Any]] = {}
         claim_order: list[str] = []
+        fallback_claim_order: list[str] = []
         for item in ordered_results:
             url = (item.get("url") or "").strip()
             title = (item.get("title") or url_to_title.get(url) or "").strip()
@@ -10392,15 +10394,18 @@ class MySearchClient:
             claim_key = self._research_claim_signature(claim)
             if not claim_key:
                 continue
-            if claim_key not in claims_by_key:
-                claims_by_key[claim_key] = {
+            is_generic_claim = self._research_claim_is_generic(claim)
+            target_claims = fallback_claims_by_key if is_generic_claim else claims_by_key
+            target_order = fallback_claim_order if is_generic_claim else claim_order
+            if claim_key not in target_claims:
+                target_claims[claim_key] = {
                     "claim": claim,
                     "sources": [],
                     "providers": [],
                     "clusters": [],
                 }
-                claim_order.append(claim_key)
-            entry = claims_by_key[claim_key]
+                target_order.append(claim_key)
+            entry = target_claims[claim_key]
             source_label = title or (self._registered_domain(self._result_hostname(item)) or url)
             if source_label and source_label not in entry["sources"]:
                 entry["sources"].append(source_label)
@@ -10423,6 +10428,9 @@ class MySearchClient:
                 len(claims_by_key[key]["sources"]) >= 1 for key in claim_order[:4]
             ):
                 continue
+        if not claim_order:
+            claims_by_key = fallback_claims_by_key
+            claim_order = fallback_claim_order
         claims: list[dict[str, Any]] = []
         for key in claim_order[:4]:
             entry = claims_by_key[key]
@@ -10489,7 +10497,7 @@ class MySearchClient:
         compact = compact.replace("*", " ")
         compact = re.sub(r"\s+", " ", compact).strip(" -|:;,.")
         heading_match = re.match(
-            r"^(?:#\s*)?[A-Z][A-Za-z0-9'’&./() \-]{1,80}?\s+"
+            r"^#\s*[A-Z][A-Za-z0-9'’&./() \-]{1,80}?\s+"
             r"((?:create|use|build|manage|run|stream|process|compare|choose|support|supports|allow|allows|enable|enables|let|lets|track|learn|handle)\b.+)$",
             compact,
             flags=re.IGNORECASE,
@@ -10661,6 +10669,8 @@ class MySearchClient:
                 "chatgpt actions",
                 "search the api docs",
                 "marketing copy",
+                "copy markdown",
+                "view as markdown",
             )
         )
 
@@ -10669,6 +10679,12 @@ class MySearchClient:
         return any(
             marker in lowered
             for marker in (
+                "reasoning tokens pricing per 1m tokens",
+                "context window",
+                "knowledge cutoff",
+                "cached input",
+                "output tokens",
+                "endpoints v1/chat",
                 "you signed in with another tab",
                 "method not allowed",
                 "\"error\"",
