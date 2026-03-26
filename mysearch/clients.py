@@ -5722,11 +5722,22 @@ class MySearchClient:
                 snippet_text=snippet_text,
                 path=path,
             )
+            weak_official_feature = (
+                registered_domain in official_award_domains
+                and self._looks_like_weak_official_award_feature_result(
+                    title_text=title_text,
+                    snippet_text=snippet_text,
+                    path=path,
+                )
+                and not winner_page
+            )
             if self._looks_like_award_prediction_result(
                 title_text=title_text,
                 snippet_text=snippet_text,
                 path=path,
             ):
+                continue
+            if weak_official_feature:
                 continue
             if (
                 not winner_page
@@ -5868,6 +5879,17 @@ class MySearchClient:
                 snippet_text=snippet_text,
                 path=path,
             )
+            weak_official_feature = (
+                registered_domain in {"grammy.com", "grammys.com", "oscars.org", "theacademy.com"}
+                and self._looks_like_weak_official_award_feature_result(
+                    title_text=title_text,
+                    snippet_text=snippet_text,
+                    path=path,
+                )
+                and not winner_page
+            )
+            if weak_official_feature:
+                continue
             if (
                 not winner_page
                 and self._looks_like_award_recap_or_gallery_result(
@@ -6714,8 +6736,7 @@ class MySearchClient:
     ) -> bool:
         title_path = f"{title_text} {path}"
         brand_markers = self._award_query_brand_markers(query_lower)
-        if brand_markers and any(marker in title_path for marker in brand_markers):
-            return True
+        brand_match = bool(brand_markers) and any(marker in title_path for marker in brand_markers)
         winner_markers = [
             "complete winners",
             "full list",
@@ -6726,7 +6747,18 @@ class MySearchClient:
         if any(marker in title_path for marker in winner_markers):
             return True
         category_markers = self._award_query_category_markers(query_lower)
-        return bool(category_markers) and any(marker in title_path for marker in category_markers)
+        if bool(category_markers) and any(marker in title_path for marker in category_markers):
+            return True
+        official_context_markers = [
+            "academy awards",
+            "grammy awards",
+            "golden globes",
+            "/award/",
+            "/awards/",
+            "/ceremonies/",
+            "/ceremony/",
+        ]
+        return brand_match and any(marker in title_path for marker in official_context_markers)
 
     def _looks_like_generic_award_archive_result(
         self,
@@ -6742,6 +6774,23 @@ class MySearchClient:
             "/awardsdatabase",
         ]
         return any(marker in text for marker in archive_markers)
+
+    def _looks_like_weak_official_award_feature_result(
+        self,
+        *,
+        title_text: str,
+        snippet_text: str,
+        path: str,
+    ) -> bool:
+        text = f"{title_text} {snippet_text} {path}"
+        weak_markers = [
+            "flashback",
+            "throughout the decades",
+            "must-watch moments",
+            "artist |",
+            "/artists/",
+        ]
+        return any(marker in text for marker in weak_markers)
 
     def _looks_like_award_fact_match(
         self,
@@ -11279,6 +11328,20 @@ class MySearchClient:
             score -= 5
         if (
             self._looks_like_award_result_query(query_lower)
+            and self._looks_like_weak_official_award_feature_result(
+                title_text=title_text,
+                snippet_text=snippet_text,
+                path=urlparse(url).path.lower(),
+            )
+            and not self._looks_like_award_winner_result(
+                title_text=title_text,
+                snippet_text=snippet_text,
+                path=urlparse(url).path.lower(),
+            )
+        ):
+            score -= 6
+        if (
+            self._looks_like_award_result_query(query_lower)
             and self._looks_like_generic_award_archive_result(
                 title_text=title_text,
                 path=urlparse(url).path.lower(),
@@ -11567,6 +11630,7 @@ class MySearchClient:
         entity = re.sub(r"\s+", " ", value).strip(" \t\r\n-:;,.\"'“”‘’")
         entity = re.sub(r"^[·•]+\s*", "", entity)
         entity = re.sub(r"^(?:winner|winners)\s*[:\-]\s*", "", entity, flags=re.IGNORECASE)
+        entity = re.sub(r"['’]s\s+win\b.*$", "", entity, flags=re.IGNORECASE)
         entity = re.split(r"\s+(?:with|which|that|during|for)\s+", entity, maxsplit=1)[0]
         entity = re.split(r",\s*(?:[\"“]|[A-Z][A-Za-z])", entity, maxsplit=1)[0]
         entity = re.split(r",\s*(?:marking|while|as|where|when)\b", entity, maxsplit=1, flags=re.IGNORECASE)[0]

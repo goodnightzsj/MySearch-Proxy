@@ -941,7 +941,7 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertTrue(strong)
 
-    def test_has_strong_award_result_accepts_official_artist_page_with_award_fact(self) -> None:
+    def test_has_strong_award_result_rejects_official_artist_page_with_incidental_award_fact(self) -> None:
         client = MySearchClient()
 
         strong = client._has_strong_award_result(
@@ -956,7 +956,7 @@ class MySearchClientTests(unittest.TestCase):
             ],
         )
 
-        self.assertTrue(strong)
+        self.assertFalse(strong)
 
     def test_has_strong_award_result_accepts_official_ceremony_page_for_exact_year(self) -> None:
         client = MySearchClient()
@@ -1080,6 +1080,23 @@ class MySearchClientTests(unittest.TestCase):
             )
         )
 
+    def test_has_strong_award_result_rejects_weak_official_feature_page(self) -> None:
+        client = MySearchClient()
+
+        strong = client._has_strong_award_result(
+            query="2026 Grammy album of the year winner",
+            results=[
+                {
+                    "title": "Watch Artists From Throughout The Decades Win Album Of ...",
+                    "url": "https://grammy.com/news/grammy-flashback-album-of-the-year",
+                    "snippet": "Bad Bunny wins the Grammy for Album Of The Year at the 2026 Grammys.",
+                    "content": "",
+                }
+            ],
+        )
+
+        self.assertFalse(strong)
+
     def test_result_event_page_priority_downranks_award_gallery_pages(self) -> None:
         client = MySearchClient()
 
@@ -1171,6 +1188,30 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertGreaterEqual(official_priority, 8)
+
+    def test_result_event_page_priority_downranks_weak_official_award_feature_pages(self) -> None:
+        client = MySearchClient()
+
+        flashback_priority = client._result_event_page_priority(
+            query="2026 Grammy album of the year winner",
+            item={
+                "title": "Watch Artists From Throughout The Decades Win Album Of ...",
+                "url": "https://grammy.com/news/grammy-flashback-album-of-the-year",
+                "snippet": "Bad Bunny wins the Grammy for Album Of The Year at the 2026 Grammys.",
+                "content": "",
+            },
+        )
+        winners_priority = client._result_event_page_priority(
+            query="2026 Grammy album of the year winner",
+            item={
+                "title": "2026 Grammys: See The Full Winners & Nominees List",
+                "url": "https://grammy.com/news/2026-grammys-nominations-full-winners-nominees-list",
+                "snippet": "Bad Bunny wins the Grammy for Album Of The Year at the 2026 Grammys.",
+                "content": "",
+            },
+        )
+
+        self.assertLess(flashback_priority, winners_priority)
 
     def test_search_tavily_rewrites_award_result_query_for_news(self) -> None:
         client = MySearchClient()
@@ -1577,6 +1618,23 @@ class MySearchClientTests(unittest.TestCase):
                     "title": "68th Annual GRAMMY Awards | 2026: Winners & Nominees",
                     "url": "https://grammy.com/awards/68th-annual-grammy-awards-2025",
                     "snippet": "Album Of The Year · Bad Bunny. \"DeBÍ TiRAR MáS FOToS\"",
+                    "content": "",
+                }
+            ],
+        )
+
+        self.assertEqual(answer, "Album of the Year winner: Bad Bunny")
+
+    def test_extract_result_event_answer_strips_possessive_win_shell_from_award_entity(self) -> None:
+        client = MySearchClient()
+
+        answer = client._extract_result_event_answer(
+            query="2026 Grammy album of the year winner",
+            results=[
+                {
+                    "title": "Grammy Award: Album Of The Year",
+                    "url": "https://www.grammy.com/award/album-of-the-year/",
+                    "snippet": "Bad Bunny's win for Album Of The Year at the 2026 Grammy Awards for DeBÍ TiRAR MáS FOToS.",
                     "content": "",
                 }
             ],
