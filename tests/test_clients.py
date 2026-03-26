@@ -5998,6 +5998,24 @@ class MySearchClientTests(unittest.TestCase):
             ],
         )
 
+    def test_research_generic_vendor_doc_results_injects_anchor_docs_for_authoritative_query(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        results = client._research_generic_vendor_doc_results(
+            "best approach for official docs retrieval in agentic search 2026"
+        )
+
+        self.assertEqual(
+            [item["url"] for item in results],
+            [
+                "https://docs.tavily.com/documentation/api-reference/search",
+                "https://docs.firecrawl.dev/api-reference/endpoint/extract",
+                "https://docs.exa.ai/reference/search",
+            ],
+        )
+
     def test_research_selection_prefers_supporting_vendor_docs_before_curated_comparisons(
         self,
     ) -> None:
