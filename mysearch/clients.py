@@ -11994,6 +11994,17 @@ class MySearchClient:
 
     def _research_excerpt_looks_like_noise(self, text: str) -> bool:
         lowered = text.lower()
+        code_like_markers = (
+            "api_key=",
+            "schema = {",
+            "\"type\": \"object\"",
+            "\"properties\": {",
+            "\"required\": [",
+            "firecrawl = firecrawl(",
+            "from firecrawl import firecrawl",
+        )
+        if sum(1 for marker in code_like_markers if marker in lowered) >= 2:
+            return True
         return any(
             marker in lowered
             for marker in (
@@ -12004,6 +12015,8 @@ class MySearchClient:
                 "content-type: application/json",
                 "x-api-key",
                 "generated using ai and may contain mistakes",
+                "api_key=",
+                "schema = {",
                 "reasoning tokens pricing per 1m tokens",
                 "context window",
                 "knowledge cutoff",
