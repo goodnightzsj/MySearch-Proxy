@@ -5495,6 +5495,42 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(claims[0]["support_level"], "cross-provider")
         self.assertIn("official", claims[0]["clusters"])
 
+    def test_research_claim_evidence_prefers_non_navigation_snippet_over_noisy_page_excerpt(self) -> None:
+        client = MySearchClient()
+
+        claims = client._build_research_claim_evidence(
+            query="responses api vs batch api",
+            mode="research",
+            ordered_results=[
+                {
+                    "provider": "tavily",
+                    "matched_providers": ["tavily"],
+                    "title": "Compare models | OpenAI API",
+                    "url": "https://openai.com/api/compare-models",
+                    "snippet": "Use the Batch API when you need discounted asynchronous processing for large jobs.",
+                }
+            ],
+            pages=[
+                {
+                    "url": "https://openai.com/api/compare-models",
+                    "excerpt": "## Search the API docs Search docs ### Suggested response_format Primary navigation Search docs",
+                    "content": "",
+                }
+            ],
+            citations=[
+                {
+                    "title": "Compare models | OpenAI API",
+                    "url": "https://openai.com/api/compare-models",
+                }
+            ],
+            comparison_like=True,
+            include_domains=None,
+            authoritative_preferred=True,
+        )
+
+        self.assertEqual(len(claims), 1)
+        self.assertIn("discounted asynchronous processing", claims[0]["claim"].lower())
+
     def test_research_report_sections_include_claim_evidence_and_source_clusters(self) -> None:
         client = MySearchClient()
 
@@ -5565,6 +5601,63 @@ class MySearchClientTests(unittest.TestCase):
         self.assertIn("## Source Clusters", summary)
         self.assertIn("| Candidate | Cluster | Provider Support | Evidence Note |", summary)
         self.assertIn("## Decision Table", summary)
+
+    def test_research_report_sections_promote_non_generic_top_claim_into_executive_summary(self) -> None:
+        client = MySearchClient()
+
+        sections = client._build_research_report_sections(
+            query="responses api vs batch api",
+            web_search={"intent": "comparison", "answer": ""},
+            ordered_results=[
+                {
+                    "provider": "tavily",
+                    "matched_providers": ["tavily", "exa"],
+                    "title": "Compare models | OpenAI API",
+                    "url": "https://openai.com/api/compare-models",
+                    "snippet": "Use the Batch API when you need discounted asynchronous processing for large jobs.",
+                },
+                {
+                    "provider": "exa",
+                    "matched_providers": ["exa"],
+                    "title": "Responses API vs Batch API",
+                    "url": "https://platform.openai.com/docs/guides/batch-vs-responses",
+                    "snippet": "Use the Batch API when you need discounted asynchronous processing for large jobs.",
+                },
+            ],
+            pages=[
+                {
+                    "url": "https://openai.com/api/compare-models",
+                    "excerpt": "## Search the API docs Search docs ### Suggested response_format Primary navigation Search docs",
+                    "content": "",
+                },
+                {
+                    "url": "https://platform.openai.com/docs/guides/batch-vs-responses",
+                    "excerpt": "## Search the API docs Search docs ### Suggested response_format Primary navigation Search docs",
+                    "content": "",
+                },
+            ],
+            citations=[
+                {
+                    "title": "Compare models | OpenAI API",
+                    "url": "https://openai.com/api/compare-models",
+                },
+                {
+                    "title": "Responses API vs Batch API",
+                    "url": "https://platform.openai.com/docs/guides/batch-vs-responses",
+                },
+            ],
+            social=None,
+            evidence={
+                "providers_consulted": ["tavily", "exa"],
+                "citation_count": 2,
+                "confidence": "medium",
+                "research_plan": {"scrape_top_n": 2, "web_mode": "research"},
+                "selected_candidate_domains": ["openai.com", "platform.openai.com"],
+                "authoritative_research": True,
+            },
+        )
+
+        self.assertIn("discounted asynchronous processing", sections["executive_summary"].lower())
 
 
 if __name__ == "__main__":
