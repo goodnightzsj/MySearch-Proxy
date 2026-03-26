@@ -1154,6 +1154,23 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(answer, "Best Picture winner: One Battle after Another")
 
+    def test_extract_result_event_answer_strips_leading_bullets_from_award_entity(self) -> None:
+        client = MySearchClient()
+
+        answer = client._extract_result_event_answer(
+            query="2026 Grammy album of the year winner",
+            results=[
+                {
+                    "title": "68th Annual GRAMMY Awards | 2026: Winners & Nominees",
+                    "url": "https://grammy.com/awards/68th-annual-grammy-awards-2025",
+                    "snippet": "Album Of The Year · Bad Bunny. \"DeBÍ TiRAR MáS FOToS\"",
+                    "content": "",
+                }
+            ],
+        )
+
+        self.assertEqual(answer, "Album of the Year winner: Bad Bunny")
+
     def test_apply_result_event_answer_override_does_not_extract_from_weak_award_mentions(self) -> None:
         client = MySearchClient()
 
