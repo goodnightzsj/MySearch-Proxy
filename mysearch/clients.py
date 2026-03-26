@@ -9803,10 +9803,14 @@ class MySearchClient:
             authoritative_preferred=bool(evidence.get("authoritative_research")),
         )
         claim_evidence = self._build_research_claim_evidence(
+            query=query,
+            mode=str((evidence.get("research_plan") or {}).get("web_mode") or web_search.get("intent") or "web"),
             ordered_results=ordered_results,
             pages=pages,
             citations=citations,
             comparison_like=comparison_like,
+            include_domains=None,
+            authoritative_preferred=bool(evidence.get("authoritative_research")),
         )
 
         significant_conflicts = [
@@ -9949,23 +9953,52 @@ class MySearchClient:
                     }
                 )
 
+        consensus_snapshot: list[str] = []
+        for item in claim_evidence[:3]:
+            claim = str(item.get("claim") or "").strip()
+            if not claim:
+                continue
+            support_phrase = self._research_claim_support_phrase(item)
+            if support_phrase:
+                consensus_snapshot.append(f"{claim} ({support_phrase})")
+            else:
+                consensus_snapshot.append(claim)
+
         recommendation = ""
         if comparison_like:
+            primary_claim = claim_evidence[0] if claim_evidence else {}
+            primary_support_phrase = self._research_claim_support_phrase(primary_claim)
+            runner_up = decision_table[1] if len(decision_table) > 1 else {}
             if authoritative_source_count > 0 and decision_table:
                 recommendation = (
                     f"Start from {decision_table[0]['candidate']} as the primary anchor, "
                     "then use the remaining shortlisted sources to validate trade-offs and edge cases."
                 )
+                if primary_support_phrase:
+                    recommendation += f" {primary_support_phrase.capitalize()}."
+                if runner_up:
+                    recommendation += (
+                        f" Use {runner_up['candidate']} as the leading counterpoint when checking "
+                        f"{runner_up['fit']} trade-offs."
+                    )
             elif decision_table:
                 recommendation = (
                     f"Treat {decision_table[0]['candidate']} as the leading candidate for now, "
                     "but keep the next shortlisted sources in scope because the evidence is still comparative."
                 )
+                if primary_support_phrase:
+                    recommendation += f" {primary_support_phrase.capitalize()}."
+                if runner_up:
+                    recommendation += (
+                        f" {runner_up['candidate']} remains the strongest alternate angle for "
+                        f"{runner_up['fit']}."
+                    )
 
         return {
             "executive_summary": primary_finding,
             "key_findings": key_findings[:3],
             "evidence_highlights": evidence_highlights[:3],
+            "consensus_snapshot": consensus_snapshot[:3],
             "provider_roles": provider_roles[:4],
             "coverage_bits": coverage_bits,
             "claim_evidence": claim_evidence[:4],
@@ -10012,6 +10045,16 @@ class MySearchClient:
             for item in evidence_highlights:
                 lines.append(f"- {item}")
 
+        consensus_snapshot = [
+            str(item).strip()
+            for item in (sections.get("consensus_snapshot") or [])
+            if str(item).strip()
+        ]
+        if consensus_snapshot:
+            lines.extend(["", "## Consensus Snapshot"])
+            for item in consensus_snapshot:
+                lines.append(f"- {item}")
+
         claim_evidence = [
             item
             for item in (sections.get("claim_evidence") or [])
@@ -10031,9 +10074,17 @@ class MySearchClient:
                     for provider in (item.get("providers") or [])[:3]
                     if str(provider).strip()
                 )
+                clusters = ", ".join(
+                    str(cluster).strip()
+                    for cluster in (item.get("clusters") or [])[:3]
+                    if str(cluster).strip()
+                )
+                support_level = str(item.get("support_level") or "").strip()
                 suffix_bits = [
+                    f"Support: {support_level}" if support_level else "",
                     f"Sources: {sources}" if sources else "",
                     f"Providers: {providers}" if providers else "",
+                    f"Clusters: {clusters}" if clusters else "",
                 ]
                 suffix = "; ".join(bit for bit in suffix_bits if bit)
                 if suffix:
@@ -10279,10 +10330,14 @@ class MySearchClient:
     def _build_research_claim_evidence(
         self,
         *,
+        query: str,
+        mode: str,
         ordered_results: list[dict[str, Any]],
         pages: list[dict[str, Any]],
         citations: list[dict[str, Any]],
         comparison_like: bool,
+        include_domains: list[str] | None,
+        authoritative_preferred: bool,
     ) -> list[dict[str, Any]]:
         if not ordered_results:
             return []
@@ -10321,6 +10376,7 @@ class MySearchClient:
                     "claim": claim,
                     "sources": [],
                     "providers": [],
+                    "clusters": [],
                 }
                 claim_order.append(claim_key)
             entry = claims_by_key[claim_key]
@@ -10333,11 +10389,32 @@ class MySearchClient:
             ):
                 if provider and provider not in entry["providers"]:
                     entry["providers"].append(provider)
+            cluster_label = self._research_result_cluster_label(
+                query=query,
+                mode=cast(SearchMode, mode if mode in SEARCH_MODES else "web"),
+                item=item,
+                include_domains=include_domains,
+                authoritative_preferred=authoritative_preferred,
+            )
+            if cluster_label and cluster_label not in entry["clusters"]:
+                entry["clusters"].append(cluster_label)
             if len(claim_order) >= 4 and all(
                 len(claims_by_key[key]["sources"]) >= 1 for key in claim_order[:4]
             ):
                 continue
-        return [claims_by_key[key] for key in claim_order[:4]]
+        claims: list[dict[str, Any]] = []
+        for key in claim_order[:4]:
+            entry = claims_by_key[key]
+            entry["source_count"] = len(entry["sources"])
+            entry["provider_count"] = len(entry["providers"])
+            entry["cluster_count"] = len(entry["clusters"])
+            entry["support_level"] = self._research_claim_support_level(
+                source_count=int(entry["source_count"] or 0),
+                provider_count=int(entry["provider_count"] or 0),
+                cluster_count=int(entry["cluster_count"] or 0),
+            )
+            claims.append(entry)
+        return claims
 
     def _research_claim_text(
         self,
@@ -10422,6 +10499,44 @@ class MySearchClient:
         ]
         signature_tokens = tokens[:8] or normalized.split()[:8]
         return " ".join(signature_tokens)
+
+    def _research_claim_support_level(
+        self,
+        *,
+        source_count: int,
+        provider_count: int,
+        cluster_count: int,
+    ) -> str:
+        if source_count >= 2 and provider_count >= 2:
+            return "cross-provider"
+        if source_count >= 3 or cluster_count >= 2:
+            return "multi-source"
+        if source_count >= 2:
+            return "corroborated"
+        return "single-source"
+
+    def _research_claim_support_phrase(self, claim_entry: dict[str, Any]) -> str:
+        if not claim_entry:
+            return ""
+        support_level = str(claim_entry.get("support_level") or "").strip()
+        source_count = int(claim_entry.get("source_count") or 0)
+        provider_count = int(claim_entry.get("provider_count") or 0)
+        cluster_count = int(claim_entry.get("cluster_count") or 0)
+        phrase = support_level.replace("-", " ").strip() if support_level else ""
+        detail_bits: list[str] = []
+        if provider_count > 0:
+            detail_bits.append(f"{provider_count} provider{'s' if provider_count != 1 else ''}")
+        if source_count > 0:
+            detail_bits.append(f"{source_count} source{'s' if source_count != 1 else ''}")
+        if cluster_count > 1:
+            detail_bits.append(f"{cluster_count} source clusters")
+        if phrase and detail_bits:
+            return f"{phrase} support across {', '.join(detail_bits)}"
+        if phrase:
+            return f"{phrase} support"
+        if detail_bits:
+            return f"supported by {', '.join(detail_bits)}"
+        return ""
 
     def _research_excerpt_looks_like_navigation_noise(self, text: str) -> bool:
         lowered = text.lower()
