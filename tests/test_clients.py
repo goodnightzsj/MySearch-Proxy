@@ -941,6 +941,23 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertTrue(strong)
 
+    def test_has_strong_award_result_accepts_official_artist_page_with_award_fact(self) -> None:
+        client = MySearchClient()
+
+        strong = client._has_strong_award_result(
+            query="2026 Grammy album of the year winner",
+            results=[
+                {
+                    "title": "Bad Bunny | Artist | GRAMMY.com",
+                    "url": "https://grammy.com/artists/bad-bunny/243129",
+                    "snippet": "Bad Bunny wins the Grammy for Album Of The Year at the 2026 Grammys.",
+                    "content": "",
+                }
+            ],
+        )
+
+        self.assertTrue(strong)
+
     def test_refined_award_result_query_rewrites_oscars_query(self) -> None:
         client = MySearchClient()
 
@@ -1119,6 +1136,23 @@ class MySearchClientTests(unittest.TestCase):
             answer,
             "Album of the Year winner: DeBÍ TiRAR MáS FOToS by Bad Bunny",
         )
+
+    def test_extract_result_event_answer_supports_dotted_official_award_format(self) -> None:
+        client = MySearchClient()
+
+        answer = client._extract_result_event_answer(
+            query="2026 Oscars best picture winner",
+            results=[
+                {
+                    "title": "The 98th Academy Awards | 2026",
+                    "url": "https://www.oscars.org/oscars/ceremonies/2026",
+                    "snippet": "Best Picture. Winner. One Battle after Another.",
+                    "content": "",
+                }
+            ],
+        )
+
+        self.assertEqual(answer, "Best Picture winner: One Battle after Another")
 
     def test_apply_result_event_answer_override_does_not_extract_from_weak_award_mentions(self) -> None:
         client = MySearchClient()
