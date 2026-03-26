@@ -1791,6 +1791,57 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["results"][0]["url"], "https://x.com/OpenAI/status/123")
         self.assertEqual(result["fallback"]["from"], "xai_compatible")
 
+    def test_social_search_reuses_search_cache_for_repeated_x_queries(self) -> None:
+        client = MySearchClient()
+        client.config.search_cache_ttl_seconds = 60
+        call_count = 0
+
+        def fake_search_xai(**kwargs):  # type: ignore[no-untyped-def]
+            nonlocal call_count
+            call_count += 1
+            return {
+                "provider": "xai",
+                "transport": "env",
+                "query": kwargs["query"],
+                "answer": "Cached social summary",
+                "results": [
+                    {
+                        "provider": "xai",
+                        "source": "x",
+                        "title": "OpenAI post",
+                        "url": "https://x.com/OpenAI/status/123",
+                        "snippet": "Latest OpenAI post",
+                        "content": "",
+                    }
+                ],
+                "citations": [{"title": "OpenAI post", "url": "https://x.com/OpenAI/status/123"}],
+            }
+
+        client._search_xai = fake_search_xai  # type: ignore[method-assign]
+        client._provider_can_serve = lambda provider: provider.name == "xai"  # type: ignore[method-assign]
+
+        first = client.search(
+            query="OpenAI reactions on X",
+            mode="social",
+            sources=["x"],
+            strategy="verify",
+            max_results=5,
+            include_answer=True,
+        )
+        second = client.search(
+            query="OpenAI reactions on X",
+            mode="social",
+            sources=["x"],
+            strategy="verify",
+            max_results=5,
+            include_answer=True,
+        )
+
+        self.assertEqual(call_count, 1)
+        self.assertEqual(first["answer"], "Cached social summary")
+        self.assertEqual(second["answer"], "Cached social summary")
+        self.assertTrue(second.get("cache", {}).get("search", {}).get("hit"))
+
     def test_github_blob_raw_urls_try_common_branch_aliases(self) -> None:
         client = MySearchClient()
 

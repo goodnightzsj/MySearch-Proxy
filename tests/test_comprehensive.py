@@ -196,6 +196,7 @@ class CacheBehaviorTests(unittest.TestCase):
         self.assertFalse(client._should_cache_search(
             decision=decision,
             normalized_sources=["x"],
+            mode="web",
         ))
 
     def test_should_cache_search_excludes_xai_provider(self) -> None:
@@ -204,6 +205,7 @@ class CacheBehaviorTests(unittest.TestCase):
         self.assertFalse(client._should_cache_search(
             decision=decision,
             normalized_sources=["web"],
+            mode="social",
         ))
 
     def test_should_cache_search_allows_tavily(self) -> None:
@@ -212,6 +214,16 @@ class CacheBehaviorTests(unittest.TestCase):
         self.assertTrue(client._should_cache_search(
             decision=decision,
             normalized_sources=["web"],
+            mode="web",
+        ))
+
+    def test_should_cache_search_allows_pure_social_x_queries(self) -> None:
+        client = _make_client()
+        decision = RouteDecision(provider="xai", reason="test")
+        self.assertTrue(client._should_cache_search(
+            decision=decision,
+            normalized_sources=["x"],
+            mode="social",
         ))
 
 
