@@ -5703,6 +5703,59 @@ class MySearchClientTests(unittest.TestCase):
             {"supporting": 1, "general": 1},
         )
 
+    def test_authoritative_research_selection_caps_general_when_anchor_sources_exist(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        ordered = client._assemble_authoritative_research_candidates(
+            official_candidates=[
+                {"url": "https://openai.com/docs/guide", "title": "Official guide"},
+            ],
+            supporting_candidates=[
+                {"url": "https://docs.azure.cn/en-us/search/agentic-retrieval-overview", "title": "Azure docs"},
+            ],
+            general_candidates=[
+                {"url": "https://example.com/general-1", "title": "General 1"},
+                {"url": "https://example.com/general-2", "title": "General 2"},
+                {"url": "https://example.com/general-3", "title": "General 3"},
+            ],
+            community_candidates=[
+                {"url": "https://community.example.com/post", "title": "Community 1"},
+            ],
+            max_results=5,
+        )
+
+        self.assertEqual(
+            [item["url"] for item in ordered],
+            [
+                "https://openai.com/docs/guide",
+                "https://docs.azure.cn/en-us/search/agentic-retrieval-overview",
+                "https://example.com/general-1",
+                "https://example.com/general-2",
+                "https://community.example.com/post",
+            ],
+        )
+
+    def test_research_result_cluster_label_marks_software_directory_as_directory(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        label = client._research_result_cluster_label(
+            query="compare Tavily and Firecrawl for AI agent web retrieval 2026",
+            mode="research",
+            item={
+                "title": "Firecrawl vs. Tavily Comparison - SourceForge",
+                "url": "https://sourceforge.net/software/compare/Firecrawl-vs-Tavily/",
+                "snippet": "Compare Firecrawl and Tavily side by side.",
+            },
+            include_domains=None,
+            authoritative_preferred=False,
+        )
+
+        self.assertEqual(label, "directory")
+
     def test_research_claim_evidence_skips_schema_noise_from_method_pages(self) -> None:
         client = MySearchClient()
         query = "compare OpenAI Responses API and Batch API for long-running tasks 2026"
