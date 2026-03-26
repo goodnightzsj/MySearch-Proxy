@@ -7010,6 +7010,30 @@ class MySearchClientTests(unittest.TestCase):
         self.assertIn("Apify api docs", queries)
         self.assertIn("Apify actors docs", queries)
 
+    def test_research_authoritative_rescue_queries_prefix_brand_for_ambiguous_product_comparison(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        queries = client._research_authoritative_rescue_queries(
+            "compare OpenAI Responses API and Batch API for long-running tasks 2026"
+        )
+
+        self.assertIn("OpenAI Responses API official docs long-running tasks", queries)
+        self.assertIn("OpenAI Batch API official docs long-running tasks", queries)
+        self.assertNotIn("Batch API official docs long-running tasks", queries)
+
+    def test_research_comparison_entities_keep_vendor_for_ambiguous_product_comparison(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        entities = client._research_comparison_entities(
+            "compare OpenAI Responses API and Batch API for long-running tasks 2026"
+        )
+
+        self.assertEqual(entities, [("openai", "responses"), ("openai", "batch")])
+
     def test_research_known_provider_doc_results_injects_canonical_docs_for_comparison(
         self,
     ) -> None:
@@ -7048,6 +7072,26 @@ class MySearchClientTests(unittest.TestCase):
             ],
         )
 
+    def test_research_result_cluster_label_downgrades_non_primary_vendor_in_single_vendor_product_comparison(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        label = client._research_result_cluster_label(
+            query="compare OpenAI Responses API and Batch API for long-running tasks 2026",
+            mode="docs",
+            item={
+                "provider": "tavily",
+                "title": "API - Mobile Engagement Platform | API & SDK Documentation",
+                "url": "https://batch.com/docs/api",
+                "snippet": "Batch exposes an API for campaigns and messaging workflows.",
+            },
+            include_domains=None,
+            authoritative_preferred=True,
+        )
+
+        self.assertEqual(label, "general")
+
     def test_research_prefers_canonical_vendor_docs_for_generic_authoritative_query(
         self,
     ) -> None:
@@ -7081,6 +7125,73 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(
             route["query"],
             "best approach for docs retrieval in agentic search 2026",
+        )
+
+    def test_research_prefers_tavily_discovery_for_authoritative_comparison_query(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        self.assertTrue(
+            client._research_prefers_tavily_discovery(
+                query="compare OpenAI Responses API and Batch API for long-running tasks 2026",
+                mode="docs",
+                intent="exploratory",
+                authoritative_research=True,
+            )
+        )
+        self.assertFalse(
+            client._research_prefers_tavily_discovery(
+                query="best approach for official docs retrieval in agentic search 2026",
+                mode="docs",
+                intent="resource",
+                authoritative_research=True,
+            )
+        )
+
+    def test_run_research_web_discovery_falls_back_to_direct_tavily_when_search_chain_fails(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        def fake_search(**kwargs):  # type: ignore[no-untyped-def]
+            raise MySearchError("All providers failed for query: exa not configured")
+
+        client.search = fake_search  # type: ignore[method-assign]
+        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "title": "Migrate to the Responses API | OpenAI API",
+                    "url": "https://developers.openai.com/api/docs/guides/migrate-to-responses/",
+                    "snippet": "Use Responses API for new integrations.",
+                }
+            ],
+            "citations": [
+                {
+                    "title": "Migrate to the Responses API | OpenAI API",
+                    "url": "https://developers.openai.com/api/docs/guides/migrate-to-responses/",
+                }
+            ],
+        }
+
+        result = client._run_research_web_discovery(
+            query="compare OpenAI Responses API and Batch API for long-running tasks 2026",
+            mode="docs",
+            intent="exploratory",
+            strategy="deep",
+            max_results=4,
+            include_content=False,
+            include_domains=None,
+            exclude_domains=None,
+            authoritative_research=True,
+        )
+
+        self.assertEqual(result["provider"], "tavily")
+        self.assertEqual(
+            result["results"][0]["url"],
+            "https://developers.openai.com/api/docs/guides/migrate-to-responses/",
         )
 
     def test_research_primary_discovery_route_keeps_branded_authoritative_query_strict(
