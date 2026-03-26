@@ -1846,6 +1846,98 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["results"][0]["url"], "https://x.com/OpenAI/status/456")
         self.assertIn("no x.com/twitter.com results", result["fallback"]["reason"])
 
+    def test_tavily_social_fallback_diversifies_repeated_handles(self) -> None:
+        client = MySearchClient()
+        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "Fallback social summary",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "Zvi Mowshowitz (@TheZvi) on X",
+                    "url": "https://x.com/TheZvi/status/1",
+                    "snippet": "Post 1",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "Zvi Mowshowitz (@TheZvi) on X",
+                    "url": "https://x.com/TheZvi/status/2",
+                    "snippet": "Post 2",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "Zvi Mowshowitz (@TheZvi) on X",
+                    "url": "https://x.com/TheZvi/status/3",
+                    "snippet": "Post 3",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "Arjun Kalsy (@ArjunKalsy) on X",
+                    "url": "https://x.com/ArjunKalsy/status/4",
+                    "snippet": "Post 4",
+                    "content": "",
+                },
+            ],
+            "citations": [
+                {"title": "Zvi", "url": "https://x.com/TheZvi/status/1"},
+                {"title": "Zvi", "url": "https://x.com/TheZvi/status/2"},
+                {"title": "Zvi", "url": "https://x.com/TheZvi/status/3"},
+                {"title": "Arjun", "url": "https://x.com/ArjunKalsy/status/4"},
+            ],
+        }
+
+        result = client._search_tavily_social_fallback(
+            query="Claude 4 reactions on X",
+            max_results=5,
+            from_date=None,
+            to_date=None,
+            fallback_reason="timeout",
+        )
+
+        self.assertEqual(
+            [item["url"] for item in result["results"]],
+            [
+                "https://x.com/TheZvi/status/1",
+                "https://x.com/TheZvi/status/2",
+                "https://x.com/ArjunKalsy/status/4",
+            ],
+        )
+
+    def test_normalize_social_gateway_response_diversifies_repeated_handles(self) -> None:
+        client = MySearchClient()
+
+        result = client._normalize_social_gateway_response(
+            response={
+                "query": "GPT-5.4 reactions on X",
+                "results": [
+                    {"url": "https://x.com/TheZvi/status/1", "author": "TheZvi", "text": "One"},
+                    {"url": "https://x.com/TheZvi/status/2", "author": "TheZvi", "text": "Two"},
+                    {"url": "https://x.com/TheZvi/status/3", "author": "TheZvi", "text": "Three"},
+                    {"url": "https://x.com/clairevo/status/4", "author": "clairevo", "text": "Four"},
+                ],
+            },
+            query="GPT-5.4 reactions on X",
+            transport="env",
+        )
+
+        self.assertEqual(
+            [item["url"] for item in result["results"]],
+            [
+                "https://x.com/TheZvi/status/1",
+                "https://x.com/TheZvi/status/2",
+                "https://x.com/clairevo/status/4",
+            ],
+        )
+
     def test_social_queries_disable_official_resource_mode_even_with_status_like_intent(self) -> None:
         client = MySearchClient()
 
