@@ -6421,6 +6421,66 @@ class MySearchClientTests(unittest.TestCase):
         )
         self.assertEqual(evidence["supporting_source_count"], 2)
 
+    def test_authoritative_research_selection_diversifies_supporting_vendor_docs_by_domain(
+        self,
+    ) -> None:
+        client = MySearchClient()
+        query = "best approach for official docs retrieval in agentic search 2026"
+
+        selected, evidence = client._select_research_candidate_results(
+            query=query,
+            mode="docs",
+            intent="comparison",
+            max_results=5,
+            web_results=[],
+            docs_rescue_results=[
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Search API - Tavily",
+                    "url": "https://docs.tavily.com/documentation/api-reference/search",
+                    "snippet": "Tavily exposes a search API for web retrieval, real-time discovery, and agent search workflows.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Extract API - Tavily",
+                    "url": "https://docs.tavily.com/documentation/api-reference/extract",
+                    "snippet": "Tavily exposes an extract API for content extraction and document retrieval workflows.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Extract - Firecrawl Docs",
+                    "url": "https://docs.firecrawl.dev/api-reference/endpoint/extract",
+                    "snippet": "Firecrawl provides an extract API for structured extraction across URLs, domains, and documents.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Search - Exa Docs",
+                    "url": "https://docs.exa.ai/reference/search",
+                    "snippet": "Exa provides a search API for semantic web retrieval and content discovery.",
+                },
+            ],
+            tavily_support_results=[],
+            exa_results=[],
+            include_domains=None,
+            authoritative_preferred=True,
+        )
+
+        top_urls = [item["url"] for item in selected[:3]]
+        self.assertEqual(
+            set(top_urls),
+            {
+                "https://docs.tavily.com/documentation/api-reference/search",
+                "https://docs.firecrawl.dev/api-reference/endpoint/extract",
+                "https://docs.exa.ai/reference/search",
+            },
+        )
+        self.assertEqual(
+            sum("docs.tavily.com" in url for url in top_urls),
+            1,
+        )
+        self.assertEqual(evidence["authoritative_source_count"], 2)
+        self.assertEqual(evidence["supporting_source_count"], 1)
+
     def test_research_selection_prefers_supporting_vendor_docs_before_curated_comparisons(
         self,
     ) -> None:
@@ -7487,6 +7547,44 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["web_search"]["provider"], "firecrawl")
         self.assertEqual(result["web_search"]["fallback"]["to"], "docs_rescue")
         self.assertEqual(result["pages"][0]["url"], "https://openai.com/api/pricing/")
+
+    def test_research_falls_back_to_canonical_vendor_docs_when_primary_and_docs_rescue_fail(
+        self,
+    ) -> None:
+        client = MySearchClient()
+        client._provider_can_serve = lambda provider: provider.name != "xai"  # type: ignore[method-assign]
+        client._resolve_research_plan = lambda **kwargs: {  # type: ignore[method-assign]
+            "web_mode": "research",
+            "web_max_results": kwargs["web_max_results"],
+            "social_max_results": kwargs["social_max_results"],
+            "scrape_top_n": kwargs["scrape_top_n"],
+        }
+
+        def failing_search(**kwargs):  # type: ignore[no-untyped-def]
+            raise MySearchError("provider unavailable")
+
+        client.search = failing_search  # type: ignore[method-assign]
+        client.extract_url = lambda **kwargs: {  # type: ignore[method-assign]
+            "url": kwargs["url"],
+            "provider": "firecrawl",
+            "content": f"content for {kwargs['url']}",
+            "cache": {"extract": {"hit": False, "ttl_seconds": 300}},
+        }
+
+        result = client.research(
+            query="best approach for official docs retrieval in agentic search 2026",
+            mode="research",
+            strategy="deep",
+            include_social=False,
+            scrape_top_n=2,
+        )
+
+        self.assertEqual(result["web_search"]["provider"], "canonical_research_docs")
+        self.assertEqual(result["web_search"]["fallback"]["to"], "canonical_research_docs")
+        top_urls = [item["url"] for item in result["web_search"]["results"][:3]]
+        self.assertIn("https://docs.tavily.com/documentation/api-reference/search", top_urls)
+        self.assertIn("https://docs.exa.ai/reference/search", top_urls)
+        self.assertGreaterEqual(result["evidence"]["supporting_source_count"], 1)
 
     def test_dedupe_research_results_preserves_matched_providers(self) -> None:
         client = MySearchClient()

@@ -1656,6 +1656,16 @@ class MySearchClient:
         )
         web_search = research_results.get("web")
         exa_discovery = research_results.get("exa_discovery")
+        known_provider_doc_results = self._research_known_provider_doc_results(query)
+        generic_vendor_doc_results = (
+            self._research_generic_vendor_doc_results(query)
+            if authoritative_research
+            else []
+        )
+        canonical_research_doc_results = self._dedupe_research_results_for_report(
+            known_provider_doc_results,
+            generic_vendor_doc_results,
+        )
         if web_search is None:
             if exa_discovery and not research_errors.get("exa_discovery"):
                 web_search = self._build_research_web_fallback_result(
@@ -1688,6 +1698,31 @@ class MySearchClient:
                     fallback_to="tavily_support",
                     fallback_reason="primary web discovery failed",
                 )
+            elif canonical_research_doc_results:
+                web_search = self._build_research_secondary_fallback_result(
+                    query=query,
+                    mode=research_plan["web_mode"],
+                    intent=resolved_intent,
+                    strategy=resolved_strategy,
+                    source_result={
+                        "provider": "canonical_research_docs",
+                        "query": query,
+                        "intent": resolved_intent,
+                        "strategy": resolved_strategy,
+                        "results": canonical_research_doc_results,
+                        "citations": [
+                            {
+                                "title": str(item.get("title") or ""),
+                                "url": str(item.get("url") or ""),
+                            }
+                            for item in canonical_research_doc_results
+                            if str(item.get("url") or "").strip()
+                        ],
+                    },
+                    include_domains=include_domains,
+                    fallback_to="canonical_research_docs",
+                    fallback_reason="primary web discovery failed",
+                )
             else:
                 self._raise_parallel_error(research_errors, "web")
                 web_search = research_results["web"]
@@ -1698,13 +1733,8 @@ class MySearchClient:
             if docs_rescue and not research_errors.get("docs_rescue")
             else []
         )
-        docs_rescue_results.extend(
-            self._research_known_provider_doc_results(query)
-        )
-        if authoritative_research:
-            docs_rescue_results.extend(
-                self._research_generic_vendor_doc_results(query)
-            )
+        docs_rescue_results.extend(known_provider_doc_results)
+        docs_rescue_results.extend(generic_vendor_doc_results)
         docs_rescue_provider = docs_rescue.get("provider", "") if docs_rescue and not research_errors.get("docs_rescue") else ""
         tavily_support = research_results.get("tavily_support")
         tavily_support_results = (
@@ -2871,6 +2901,10 @@ class MySearchClient:
                 query=query,
                 candidates=official_candidates,
             )
+            if self._research_prefers_canonical_vendor_docs(query):
+                official_candidates = self._diversify_results_by_registered_domain(
+                    official_candidates
+                )
         if len(supporting_candidates) > 1:
             supporting_candidates = self._rerank_resource_results(
                 query=query,
@@ -2878,6 +2912,10 @@ class MySearchClient:
                 results=supporting_candidates,
                 include_domains=include_domains,
             )
+            if self._research_prefers_canonical_vendor_docs(query):
+                supporting_candidates = self._diversify_results_by_registered_domain(
+                    supporting_candidates
+                )
         if len(general_candidates) > 1:
             general_candidates = self._rerank_general_results(
                 query=query,
