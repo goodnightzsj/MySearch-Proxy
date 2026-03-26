@@ -5979,6 +5979,25 @@ class MySearchClientTests(unittest.TestCase):
         self.assertIn("Firecrawl scrape docs", queries)
         self.assertIn("Firecrawl extract docs", queries)
 
+    def test_research_known_provider_doc_results_injects_canonical_docs_for_comparison(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        results = client._research_known_provider_doc_results(
+            "compare Tavily and Firecrawl for AI agent web retrieval 2026"
+        )
+
+        self.assertEqual(
+            [item["url"] for item in results],
+            [
+                "https://docs.tavily.com/documentation/api-reference/search",
+                "https://docs.tavily.com/documentation/api-reference/extract",
+                "https://docs.firecrawl.dev/api-reference/endpoint/scrape",
+                "https://docs.firecrawl.dev/api-reference/endpoint/extract",
+            ],
+        )
+
     def test_research_selection_prefers_supporting_vendor_docs_before_curated_comparisons(
         self,
     ) -> None:

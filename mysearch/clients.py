@@ -1660,6 +1660,9 @@ class MySearchClient:
             if docs_rescue and not research_errors.get("docs_rescue")
             else []
         )
+        docs_rescue_results.extend(
+            self._research_known_provider_doc_results(query)
+        )
         docs_rescue_provider = docs_rescue.get("provider", "") if docs_rescue and not research_errors.get("docs_rescue") else ""
         tavily_support = research_results.get("tavily_support")
         tavily_support_results = (
@@ -2066,6 +2069,62 @@ class MySearchClient:
                 "Exa contents docs",
             ]
         return []
+
+    def _research_known_provider_doc_results(self, query: str) -> list[dict[str, Any]]:
+        if not self._looks_like_comparison_query(query.lower()):
+            return []
+        catalog = {
+            "tavily": [
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Search API - Tavily",
+                    "url": "https://docs.tavily.com/documentation/api-reference/search",
+                    "snippet": "Official Tavily Search API reference for web retrieval and search workflows.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Extract API - Tavily",
+                    "url": "https://docs.tavily.com/documentation/api-reference/extract",
+                    "snippet": "Official Tavily Extract API reference for content extraction workflows.",
+                },
+            ],
+            "firecrawl": [
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Scrape - Firecrawl Docs",
+                    "url": "https://docs.firecrawl.dev/api-reference/endpoint/scrape",
+                    "snippet": "Official Firecrawl scrape API reference for markdown extraction and page retrieval.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Extract - Firecrawl Docs",
+                    "url": "https://docs.firecrawl.dev/api-reference/endpoint/extract",
+                    "snippet": "Official Firecrawl extract API reference for structured extraction workflows.",
+                },
+            ],
+            "exa": [
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Search - Exa Docs",
+                    "url": "https://docs.exa.ai/reference/search",
+                    "snippet": "Official Exa search API reference for semantic web retrieval.",
+                },
+            ],
+        }
+        injected: list[dict[str, Any]] = []
+        seen_urls: set[str] = set()
+        for entity_tokens in self._research_comparison_entities(query):
+            entity_text = " ".join(entity_tokens).lower()
+            for brand, items in catalog.items():
+                if brand not in entity_text:
+                    continue
+                for item in items:
+                    url = str(item.get("url") or "")
+                    if not url or url in seen_urls:
+                        continue
+                    seen_urls.add(url)
+                    injected.append(dict(item))
+        return injected
 
     def _run_research_docs_rescue(
         self,
