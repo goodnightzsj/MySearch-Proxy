@@ -4045,14 +4045,14 @@ class MySearchClient:
             and (mode == "news" or intent in {"news", "status"})
         ):
             return False
+        results = list(result.get("results") or [])
+        if self._looks_like_award_result_query(query_lower):
+            return self._has_strong_award_result(query=query, results=results)
         evidence = result.get("evidence") or {}
         if bool(str(result.get("answer") or "").strip()) and (
             str(evidence.get("answer_source") or "") == "result-event-extraction"
         ):
             return True
-        results = list(result.get("results") or [])
-        if self._looks_like_award_result_query(query_lower):
-            return self._has_strong_award_result(query=query, results=results)
         return False
 
     def _result_set_looks_weak_for_exa_rescue(
@@ -5332,8 +5332,13 @@ class MySearchClient:
     ) -> dict[str, Any]:
         provider = self.config.tavily
         key = self._get_key_or_raise(provider)
+        effective_query = query
+        if topic == "news" and self._looks_like_award_result_query(query.lower()):
+            refined_query = self._refined_award_result_query(query)
+            if refined_query and refined_query != query:
+                effective_query = refined_query
         payload: dict[str, Any] = {
-            "query": query,
+            "query": effective_query,
             "max_results": max_results,
             "search_depth": "advanced" if include_content or strategy in {"verify", "deep"} else "basic",
             "topic": topic,
@@ -5379,7 +5384,7 @@ class MySearchClient:
         return {
             "provider": "tavily",
             "transport": key.source,
-            "query": response.get("query", query),
+            "query": response.get("query", effective_query),
             "answer": response.get("answer", ""),
             "request_id": response.get("request_id", ""),
             "response_time": response.get("response_time"),
