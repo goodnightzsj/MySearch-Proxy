@@ -10774,6 +10774,10 @@ class MySearchClient:
                             return trailing_excerpt
                 if cleaned_title and self._research_excerpt_looks_like_navigation_noise(cleaned_excerpt):
                     return cleaned_title
+                if self._research_excerpt_looks_like_schema_noise(cleaned_excerpt):
+                    if cleaned_title and not self._research_claim_is_generic(cleaned_title):
+                        return cleaned_title
+                    return ""
                 if not self._research_excerpt_looks_like_noise(cleaned_excerpt):
                     excerpt_tokens = set(re.findall(r"[a-z0-9]+", cleaned_excerpt.lower()))
                     title_tokens = set(re.findall(r"[a-z0-9]+", cleaned_title.lower()))
@@ -10837,6 +10841,24 @@ class MySearchClient:
             return cleaned
         fallback = page_excerpt or snippet or content
         return re.sub(r"\s+", " ", fallback).strip()
+
+    def _research_excerpt_looks_like_schema_noise(self, text: str) -> bool:
+        normalized = re.sub(r"\s+", " ", text.lower()).strip()
+        if not normalized:
+            return False
+        schema_markers = (
+            "keys are strings",
+            "maximum length",
+            "minimum length",
+            "defaults to",
+            "must be one of",
+            "object containing",
+            "array of",
+            "the id of the",
+            "the type of the",
+            "a list of",
+        )
+        return any(marker in normalized for marker in schema_markers)
 
     def _research_claim_signature(self, claim: str) -> str:
         normalized = re.sub(r"[^a-z0-9]+", " ", claim.lower()).strip()
