@@ -6110,6 +6110,66 @@ class MySearchClientTests(unittest.TestCase):
         )
         self.assertEqual(evidence["selected_candidate_cluster_counts"]["supporting"], 2)
 
+    def test_research_selection_prefers_capability_docs_over_generic_agent_docs(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        selected, evidence = client._select_research_candidate_results(
+            query="compare Tavily and Firecrawl for AI agent web retrieval 2026",
+            mode="research",
+            intent="comparison",
+            max_results=5,
+            web_results=[
+                {
+                    "provider": "tavily",
+                    "title": "Firecrawl vs Tavily: Complete Comparison for AI Agents & RAG (2026)",
+                    "url": "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                    "snippet": "Direct first-party comparison page.",
+                },
+            ],
+            docs_rescue_results=[
+                {
+                    "provider": "tavily",
+                    "title": "Tavily Agent Skills",
+                    "url": "https://docs.tavily.com/documentation/agent-skills",
+                    "snippet": "Tavily agent skills overview.",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "OpenAI Agent Builder - Tavily Docs",
+                    "url": "https://docs.tavily.com/documentation/integrations/agent-builder",
+                    "snippet": "Tavily integration docs for agent builder.",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Search API - Tavily",
+                    "url": "https://docs.tavily.com/documentation/api-reference/search",
+                    "snippet": "Search API reference for Tavily web retrieval and extraction workflows.",
+                },
+                {
+                    "provider": "firecrawl",
+                    "title": "Extract - Firecrawl Docs",
+                    "url": "https://docs.firecrawl.dev/api-reference/endpoint/extract",
+                    "snippet": "Extract structured data from URLs.",
+                },
+            ],
+            tavily_support_results=[],
+            exa_results=[],
+            include_domains=None,
+            authoritative_preferred=False,
+        )
+
+        self.assertEqual(
+            [item["url"] for item in selected[:3]],
+            [
+                "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                "https://docs.tavily.com/documentation/api-reference/search",
+                "https://docs.firecrawl.dev/api-reference/endpoint/extract",
+            ],
+        )
+        self.assertEqual(evidence["selected_candidate_cluster_counts"]["supporting"], 2)
+
     def test_generic_authoritative_research_blog_page_is_not_classified_as_official(
         self,
     ) -> None:
