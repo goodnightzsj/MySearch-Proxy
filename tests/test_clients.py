@@ -9407,6 +9407,67 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertIn("discounted asynchronous processing", sections["executive_summary"].lower())
 
+    def test_research_report_sections_ignore_unanchored_web_answer_when_vendor_docs_anchor_shortlist(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        sections = client._build_research_report_sections(
+            query="best approach for official docs retrieval in agentic search 2026",
+            web_search={
+                "intent": "exploratory",
+                "answer": (
+                    "For agentic search in 2026, use retrieval-augmented generation (RAG) with "
+                    "keyword search and vector databases. Azure AI Search offers advanced "
+                    "multi-query pipelines for complex queries."
+                ),
+            },
+            ordered_results=[
+                {
+                    "provider": "canonical_research_docs",
+                    "matched_providers": ["canonical_research_docs", "tavily"],
+                    "title": "Search API - Tavily",
+                    "url": "https://docs.tavily.com/documentation/api-reference/search",
+                    "snippet": "Tavily exposes a search API for web retrieval, real-time discovery, and agent search workflows.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "matched_providers": ["canonical_research_docs", "exa"],
+                    "title": "Search - Exa Docs",
+                    "url": "https://docs.exa.ai/reference/search",
+                    "snippet": "Exa provides a search API for semantic web retrieval and content discovery.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "matched_providers": ["canonical_research_docs", "firecrawl"],
+                    "title": "Extract - Firecrawl Docs",
+                    "url": "https://docs.firecrawl.dev/api-reference/endpoint/extract",
+                    "snippet": "Firecrawl provides an extract API for structured extraction across URLs, domains, and documents.",
+                },
+            ],
+            pages=[],
+            citations=[
+                {"title": "Search API - Tavily", "url": "https://docs.tavily.com/documentation/api-reference/search"},
+                {"title": "Search - Exa Docs", "url": "https://docs.exa.ai/reference/search"},
+                {"title": "Extract - Firecrawl Docs", "url": "https://docs.firecrawl.dev/api-reference/endpoint/extract"},
+            ],
+            social=None,
+            evidence={
+                "providers_consulted": ["hybrid", "tavily", "exa"],
+                "citation_count": 3,
+                "confidence": "high",
+                "research_plan": {"scrape_top_n": 2, "web_mode": "docs"},
+                "selected_candidate_domains": ["tavily.com", "exa.ai", "firecrawl.dev"],
+                "selected_candidate_cluster_counts": {"official": 2, "supporting": 1},
+                "selected_authoritative_source_count": 2,
+                "selected_supporting_source_count": 1,
+                "authoritative_research": True,
+            },
+        )
+
+        self.assertNotIn("azure ai search", sections["executive_summary"].lower())
+        self.assertIn("tavily", sections["executive_summary"].lower())
+
 
 if __name__ == "__main__":
     unittest.main()

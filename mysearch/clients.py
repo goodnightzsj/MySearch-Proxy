@@ -3842,6 +3842,63 @@ class MySearchClient:
             return 3
         return 2
 
+    def _research_report_anchor_tokens(
+        self,
+        *,
+        query: str,
+        mode: str,
+        ordered_results: list[dict[str, Any]],
+        authoritative_preferred: bool,
+    ) -> list[str]:
+        ignored_tokens = {
+            "ai",
+            "api",
+            "app",
+            "com",
+            "dev",
+            "developers",
+            "docs",
+            "guide",
+            "guides",
+            "io",
+            "net",
+            "org",
+            "platform",
+            "reference",
+            "www",
+        }
+        tokens: list[str] = []
+        seen: set[str] = set()
+        for item in ordered_results:
+            cluster_label = self._research_result_cluster_label(
+                query=query,
+                mode=mode,
+                item=item,
+                include_domains=None,
+                authoritative_preferred=authoritative_preferred,
+            )
+            if cluster_label not in {"official", "supporting"}:
+                continue
+            registered_domain = self._registered_domain(self._result_hostname(item))
+            if not registered_domain:
+                continue
+            for token in re.split(r"[^a-z0-9]+", registered_domain.lower()):
+                if not token or token in ignored_tokens or token in seen:
+                    continue
+                seen.add(token)
+                tokens.append(token)
+                if len(tokens) >= 6:
+                    return tokens
+        return tokens
+
+    def _research_summary_mentions_anchor_tokens(
+        self,
+        text: str,
+        anchor_tokens: list[str],
+    ) -> bool:
+        normalized = f" {re.sub(r'[^a-z0-9]+', ' ', text.lower()).strip()} "
+        return any(f" {token} " in normalized for token in anchor_tokens if token)
+
     def _research_authoritative_query_tokens(self, query: str) -> list[str]:
         generic_tokens = {
             "agent",
@@ -12255,6 +12312,26 @@ class MySearchClient:
             supporting_source_count = int(evidence.get("supporting_source_count") or 0)
             community_source_count = int(evidence.get("community_source_count") or 0)
         preferred_title_lines = ordered_title_lines or citation_title_lines
+        report_mode = str(
+            (evidence.get("research_plan") or {}).get("web_mode")
+            or web_search.get("intent")
+            or "web"
+        )
+        authoritative_research = bool(evidence.get("authoritative_research"))
+        anchor_tokens = self._research_report_anchor_tokens(
+            query=query,
+            mode=report_mode,
+            ordered_results=ordered_results,
+            authoritative_preferred=authoritative_research,
+        )
+        if (
+            web_answer
+            and (comparison_like or authoritative_research)
+            and (authoritative_source_count > 0 or supporting_source_count > 0)
+            and anchor_tokens
+            and not self._research_summary_mentions_anchor_tokens(web_answer, anchor_tokens)
+        ):
+            web_answer = ""
         primary_finding = executive_summary_override or web_answer or social_answer
         if not primary_finding and comparison_like:
             if authoritative_source_count > 0 and preferred_title_lines:
@@ -12355,20 +12432,20 @@ class MySearchClient:
         social_signal = social_answer if social_answer and social_answer != primary_finding else ""
         source_clusters = self._build_research_source_clusters(
             query=query,
-            mode=str((evidence.get("research_plan") or {}).get("web_mode") or web_search.get("intent") or "web"),
+            mode=report_mode,
             ordered_results=ordered_results,
             include_domains=None,
-            authoritative_preferred=bool(evidence.get("authoritative_research")),
+            authoritative_preferred=authoritative_research,
         )
         claim_evidence = self._build_research_claim_evidence(
             query=query,
-            mode=str((evidence.get("research_plan") or {}).get("web_mode") or web_search.get("intent") or "web"),
+            mode=report_mode,
             ordered_results=ordered_results,
             pages=pages,
             citations=citations,
             comparison_like=comparison_like,
             include_domains=None,
-            authoritative_preferred=bool(evidence.get("authoritative_research")),
+            authoritative_preferred=authoritative_research,
         )
         significant_conflicts = [
             str(item)
@@ -12443,10 +12520,10 @@ class MySearchClient:
                 )
                 cluster_label = self._research_result_cluster_label(
                     query=query,
-                    mode=str((evidence.get("research_plan") or {}).get("web_mode") or "web"),
+                    mode=report_mode,
                     item=matching_item or {"url": url, "title": title},
                     include_domains=None,
-                    authoritative_preferred=bool(evidence.get("authoritative_research")),
+                    authoritative_preferred=authoritative_research,
                 )
                 providers = [
                     provider
