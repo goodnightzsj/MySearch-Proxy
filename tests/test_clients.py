@@ -5542,6 +5542,47 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(claim, "Create large batches of API requests to run asynchronously")
 
+    def test_research_claim_evidence_prefers_non_generic_claims_over_title_shells(self) -> None:
+        client = MySearchClient()
+
+        claims = client._build_research_claim_evidence(
+            query="responses api vs batch api",
+            mode="research",
+            ordered_results=[
+                {
+                    "provider": "tavily",
+                    "matched_providers": ["tavily"],
+                    "title": "Compare models | OpenAI API",
+                    "url": "https://openai.com/api/compare-models",
+                    "snippet": "Output Reasoning tokens Pricing Per 1M tokens Input Cached Input Output Context Window Max Output Tokens 128,000",
+                },
+                {
+                    "provider": "exa",
+                    "matched_providers": ["exa"],
+                    "title": "Batches | OpenAI API Reference",
+                    "url": "https://platform.openai.com/docs/api-reference/batches",
+                    "snippet": "Create large batches of API requests to run asynchronously.",
+                },
+            ],
+            pages=[],
+            citations=[
+                {
+                    "title": "Compare models | OpenAI API",
+                    "url": "https://openai.com/api/compare-models",
+                },
+                {
+                    "title": "Batches | OpenAI API Reference",
+                    "url": "https://platform.openai.com/docs/api-reference/batches",
+                },
+            ],
+            comparison_like=True,
+            include_domains=None,
+            authoritative_preferred=True,
+        )
+
+        self.assertTrue(claims)
+        self.assertIn("create large batches", claims[0]["claim"].lower())
+
     def test_research_report_sections_include_claim_evidence_and_source_clusters(self) -> None:
         client = MySearchClient()
 
