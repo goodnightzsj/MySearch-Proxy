@@ -131,8 +131,9 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(result, "news")
 
-    def test_news_route_policy_prefers_exa_rescue_without_firecrawl_search(self) -> None:
+    def test_news_route_policy_prefers_exa_primary_for_award_result_queries(self) -> None:
         client = MySearchClient()
+        client._provider_can_serve = lambda provider: provider.name == "exa"  # type: ignore[method-assign]
 
         policy = client._route_policy_for_request(
             query="2026 Oscars best picture winner",
@@ -141,9 +142,9 @@ class MySearchClientTests(unittest.TestCase):
             include_content=False,
         )
 
-        self.assertEqual(policy.key, "news")
-        self.assertEqual(policy.provider, "tavily")
-        self.assertEqual(policy.fallback_chain, ("exa",))
+        self.assertEqual(policy.key, "award_result")
+        self.assertEqual(policy.provider, "exa")
+        self.assertEqual(policy.fallback_chain, ("tavily",))
 
     def test_news_verify_does_not_enable_tavily_firecrawl_blend(self) -> None:
         client = MySearchClient()

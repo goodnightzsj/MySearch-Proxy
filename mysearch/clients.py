@@ -152,6 +152,13 @@ _MODE_PROVIDER_POLICY: dict[str, SearchRoutePolicy] = {
         result_profile="news",
         allow_exa_rescue=True,
     ),
+    "award_result": SearchRoutePolicy(
+        key="award_result",
+        provider="exa",
+        fallback_chain=("tavily",),
+        tavily_topic="news",
+        result_profile="news",
+    ),
     "status": SearchRoutePolicy(
         key="status",
         provider="tavily",
@@ -3622,6 +3629,12 @@ class MySearchClient:
             return _MODE_PROVIDER_POLICY["resource"]
         if intent == "status" or self._looks_like_status_query(query_lower):
             return _MODE_PROVIDER_POLICY["status"]
+        if (
+            self._looks_like_award_result_query(query_lower)
+            and (intent == "news" or mode == "news")
+            and self._provider_can_serve(self.config.exa)
+        ):
+            return _MODE_PROVIDER_POLICY["award_result"]
         if intent == "news" or mode == "news" or self._looks_like_news_query(query_lower):
             return _MODE_PROVIDER_POLICY["news"]
         if intent in {"exploratory", "comparison"} and self._provider_can_serve(self.config.exa):
