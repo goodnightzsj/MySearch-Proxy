@@ -11934,9 +11934,9 @@ class MySearchClient:
         else:
             weights = {
                 "project": 5,
-                "curated": 4,
+                "supporting": 4,
+                "curated": 3,
                 "general": 3,
-                "supporting": 3,
                 "official": 3,
                 "listicle": 2,
                 "directory": 1,
