@@ -10456,6 +10456,12 @@ class MySearchClient:
                 comparison_like=comparison_like,
             )
             if cleaned_excerpt:
+                if cleaned_title:
+                    title_prefix = f"{cleaned_title} "
+                    if cleaned_excerpt.lower().startswith(title_prefix.lower()):
+                        trailing_excerpt = cleaned_excerpt[len(title_prefix):].strip(" -:;,.")
+                        if len(trailing_excerpt.split()) >= 3:
+                            return trailing_excerpt
                 if cleaned_title and self._research_excerpt_looks_like_navigation_noise(cleaned_excerpt):
                     return cleaned_title
                 if not self._research_excerpt_looks_like_noise(cleaned_excerpt):
@@ -10474,7 +10480,22 @@ class MySearchClient:
         *,
         comparison_like: bool,
     ) -> str:
-        compact = re.sub(r"\s+", " ", text).strip(" -|:;,.")
+        compact = text.replace("**", " ").replace("__", " ")
+        compact = re.sub(
+            r"(?i)\b(copy\s+markdown|open\s+in\s+chatgpt|view\s+as\s+markdown|copy\s+page|view\s+page)\b",
+            " ",
+            compact,
+        )
+        compact = compact.replace("*", " ")
+        compact = re.sub(r"\s+", " ", compact).strip(" -|:;,.")
+        heading_match = re.match(
+            r"^(?:#\s*)?[A-Z][A-Za-z0-9'’&./() \-]{1,80}?\s+"
+            r"((?:create|use|build|manage|run|stream|process|compare|choose|support|supports|allow|allows|enable|enables|let|lets|track|learn|handle)\b.+)$",
+            compact,
+            flags=re.IGNORECASE,
+        )
+        if heading_match:
+            compact = heading_match.group(1).strip()
         compact = re.sub(r"^[#>*`\-\d\.\)\s]+", "", compact).strip()
         compact = re.sub(r"\[[^\]]+\]\([^)]+\)", "", compact).strip()
         compact = re.sub(r"https?://\S+", "", compact).strip()
@@ -10632,6 +10653,8 @@ class MySearchClient:
             marker in lowered
             for marker in (
                 "primary navigation",
+                "copy markdown",
+                "open in chatgpt",
                 "search docs",
                 "skip to content",
                 "suggested",

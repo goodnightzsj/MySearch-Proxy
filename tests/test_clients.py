@@ -5531,6 +5531,17 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(len(claims), 1)
         self.assertIn("discounted asynchronous processing", claims[0]["claim"].lower())
 
+    def test_research_claim_text_strips_openai_markdown_boilerplate(self) -> None:
+        client = MySearchClient()
+
+        claim = client._research_claim_text(
+            title="Batches | OpenAI API Reference",
+            excerpt="Copy Markdown Open in **ChatGPT** **View as Markdown** # Batches Create large batches of API requests to run asynchronously.",
+            comparison_like=True,
+        )
+
+        self.assertEqual(claim, "Create large batches of API requests to run asynchronously")
+
     def test_research_report_sections_include_claim_evidence_and_source_clusters(self) -> None:
         client = MySearchClient()
 
