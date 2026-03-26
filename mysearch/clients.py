@@ -460,12 +460,14 @@ class MySearchClient:
         *,
         decision: RouteDecision,
         normalized_sources: list[str],
+        mode: SearchMode,
     ) -> bool:
         if self.config.search_cache_ttl_seconds <= 0:
             return False
-        if "x" in normalized_sources:
+        social_only = mode == "social" and normalized_sources == ["x"]
+        if "x" in normalized_sources and not social_only:
             return False
-        if decision.provider == "xai":
+        if decision.provider == "xai" and not social_only:
             return False
         return True
 
@@ -653,6 +655,7 @@ class MySearchClient:
         cacheable = self._should_cache_search(
             decision=decision,
             normalized_sources=normalized_sources,
+            mode=mode,
         )
         cache_key = ""
         if cacheable:
