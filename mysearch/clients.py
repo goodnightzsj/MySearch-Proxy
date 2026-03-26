@@ -12324,6 +12324,36 @@ class MySearchClient:
             ordered_results=ordered_results,
             authoritative_preferred=authoritative_research,
         )
+        if not anchor_tokens:
+            for domain in [str(item).strip() for item in (evidence.get("selected_candidate_domains") or [])]:
+                if not domain:
+                    continue
+                registered_domain = self._registered_domain(domain)
+                for token in re.split(r"[^a-z0-9]+", registered_domain.lower()):
+                    if token in {
+                        "",
+                        "ai",
+                        "api",
+                        "com",
+                        "dev",
+                        "developers",
+                        "docs",
+                        "guide",
+                        "guides",
+                        "io",
+                        "net",
+                        "org",
+                        "platform",
+                        "reference",
+                        "www",
+                    }:
+                        continue
+                    if token not in anchor_tokens:
+                        anchor_tokens.append(token)
+                    if len(anchor_tokens) >= 6:
+                        break
+                if len(anchor_tokens) >= 6:
+                    break
         if (
             web_answer
             and (comparison_like or authoritative_research)
