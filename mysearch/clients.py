@@ -3549,9 +3549,13 @@ class MySearchClient:
             citations=citations,
         )
         conflicts = list(web_evidence.get("conflicts") or [])
+        selected_authoritative_source_count = max(authoritative_source_count, 0)
+        selected_supporting_source_count = max(supporting_source_count, 0)
+        selected_community_source_count = max(community_source_count, 0)
+        search_authoritative_source_count = int(web_evidence.get("official_source_count") or 0)
         effective_authoritative_source_count = max(
-            authoritative_source_count,
-            int(web_evidence.get("official_source_count") or 0),
+            selected_authoritative_source_count,
+            search_authoritative_source_count,
         )
         if requested_page_count and not successful_pages:
             conflicts.append("page-extraction-unavailable")
@@ -3592,7 +3596,7 @@ class MySearchClient:
             else "single-provider",
             "source_diversity": len(source_domains),
             "source_domains": source_domains[:5],
-            "official_source_count": int(web_evidence.get("official_source_count") or 0),
+            "official_source_count": search_authoritative_source_count,
             "official_mode": official_mode,
             "search_confidence": str(web_evidence.get("confidence") or "low"),
             "confidence": confidence,
@@ -3602,8 +3606,12 @@ class MySearchClient:
             "exa_unique_url_count": exa_unique_url_count,
             "exa_promoted_page_count": exa_promoted_page_count,
             "authoritative_source_count": effective_authoritative_source_count,
-            "supporting_source_count": max(supporting_source_count, 0),
-            "community_source_count": community_source_count,
+            "search_authoritative_source_count": search_authoritative_source_count,
+            "selected_authoritative_source_count": selected_authoritative_source_count,
+            "supporting_source_count": selected_supporting_source_count,
+            "selected_supporting_source_count": selected_supporting_source_count,
+            "community_source_count": selected_community_source_count,
+            "selected_community_source_count": selected_community_source_count,
             "selected_candidate_count": selected_candidate_count,
             "selected_candidate_domains": selected_candidate_domains[:5],
             "selected_candidate_cluster_counts": dict(selected_candidate_cluster_counts),
@@ -10176,7 +10184,18 @@ class MySearchClient:
             str(key): int(value or 0)
             for key, value in dict(evidence.get("selected_candidate_cluster_counts") or {}).items()
         }
-        if selected_cluster_counts:
+        explicit_selected_authoritative = int(evidence.get("selected_authoritative_source_count") or 0)
+        explicit_selected_supporting = int(evidence.get("selected_supporting_source_count") or 0)
+        explicit_selected_community = int(evidence.get("selected_community_source_count") or 0)
+        if (
+            explicit_selected_authoritative > 0
+            or explicit_selected_supporting > 0
+            or explicit_selected_community > 0
+        ):
+            authoritative_source_count = explicit_selected_authoritative
+            supporting_source_count = explicit_selected_supporting
+            community_source_count = explicit_selected_community
+        elif selected_cluster_counts:
             authoritative_source_count = int(selected_cluster_counts.get("official") or 0)
             supporting_source_count = int(selected_cluster_counts.get("supporting") or 0)
             community_source_count = int(selected_cluster_counts.get("community") or 0)

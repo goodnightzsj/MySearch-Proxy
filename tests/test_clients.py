@@ -5969,6 +5969,52 @@ class MySearchClientTests(unittest.TestCase):
         self.assertNotIn("Authoritative sources", sections["executive_summary"])
         self.assertIn("supporting=1", sections["source_mix"])
 
+    def test_augment_research_evidence_tracks_selected_and_search_authority_separately(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        evidence = client._augment_research_evidence(
+            query="best approach for official docs retrieval in agentic search 2026",
+            mode="docs",
+            intent="comparison",
+            requested_page_count=0,
+            pages=[],
+            citations=[],
+            web_search={
+                "provider": "hybrid",
+                "results": [],
+                "evidence": {
+                    "official_source_count": 1,
+                    "confidence": "medium",
+                    "official_mode": "strict",
+                },
+            },
+            social=None,
+            social_error="",
+            providers_consulted=["tavily", "exa"],
+            research_plan={"web_mode": "docs", "scrape_top_n": 0},
+            exa_discovery_count=2,
+            exa_unique_url_count=1,
+            exa_promoted_page_count=0,
+            authoritative_source_count=0,
+            supporting_source_count=1,
+            community_source_count=0,
+            selected_candidate_count=2,
+            selected_candidate_domains=["azure.cn", "github.io"],
+            selected_candidate_cluster_counts={"supporting": 1, "general": 1},
+            docs_rescue_result_count=1,
+            authoritative_research=True,
+            cross_provider_candidate_count=1,
+            provider_match_depth=1.0,
+        )
+
+        self.assertEqual(evidence["authoritative_source_count"], 1)
+        self.assertEqual(evidence["search_authoritative_source_count"], 1)
+        self.assertEqual(evidence["selected_authoritative_source_count"], 0)
+        self.assertEqual(evidence["supporting_source_count"], 1)
+        self.assertEqual(evidence["selected_supporting_source_count"], 1)
+
     def test_research_claim_text_prefers_substantive_excerpt_for_comparison_pages(self) -> None:
         client = MySearchClient()
 
