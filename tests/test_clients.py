@@ -958,6 +958,39 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertTrue(strong)
 
+    def test_has_strong_award_result_accepts_official_ceremony_page_for_exact_year(self) -> None:
+        client = MySearchClient()
+
+        strong = client._has_strong_award_result(
+            query="2026 Oscars best picture winner",
+            results=[
+                {
+                    "title": "The 98th Academy Awards | 2026",
+                    "url": "https://www.oscars.org/oscars/ceremonies/2026",
+                    "snippet": "",
+                    "content": "",
+                }
+            ],
+        )
+
+        self.assertTrue(strong)
+
+    def test_query_year_mismatch_detects_legacy_award_pages(self) -> None:
+        client = MySearchClient()
+
+        self.assertTrue(
+            client._looks_like_query_year_mismatch(
+                query="2026 Oscars best picture winner",
+                text="The 18th Academy Awards | 1946",
+            )
+        )
+        self.assertFalse(
+            client._looks_like_query_year_mismatch(
+                query="2026 Oscars best picture winner",
+                text="The 98th Academy Awards | 2026",
+            )
+        )
+
     def test_refined_award_result_query_rewrites_oscars_query(self) -> None:
         client = MySearchClient()
 
@@ -988,6 +1021,156 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertFalse(strong)
+
+    def test_has_strong_award_result_rejects_gallery_page_with_winner_fact(self) -> None:
+        client = MySearchClient()
+
+        strong = client._has_strong_award_result(
+            query="2026 Oscars best picture winner",
+            results=[
+                {
+                    "title": "The week in 38 photos - CNN",
+                    "url": "https://www.cnn.com/2026/03/19/world/gallery/photos-this-week-march-12-march-19",
+                    "snippet": (
+                        "Director Paul Thomas Anderson is surrounded by cast members of "
+                        "“One Battle After Another” as he holds the Academy Award for best picture."
+                    ),
+                    "content": "",
+                }
+            ],
+        )
+
+        self.assertFalse(strong)
+
+    def test_has_strong_award_result_rejects_followup_story_with_incidental_winner_fact(self) -> None:
+        client = MySearchClient()
+
+        strong = client._has_strong_award_result(
+            query="2026 Oscars best picture winner",
+            results=[
+                {
+                    "title": "Project Hail Mary adds to a winning streak for originality at the movies - AP News",
+                    "url": "https://apnews.com/article/project-hail-mary-b0a693d3160a90c1724248151edeea34",
+                    "snippet": (
+                        "Paul Thomas Anderson, winner of the awards for writing, directing, "
+                        "and best picture for One Battle After Another, attends the Governors Ball."
+                    ),
+                    "content": "",
+                }
+            ],
+        )
+
+        self.assertFalse(strong)
+
+    def test_award_coverage_page_requires_more_than_generic_winners_word(self) -> None:
+        client = MySearchClient()
+
+        self.assertFalse(
+            client._looks_like_award_coverage_page(
+                query_lower="2026 oscars best picture winner",
+                title_text="its awards names all 10 finalists winners for 2026 - wwd",
+                path="/fashion-news/fashion-features/international-talent-support-fashion-contest-2026-winners-1238684709/",
+            )
+        )
+        self.assertTrue(
+            client._looks_like_award_coverage_page(
+                query_lower="2026 oscars best picture winner",
+                title_text="2026 Oscars: See the full list of winners | AP News",
+                path="/article/2026-oscars-winners",
+            )
+        )
+
+    def test_result_event_page_priority_downranks_award_gallery_pages(self) -> None:
+        client = MySearchClient()
+
+        gallery_priority = client._result_event_page_priority(
+            query="2026 Oscars best picture winner",
+            item={
+                "title": "The week in 38 photos - CNN",
+                "url": "https://www.cnn.com/2026/03/19/world/gallery/photos-this-week-march-12-march-19",
+                "snippet": (
+                    "One Battle After Another was the big winner at Sunday’s Academy Awards."
+                ),
+                "content": "",
+            },
+        )
+        winners_priority = client._result_event_page_priority(
+            query="2026 Oscars best picture winner",
+            item={
+                "title": "Oscars 2026 full results: best picture, actor, actress",
+                "url": "https://www.npr.org/2026/03/15/nx-s1-5739287/oscars-2026-full-results",
+                "snippet": "See the complete winners list from the Academy Awards.",
+                "content": "",
+            },
+        )
+
+        self.assertLess(gallery_priority, winners_priority)
+
+    def test_result_event_page_priority_downranks_followup_story_without_award_branding(self) -> None:
+        client = MySearchClient()
+
+        followup_priority = client._result_event_page_priority(
+            query="2026 Oscars best picture winner",
+            item={
+                "title": "Project Hail Mary adds to a winning streak for originality at the movies - AP News",
+                "url": "https://apnews.com/article/project-hail-mary-b0a693d3160a90c1724248151edeea34",
+                "snippet": (
+                    "Paul Thomas Anderson, winner of the awards for writing, directing, "
+                    "and best picture for One Battle After Another, attends the Governors Ball."
+                ),
+                "content": "",
+            },
+        )
+        winners_priority = client._result_event_page_priority(
+            query="2026 Oscars best picture winner",
+            item={
+                "title": "2026 Oscars: See the full list of winners | AP News",
+                "url": "https://apnews.com/article/2026-oscars-winners",
+                "snippet": "Best Picture winner One Battle After Another.",
+                "content": "",
+            },
+        )
+
+        self.assertLess(followup_priority, winners_priority)
+
+    def test_result_event_page_priority_downranks_generic_award_archive_pages(self) -> None:
+        client = MySearchClient()
+
+        archive_priority = client._result_event_page_priority(
+            query="2026 Oscars best picture winner",
+            item={
+                "title": "Home - Academy Awards Search | Academy of Motion Picture ...",
+                "url": "https://awardsdatabase.oscars.org/",
+                "snippet": "The Academy Awards Database contains the official record of past Academy Award winners and nominees. The data is complete through the 2024 Academy Awards.",
+                "content": "",
+            },
+        )
+        official_priority = client._result_event_page_priority(
+            query="2026 Oscars best picture winner",
+            item={
+                "title": "The 98th Academy Awards | 2026",
+                "url": "https://www.oscars.org/oscars/ceremonies/2026",
+                "snippet": "Best Picture. Winner. One Battle After Another.",
+                "content": "",
+            },
+        )
+
+        self.assertLess(archive_priority, official_priority)
+
+    def test_result_event_page_priority_boosts_official_award_domain(self) -> None:
+        client = MySearchClient()
+
+        official_priority = client._result_event_page_priority(
+            query="2026 Oscars best picture winner",
+            item={
+                "title": "The 98th Academy Awards | 2026",
+                "url": "https://www.oscars.org/oscars/ceremonies/2026",
+                "snippet": "",
+                "content": "",
+            },
+        )
+
+        self.assertGreaterEqual(official_priority, 8)
 
     def test_search_tavily_rewrites_award_result_query_for_news(self) -> None:
         client = MySearchClient()
@@ -1092,6 +1275,236 @@ class MySearchClientTests(unittest.TestCase):
             "award-result-trusted-domain-refinement",
             str(result.get("route_debug", {}).get("query_refinement") or ""),
         )
+
+    def test_tavily_award_result_refinement_keeps_media_corroboration_after_official_hit(self) -> None:
+        client = MySearchClient()
+        include_domain_calls: list[tuple[str, ...] | None] = []
+
+        def fake_search_tavily(  # type: ignore[no-untyped-def]
+            *,
+            query,
+            max_results,
+            topic,
+            include_answer,
+            include_content,
+            include_domains,
+            exclude_domains,
+            strategy,
+            days=None,
+        ):
+            include_domain_calls.append(tuple(include_domains) if include_domains else None)
+            if include_domains == ["oscars.org", "theacademy.com"]:
+                return {
+                    "provider": "tavily",
+                    "results": [
+                        {
+                            "provider": "tavily",
+                            "title": "The 98th Academy Awards | 2026",
+                            "url": "https://www.oscars.org/oscars/ceremonies/2026",
+                            "snippet": "Best Picture. Winner. One Battle After Another.",
+                            "content": "",
+                        }
+                    ],
+                    "citations": [
+                        {
+                            "title": "The 98th Academy Awards | 2026",
+                            "url": "https://www.oscars.org/oscars/ceremonies/2026",
+                        }
+                    ],
+                }
+            if include_domains == ["apnews.com", "npr.org", "reuters.com", "nytimes.com", "abcnews.go.com"]:
+                return {
+                    "provider": "tavily",
+                    "results": [
+                        {
+                            "provider": "tavily",
+                            "title": "2026 Oscars: See the full list of winners | AP News",
+                            "url": "https://apnews.com/article/2026-oscars-winners",
+                            "snippet": "Best Picture winner One Battle After Another.",
+                            "content": "",
+                        }
+                    ],
+                    "citations": [
+                        {
+                            "title": "2026 Oscars: See the full list of winners | AP News",
+                            "url": "https://apnews.com/article/2026-oscars-winners",
+                        }
+                    ],
+                }
+            return {"provider": "tavily", "results": [], "citations": []}
+
+        client._search_tavily = fake_search_tavily  # type: ignore[method-assign]
+
+        result = client._maybe_refine_tavily_result_event_discovery(
+            query="2026 Oscars best picture winner",
+            mode="news",
+            intent="news",
+            result={
+                "provider": "tavily",
+                "results": [
+                    {
+                        "provider": "tavily",
+                        "title": "The week in 38 photos - CNN",
+                        "url": "https://www.cnn.com/2026/03/19/world/gallery/photos-this-week-march-12-march-19",
+                        "snippet": "One Battle After Another was the big winner at Sunday’s Academy Awards.",
+                        "content": "",
+                    }
+                ],
+                "citations": [],
+                "route_debug": {},
+            },
+            max_results=5,
+            include_domains=None,
+            exclude_domains=None,
+            from_date=None,
+        )
+
+        self.assertIn(("oscars.org", "theacademy.com"), include_domain_calls)
+        self.assertIn(("apnews.com", "npr.org", "reuters.com", "nytimes.com", "abcnews.go.com"), include_domain_calls)
+        urls = [item["url"] for item in result["results"]]
+        self.assertIn("https://www.oscars.org/oscars/ceremonies/2026", urls)
+        self.assertIn("https://apnews.com/article/2026-oscars-winners", urls)
+
+    def test_tavily_award_result_refinement_filters_followup_media_story_after_official_hit(self) -> None:
+        client = MySearchClient()
+
+        def fake_search_tavily(  # type: ignore[no-untyped-def]
+            *,
+            query,
+            max_results,
+            topic,
+            include_answer,
+            include_content,
+            include_domains,
+            exclude_domains,
+            strategy,
+            days=None,
+        ):
+            if include_domains == ["oscars.org", "theacademy.com"]:
+                return {
+                    "provider": "tavily",
+                    "results": [
+                        {
+                            "provider": "tavily",
+                            "title": "The 98th Academy Awards | 2026",
+                            "url": "https://www.oscars.org/oscars/ceremonies/2026",
+                            "snippet": "Best Picture. Winner. One Battle After Another.",
+                            "content": "",
+                        }
+                    ],
+                    "citations": [],
+                }
+            if include_domains == ["apnews.com", "npr.org", "reuters.com", "nytimes.com", "abcnews.go.com"]:
+                return {
+                    "provider": "tavily",
+                    "results": [
+                        {
+                            "provider": "tavily",
+                            "title": "Project Hail Mary adds to a winning streak for originality at the movies - AP News",
+                            "url": "https://apnews.com/article/project-hail-mary-b0a693d3160a90c1724248151edeea34",
+                            "snippet": (
+                                "Paul Thomas Anderson, winner of the awards for writing, directing, "
+                                "and best picture for One Battle After Another, attends the Governors Ball."
+                            ),
+                            "content": "",
+                        },
+                        {
+                            "provider": "tavily",
+                            "title": "2026 Oscars: See the full list of winners | AP News",
+                            "url": "https://apnews.com/article/2026-oscars-winners",
+                            "snippet": "Best Picture winner One Battle After Another.",
+                            "content": "",
+                        },
+                    ],
+                    "citations": [],
+                }
+            return {"provider": "tavily", "results": [], "citations": []}
+
+        client._search_tavily = fake_search_tavily  # type: ignore[method-assign]
+
+        result = client._maybe_refine_tavily_result_event_discovery(
+            query="2026 Oscars best picture winner",
+            mode="news",
+            intent="news",
+            result={
+                "provider": "tavily",
+                "results": [
+                    {
+                        "provider": "tavily",
+                        "title": "The week in 38 photos - CNN",
+                        "url": "https://www.cnn.com/2026/03/19/world/gallery/photos-this-week-march-12-march-19",
+                        "snippet": "One Battle After Another was the big winner at Sunday’s Academy Awards.",
+                        "content": "",
+                    }
+                ],
+                "citations": [],
+                "route_debug": {},
+            },
+            max_results=5,
+            include_domains=None,
+            exclude_domains=None,
+            from_date=None,
+        )
+
+        urls = [item["url"] for item in result["results"]]
+        self.assertIn("https://www.oscars.org/oscars/ceremonies/2026", urls)
+        self.assertIn("https://apnews.com/article/2026-oscars-winners", urls)
+        self.assertNotIn(
+            "https://apnews.com/article/project-hail-mary-b0a693d3160a90c1724248151edeea34",
+            urls,
+        )
+
+    def test_tavily_award_result_refinement_filters_strong_initial_results_without_extra_queries(self) -> None:
+        client = MySearchClient()
+
+        def fail_search_tavily(**kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("strong initial result should not trigger extra tavily refinement")
+
+        client._search_tavily = fail_search_tavily  # type: ignore[method-assign]
+
+        result = client._maybe_refine_tavily_result_event_discovery(
+            query="2026 Oscars best picture winner",
+            mode="news",
+            intent="news",
+            result={
+                "provider": "tavily",
+                "results": [
+                    {
+                        "provider": "tavily",
+                        "title": "The 98th Academy Awards | 2026",
+                        "url": "https://www.oscars.org/oscars/ceremonies/2026",
+                        "snippet": "Best Picture. Winner. One Battle After Another.",
+                        "content": "",
+                    },
+                    {
+                        "provider": "tavily",
+                        "title": "Project Hail Mary adds to a winning streak for originality at the movies - AP News",
+                        "url": "https://apnews.com/article/project-hail-mary-b0a693d3160a90c1724248151edeea34",
+                        "snippet": (
+                            "Paul Thomas Anderson, winner of the awards for writing, directing, "
+                            "and best picture for One Battle After Another, attends the Governors Ball."
+                        ),
+                        "content": "",
+                    },
+                    {
+                        "provider": "tavily",
+                        "title": "The 18th Academy Awards | 1946",
+                        "url": "https://www.oscars.org/oscars/ceremonies/1946",
+                        "snippet": "Best Actor winner for The Lost Weekend.",
+                        "content": "",
+                    },
+                ],
+                "citations": [],
+                "route_debug": {},
+            },
+            max_results=5,
+            include_domains=None,
+            exclude_domains=None,
+            from_date=None,
+        )
+
+        urls = [item["url"] for item in result["results"]]
+        self.assertEqual(urls, ["https://www.oscars.org/oscars/ceremonies/2026"])
 
     def test_extract_result_event_answer_prefers_prioritized_top_five_candidates(self) -> None:
         client = MySearchClient()
@@ -3145,6 +3558,40 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(decision.provider, "exa")
         self.assertEqual(decision.fallback_chain, ["firecrawl", "tavily"])
+
+    def test_award_result_route_keeps_tavily_primary_when_probe_is_degraded(self) -> None:
+        client = MySearchClient()
+        client.keyring.has_provider = lambda provider: provider in {"tavily", "exa"}  # type: ignore[method-assign]
+
+        def fake_probe(provider, key_count):  # type: ignore[no-untyped-def]
+            if provider.name == "tavily":
+                return {
+                    "status": "http_error",
+                    "error": "proxy_error",
+                    "checked_at": "2026-03-27T00:00:00+00:00",
+                }
+            return {
+                "status": "ok",
+                "error": "",
+                "checked_at": "2026-03-27T00:00:00+00:00",
+            }
+
+        client._probe_provider_status = fake_probe  # type: ignore[method-assign]
+
+        decision = client._route_search(
+            query="2026 Oscars best picture winner",
+            mode="news",
+            intent="news",
+            provider="auto",
+            sources=["web"],
+            include_content=False,
+            include_domains=None,
+            allowed_x_handles=None,
+            excluded_x_handles=None,
+        )
+
+        self.assertEqual(decision.provider, "tavily")
+        self.assertEqual(decision.fallback_chain, ["exa"])
 
     def test_blended_search_requires_live_ok_providers(self) -> None:
         client = MySearchClient()
