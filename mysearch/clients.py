@@ -2810,6 +2810,7 @@ class MySearchClient:
             effective_mode: SearchMode = mode if mode in {"docs", "github", "pdf"} else "docs"
             query_tokens = self._research_authoritative_query_tokens(query)
             primary_vendor_brand = self._research_primary_vendor_brand(query)
+            comparison_entities = self._research_comparison_entities(query)
             flags = self._resource_result_flags(
                 mode=effective_mode,
                 item=normalized,
@@ -2831,6 +2832,16 @@ class MySearchClient:
                 or self._research_item_matches_brand_token(
                     item=normalized,
                     brand_token=primary_vendor_brand,
+                )
+            )
+            comparison_entity_match = (
+                not comparison_entities
+                or any(
+                    self._research_result_matches_entity(
+                        item=normalized,
+                        entity_tokens=entity_tokens,
+                    )
+                    for entity_tokens in comparison_entities
                 )
             )
             authoritative_target = self._looks_like_authoritative_research_target(
@@ -2863,6 +2874,8 @@ class MySearchClient:
                 or self._is_obvious_official_community_result(hostname=hostname, path=path)
             )
             if primary_vendor_brand and not primary_vendor_match:
+                official_candidate = False
+            if comparison_entities and not comparison_entity_match:
                 official_candidate = False
             supportive_candidate = bool(flags["non_third_party"]) and (
                 self._looks_like_supporting_research_target(
@@ -2900,6 +2913,8 @@ class MySearchClient:
                 )
             )
             if primary_vendor_brand and not primary_vendor_match:
+                supportive_candidate = False
+            if comparison_entities and not comparison_entity_match:
                 supportive_candidate = False
             if community_candidate:
                 return "community"
@@ -3271,11 +3286,16 @@ class MySearchClient:
             if candidate and candidate[0].isalpha() and candidate[0].isupper():
                 brand_prefix = candidate
         generic_tokens = {
+            "advice",
             "api",
+            "community",
             "docs",
             "documentation",
+            "guidance",
             "guide",
             "guides",
+            "migration",
+            "migrations",
             "official",
             "resource",
             "resources",
@@ -3285,6 +3305,8 @@ class MySearchClient:
         entities: list[tuple[str, ...]] = []
         seen: set[tuple[str, ...]] = set()
         for part in subjects[:4]:
+            if self._research_subject_is_generic_comparison_dimension(part):
+                continue
             candidate = part
             if self._research_subject_should_inherit_brand_prefix(
                 subject=candidate,
@@ -3343,6 +3365,38 @@ class MySearchClient:
             "responses",
             "webhooks",
         }
+
+    def _research_subject_is_generic_comparison_dimension(self, subject: str) -> bool:
+        tokens = self._query_precision_tokens(subject)
+        if not tokens:
+            return True
+        generic_dimension_tokens = {
+            "advice",
+            "approach",
+            "approaches",
+            "best",
+            "community",
+            "compare",
+            "comparison",
+            "docs",
+            "documentation",
+            "guidance",
+            "guide",
+            "guides",
+            "migration",
+            "migrations",
+            "official",
+            "opinion",
+            "opinions",
+            "strategy",
+            "strategies",
+            "tutorial",
+            "tutorials",
+            "usage",
+            "workflow",
+            "workflows",
+        }
+        return all(token in generic_dimension_tokens for token in tokens)
 
     def _research_subject_should_inherit_brand_prefix(
         self,
