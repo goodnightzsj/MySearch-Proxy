@@ -1534,16 +1534,25 @@ class MySearchClient:
             intent=resolved_intent,
             include_domains=include_domains,
         )
-        discovery_include_content = research_plan["web_mode"] in {"docs"} and self._provider_can_serve(
+        discovery_route = self._research_primary_discovery_route(
+            query=query,
+            mode=research_plan["web_mode"],
+            intent=resolved_intent,
+            authoritative_research=authoritative_research,
+        )
+        discovery_mode = cast(SearchMode, discovery_route["mode"])
+        discovery_intent = cast(ResolvedSearchIntent, discovery_route["intent"])
+        discovery_query = discovery_route["query"]
+        discovery_include_content = discovery_mode in {"docs"} and self._provider_can_serve(
             self.config.firecrawl
         )
         research_tasks: dict[str, Callable[[], Any]] = {
             "web": lambda: self.search(
-                query=query,
-                mode=research_plan["web_mode"],
-                intent=resolved_intent,
+                query=discovery_query,
+                mode=discovery_mode,
+                intent=discovery_intent,
                 strategy=resolved_strategy,
-                provider="tavily" if research_plan["web_mode"] in {"web", "news"} else "auto",
+                provider="tavily" if discovery_mode in {"web", "news"} else "auto",
                 sources=["web"],
                 max_results=research_plan["web_max_results"],
                 include_content=discovery_include_content,
@@ -2133,6 +2142,66 @@ class MySearchClient:
                 if candidate_normalized == normalized:
                     return str(item.get("snippet") or "").strip()
         return ""
+
+    def _research_is_canonical_vendor_doc(self, url: str) -> bool:
+        normalized = url.strip()
+        if not normalized:
+            return False
+        parsed = urlparse(normalized)
+        normalized = parsed._replace(fragment="", query="").geturl().rstrip("/")
+        for items in self._research_canonical_doc_catalog().values():
+            for item in items:
+                candidate_url = str(item.get("url") or "").strip()
+                if not candidate_url:
+                    continue
+                candidate_parsed = urlparse(candidate_url)
+                candidate_normalized = candidate_parsed._replace(
+                    fragment="",
+                    query="",
+                ).geturl().rstrip("/")
+                if candidate_normalized == normalized:
+                    return True
+        return False
+
+    def _research_prefers_canonical_vendor_docs(self, query: str) -> bool:
+        query_lower = query.lower()
+        if not any(
+            marker in query_lower
+            for marker in (
+                "official docs",
+                "docs retrieval",
+                "documentation retrieval",
+                "agentic search",
+                "web retrieval",
+            )
+        ):
+            return False
+        return not bool(self._research_authoritative_query_tokens(query))
+
+    def _research_relaxed_discovery_query(self, query: str) -> str:
+        relaxed = re.sub(r"\bofficial\b", " ", query, flags=re.IGNORECASE)
+        relaxed = re.sub(r"\s+", " ", relaxed).strip()
+        return relaxed or query.strip()
+
+    def _research_primary_discovery_route(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        authoritative_research: bool,
+    ) -> dict[str, str]:
+        if authoritative_research and self._research_prefers_canonical_vendor_docs(query):
+            return {
+                "query": self._research_relaxed_discovery_query(query),
+                "mode": "web",
+                "intent": "exploratory",
+            }
+        return {
+            "query": query,
+            "mode": mode,
+            "intent": intent,
+        }
 
     def _research_known_provider_doc_results(self, query: str) -> list[dict[str, Any]]:
         if not self._looks_like_comparison_query(query.lower()):
@@ -2801,6 +2870,9 @@ class MySearchClient:
             general_candidates=general_candidates,
             community_candidates=community_candidates,
             max_results=max_results,
+            prefer_canonical_vendor_docs=self._research_prefers_canonical_vendor_docs(
+                query
+            ),
         )
         selected_domains = self._collect_source_domains(results=ordered, citations=[])
         cluster_counts: dict[str, int] = {}
@@ -3085,8 +3157,37 @@ class MySearchClient:
         general_candidates: list[dict[str, Any]],
         community_candidates: list[dict[str, Any]],
         max_results: int,
+        prefer_canonical_vendor_docs: bool = False,
     ) -> list[dict[str, Any]]:
-        anchor_candidates = [*official_candidates, *supporting_candidates]
+        if prefer_canonical_vendor_docs:
+            vendor_official_candidates = [
+                item
+                for item in official_candidates
+                if self._research_is_canonical_vendor_doc(str(item.get("url") or ""))
+            ]
+            vendor_supporting_candidates = [
+                item
+                for item in supporting_candidates
+                if self._research_is_canonical_vendor_doc(str(item.get("url") or ""))
+            ]
+            other_official_candidates = [
+                item
+                for item in official_candidates
+                if item not in vendor_official_candidates
+            ]
+            other_supporting_candidates = [
+                item
+                for item in supporting_candidates
+                if item not in vendor_supporting_candidates
+            ]
+            anchor_candidates = [
+                *vendor_official_candidates,
+                *vendor_supporting_candidates,
+                *other_official_candidates,
+                *other_supporting_candidates,
+            ]
+        else:
+            anchor_candidates = [*official_candidates, *supporting_candidates]
         if max_results <= 0:
             return []
         if not anchor_candidates:

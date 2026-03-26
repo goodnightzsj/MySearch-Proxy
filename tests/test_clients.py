@@ -6016,6 +6016,123 @@ class MySearchClientTests(unittest.TestCase):
             ],
         )
 
+    def test_research_prefers_canonical_vendor_docs_for_generic_authoritative_query(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        self.assertTrue(
+            client._research_prefers_canonical_vendor_docs(
+                "best approach for official docs retrieval in agentic search 2026"
+            )
+        )
+        self.assertFalse(
+            client._research_prefers_canonical_vendor_docs(
+                "OpenAI background mode official docs"
+            )
+        )
+
+    def test_research_primary_discovery_route_relaxes_generic_vendor_doc_query(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        route = client._research_primary_discovery_route(
+            query="best approach for official docs retrieval in agentic search 2026",
+            mode="docs",
+            intent="resource",
+            authoritative_research=True,
+        )
+
+        self.assertEqual(route["mode"], "web")
+        self.assertEqual(route["intent"], "exploratory")
+        self.assertEqual(
+            route["query"],
+            "best approach for docs retrieval in agentic search 2026",
+        )
+
+    def test_research_primary_discovery_route_keeps_branded_authoritative_query_strict(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        route = client._research_primary_discovery_route(
+            query="OpenAI webhooks official docs",
+            mode="docs",
+            intent="resource",
+            authoritative_research=True,
+        )
+
+        self.assertEqual(route["mode"], "docs")
+        self.assertEqual(route["intent"], "resource")
+        self.assertEqual(route["query"], "OpenAI webhooks official docs")
+
+    def test_authoritative_research_selection_prefers_canonical_vendor_docs_for_generic_query(
+        self,
+    ) -> None:
+        client = MySearchClient()
+        query = "best approach for official docs retrieval in agentic search 2026"
+
+        selected, evidence = client._select_research_candidate_results(
+            query=query,
+            mode="docs",
+            intent="comparison",
+            max_results=5,
+            web_results=[
+                {
+                    "provider": "exa",
+                    "title": "Agentic RAG",
+                    "url": "https://r2r-docs.sciphi.ai/documentation/retrieval/agentic-rag",
+                    "snippet": "Agentic RAG combines retrieval and reasoning for enterprise search.",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Agentic retrieval in Azure AI Search",
+                    "url": "https://docs.azure.cn/en-us/search/agentic-retrieval-overview",
+                    "snippet": "Agentic retrieval in Azure AI Search unifies retrieval and orchestration for enterprise search.",
+                },
+            ],
+            docs_rescue_results=[
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Search API - Tavily",
+                    "url": "https://docs.tavily.com/documentation/api-reference/search",
+                    "snippet": "Tavily exposes a search API for web retrieval, real-time discovery, and agent search workflows.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Extract - Firecrawl Docs",
+                    "url": "https://docs.firecrawl.dev/api-reference/endpoint/extract",
+                    "snippet": "Firecrawl provides an extract API for structured extraction across URLs, domains, and documents.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Search - Exa Docs",
+                    "url": "https://docs.exa.ai/reference/search",
+                    "snippet": "Exa provides a search API for semantic web retrieval and content discovery.",
+                },
+            ],
+            tavily_support_results=[],
+            exa_results=[],
+            include_domains=None,
+            authoritative_preferred=True,
+        )
+
+        top_urls = [item["url"] for item in selected[:4]]
+        self.assertEqual(
+            set(top_urls[:3]),
+            {
+                "https://docs.tavily.com/documentation/api-reference/search",
+                "https://docs.firecrawl.dev/api-reference/endpoint/extract",
+                "https://docs.exa.ai/reference/search",
+            },
+        )
+        self.assertLess(
+            top_urls.index("https://docs.firecrawl.dev/api-reference/endpoint/extract"),
+            top_urls.index("https://r2r-docs.sciphi.ai/documentation/retrieval/agentic-rag"),
+        )
+        self.assertEqual(evidence["supporting_source_count"], 2)
+
     def test_research_selection_prefers_supporting_vendor_docs_before_curated_comparisons(
         self,
     ) -> None:
