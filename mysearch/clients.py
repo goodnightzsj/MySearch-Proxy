@@ -11626,7 +11626,8 @@ class MySearchClient:
         *,
         comparison_like: bool,
     ) -> str:
-        compact = text.replace("**", " ").replace("__", " ")
+        compact = re.sub(r"[\u200b\u200c\u200d\ufeff]", " ", text)
+        compact = compact.replace("**", " ").replace("__", " ").replace("`", " ")
         compact = re.sub(r"!\[[^\]]*\]\([^)]+\)", " ", compact)
         compact = re.sub(
             r"(?i)\b(copy\s+markdown|open\s+in\s+chatgpt|view\s+as\s+markdown|copy\s+page|view\s+page)\b",
@@ -11759,6 +11760,8 @@ class MySearchClient:
         if any(
             marker in normalized
             for marker in (
+                "agent builder",
+                "agent skills",
                 "authoritative content for",
                 "api guide",
                 "api reference",
@@ -11767,6 +11770,8 @@ class MySearchClient:
                 "compare models",
                 "complete comparison",
                 "definition examples",
+                "integration docs",
+                "integrations",
                 "ultimate guide",
             )
         ):
@@ -11992,6 +11997,13 @@ class MySearchClient:
         return any(
             marker in lowered
             for marker in (
+                "step 1: curl",
+                "curl -fssl",
+                "curl --request",
+                "authorization: bearer",
+                "content-type: application/json",
+                "x-api-key",
+                "generated using ai and may contain mistakes",
                 "reasoning tokens pricing per 1m tokens",
                 "context window",
                 "knowledge cutoff",

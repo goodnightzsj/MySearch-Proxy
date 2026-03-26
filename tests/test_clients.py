@@ -6326,6 +6326,28 @@ class MySearchClientTests(unittest.TestCase):
         self.assertNotIn("March 14th", claim)
         self.assertNotIn("![]", claim)
 
+    def test_research_claim_text_drops_curl_setup_snippet_noise(self) -> None:
+        client = MySearchClient()
+
+        claim = client._research_claim_text(
+            title="Tavily Agent Skills",
+            excerpt="Step 1: `curl -fsSL https://example.com/install.sh | bash` to install the agent runtime.",
+            comparison_like=True,
+        )
+
+        self.assertEqual(claim, "")
+
+    def test_research_claim_text_drops_ai_disclaimer_noise(self) -> None:
+        client = MySearchClient()
+
+        claim = client._research_claim_text(
+            title="OpenAI Agent Builder - Tavily Docs",
+            excerpt="MakeLangflow Responses are generated using AI and may contain mistakes.",
+            comparison_like=True,
+        )
+
+        self.assertEqual(claim, "")
+
     def test_research_claim_evidence_promotes_supporting_claim_fallback(self) -> None:
         client = MySearchClient()
         query = "best approach for official docs retrieval in agentic search 2026"
@@ -6357,6 +6379,62 @@ class MySearchClientTests(unittest.TestCase):
         self.assertTrue(claims)
         self.assertEqual(claims[0]["claim"], "Agentic retrieval in Azure AI Search")
         self.assertIn("supporting", claims[0]["clusters"])
+
+    def test_research_claim_evidence_skips_code_and_ai_disclaimer_noise(self) -> None:
+        client = MySearchClient()
+        query = "compare Tavily and Firecrawl for AI agent web retrieval 2026"
+
+        claims = client._build_research_claim_evidence(
+            query=query,
+            mode="research",
+            ordered_results=[
+                {
+                    "provider": "tavily",
+                    "title": "Firecrawl vs Tavily: Complete Comparison for AI Agents",
+                    "url": "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                    "snippet": "Firecrawl handles full web extraction while Tavily focuses on search APIs.",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Tavily Agent Skills",
+                    "url": "https://docs.tavily.com/documentation/agent-skills",
+                    "snippet": "Step 1: `curl -fsSL https://example.com/install.sh | bash` to install the agent runtime.",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "OpenAI Agent Builder - Tavily Docs",
+                    "url": "https://docs.tavily.com/documentation/integrations/openai-agent-builder",
+                    "snippet": "MakeLangflow Responses are generated using AI and may contain mistakes.",
+                },
+            ],
+            pages=[],
+            citations=[
+                {
+                    "title": "Firecrawl vs Tavily: Complete Comparison for AI Agents",
+                    "url": "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                },
+                {
+                    "title": "Tavily Agent Skills",
+                    "url": "https://docs.tavily.com/documentation/agent-skills",
+                },
+                {
+                    "title": "OpenAI Agent Builder - Tavily Docs",
+                    "url": "https://docs.tavily.com/documentation/integrations/openai-agent-builder",
+                },
+            ],
+            comparison_like=True,
+            include_domains=None,
+            authoritative_preferred=False,
+        )
+
+        claim_texts = [str(item.get("claim") or "") for item in claims]
+        self.assertTrue(
+            any("Firecrawl handles full web extraction" in claim for claim in claim_texts)
+        )
+        self.assertTrue(all("curl -fsSL" not in claim for claim in claim_texts))
+        self.assertTrue(
+            all("generated using ai and may contain mistakes" not in claim.lower() for claim in claim_texts)
+        )
 
     def test_research_report_uses_supporting_wording_without_authoritative_sources(self) -> None:
         client = MySearchClient()
