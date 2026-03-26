@@ -5473,6 +5473,64 @@ class MySearchClientTests(unittest.TestCase):
             {"official": 4},
         )
 
+    def test_research_claim_evidence_skips_schema_noise_from_method_pages(self) -> None:
+        client = MySearchClient()
+        query = "compare OpenAI Responses API and Batch API for long-running tasks 2026"
+        ordered_results = [
+            {
+                "provider": "tavily",
+                "title": "Migrate to the Responses API - OpenAI Developers",
+                "url": "https://developers.openai.com/api/docs/guides/migrate-to-responses/",
+                "snippet": "Use the Responses API for long-running tasks and agent workflows.",
+            },
+            {
+                "provider": "tavily",
+                "title": "Create batch | OpenAI API Reference",
+                "url": "https://developers.openai.com/api/reference/resources/batches/methods/create/",
+                "snippet": "Keys are strings with a maximum length of 64 characters.",
+            },
+        ]
+        citations = [
+            {
+                "title": "Migrate to the Responses API - OpenAI Developers",
+                "url": "https://developers.openai.com/api/docs/guides/migrate-to-responses/",
+            },
+            {
+                "title": "Create batch | OpenAI API Reference",
+                "url": "https://developers.openai.com/api/reference/resources/batches/methods/create/",
+            },
+        ]
+        pages = [
+            {
+                "url": "https://developers.openai.com/api/docs/guides/migrate-to-responses/",
+                "excerpt": "Use the Responses API for long-running tasks, tool use, and agent workflows.",
+            },
+            {
+                "url": "https://developers.openai.com/api/reference/resources/batches/methods/create/",
+                "excerpt": "Keys are strings with a maximum length of 64 characters.",
+            },
+        ]
+
+        claims = client._build_research_claim_evidence(
+            query=query,
+            mode="docs",
+            ordered_results=ordered_results,
+            pages=pages,
+            citations=citations,
+            comparison_like=True,
+            include_domains=None,
+            authoritative_preferred=True,
+        )
+
+        self.assertTrue(claims)
+        self.assertIn("Responses API", claims[0]["claim"])
+        self.assertTrue(
+            all("maximum length" not in str(item.get("claim") or "").lower() for item in claims)
+        )
+        self.assertTrue(
+            all("keys are strings" not in str(item.get("claim") or "").lower() for item in claims)
+        )
+
     def test_research_comparison_queries_downrank_community_results(self) -> None:
         client = MySearchClient()
         client._provider_can_serve = lambda provider: provider.name != "xai"  # type: ignore[method-assign]
