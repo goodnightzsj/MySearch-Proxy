@@ -9812,7 +9812,6 @@ class MySearchClient:
             include_domains=None,
             authoritative_preferred=bool(evidence.get("authoritative_research")),
         )
-
         significant_conflicts = [
             str(item)
             for item in (evidence.get("conflicts") or [])
@@ -9952,6 +9951,24 @@ class MySearchClient:
                         ),
                     }
                 )
+
+        top_claim = claim_evidence[0] if claim_evidence else {}
+        top_claim_text = str(top_claim.get("claim") or "").strip()
+        if (
+            top_claim_text
+            and str(top_claim.get("support_level") or "") != "single-source"
+            and not self._research_claim_is_generic(top_claim_text)
+        ):
+            support_phrase = self._research_claim_support_phrase(top_claim)
+            if comparison_like and decision_table:
+                primary_finding = (
+                    f"{top_claim_text}. {decision_table[0]['candidate']} is the strongest current fit "
+                    f"for {decision_table[0]['fit']}."
+                )
+            else:
+                primary_finding = top_claim_text
+            if support_phrase:
+                primary_finding += f" {support_phrase.capitalize()}."
 
         consensus_snapshot: list[str] = []
         for item in claim_evidence[:3]:
@@ -10360,7 +10377,11 @@ class MySearchClient:
         for item in ordered_results:
             url = (item.get("url") or "").strip()
             title = (item.get("title") or url_to_title.get(url) or "").strip()
-            excerpt = (url_to_excerpt.get(url) or item.get("snippet") or item.get("content") or "").strip()
+            excerpt = self._select_research_claim_excerpt(
+                page_excerpt=(url_to_excerpt.get(url) or "").strip(),
+                snippet=(item.get("snippet") or "").strip(),
+                content=(item.get("content") or "").strip(),
+            )
             claim = self._research_claim_text(
                 title=title,
                 excerpt=excerpt,
@@ -10467,6 +10488,25 @@ class MySearchClient:
             return ""
         return compact
 
+    def _select_research_claim_excerpt(
+        self,
+        *,
+        page_excerpt: str,
+        snippet: str,
+        content: str,
+    ) -> str:
+        for candidate in (page_excerpt, snippet):
+            cleaned = re.sub(r"\s+", " ", candidate).strip()
+            if not cleaned:
+                continue
+            if self._research_excerpt_looks_like_navigation_noise(cleaned):
+                continue
+            if self._research_excerpt_looks_like_noise(cleaned):
+                continue
+            return cleaned
+        fallback = page_excerpt or snippet or content
+        return re.sub(r"\s+", " ", fallback).strip()
+
     def _research_claim_signature(self, claim: str) -> str:
         normalized = re.sub(r"[^a-z0-9]+", " ", claim.lower()).strip()
         if not normalized:
@@ -10499,6 +10539,54 @@ class MySearchClient:
         ]
         signature_tokens = tokens[:8] or normalized.split()[:8]
         return " ".join(signature_tokens)
+
+    def _research_claim_is_generic(self, claim: str) -> bool:
+        normalized = re.sub(r"[^a-z0-9]+", " ", claim.lower()).strip()
+        if not normalized:
+            return True
+        if normalized.startswith(("best ", "top ", "compare ", "comparison ")):
+            return True
+        if normalized.endswith((" for", " guide", " reference", " docs")):
+            return True
+        if any(
+            marker in normalized
+            for marker in (
+                "authoritative content for",
+                "api guide",
+                "api reference",
+                "best mcp servers",
+                "compare models",
+            )
+        ):
+            return True
+        tokens = normalized.split()
+        generic_tokens = {
+            "api",
+            "authoritative",
+            "batch",
+            "batches",
+            "compare",
+            "comparison",
+            "content",
+            "docs",
+            "documentation",
+            "guide",
+            "guides",
+            "model",
+            "mcp",
+            "models",
+            "openai",
+            "reference",
+            "search",
+            "server",
+            "servers",
+            "tool",
+            "tools",
+        }
+        meaningful_tokens = [token for token in tokens if token not in generic_tokens]
+        if not meaningful_tokens and len(tokens) <= 4:
+            return True
+        return len(tokens) <= 3 and len(meaningful_tokens) <= 1
 
     def _research_claim_support_level(
         self,
