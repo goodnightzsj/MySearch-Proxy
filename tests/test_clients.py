@@ -199,6 +199,44 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertFalse(captured["include_content"])
 
+    def test_dispatch_single_provider_for_strict_docs_query_keeps_tavily_lightweight(self) -> None:
+        client = MySearchClient()
+        captured: dict[str, object] = {}
+        client._provider_can_serve = lambda provider: provider.name == "tavily"  # type: ignore[method-assign]
+
+        def fake_search_tavily(**kwargs):  # type: ignore[no-untyped-def]
+            captured.update(kwargs)
+            return {
+                "provider": "tavily",
+                "results": [],
+                "citations": [],
+                "answer": "",
+            }
+
+        client._search_tavily = fake_search_tavily  # type: ignore[method-assign]
+
+        client._dispatch_single_provider(
+            provider_name="tavily",
+            query="OpenAI background mode official docs site:developers.openai.com",
+            max_results=5,
+            mode="docs",
+            intent="resource",
+            decision=RouteDecision(
+                provider="tavily",
+                reason="test",
+                tavily_topic="general",
+                result_profile="resource",
+            ),
+            include_answer=False,
+            include_content=True,
+            include_domains=["developers.openai.com"],
+            exclude_domains=None,
+            strategy="verify",
+        )
+
+        self.assertFalse(captured["include_content"])
+        self.assertEqual(captured["strategy"], "fast")
+
     def test_news_rerank_prefers_award_winners_page_over_nominations_page(self) -> None:
         client = MySearchClient()
 
