@@ -8889,6 +8889,16 @@ class MySearchClientTests(unittest.TestCase):
         self.assertTrue(all("completion_window" not in claim for claim in claim_texts))
         self.assertLessEqual(len(claim_texts), 2)
 
+    def test_normalize_research_claim_text_drops_json_shell(self) -> None:
+        client = MySearchClient()
+
+        claim = client._normalize_research_claim_text(
+            '{{ "id": "id", "completion_window": "completion_window", "created_at": 0, "endpoint": "/v1/batches" }}',
+            comparison_like=True,
+        )
+
+        self.assertEqual(claim, "")
+
     def test_research_report_uses_supporting_wording_without_authoritative_sources(self) -> None:
         client = MySearchClient()
 
@@ -10054,6 +10064,53 @@ class MySearchClientTests(unittest.TestCase):
             sections["executive_summary"],
         )
         self.assertNotIn("Proxy support.", sections["executive_summary"])
+
+    def test_research_report_sections_drop_json_shell_claims(self) -> None:
+        client = MySearchClient()
+
+        sections = client._build_research_report_sections(
+            query="compare OpenAI Responses API and Batch API for long-running tasks 2026",
+            web_search={"intent": "comparison", "answer": ""},
+            ordered_results=[
+                {
+                    "provider": "exa",
+                    "title": "Migrate to the Responses API | OpenAI API",
+                    "url": "https://developers.openai.com/api/docs/guides/migrate-to-responses",
+                    "snippet": "Use the Responses API for long-running tasks and agent workflows.",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Create batch | OpenAI API Reference",
+                    "url": "https://developers.openai.com/api/reference/resources/batches/create",
+                    "snippet": '{{ "id": "id", "completion_window": "completion_window", "created_at": 0, "endpoint": "/v1/batches" }}',
+                },
+            ],
+            pages=[],
+            citations=[
+                {
+                    "title": "Migrate to the Responses API | OpenAI API",
+                    "url": "https://developers.openai.com/api/docs/guides/migrate-to-responses",
+                },
+                {
+                    "title": "Create batch | OpenAI API Reference",
+                    "url": "https://developers.openai.com/api/reference/resources/batches/create",
+                },
+            ],
+            social=None,
+            evidence={
+                "providers_consulted": ["tavily", "exa"],
+                "citation_count": 2,
+                "confidence": "medium",
+                "research_plan": {"scrape_top_n": 2, "web_mode": "research"},
+                "selected_candidate_domains": ["openai.com"],
+                "selected_candidate_cluster_counts": {"official": 2},
+                "authoritative_research": True,
+            },
+        )
+
+        summary = client._render_research_report(sections)
+        self.assertNotIn("{{", summary)
+        self.assertNotIn("completion_window", summary)
 
     def test_research_report_shortlist_uses_canonical_note_for_supporting_docs(self) -> None:
         client = MySearchClient()

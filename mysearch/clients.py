@@ -13937,6 +13937,8 @@ class MySearchClient:
             compact,
         )
         compact = re.sub(r"\s+", " ", compact).strip(" -|:;,.")
+        if self._research_excerpt_looks_like_json_shell(compact):
+            return ""
         heading_match = re.match(
             r"^#\s*[A-Z][A-Za-z0-9'’&./() \-]{1,80}?\s+"
             r"((?:create|use|build|manage|run|stream|process|compare|choose|support|supports|allow|allows|enable|enables|let|lets|track|learn|handle)\b.+)$",
@@ -13968,6 +13970,8 @@ class MySearchClient:
         compact = compact.replace("\\_", "_")
         if not compact:
             return ""
+        if self._research_excerpt_looks_like_json_shell(compact):
+            return ""
         if comparison_like:
             compact = re.split(r"\s(?:[-:|–—])\s", compact, maxsplit=1)[0].strip() or compact
         compact = self._build_excerpt(compact, limit=160)
@@ -13982,7 +13986,7 @@ class MySearchClient:
         snippet: str,
         content: str,
     ) -> str:
-        for candidate in (page_excerpt, snippet):
+        for candidate in (page_excerpt, snippet, content):
             cleaned = re.sub(r"\s+", " ", candidate).strip()
             if not cleaned:
                 continue
@@ -13991,13 +13995,14 @@ class MySearchClient:
             if self._research_excerpt_looks_like_noise(cleaned):
                 continue
             return cleaned
-        fallback = page_excerpt or snippet or content
-        return re.sub(r"\s+", " ", fallback).strip()
+        return ""
 
     def _research_excerpt_looks_like_schema_noise(self, text: str) -> bool:
         normalized = re.sub(r"\s+", " ", text.lower()).strip()
         if not normalized:
             return False
+        if self._research_excerpt_looks_like_json_shell(normalized):
+            return True
         schema_markers = (
             "keys are strings",
             "maximum length",
@@ -14014,6 +14019,42 @@ class MySearchClient:
             "a list of",
         )
         return any(marker in normalized for marker in schema_markers)
+
+    def _research_excerpt_looks_like_json_shell(self, text: str) -> bool:
+        normalized = re.sub(r"\s+", " ", text).strip()
+        if not normalized:
+            return False
+        lowered = normalized.lower()
+        if not (
+            normalized.startswith("{")
+            or normalized.startswith("{{")
+            or '"id"' in lowered
+            or '"completion_window"' in lowered
+            or '"created_at"' in lowered
+        ):
+            return False
+        json_field_count = len(
+            re.findall(
+                r'"[a-z0-9_]{2,40}"\s*:\s*(?:"[^"]*"|\d+|true|false|null|\{|\[)',
+                lowered,
+            )
+        )
+        if json_field_count >= 2:
+            return True
+        return any(
+            marker in lowered
+            for marker in (
+                '"id":',
+                '"completion_window":',
+                '"created_at":',
+                '"request_counts":',
+                '"input_file_id":',
+                '"output_file_id":',
+                '"error_file_id":',
+                '"status":',
+                '"endpoint":',
+            )
+        )
 
     def _research_claim_signature(self, claim: str) -> str:
         normalized = re.sub(r"[^a-z0-9]+", " ", claim.lower()).strip()
@@ -14393,6 +14434,8 @@ class MySearchClient:
         )
 
     def _research_excerpt_looks_like_noise(self, text: str) -> bool:
+        if self._research_excerpt_looks_like_json_shell(text):
+            return True
         lowered = text.lower()
         code_like_markers = (
             "api_key=",
