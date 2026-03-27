@@ -828,7 +828,7 @@ def run_remote_cases(
             capture_output=True,
             text=True,
             input=REMOTE_SCRIPT,
-            timeout=max(180, 90 * max(1, len(cases))),
+            timeout=max(300, 150 * max(1, len(cases))),
         )
     except subprocess.TimeoutExpired as exc:
         timeout_rows: list[dict[str, str]] = []
