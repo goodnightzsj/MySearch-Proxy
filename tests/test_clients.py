@@ -9314,6 +9314,37 @@ class MySearchClientTests(unittest.TestCase):
         top_urls = [item["url"] for item in result["web_search"]["results"][:5]]
         self.assertIn("https://www.firecrawl.dev/compare", top_urls)
 
+    def test_research_syncs_web_answer_to_visible_summary_for_vendor_doc_comparison(self) -> None:
+        client = MySearchClient()
+
+        def failing_search(**kwargs):  # type: ignore[no-untyped-def]
+            raise MySearchError("provider unavailable")
+
+        client.search = failing_search  # type: ignore[method-assign]
+        client.extract_url = lambda **kwargs: {  # type: ignore[method-assign]
+            "url": kwargs["url"],
+            "provider": "firecrawl",
+            "content": f"content for {kwargs['url']}",
+            "cache": {"extract": {"hit": False, "ttl_seconds": 300}},
+        }
+
+        result = client.research(
+            query="compare Tavily and Firecrawl for AI agent web retrieval 2026",
+            mode="research",
+            strategy="deep",
+            include_social=False,
+            scrape_top_n=2,
+        )
+
+        self.assertEqual(
+            result["web_search"]["answer"],
+            result["report_sections"]["executive_summary"],
+        )
+        self.assertIn(
+            "Supporting sources and corroborating analysis were found;",
+            result["web_search"]["answer"],
+        )
+
     def test_dedupe_research_results_preserves_matched_providers(self) -> None:
         client = MySearchClient()
 
