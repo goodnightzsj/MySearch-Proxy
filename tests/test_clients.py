@@ -2735,6 +2735,74 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(cached_result["provider"], "tavily_social_fallback")
         self.assertEqual(cached_result["results"][0]["url"], "https://x.com/OpenAI/status/555")
 
+    def test_xai_compatible_search_returns_cached_tavily_social_fallback_before_retrying(self) -> None:
+        client = MySearchClient()
+        provider = client.config.xai
+        provider.search_mode = "compatible"
+        provider.default_paths["social_search"] = "/social/search"
+        provider.alternate_base_urls["social_search"] = "http://gateway.example/v1"
+        client._get_key_or_raise = lambda provider: type(  # type: ignore[method-assign]
+            "Record",
+            (),
+            {"key": "gateway-token", "source": "env"},
+        )()
+
+        cache_key = client._build_social_cache_key(
+            query="GPT-5.4 reactions on X",
+            max_results=5,
+            allowed_x_handles=None,
+            excluded_x_handles=None,
+            from_date=None,
+            to_date=None,
+            include_x_images=False,
+            include_x_videos=False,
+        )
+        client._cache_set(
+            "social",
+            cache_key,
+            {
+                "provider": "tavily_social_fallback",
+                "transport": "env",
+                "query": "GPT-5.4 reactions on X",
+                "results": [
+                    {
+                        "provider": "tavily",
+                        "source": "x",
+                        "title": "OpenAI on X",
+                        "url": "https://x.com/OpenAI/status/123",
+                        "snippet": "GPT-5.4 reactions",
+                        "content": "",
+                    }
+                ],
+                "citations": [{"title": "OpenAI on X", "url": "https://x.com/OpenAI/status/123"}],
+            },
+        )
+
+        def fail_request_json(**kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("custom social should not run when tavily social fallback cache exists")
+
+        def fail_tavily_fallback(**kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("tavily fallback should not run when tavily social fallback cache exists")
+
+        client._request_json = fail_request_json  # type: ignore[method-assign]
+        client._search_tavily = fail_tavily_fallback  # type: ignore[method-assign]
+
+        result = client._search_xai_compatible(
+            query="GPT-5.4 reactions on X",
+            sources=["x"],
+            max_results=5,
+            allowed_x_handles=None,
+            excluded_x_handles=None,
+            from_date=None,
+            to_date=None,
+            include_x_images=False,
+            include_x_videos=False,
+        )
+
+        self.assertEqual(result["provider"], "tavily_social_fallback")
+        self.assertEqual(result["results"][0]["url"], "https://x.com/OpenAI/status/123")
+        self.assertTrue(result["cache"]["social"]["hit"])
+
     def test_xai_compatible_search_uses_social_unavailable_cache_before_retrying(self) -> None:
         client = MySearchClient()
         provider = client.config.xai

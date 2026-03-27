@@ -8478,6 +8478,16 @@ class MySearchClient:
         cached_social_result = self._cache_get("social", social_cache_key)
         cached_social_unavailable = None
         cached_social_gateway_unavailable = None
+        if (
+            cached_social_result
+            and cached_social_result.get("results")
+            and str(cached_social_result.get("provider") or "") == "tavily_social_fallback"
+        ):
+            return self._annotate_cache(
+                cached_social_result,
+                namespace="social",
+                hit=True,
+            )
         if not (cached_social_result and cached_social_result.get("results")):
             cached_social_unavailable = self._cache_get("social_unavailable", social_cache_key)
             if not cached_social_unavailable:
