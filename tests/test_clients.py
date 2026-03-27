@@ -10170,6 +10170,95 @@ class MySearchClientTests(unittest.TestCase):
         )
         self.assertIn("Tavily exposes a search API for web retrieval", str(search_row.get("note") or ""))
 
+    def test_research_report_shortlist_uses_claim_fallback_before_domain(self) -> None:
+        client = MySearchClient()
+        client._build_research_claim_evidence = lambda *args, **kwargs: [  # type: ignore[method-assign]
+            {
+                "claim": "Create a model response",
+                "urls": ["https://developers.openai.com/api/reference/resources/responses/methods/create/"],
+                "providers": ["tavily"],
+                "clusters": ["official"],
+                "support_level": "single-source",
+                "support_basis": "shortlisted official doc",
+            }
+        ]
+
+        sections = client._build_research_report_sections(
+            query="compare OpenAI Responses API and Batch API for long-running tasks 2026",
+            web_search={"intent": "comparison", "answer": ""},
+            ordered_results=[
+                {
+                    "provider": "tavily",
+                    "title": "Create a model response | OpenAI API Reference",
+                    "url": "https://developers.openai.com/api/reference/resources/responses/methods/create/",
+                    "snippet": "",
+                },
+            ],
+            pages=[],
+            citations=[
+                {
+                    "title": "Create a model response | OpenAI API Reference",
+                    "url": "https://developers.openai.com/api/reference/resources/responses/methods/create/",
+                }
+            ],
+            social=None,
+            evidence={
+                "providers_consulted": ["tavily"],
+                "citation_count": 1,
+                "confidence": "medium",
+                "research_plan": {"scrape_top_n": 1, "web_mode": "research"},
+                "selected_candidate_domains": ["openai.com"],
+                "selected_candidate_cluster_counts": {"official": 1},
+                "authoritative_research": True,
+            },
+        )
+
+        row = next(
+            row for row in (sections.get("comparison_rows") or [])
+            if row.get("candidate") == "Create a model response"
+        )
+        self.assertEqual(row.get("note"), "Create a model response")
+
+    def test_research_report_shortlist_uses_official_title_before_domain(self) -> None:
+        client = MySearchClient()
+        client._build_research_claim_evidence = lambda *args, **kwargs: []  # type: ignore[method-assign]
+
+        sections = client._build_research_report_sections(
+            query="compare OpenAI Responses API and Batch API for long-running tasks 2026",
+            web_search={"intent": "comparison", "answer": ""},
+            ordered_results=[
+                {
+                    "provider": "tavily",
+                    "title": "Create batch | OpenAI API Reference",
+                    "url": "https://developers.openai.com/api/reference/resources/batches/methods/create/",
+                    "snippet": "",
+                },
+            ],
+            pages=[],
+            citations=[
+                {
+                    "title": "Create batch | OpenAI API Reference",
+                    "url": "https://developers.openai.com/api/reference/resources/batches/methods/create/",
+                }
+            ],
+            social=None,
+            evidence={
+                "providers_consulted": ["tavily"],
+                "citation_count": 1,
+                "confidence": "medium",
+                "research_plan": {"scrape_top_n": 1, "web_mode": "research"},
+                "selected_candidate_domains": ["openai.com"],
+                "selected_candidate_cluster_counts": {"official": 1},
+                "authoritative_research": True,
+            },
+        )
+
+        row = next(
+            row for row in (sections.get("comparison_rows") or [])
+            if row.get("candidate") == "Create batch"
+        )
+        self.assertEqual(row.get("note"), "Create batch")
+
     def test_research_report_sections_promote_non_generic_top_claim_into_executive_summary(self) -> None:
         client = MySearchClient()
 

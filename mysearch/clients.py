@@ -12907,6 +12907,15 @@ class MySearchClient:
             include_domains=None,
             authoritative_preferred=authoritative_research,
         )
+        claim_by_url: dict[str, str] = {}
+        for item in claim_evidence:
+            claim_text = str(item.get("claim") or "").strip()
+            if not claim_text:
+                continue
+            for claim_url in item.get("urls") or []:
+                normalized_url = str(claim_url or "").strip()
+                if normalized_url and normalized_url not in claim_by_url:
+                    claim_by_url[normalized_url] = claim_text
         significant_conflicts = [
             str(item)
             for item in (evidence.get("conflicts") or [])
@@ -13018,6 +13027,18 @@ class MySearchClient:
                     )
                 ):
                     evidence_note = ""
+                if not evidence_note:
+                    evidence_note = claim_by_url.get(url, "").strip()
+                if not evidence_note:
+                    title_note = self._normalize_research_claim_text(
+                        candidate or title,
+                        comparison_like=comparison_like,
+                    )
+                    if title_note and (
+                        cluster_label == "official"
+                        or not self._research_claim_is_generic(title_note)
+                    ):
+                        evidence_note = title_note
                 if not evidence_note:
                     evidence_note = self._registered_domain(self._result_hostname({"url": url}))
                 comparison_rows.append(
