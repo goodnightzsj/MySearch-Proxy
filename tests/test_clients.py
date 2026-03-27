@@ -10259,6 +10259,97 @@ class MySearchClientTests(unittest.TestCase):
         )
         self.assertEqual(row.get("note"), "Create batch")
 
+    def test_research_report_shortlist_uses_claim_before_link_index_shell(self) -> None:
+        client = MySearchClient()
+        client._build_research_claim_evidence = lambda *args, **kwargs: [  # type: ignore[method-assign]
+            {
+                "claim": "Migrate to the Responses API",
+                "urls": ["https://developers.openai.com/api/docs/guides/migrate-to-responses/"],
+                "providers": ["tavily", "exa"],
+                "clusters": ["official"],
+                "support_level": "cross-provider",
+                "support_basis": "shortlisted official docs",
+            }
+        ]
+
+        sections = client._build_research_report_sections(
+            query="compare OpenAI Responses API and Batch API for long-running tasks 2026",
+            web_search={"intent": "comparison", "answer": ""},
+            ordered_results=[
+                {
+                    "provider": "tavily",
+                    "matched_providers": ["tavily"],
+                    "title": "Migrate to the Responses API - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/guides/migrate-to-responses/",
+                    "snippet": "* [Models](https://developers.openai.com/api/docs/models). * [Latest: GPT-5.4](https://developers.openai.com/api/docs/guides/latest-model).",
+                },
+            ],
+            pages=[],
+            citations=[
+                {
+                    "title": "Migrate to the Responses API - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/guides/migrate-to-responses/",
+                }
+            ],
+            social=None,
+            evidence={
+                "providers_consulted": ["tavily", "exa"],
+                "citation_count": 1,
+                "confidence": "high",
+                "research_plan": {"scrape_top_n": 1, "web_mode": "research"},
+                "selected_candidate_domains": ["openai.com"],
+                "selected_candidate_cluster_counts": {"official": 1},
+                "authoritative_research": True,
+            },
+        )
+
+        row = next(
+            row for row in (sections.get("comparison_rows") or [])
+            if row.get("candidate") == "Migrate to the Responses API"
+        )
+        self.assertEqual(row.get("note"), "Migrate to the Responses API")
+
+    def test_research_report_shortlist_uses_official_title_before_link_shell(self) -> None:
+        client = MySearchClient()
+        client._build_research_claim_evidence = lambda *args, **kwargs: []  # type: ignore[method-assign]
+
+        sections = client._build_research_report_sections(
+            query="compare OpenAI Responses API and Batch API for long-running tasks 2026",
+            web_search={"intent": "comparison", "answer": ""},
+            ordered_results=[
+                {
+                    "provider": "exa",
+                    "matched_providers": ["exa"],
+                    "title": "Batch API | OpenAI API",
+                    "url": "https://developers.openai.com/api/reference/resources/batches",
+                    "snippet": "# Batch API | OpenAI API [![Image 1: OpenAI Developers](https://developers.openai.com/OpenAI_Developers.svg)](https://developers.openai.com/)",
+                },
+            ],
+            pages=[],
+            citations=[
+                {
+                    "title": "Batch API | OpenAI API",
+                    "url": "https://developers.openai.com/api/reference/resources/batches",
+                }
+            ],
+            social=None,
+            evidence={
+                "providers_consulted": ["exa"],
+                "citation_count": 1,
+                "confidence": "medium",
+                "research_plan": {"scrape_top_n": 1, "web_mode": "research"},
+                "selected_candidate_domains": ["openai.com"],
+                "selected_candidate_cluster_counts": {"official": 1},
+                "authoritative_research": True,
+            },
+        )
+
+        row = next(
+            row for row in (sections.get("comparison_rows") or [])
+            if row.get("candidate") == "Batch API"
+        )
+        self.assertEqual(row.get("note"), "Batch API")
+
     def test_research_report_sections_promote_non_generic_top_claim_into_executive_summary(self) -> None:
         client = MySearchClient()
 
