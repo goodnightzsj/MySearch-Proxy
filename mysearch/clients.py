@@ -2020,6 +2020,17 @@ class MySearchClient:
             executive_summary_override=executive_summary,
         )
         research_summary = self._render_research_report(report_sections)
+        visible_summary = str(report_sections.get("executive_summary") or "").strip()
+        if (
+            visible_summary
+            and resolved_intent in {"comparison", "exploratory"}
+            and (
+                authoritative_research
+                or int(evidence.get("selected_supporting_source_count") or 0) > 0
+            )
+        ):
+            web_search = dict(web_search)
+            web_search["answer"] = visible_summary
 
         return {
             "provider": "hybrid",

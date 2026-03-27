@@ -496,6 +496,7 @@ class MCPClient:
         self.headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
         self.headers.update(headers or {})
         self.session_id = None
+        self.session_transport_blocked = False
 
     def _post(self, payload, headers, timeout, retries=4):
         data = json.dumps(payload).encode()
@@ -527,6 +528,7 @@ class MCPClient:
         raise RuntimeError("unreachable post retry state")
 
     def initialize(self):
+        self.session_transport_blocked = False
         payload = {
             "jsonrpc": "2.0",
             "id": 1,
@@ -550,10 +552,13 @@ class MCPClient:
             detail = str(exc)
             if "Missing mcp-session-id header" in detail or ("HTTP 404" in detail and "mcp-session-id" in detail):
                 self.session_id = None
+                self.session_transport_blocked = True
                 return
             raise
 
     def call_tool(self, tool_name, arguments):
+        if self.session_transport_blocked:
+            raise RuntimeError("mcp-session-transport-blocked")
         payload = {
             "jsonrpc": "2.0",
             "id": 2,
@@ -576,6 +581,9 @@ class MCPClient:
                     or ("HTTP 404" in detail and "mcp-session-id" in detail)
                 )
                 if not needs_reconnect or attempt == 1:
+                    if needs_reconnect:
+                        self.session_transport_blocked = True
+                        raise RuntimeError("mcp-session-transport-blocked")
                     raise
                 self.initialize()
         if last_error is not None:
