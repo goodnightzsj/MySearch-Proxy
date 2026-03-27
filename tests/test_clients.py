@@ -1022,6 +1022,23 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertFalse(strong)
 
+    def test_has_strong_award_result_rejects_other_award_brand_winners_list(self) -> None:
+        client = MySearchClient()
+
+        strong = client._has_strong_award_result(
+            query="2026 Grammy album of the year winner",
+            results=[
+                {
+                    "title": "2026 iHeartRadio Music Awards winners list",
+                    "url": "https://www.iheart.com/music-awards/2026/winners",
+                    "snippet": "Album of the Year winner: For The Life of a Showgirl.",
+                    "content": "See the full winners list from the 2026 iHeartRadio Music Awards.",
+                }
+            ],
+        )
+
+        self.assertFalse(strong)
+
     def test_has_strong_award_result_rejects_gallery_page_with_winner_fact(self) -> None:
         client = MySearchClient()
 
@@ -1079,6 +1096,30 @@ class MySearchClientTests(unittest.TestCase):
                 path="/article/2026-oscars-winners",
             )
         )
+
+    def test_result_event_page_priority_downranks_other_award_brand_winners_list(self) -> None:
+        client = MySearchClient()
+
+        wrong_brand_priority = client._result_event_page_priority(
+            query="2026 Grammy album of the year winner",
+            item={
+                "title": "2026 iHeartRadio Music Awards winners list",
+                "url": "https://www.iheart.com/music-awards/2026/winners",
+                "snippet": "Album of the Year winner: For The Life of a Showgirl.",
+                "content": "See the full winners list from the 2026 iHeartRadio Music Awards.",
+            },
+        )
+        grammy_priority = client._result_event_page_priority(
+            query="2026 Grammy album of the year winner",
+            item={
+                "title": "2026 Grammys: See The Full Winners & Nominees List",
+                "url": "https://grammy.com/news/2026-grammys-nominations-full-winners-nominees-list",
+                "snippet": "Bad Bunny wins the Grammy for Album Of The Year at the 2026 Grammys.",
+                "content": "",
+            },
+        )
+
+        self.assertLess(wrong_brand_priority, grammy_priority)
 
     def test_has_strong_award_result_rejects_weak_official_feature_page(self) -> None:
         client = MySearchClient()
