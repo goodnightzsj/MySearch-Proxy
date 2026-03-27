@@ -646,6 +646,19 @@ class TavilyRestClient:
             raise last_error
         raise RuntimeError("unreachable tavily rest state")
 
+    @staticmethod
+    def _looks_like_stalled_research_payload(blob):
+        if not isinstance(blob, dict):
+            return False
+        status = str(blob.get("status") or "").lower()
+        if status not in {"pending", "in_progress"}:
+            return False
+        keys = set(blob.keys())
+        allowed = {"status", "request_id", "id", "response_time", "provider", "model", "created_at", "input"}
+        if not keys.issubset(allowed):
+            return False
+        return True
+
     def call_tool(self, tool_name, arguments):
         endpoint = derive_tavily_rest_url(self.mcp_url, tool_name)
         if not endpoint:
@@ -658,6 +671,7 @@ class TavilyRestClient:
             if request_id and status in {"pending", "in_progress"}:
                 poll_url = f"{endpoint}/{request_id}"
                 deadline = time.time() + 240
+                stalled_polls = 0
                 while time.time() < deadline:
                     time.sleep(5)
                     polled = self._request_json("GET", poll_url, None, timeout=120, retries=4)
@@ -668,6 +682,12 @@ class TavilyRestClient:
                     polled_status = str(polled.get("status") or "").lower()
                     if polled_status not in {"pending", "in_progress"}:
                         break
+                    if self._looks_like_stalled_research_payload(polled):
+                        stalled_polls += 1
+                        if stalled_polls >= 8:
+                            raise RuntimeError("tavily-rest-research-stalled")
+                    else:
+                        stalled_polls = 0
                 else:
                     raise RuntimeError("tavily-rest-research-timeout")
         if isinstance(blob, dict) and "provider" not in blob:
@@ -873,10 +893,25 @@ def run_remote_cases(
         payload_b64,
     ]
     proc = subprocess.run(cmd, check=False, capture_output=True, text=True, input=REMOTE_SCRIPT)
+    parsed_stdout = None
+    if proc.stdout.strip():
+        try:
+            parsed_stdout = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            parsed_stdout = None
     if proc.returncode != 0:
+        if isinstance(parsed_stdout, list):
+            warning = proc.stderr.strip()
+            if warning:
+                for item in parsed_stdout:
+                    if isinstance(item, dict):
+                        item["_remote_transport_warning"] = warning
+            return parsed_stdout
         raise RuntimeError(
             f"remote benchmark failed with exit {proc.returncode}\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
         )
+    if parsed_stdout is not None:
+        return parsed_stdout
     return json.loads(proc.stdout)
 
 
@@ -949,7 +984,7 @@ def build_output_row(
     row["structural_failure"] = existing.get("structural_failure", "")
     row["optimization_hint"] = existing.get("optimization_hint", "")
     error_text = str(row.get("error") or "")
-    if "tavily-rest-research-timeout" in error_text or (
+    if "tavily-rest-research-timeout" in error_text or "tavily-rest-research-stalled" in error_text or (
         "tavily-rest:" in error_text and "proxy_error" in error_text and "upstream unavailable" in error_text
     ):
         row["run_status"] = "comparator-blocked"
