@@ -13669,7 +13669,7 @@ class MySearchClient:
         comparison_like: bool,
     ) -> str:
         cleaned_title = self._normalize_research_claim_text(
-            re.split(r"\s[\-|:|]\s", title, maxsplit=1)[0].strip() or title,
+            re.split(r"\s(?:[-:|–—])\s", title, maxsplit=1)[0].strip() or title,
             comparison_like=comparison_like,
         )
         excerpt = re.sub(r"\s+", " ", excerpt).strip()
@@ -13707,6 +13707,23 @@ class MySearchClient:
                     title_prefix = f"{cleaned_title} "
                     if cleaned_excerpt.lower().startswith(title_prefix.lower()):
                         trailing_excerpt = cleaned_excerpt[len(title_prefix):].strip(" -:;,.")
+                        if trailing_excerpt.lower().startswith(title_prefix.lower()):
+                            trailing_excerpt = trailing_excerpt[len(title_prefix):].strip(" -:;,.")
+                        if trailing_excerpt:
+                            leading_word = trailing_excerpt.split()[0].lower()
+                            if leading_word in {
+                                "is",
+                                "are",
+                                "can",
+                                "lets",
+                                "allows",
+                                "enables",
+                                "supports",
+                                "provides",
+                                "helps",
+                                "uses",
+                            }:
+                                trailing_excerpt = f"{cleaned_title} {trailing_excerpt}"
                         if len(trailing_excerpt.split()) >= 3:
                             return trailing_excerpt
                 if cleaned_title and self._research_excerpt_looks_like_navigation_noise(cleaned_excerpt):
@@ -13746,11 +13763,13 @@ class MySearchClient:
         compact = re.sub(r"[\u200b\u200c\u200d\ufeff]", " ", text)
         compact = compact.replace("**", " ").replace("__", " ").replace("`", " ")
         compact = re.sub(r"!\[[^\]]*\]\([^)]+\)", " ", compact)
+        compact = re.sub(r"\[[^\]]+\]\([^)]+\)", " ", compact)
         compact = re.sub(
-            r"(?i)\b(copy\s+markdown|open\s+in\s+chatgpt|view\s+as\s+markdown|copy\s+page|view\s+page)\b",
+            r"(?i)\b(copy\s*pagecopy|copy\s+markdown|open\s+in\s+chatgpt|view\s+as\s+markdown|copy\s+page|view\s+page)\b",
             " ",
             compact,
         )
+        compact = re.sub(r"(?i)^\s*(?:copy\s+pagecopy|copy\s+page|copy)\s+", "", compact).strip()
         compact = re.sub(r"\s*#+\s*", " ", compact)
         compact = compact.replace("*", " ")
         compact = re.sub(
@@ -13786,13 +13805,12 @@ class MySearchClient:
         )
         compact = re.sub(r"(?i)^abstract\s+", "", compact).strip()
         compact = re.sub(r"^[#>*`\-\d\.\)\s]+", "", compact).strip()
-        compact = re.sub(r"\[[^\]]+\]\([^)]+\)", "", compact).strip()
         compact = re.sub(r"https?://\S+", "", compact).strip()
         compact = compact.replace("\\_", "_")
         if not compact:
             return ""
         if comparison_like:
-            compact = re.split(r"\s[\-|:|]\s", compact, maxsplit=1)[0].strip() or compact
+            compact = re.split(r"\s(?:[-:|–—])\s", compact, maxsplit=1)[0].strip() or compact
         compact = self._build_excerpt(compact, limit=160)
         if self._research_excerpt_looks_like_noise(compact):
             return ""
