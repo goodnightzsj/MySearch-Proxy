@@ -6155,6 +6155,14 @@ class MySearchClient:
                 content_text=content_text,
             ):
                 continue
+            if self._looks_like_award_brand_conflict(
+                query_lower=query_lower,
+                title_text=title_text,
+                snippet_text=snippet_text,
+                content_text=content_text,
+                path=path,
+            ):
+                continue
             if self._looks_like_generic_award_archive_result(
                 title_text=title_text,
                 path=path,
@@ -6276,6 +6284,14 @@ class MySearchClient:
                 title_text=title_text,
                 snippet_text=snippet_text,
                 content_text=content_text,
+            ):
+                continue
+            if self._looks_like_award_brand_conflict(
+                query_lower=query_lower,
+                title_text=title_text,
+                snippet_text=snippet_text,
+                content_text=content_text,
+                path=path,
             ):
                 continue
             if self._looks_like_generic_award_archive_result(
@@ -11414,6 +11430,75 @@ class MySearchClient:
             return ["bafta"]
         return []
 
+    def _looks_like_award_brand_conflict(
+        self,
+        *,
+        query_lower: str,
+        title_text: str,
+        snippet_text: str,
+        content_text: str,
+        path: str,
+    ) -> bool:
+        brand_markers = self._award_query_brand_markers(query_lower)
+        if not brand_markers:
+            return False
+        text = f"{title_text} {snippet_text} {content_text} {path}"
+        if any(marker in text for marker in brand_markers):
+            return False
+        if "grammy" in query_lower:
+            competing_markers = [
+                "academy awards",
+                "american music awards",
+                "bafta",
+                "billboard music awards",
+                "brit awards",
+                "emmy",
+                "glaad",
+                "golden globe",
+                "golden globes",
+                "hall of fame gala",
+                "iheartradio",
+                "juno",
+                "mtv",
+                "oscars",
+                "platino",
+                "sxsw",
+                "vma",
+            ]
+        elif "oscar" in query_lower or "academy awards" in query_lower:
+            competing_markers = [
+                "bafta",
+                "emmy",
+                "glaad",
+                "golden globe",
+                "golden globes",
+                "grammy",
+                "grammys",
+                "iheartradio",
+                "mtv",
+                "platino",
+                "sxsw",
+                "vma",
+            ]
+        else:
+            competing_markers = [
+                "academy awards",
+                "bafta",
+                "emmy",
+                "glaad",
+                "golden globe",
+                "golden globes",
+                "grammy",
+                "grammys",
+                "iheartradio",
+                "mtv",
+                "oscars",
+                "platino",
+                "sxsw",
+                "vma",
+            ]
+        return any(marker in text for marker in competing_markers)
+
     def _looks_like_box_office_query(self, query_lower: str) -> bool:
         keywords = [
             "box office",
@@ -11861,6 +11946,17 @@ class MySearchClient:
             )
         ):
             score -= 10
+        if (
+            self._looks_like_award_result_query(query_lower)
+            and self._looks_like_award_brand_conflict(
+                query_lower=query_lower,
+                title_text=title_text,
+                snippet_text=snippet_text,
+                content_text=content_text,
+                path=urlparse(url).path.lower(),
+            )
+        ):
+            score -= 12
         if (
             self._looks_like_award_result_query(query_lower)
             and self._looks_like_weak_official_award_feature_result(
