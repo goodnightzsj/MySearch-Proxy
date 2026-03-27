@@ -8380,6 +8380,162 @@ class MySearchClientTests(unittest.TestCase):
             any("Tavily exposes a search API for web retrieval" in claim for claim in claim_texts)
         )
 
+    def test_research_claim_evidence_drops_supporting_tail_when_official_anchors_are_sufficient(
+        self,
+    ) -> None:
+        client = MySearchClient()
+        query = "best approach for official docs retrieval in agentic search 2026"
+
+        claims = client._build_research_claim_evidence(
+            query=query,
+            mode="docs",
+            ordered_results=[
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Search API - Tavily",
+                    "url": "https://docs.tavily.com/documentation/api-reference/search",
+                    "snippet": "Tavily exposes a search API for web retrieval and agent search workflows.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Search - Exa Docs",
+                    "url": "https://docs.exa.ai/reference/search",
+                    "snippet": "Exa provides a search API for semantic web retrieval and content discovery.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Extract - Firecrawl Docs",
+                    "url": "https://docs.firecrawl.dev/api-reference/endpoint/extract",
+                    "snippet": "Firecrawl provides an extract API for structured extraction across URLs and documents.",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Agentic retrieval in Azure AI Search",
+                    "url": "https://docs.azure.cn/en-us/search/agentic-retrieval-overview",
+                    "snippet": "Agentic retrieval guidance in Azure AI Search.",
+                },
+            ],
+            pages=[],
+            citations=[],
+            comparison_like=True,
+            include_domains=None,
+            authoritative_preferred=True,
+        )
+
+        claim_texts = [str(item.get("claim") or "") for item in claims]
+        self.assertTrue(
+            any("Tavily exposes a search API" in claim for claim in claim_texts)
+        )
+        self.assertTrue(
+            any("Exa provides a search API" in claim for claim in claim_texts)
+        )
+        self.assertTrue(
+            any("Firecrawl provides an extract API" in claim for claim in claim_texts)
+        )
+        self.assertTrue(all("Azure AI Search" not in claim for claim in claim_texts))
+
+    def test_research_claim_evidence_drops_curated_tail_when_project_and_supporting_claims_are_sufficient(
+        self,
+    ) -> None:
+        client = MySearchClient()
+        query = "compare Tavily and Firecrawl for AI agent web retrieval 2026"
+
+        claims = client._build_research_claim_evidence(
+            query=query,
+            mode="research",
+            ordered_results=[
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Firecrawl vs Tavily - Firecrawl",
+                    "url": "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                    "snippet": "Firecrawl positions itself as an extraction-first workflow with scrape and structured extraction, while Tavily focuses on search and retrieval APIs.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Search API - Tavily",
+                    "url": "https://docs.tavily.com/documentation/api-reference/search",
+                    "snippet": "Tavily exposes a search API for web retrieval, real-time discovery, and agent search workflows.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Scrape - Firecrawl Docs",
+                    "url": "https://docs.firecrawl.dev/api-reference/endpoint/scrape",
+                    "snippet": "Firecrawl provides a scrape API for markdown extraction, page retrieval, and dynamic site capture.",
+                },
+                {
+                    "provider": "exa",
+                    "title": "Exa vs Tavily vs Firecrawl: Which Web Search MCP Should You Use in Production?",
+                    "url": "https://www.sagentum.com/blog/exa-vs-tavily-vs-firecrawl",
+                    "snippet": "Third-party comparison.",
+                },
+            ],
+            pages=[],
+            citations=[],
+            comparison_like=True,
+            include_domains=None,
+            authoritative_preferred=False,
+        )
+
+        claim_texts = [str(item.get("claim") or "") for item in claims]
+        self.assertTrue(
+            any("Firecrawl positions itself as an extraction-first workflow" in claim for claim in claim_texts)
+        )
+        self.assertTrue(
+            any("Tavily exposes a search API" in claim for claim in claim_texts)
+        )
+        self.assertTrue(
+            any("Firecrawl provides a scrape API" in claim for claim in claim_texts)
+        )
+        self.assertTrue(
+            all("Which Web Search MCP Should You Use in Production" not in claim for claim in claim_texts)
+        )
+
+    def test_research_claim_evidence_dedupes_same_domain_same_topic_variants(self) -> None:
+        client = MySearchClient()
+        query = "compare OpenAI Responses API and Batch API for long-running tasks 2026"
+
+        claims = client._build_research_claim_evidence(
+            query=query,
+            mode="docs",
+            ordered_results=[
+                {
+                    "provider": "tavily",
+                    "title": "Migrate to the Responses API",
+                    "url": "https://openai.com/api/docs/guides/migrate-to-responses",
+                    "snippet": "Use the Responses API for long-running tasks and agent workflows.",
+                },
+                {
+                    "provider": "exa",
+                    "title": "Migrate to the Responses API | OpenAI API",
+                    "url": "https://platform.openai.com/docs/guides/migrate-to-responses",
+                    "snippet": "Use the Responses API for long-running tasks and agent workflows.",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Batch API - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/guides/batch",
+                    "snippet": "Process jobs asynchronously with Batch API.",
+                },
+                {
+                    "provider": "exa",
+                    "title": "Retrieve batch | OpenAI API Reference",
+                    "url": "https://platform.openai.com/docs/api-reference/batches/retrieve",
+                    "snippet": "id: string completion_window: string The time frame within which the batch should be processed.",
+                },
+            ],
+            pages=[],
+            citations=[],
+            comparison_like=True,
+            include_domains=None,
+            authoritative_preferred=True,
+        )
+
+        claim_texts = [str(item.get("claim") or "") for item in claims]
+        self.assertTrue(any("Responses API" in claim for claim in claim_texts))
+        self.assertTrue(any("Batch API" in claim for claim in claim_texts))
+        self.assertTrue(all("completion_window" not in claim for claim in claim_texts))
+        self.assertLessEqual(len(claim_texts), 2)
+
     def test_research_report_uses_supporting_wording_without_authoritative_sources(self) -> None:
         client = MySearchClient()
 
@@ -8552,6 +8708,17 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertIn("Firecrawl handles full web extraction", claim)
         self.assertNotIn("Complete Comparison for AI Agents", claim)
+
+    def test_research_claim_text_accepts_short_imperative_vendor_doc_excerpt(self) -> None:
+        client = MySearchClient()
+
+        claim = client._research_claim_text(
+            title="Batch API - OpenAI Developers",
+            excerpt="Process jobs asynchronously with Batch API.",
+            comparison_like=True,
+        )
+
+        self.assertEqual(claim, "Process jobs asynchronously with Batch API")
 
     def test_research_claim_text_drops_generic_comparison_title_when_excerpt_is_cta(self) -> None:
         client = MySearchClient()
@@ -9614,6 +9781,71 @@ class MySearchClientTests(unittest.TestCase):
         )
         self.assertTrue(
             all("sagentum" not in source.lower() for source in sections["top_sources"])
+        )
+
+    def test_research_report_sections_top_sources_dedupe_same_domain_same_topic_variants(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        sections = client._build_research_report_sections(
+            query="compare OpenAI Responses API and Batch API for long-running tasks 2026",
+            web_search={"intent": "comparison", "answer": ""},
+            ordered_results=[
+                {
+                    "provider": "tavily",
+                    "title": "Migrate to the Responses API",
+                    "url": "https://openai.com/api/docs/guides/migrate-to-responses",
+                    "snippet": "Use the Responses API for long-running tasks and agent workflows.",
+                },
+                {
+                    "provider": "exa",
+                    "title": "Migrate to the Responses API | OpenAI API",
+                    "url": "https://platform.openai.com/docs/guides/migrate-to-responses",
+                    "snippet": "Use the Responses API for long-running tasks and agent workflows.",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Batch API - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/guides/batch",
+                    "snippet": "Process jobs asynchronously with Batch API.",
+                },
+                {
+                    "provider": "exa",
+                    "title": "Batches | OpenAI API Reference",
+                    "url": "https://platform.openai.com/docs/api-reference/batches",
+                    "snippet": "Process jobs asynchronously with Batch API.",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "Batch API FAQ - OpenAI Help Center",
+                    "url": "https://help.openai.com/en/articles/batch-api-faq",
+                    "snippet": "FAQ for Batch API usage and supported models.",
+                },
+            ],
+            pages=[],
+            citations=[],
+            social=None,
+            evidence={
+                "providers_consulted": ["tavily", "exa"],
+                "citation_count": 5,
+                "confidence": "high",
+                "research_plan": {"scrape_top_n": 2, "web_mode": "docs"},
+                "selected_candidate_domains": ["openai.com", "platform.openai.com", "help.openai.com"],
+                "selected_candidate_cluster_counts": {"official": 2, "supporting": 1},
+                "selected_authoritative_source_count": 2,
+                "selected_supporting_source_count": 1,
+                "authoritative_research": True,
+            },
+        )
+
+        self.assertEqual(
+            sections["top_sources"],
+            [
+                "Migrate to the Responses API (openai.com)",
+                "Batch API - OpenAI Developers (openai.com)",
+                "Batch API FAQ - OpenAI Help Center (openai.com)",
+            ],
         )
 
 

@@ -12233,10 +12233,16 @@ class MySearchClient:
             if not title:
                 return
             domain = self._registered_domain(self._result_hostname(item))
-            line = f"{title} ({domain})" if domain and domain not in title.lower() else title
-            if not line or line in seen_lines:
+            dedupe_key = self._research_source_topic_key(
+                title=title,
+                domain=domain or (item.get("url") or "").strip(),
+            )
+            if dedupe_key in seen_lines:
                 return
-            seen_lines.add(line)
+            line = f"{title} ({domain})" if domain and domain not in title.lower() else title
+            if not line:
+                return
+            seen_lines.add(dedupe_key)
             cluster_label = self._research_result_cluster_label(
                 query=query,
                 mode=mode_name,
@@ -12328,6 +12334,59 @@ class MySearchClient:
                 selected_lines.append(line)
                 cluster_counts[cluster_label] = cluster_counts.get(cluster_label, 0) + 1
         return selected_lines[:max_items]
+
+    def _research_source_topic_key(self, *, title: str, domain: str) -> str:
+        head = re.split(r"\s[\-|:|]\s", title, maxsplit=1)[0].strip().lower() or title.lower()
+        tokens = re.findall(r"[a-z0-9]+", head)
+        stop_tokens = {
+            "a",
+            "an",
+            "and",
+            "api",
+            "app",
+            "apps",
+            "developer",
+            "developers",
+            "doc",
+            "docs",
+            "documentation",
+            "for",
+            "guide",
+            "guides",
+            "in",
+            "of",
+            "on",
+            "openai",
+            "platform",
+            "reference",
+            "the",
+            "to",
+        }
+        action_tokens = {
+            "create",
+            "delete",
+            "get",
+            "list",
+            "migrate",
+            "retrieve",
+            "update",
+            "use",
+            "using",
+        }
+        normalized_tokens: list[str] = []
+        for token in tokens:
+            if token in stop_tokens or token in action_tokens:
+                continue
+            if token.endswith("ies") and len(token) > 4:
+                token = f"{token[:-3]}y"
+            elif token.endswith(("ches", "shes", "sses", "xes", "zes")) and len(token) > 5:
+                token = token[:-2]
+            elif token.endswith("s") and len(token) > 4:
+                token = token[:-1]
+            normalized_tokens.append(token)
+        if not normalized_tokens:
+            normalized_tokens = tokens[:2] or [head]
+        return f"{domain}|{' '.join(normalized_tokens[:3])}"
 
     def _build_research_report_sections(
         self,
@@ -13243,6 +13302,7 @@ class MySearchClient:
                 target_claims[claim_key] = {
                     "claim": claim,
                     "sources": [],
+                    "urls": [],
                     "providers": [],
                     "clusters": [],
                     "domains": [],
@@ -13252,6 +13312,8 @@ class MySearchClient:
             source_label = title or (self._registered_domain(self._result_hostname(item)) or url)
             if source_label and source_label not in entry["sources"]:
                 entry["sources"].append(source_label)
+            if url and url not in entry["urls"]:
+                entry["urls"].append(url)
             domain = self._registered_domain(self._result_hostname(item))
             if domain and domain not in entry["domains"]:
                 entry["domains"].append(domain)
@@ -13317,6 +13379,13 @@ class MySearchClient:
         )
         for entry in claims:
             entry.pop("_order_index", None)
+        claims = self._trim_research_claims_for_visibility(
+            claims=claims,
+            authoritative_preferred=authoritative_preferred,
+            comparison_like=comparison_like,
+            limit=4,
+        )
+        claims = self._dedupe_research_claims_by_source_topic(claims, limit=4)
         claims = self._diversify_research_claims_by_domain(claims, limit=4)
         return claims
 
@@ -13345,6 +13414,141 @@ class MySearchClient:
             if len(selected) >= limit:
                 break
             selected.append(entry)
+        return selected[:limit]
+
+    def _dedupe_research_claims_by_source_topic(
+        self,
+        claims: list[dict[str, Any]],
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        if not claims:
+            return []
+        deduped: list[dict[str, Any]] = []
+        seen_topics: set[str] = set()
+        best_entries: dict[str, dict[str, Any]] = {}
+        topic_order: list[str] = []
+        for entry in claims:
+            sources = [str(item).strip() for item in (entry.get("sources") or []) if str(item).strip()]
+            domains = [str(item).strip() for item in (entry.get("domains") or []) if str(item).strip()]
+            topic_key = self._research_source_topic_key(
+                title=sources[0] if sources else str(entry.get("claim") or "").strip(),
+                domain=domains[0] if domains else "unknown",
+            )
+            if topic_key not in seen_topics:
+                seen_topics.add(topic_key)
+                topic_order.append(topic_key)
+                best_entries[topic_key] = entry
+                continue
+            current_best = best_entries[topic_key]
+            if self._research_claim_source_kind_rank(entry) < self._research_claim_source_kind_rank(current_best):
+                best_entries[topic_key] = entry
+        for topic_key in topic_order:
+            deduped.append(best_entries[topic_key])
+            if len(deduped) >= limit:
+                break
+        return deduped[:limit]
+
+    def _research_claim_source_kind_rank(self, entry: dict[str, Any]) -> int:
+        sources = [str(item).strip() for item in (entry.get("sources") or []) if str(item).strip()]
+        urls = [str(item).strip() for item in (entry.get("urls") or []) if str(item).strip()]
+        title = sources[0] if sources else str(entry.get("claim") or "").strip()
+        url = urls[0] if urls else ""
+        return self._research_official_candidate_kind_rank({"title": title, "url": url})
+
+    def _research_claim_primary_cluster(
+        self,
+        *,
+        entry: dict[str, Any],
+        authoritative_preferred: bool,
+    ) -> str:
+        preferred_order = (
+            ["official", "supporting", "general", "community"]
+            if authoritative_preferred
+            else ["project", "supporting", "curated", "listicle", "directory", "community"]
+        )
+        clusters = [str(item) for item in (entry.get("clusters") or []) if item]
+        for label in preferred_order:
+            if label in clusters:
+                return label
+        return clusters[0] if clusters else ""
+
+    def _trim_research_claims_for_visibility(
+        self,
+        *,
+        claims: list[dict[str, Any]],
+        authoritative_preferred: bool,
+        comparison_like: bool,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        if not claims:
+            return []
+
+        if authoritative_preferred:
+            primary_clusters = [
+                self._research_claim_primary_cluster(
+                    entry=entry,
+                    authoritative_preferred=True,
+                )
+                for entry in claims
+            ]
+            official_count = sum(1 for label in primary_clusters if label == "official")
+            supporting_count = sum(1 for label in primary_clusters if label == "supporting")
+            anchor_count = official_count + supporting_count
+            if official_count >= 2 and supporting_count >= 1:
+                cluster_caps = {"official": limit, "supporting": 1}
+            elif anchor_count >= 3:
+                cluster_caps = {"official": limit, "supporting": limit}
+            elif anchor_count >= 2:
+                cluster_caps = {"official": limit, "supporting": limit, "general": 1}
+            else:
+                cluster_caps = {
+                    "official": limit,
+                    "supporting": limit,
+                    "general": 2,
+                    "community": 1,
+                }
+        elif comparison_like:
+            primary_clusters = [
+                self._research_claim_primary_cluster(
+                    entry=entry,
+                    authoritative_preferred=False,
+                )
+                for entry in claims
+            ]
+            anchor_count = sum(
+                1 for label in primary_clusters if label in {"project", "supporting"}
+            )
+            if anchor_count >= 3:
+                cluster_caps = {"project": limit, "supporting": limit}
+            elif anchor_count >= 2:
+                cluster_caps = {"project": limit, "supporting": limit, "curated": 1}
+            else:
+                cluster_caps = {
+                    "project": limit,
+                    "supporting": limit,
+                    "curated": 2,
+                    "listicle": 1,
+                    "directory": 1,
+                    "community": 1,
+                }
+        else:
+            return claims[:limit]
+
+        selected: list[dict[str, Any]] = []
+        cluster_counts: dict[str, int] = {}
+        for entry in claims:
+            cluster_label = self._research_claim_primary_cluster(
+                entry=entry,
+                authoritative_preferred=authoritative_preferred,
+            )
+            cap = cluster_caps.get(cluster_label, 0)
+            if not cap or cluster_counts.get(cluster_label, 0) >= cap:
+                continue
+            selected.append(entry)
+            cluster_counts[cluster_label] = cluster_counts.get(cluster_label, 0) + 1
+            if len(selected) >= limit:
+                break
         return selected[:limit]
 
     def _research_claim_text(
@@ -13492,6 +13696,9 @@ class MySearchClient:
             "maximum length",
             "minimum length",
             "defaults to",
+            "id: string",
+            "completion_window: string",
+            "metadata: object",
             "must be one of",
             "object containing",
             "array of",
@@ -13727,33 +13934,55 @@ class MySearchClient:
 
     def _research_excerpt_has_substantive_claim(self, text: str) -> bool:
         normalized = " " + re.sub(r"\s+", " ", text.lower()).strip() + " "
-        if len(normalized.split()) < 7:
+        word_count = len(normalized.split())
+        if word_count < 5:
             return False
+        markers = (
+            " is ",
+            " are ",
+            " can ",
+            " process ",
+            " processes ",
+            " handles ",
+            " supports ",
+            " allows ",
+            " enables ",
+            " helps ",
+            " uses ",
+            " provides ",
+            " delivers ",
+            " exposes ",
+            " integrates ",
+            " explores ",
+            " built for ",
+            " designed to ",
+            " suited to ",
+            " better suited ",
+            " unlike ",
+            " compared with ",
+            " compared to ",
+        )
+        if word_count < 7:
+            short_sentence_markers = (
+                " process ",
+                " processes ",
+                " use ",
+                " uses ",
+                " build ",
+                " builds ",
+                " run ",
+                " runs ",
+                " manage ",
+                " manages ",
+                " migrate ",
+                " migrates ",
+                " compare ",
+                " compares ",
+            )
+            return any(marker in normalized for marker in short_sentence_markers)
         return any(
             marker in normalized
-            for marker in (
-                " is ",
-                " are ",
-                " can ",
-                " handles ",
-                " supports ",
-                " allows ",
-                " enables ",
-                " helps ",
-                " uses ",
-                " provides ",
-                " delivers ",
-                " exposes ",
-                " integrates ",
-                " explores ",
-                " built for ",
-                " designed to ",
-                " suited to ",
-                " better suited ",
-                " unlike ",
-                " compared with ",
-                " compared to ",
-            )
+            for marker in markers
         )
 
     def _research_excerpt_looks_like_navigation_noise(self, text: str) -> bool:
