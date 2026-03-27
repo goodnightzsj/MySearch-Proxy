@@ -5741,11 +5741,24 @@ class MySearchClient:
     ) -> dict[str, Any]:
         result_event_query = self._looks_like_result_event_query(query.lower())
         if provider_name == "tavily":
+            prefer_tavily_official_discovery = self._should_prefer_tavily_official_discovery(
+                query=query,
+                mode=mode,
+                intent=intent,
+                include_domains=include_domains,
+                include_content=include_content,
+            )
             tavily_include_content = (
                 include_content
                 and intent != "tutorial"
                 and not self._looks_like_changelog_query(query.lower())
                 and not (result_event_query and mode == "news")
+                and not prefer_tavily_official_discovery
+            )
+            tavily_strategy = (
+                "fast"
+                if prefer_tavily_official_discovery and strategy in {"verify", "deep"}
+                else strategy
             )
             return self._search_tavily(
                 query=query,
@@ -5755,7 +5768,7 @@ class MySearchClient:
                 include_content=tavily_include_content,
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
-                strategy=strategy,
+                strategy=tavily_strategy,
                 days=self._infer_tavily_days(intent, from_date),
             )
         if provider_name == "firecrawl":
