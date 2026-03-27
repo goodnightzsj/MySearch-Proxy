@@ -12941,6 +12941,7 @@ class MySearchClient:
                         f"{runner_up['fit']}."
                     )
 
+        visible_source_domains = self._research_report_source_domains(top_sources)
         return {
             "executive_summary": primary_finding,
             "key_findings": key_findings[:3],
@@ -12959,9 +12960,15 @@ class MySearchClient:
                     f"authoritative={authoritative_source_count}" if authoritative_source_count > 0 else "",
                     f"supporting={supporting_source_count}" if supporting_source_count > 0 else "",
                     f"community={community_source_count}" if community_source_count > 0 else "",
-                    f"domains={', '.join(evidence.get('selected_candidate_domains') or [])}"
-                    if evidence.get("selected_candidate_domains")
-                    else "",
+                    (
+                        f"domains={', '.join(visible_source_domains)}"
+                        if visible_source_domains
+                        else (
+                            f"domains={', '.join(evidence.get('selected_candidate_domains') or [])}"
+                            if evidence.get("selected_candidate_domains")
+                            else ""
+                        )
+                    ),
                 )
                 if bit
             ],
@@ -13169,6 +13176,23 @@ class MySearchClient:
                 lines.append(f"- {item}")
 
         return "\n".join(lines).strip()
+
+    def _research_report_source_domains(self, source_lines: Sequence[str]) -> list[str]:
+        domains: list[str] = []
+        seen: set[str] = set()
+        for line in source_lines:
+            text = str(line).strip()
+            if not text:
+                continue
+            match = re.search(r"\(([^()]+)\)\s*$", text)
+            if not match:
+                continue
+            domain = self._registered_domain(match.group(1).strip())
+            if not domain or domain in seen:
+                continue
+            seen.add(domain)
+            domains.append(domain)
+        return domains
 
     def _build_research_summary_fallback(
         self,

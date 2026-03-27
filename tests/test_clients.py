@@ -9828,6 +9828,11 @@ class MySearchClientTests(unittest.TestCase):
                 "Extract - Firecrawl Docs (firecrawl.dev)",
             ],
         )
+        self.assertIn(
+            "domains=tavily.com, exa.ai, firecrawl.dev",
+            sections["source_mix"],
+        )
+        self.assertFalse(any("azure.cn" in item for item in sections["source_mix"]))
 
     def test_research_report_sections_top_sources_cap_curated_tail_when_project_and_supporting_exist(
         self,
