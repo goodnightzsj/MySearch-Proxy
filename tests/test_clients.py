@@ -8486,6 +8486,12 @@ class MySearchClientTests(unittest.TestCase):
         self.assertTrue(
             any("Tavily exposes a search API for web retrieval" in claim for claim in claim_texts)
         )
+        tavily_claim = next(
+            item for item in claims
+            if "Tavily exposes a search API for web retrieval" in str(item.get("claim") or "")
+        )
+        self.assertEqual(tavily_claim["support_level"], "single-source")
+        self.assertEqual(tavily_claim["support_basis"], "shortlisted vendor doc")
 
     def test_research_claim_evidence_drops_supporting_tail_when_official_anchors_are_sufficient(
         self,
@@ -9590,6 +9596,7 @@ class MySearchClientTests(unittest.TestCase):
         self.assertIn("## Claim-Level Evidence", summary)
         self.assertIn("## Consensus Snapshot", summary)
         self.assertIn("Support:", summary)
+        self.assertIn("Basis:", summary)
         self.assertIn("## Source Clusters", summary)
         self.assertIn("| Candidate | Cluster | Provider Support | Evidence Note |", summary)
         self.assertIn("## Decision Table", summary)

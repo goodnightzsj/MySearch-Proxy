@@ -13035,8 +13035,10 @@ class MySearchClient:
                     if str(cluster).strip()
                 )
                 support_level = str(item.get("support_level") or "").strip()
+                support_basis = str(item.get("support_basis") or "").strip()
                 suffix_bits = [
                     f"Support: {support_level}" if support_level else "",
+                    f"Basis: {support_basis}" if support_basis else "",
                     f"Sources: {sources}" if sources else "",
                     f"Providers: {providers}" if providers else "",
                     f"Clusters: {clusters}" if clusters else "",
@@ -13437,6 +13439,7 @@ class MySearchClient:
                 provider_count=int(entry["provider_count"] or 0),
                 cluster_count=int(entry["cluster_count"] or 0),
             )
+            entry["support_basis"] = self._research_claim_support_basis(entry)
             entry["_order_index"] = order_index
             claims.append(entry)
         if authoritative_preferred and not any(
@@ -13910,6 +13913,7 @@ class MySearchClient:
         if not claim_entry:
             return ""
         support_level = str(claim_entry.get("support_level") or "").strip()
+        support_basis = str(claim_entry.get("support_basis") or "").strip()
         source_count = int(claim_entry.get("source_count") or 0)
         provider_count = int(claim_entry.get("provider_count") or 0)
         cluster_count = int(claim_entry.get("cluster_count") or 0)
@@ -13921,12 +13925,38 @@ class MySearchClient:
             detail_bits.append(f"{source_count} source{'s' if source_count != 1 else ''}")
         if cluster_count > 1:
             detail_bits.append(f"{cluster_count} source clusters")
+        if support_basis and support_level == "single-source":
+            if detail_bits:
+                return f"{phrase} support anchored by {support_basis} ({', '.join(detail_bits)})"
+            if phrase:
+                return f"{phrase} support anchored by {support_basis}"
         if phrase and detail_bits:
             return f"{phrase} support across {', '.join(detail_bits)}"
         if phrase:
             return f"{phrase} support"
         if detail_bits:
             return f"supported by {', '.join(detail_bits)}"
+        return ""
+
+    def _research_claim_support_basis(self, claim_entry: Mapping[str, Any]) -> str:
+        providers = {
+            str(item).strip()
+            for item in (claim_entry.get("providers") or [])
+            if str(item).strip()
+        }
+        clusters = {
+            str(item).strip()
+            for item in (claim_entry.get("clusters") or [])
+            if str(item).strip()
+        }
+        if "project" in clusters:
+            return "shortlisted comparison page"
+        if "canonical_research_docs" in providers and (
+            "official" in clusters or "supporting" in clusters
+        ):
+            return "shortlisted vendor doc"
+        if "official" in clusters:
+            return "shortlisted official doc"
         return ""
 
     def _research_claim_support_rank(self, support_level: str) -> int:
