@@ -11867,7 +11867,40 @@ class MySearchClient:
             )
             if extracted_answer:
                 return extracted_answer
+            extracted_answer = self._extract_result_event_answer_from_official_page_html(
+                query=query,
+                url=url,
+            )
+            if extracted_answer:
+                return extracted_answer
         return ""
+
+    def _extract_result_event_answer_from_official_page_html(
+        self,
+        *,
+        query: str,
+        url: str,
+    ) -> str:
+        hostname = self._registered_domain(self._result_hostname({"url": url}))
+        if hostname not in {"oscars.org", "theacademy.com", "grammy.com", "grammys.com"}:
+            return ""
+        try:
+            status_code, response_text = self._request_text(
+                url=url,
+                timeout_seconds=min(self.config.timeout_seconds, 20),
+            )
+        except MySearchError:
+            return ""
+        if status_code >= 400 or not response_text:
+            return ""
+        plain = html.unescape(re.sub(r"<[^>]+>", " ", response_text))
+        plain = re.sub(r"\s+", " ", plain).strip()
+        if not plain:
+            return ""
+        return self._extract_result_event_answer_from_text(
+            query_lower=query.lower(),
+            text=plain,
+        )
 
     def _result_event_candidates(
         self,
@@ -12109,6 +12142,7 @@ class MySearchClient:
                 patterns=[
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+won[^\n]{0,80}\bbest picture\b",
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+is\s+the\s+(?:20\d{2}\s+)?best picture winner",
+                    r"best picture\s+winner\s+([^\n.;]{2,100})",
                     r"best picture\s*\.\s*winner\s*[\.\-–—: ]+\s*([^\n.;]{2,100})",
                     r"best picture\s*[–—:]\s*[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]",
                     r"best picture(?:\s+winner)?(?:\s*[–—:]|\s+was|\s+is|\s+goes to|\s+went to)\s+[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]",
@@ -12126,6 +12160,7 @@ class MySearchClient:
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+won[^\n]{0,80}\bbest actor\b",
                     r"([A-Z][A-Za-z0-9'’&.\- ]{2,100})\s+wins\s+best actor",
                     r"([A-Z][A-Za-z0-9'’&.\- ]{2,100})\s+is\s+the\s+(?:20\d{2}\s+)?best actor winner",
+                    r"best actor\s+winner\s+([^\n.;]{2,100})",
                     r"best actor\s*[–—:]\s*([^\n.;]{2,100})",
                     r"best actor(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)?\s+([^\n.;]{2,100})",
                     r"([A-Z][A-Za-z0-9'’&.\- ]{2,100})\s+won\s+best actor",
@@ -12151,6 +12186,7 @@ class MySearchClient:
                 patterns=[
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+(?:won|wins)[^\n]{0,80}\balbum of the year\b",
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+[–—:]\s*album of the year",
+                    r"album of the year\s+winner\s+([^\n.;]{2,100})",
                     r"album of the year\s*\.\s*winner\s*[\.\-–—: ]+\s*([^\n.;]{2,100})",
                     r"album of the year\s*[·•]\s*([^\n.;]{2,100})",
                     r"album of the year\s*[–—:]\s*([^\n.;]{2,100})",
@@ -12183,6 +12219,7 @@ class MySearchClient:
                 patterns=[
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+(?:won|wins)[^\n]{0,80}\brecord of the year\b",
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+[–—:]\s*record of the year",
+                    r"record of the year\s+winner\s+([^\n.;]{2,100})",
                     r"record of the year\s*[–—:]\s*([^\n.;]{2,100})",
                     r"record of the year(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)?\s+([^\n.;]{2,100})",
                     r"([^\n.;]{2,100})\s+wins\s+record of the year",

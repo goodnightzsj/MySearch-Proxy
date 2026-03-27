@@ -354,6 +354,42 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(result["answer"], "Best Picture winner: One Battle After Another")
 
+    def test_apply_result_event_answer_override_falls_back_to_official_award_page_html(self) -> None:
+        client = MySearchClient()
+        client.extract_url = lambda **_: {"content": ""}  # type: ignore[method-assign]
+        client._request_text = lambda **_: (  # type: ignore[method-assign]
+            200,
+            """
+            <html><body>
+              <div>Best Picture</div>
+              <div>Winner</div>
+              <div>One Battle After Another</div>
+            </body></html>
+            """,
+        )
+
+        result = client._apply_result_event_answer_override(
+            query="2026 Oscars best picture winner",
+            mode="news",
+            intent="news",
+            strategy="verify",
+            result={
+                "answer": "",
+                "results": [
+                    {
+                        "title": "The 98th Academy Awards | 2026 - Oscars.org",
+                        "url": "https://www.oscars.org/oscars/ceremonies/2026",
+                        "snippet": "Official ceremony page.",
+                        "content": "",
+                    }
+                ],
+                "evidence": {},
+            },
+        )
+
+        self.assertEqual(result["answer"], "Best Picture winner: One Battle After Another")
+        self.assertEqual(result["evidence"]["answer_source"], "result-event-extraction")
+
     def test_apply_result_event_answer_override_extracts_best_actor_from_headline_style_result(self) -> None:
         client = MySearchClient()
 
