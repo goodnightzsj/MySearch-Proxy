@@ -2216,6 +2216,12 @@ class MySearchClient:
                     "url": "https://docs.exa.ai/reference/search",
                     "snippet": "Exa provides a search API for semantic web retrieval and content discovery.",
                 },
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Contents Retrieval - Exa",
+                    "url": "https://exa.ai/docs/reference/contents-retrieval",
+                    "snippet": "Exa supports contents retrieval for full text, summaries, highlights, and context extraction across fetched pages.",
+                },
             ],
             "apify": [
                 {
@@ -12950,6 +12956,7 @@ class MySearchClient:
             "provider_roles": provider_roles[:4],
             "coverage_bits": coverage_bits,
             "claim_evidence": claim_evidence[:4],
+            "claim_level_evidence": claim_evidence[:4],
             "source_clusters": source_clusters[:5],
             "social_signal": social_signal,
             "caveats": significant_conflicts[:4],
@@ -13737,6 +13744,8 @@ class MySearchClient:
             compact,
         )
         compact = re.sub(r"(?i)^comparison\s+", "", compact).strip()
+        compact = re.sub(r"(?i)^summary\s*:\s*", "", compact).strip()
+        compact = re.sub(r"(?i)^tl\s*;?\s*dr\s*:\s*", "", compact).strip()
         compact = re.sub(r"(?i)^abstract\s+", "", compact).strip()
         compact = re.sub(
             r"(?i)^[A-Z][a-z]+\s+\d{1,2}(?:st|nd|rd|th),\s+\d{4}\s+by\s+"
@@ -13901,7 +13910,7 @@ class MySearchClient:
         provider_count: int,
         cluster_count: int,
     ) -> str:
-        if source_count >= 2 and provider_count >= 2:
+        if provider_count >= 2 and source_count >= 1:
             return "cross-provider"
         if source_count >= 3 or cluster_count >= 2:
             return "multi-source"
@@ -13914,6 +13923,8 @@ class MySearchClient:
             return ""
         support_level = str(claim_entry.get("support_level") or "").strip()
         support_basis = str(claim_entry.get("support_basis") or "").strip()
+        if not support_basis:
+            support_basis = self._research_claim_support_basis(claim_entry)
         source_count = int(claim_entry.get("source_count") or 0)
         provider_count = int(claim_entry.get("provider_count") or 0)
         cluster_count = int(claim_entry.get("cluster_count") or 0)
@@ -13925,11 +13936,19 @@ class MySearchClient:
             detail_bits.append(f"{source_count} source{'s' if source_count != 1 else ''}")
         if cluster_count > 1:
             detail_bits.append(f"{cluster_count} source clusters")
-        if support_basis and support_level == "single-source":
-            if detail_bits:
-                return f"{phrase} support anchored by {support_basis} ({', '.join(detail_bits)})"
+        if support_basis:
+            if support_level == "single-source":
+                if detail_bits:
+                    return f"{phrase} support anchored by {support_basis} ({', '.join(detail_bits)})"
+                if phrase:
+                    return f"{phrase} support anchored by {support_basis}"
             if phrase:
-                return f"{phrase} support anchored by {support_basis}"
+                if detail_bits:
+                    return f"{phrase} support across {support_basis} ({', '.join(detail_bits)})"
+                return f"{phrase} support across {support_basis}"
+            if detail_bits:
+                return f"supported across {support_basis} ({', '.join(detail_bits)})"
+            return f"supported across {support_basis}"
         if phrase and detail_bits:
             return f"{phrase} support across {', '.join(detail_bits)}"
         if phrase:
@@ -13939,6 +13958,7 @@ class MySearchClient:
         return ""
 
     def _research_claim_support_basis(self, claim_entry: Mapping[str, Any]) -> str:
+        support_level = str(claim_entry.get("support_level") or "").strip()
         providers = {
             str(item).strip()
             for item in (claim_entry.get("providers") or [])
@@ -13949,14 +13969,28 @@ class MySearchClient:
             for item in (claim_entry.get("clusters") or [])
             if str(item).strip()
         }
-        if "project" in clusters:
-            return "shortlisted comparison page"
-        if "canonical_research_docs" in providers and (
+        has_project = "project" in clusters
+        has_vendor_docs = "canonical_research_docs" in providers and (
             "official" in clusters or "supporting" in clusters
-        ):
-            return "shortlisted vendor doc"
-        if "official" in clusters:
-            return "shortlisted official doc"
+        )
+        has_official = "official" in clusters
+
+        if has_project and has_vendor_docs:
+            return "shortlisted comparison page and vendor docs"
+        if has_project:
+            return "shortlisted comparison page"
+        if has_vendor_docs:
+            return (
+                "shortlisted vendor docs"
+                if support_level in {"cross-provider", "multi-source", "corroborated"}
+                else "shortlisted vendor doc"
+            )
+        if has_official:
+            return (
+                "shortlisted official docs"
+                if support_level in {"cross-provider", "multi-source", "corroborated"}
+                else "shortlisted official doc"
+            )
         return ""
 
     def _research_claim_support_rank(self, support_level: str) -> int:
@@ -14140,6 +14174,11 @@ class MySearchClient:
             "\"required\": [",
             "firecrawl = firecrawl(",
             "from firecrawl import firecrawl",
+            "your-api-key",
+            "const exa = new exa(",
+            "await exa.getcontents(",
+            "highlights: {",
+            "maxcharacters:",
         )
         if sum(1 for marker in code_like_markers if marker in lowered) >= 2:
             return True
@@ -14155,6 +14194,11 @@ class MySearchClient:
                 "generated using ai and may contain mistakes",
                 "api_key=",
                 "schema = {",
+                "your-api-key",
+                "const exa = new exa(",
+                "await exa.getcontents(",
+                "highlights: {",
+                "maxcharacters:",
                 "reasoning tokens pricing per 1m tokens",
                 "context window",
                 "knowledge cutoff",

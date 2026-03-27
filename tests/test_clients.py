@@ -7691,6 +7691,7 @@ class MySearchClientTests(unittest.TestCase):
         urls = [item["url"] for item in results]
         self.assertEqual(urls[0], "https://exa.ai/versus/tavily")
         self.assertIn("https://docs.exa.ai/reference/search", urls)
+        self.assertIn("https://exa.ai/docs/reference/contents-retrieval", urls)
         self.assertIn("https://docs.tavily.com/documentation/api-reference/search", urls)
         self.assertIn("https://exa.ai/versus/tavily", urls)
 
@@ -8216,6 +8217,21 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(claim, "")
 
+    def test_research_claim_text_drops_exa_js_code_example_noise(self) -> None:
+        client = MySearchClient()
+
+        claim = client._research_claim_text(
+            title="Contents API - Exa",
+            excerpt=(
+                'const exa = new Exa("your-api-key"); '
+                "const result = await exa.getContents([\"https://example.com\"], "
+                "{ highlights: { maxCharacters: 4000 } });"
+            ),
+            comparison_like=True,
+        )
+
+        self.assertEqual(claim, "")
+
     def test_research_claim_text_prefers_substantive_excerpt_over_generic_supporting_title(self) -> None:
         client = MySearchClient()
 
@@ -8490,8 +8506,8 @@ class MySearchClientTests(unittest.TestCase):
             item for item in claims
             if "Tavily exposes a search API for web retrieval" in str(item.get("claim") or "")
         )
-        self.assertEqual(tavily_claim["support_level"], "single-source")
-        self.assertEqual(tavily_claim["support_basis"], "shortlisted vendor doc")
+        self.assertEqual(tavily_claim["support_level"], "cross-provider")
+        self.assertEqual(tavily_claim["support_basis"], "shortlisted vendor docs")
 
     def test_research_claim_evidence_drops_supporting_tail_when_official_anchors_are_sufficient(
         self,
@@ -8753,8 +8769,13 @@ class MySearchClientTests(unittest.TestCase):
             executive_summary_override="",
         )
 
+        self.assertIn("Agentic retrieval in Azure AI Search.", sections["executive_summary"])
         self.assertIn(
-            "Supporting sources and corroborating analysis were found; the strongest anchors include Agentic retrieval in Azure AI Search (azure.cn).",
+            "Agentic retrieval in Azure AI Search is the strongest current fit for supporting analysis.",
+            sections["executive_summary"],
+        )
+        self.assertIn(
+            "Cross provider support across 2 providers, 1 source.",
             sections["executive_summary"],
         )
         self.assertEqual(
@@ -8821,6 +8842,23 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertIn("Firecrawl handles full web extraction", claim)
         self.assertNotIn("Complete Comparison for AI Agents", claim)
+
+    def test_research_claim_text_strips_summary_prefix_from_comparison_pages(self) -> None:
+        client = MySearchClient()
+
+        claim = client._research_claim_text(
+            title="Exa vs Tavily: AI Search API Comparison 2026",
+            excerpt=(
+                "Summary: When building autonomous agents, the choice of backend dictates capability. "
+                "Exa is faster, more accurate on hard queries, and has dedicated people, company, and code search."
+            ),
+            comparison_like=True,
+        )
+
+        self.assertEqual(
+            claim,
+            "When building autonomous agents, the choice of backend dictates capability",
+        )
 
     def test_research_claim_text_accepts_short_imperative_vendor_doc_excerpt(self) -> None:
         client = MySearchClient()
@@ -9354,7 +9392,69 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(sorted(claims[0]["providers"]), ["exa", "tavily"])
         self.assertEqual(len(claims[0]["sources"]), 2)
         self.assertEqual(claims[0]["support_level"], "cross-provider")
+        self.assertEqual(claims[0]["support_basis"], "shortlisted official docs")
+        self.assertIn("cross provider support across shortlisted official docs", client._research_claim_support_phrase(claims[0]))
         self.assertIn("official", claims[0]["clusters"])
+
+    def test_research_claim_support_basis_prefers_comparison_page_and_vendor_docs(self) -> None:
+        client = MySearchClient()
+
+        entry = {
+            "support_level": "cross-provider",
+            "providers": ["canonical_research_projects", "canonical_research_docs"],
+            "clusters": ["project", "supporting"],
+            "source_count": 2,
+            "provider_count": 2,
+            "cluster_count": 2,
+        }
+
+        self.assertEqual(
+            client._research_claim_support_basis(entry),
+            "shortlisted comparison page and vendor docs",
+        )
+        self.assertIn(
+            "cross provider support across shortlisted comparison page and vendor docs",
+            client._research_claim_support_phrase(entry),
+        )
+
+    def test_research_claim_evidence_marks_same_source_multi_provider_as_cross_provider(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        claims = client._build_research_claim_evidence(
+            query="compare Tavily and Exa for AI agent web retrieval 2026",
+            mode="research",
+            ordered_results=[
+                {
+                    "provider": "exa",
+                    "matched_providers": ["exa"],
+                    "title": "Search API - Tavily",
+                    "url": "https://docs.tavily.com/documentation/api-reference/search",
+                    "snippet": "Tavily exposes a search API for web retrieval, real-time discovery, and agent search workflows.",
+                },
+                {
+                    "provider": "tavily",
+                    "matched_providers": ["tavily"],
+                    "title": "Search API - Tavily",
+                    "url": "https://docs.tavily.com/documentation/api-reference/search",
+                    "snippet": "Tavily exposes a search API for web retrieval, real-time discovery, and agent search workflows.",
+                },
+            ],
+            pages=[],
+            citations=[],
+            comparison_like=True,
+            include_domains=None,
+            authoritative_preferred=True,
+        )
+
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(claims[0]["support_level"], "cross-provider")
+        self.assertEqual(claims[0]["support_basis"], "shortlisted official docs")
+        self.assertIn(
+            "cross provider support across shortlisted official docs",
+            client._research_claim_support_phrase(claims[0]),
+        )
 
     def test_dedupe_research_results_hydrates_weak_snippet_from_canonical_docs(self) -> None:
         client = MySearchClient()
@@ -9580,6 +9680,7 @@ class MySearchClientTests(unittest.TestCase):
         summary = client._render_research_report(sections)
 
         self.assertIn("claim_evidence", sections)
+        self.assertEqual(sections["claim_level_evidence"], sections["claim_evidence"])
         self.assertIn("consensus_snapshot", sections)
         self.assertIn("source_clusters", sections)
         self.assertIn("decision_table", sections)
