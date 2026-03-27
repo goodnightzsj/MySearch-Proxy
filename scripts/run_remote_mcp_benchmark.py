@@ -935,7 +935,12 @@ def merge_output_rows(
     result_map = {item["benchmark_id"]: item for item in results}
     input_row_map = {row["benchmark_id"]: row for row in input_rows}
     selected_ids = {row["benchmark_id"] for row in selected_rows}
-    merged = dict(existing_rows)
+    active_ids = {row["benchmark_id"] for row in input_rows}
+    merged = {
+        benchmark_id: row
+        for benchmark_id, row in existing_rows.items()
+        if benchmark_id in active_ids
+    }
 
     for benchmark_id in selected_ids:
         if benchmark_id not in result_map:
@@ -950,10 +955,6 @@ def merge_output_rows(
 
     ordered_ids = []
     seen = set()
-    for benchmark_id in existing_order:
-        if benchmark_id in merged and benchmark_id not in seen:
-            ordered_ids.append(benchmark_id)
-            seen.add(benchmark_id)
     for row in input_rows:
         benchmark_id = row["benchmark_id"]
         if benchmark_id in merged and benchmark_id not in seen:
