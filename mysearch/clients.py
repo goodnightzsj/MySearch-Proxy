@@ -12898,9 +12898,11 @@ class MySearchClient:
             support_phrase = self._research_claim_support_phrase(top_claim)
             if comparison_like and decision_table:
                 primary_finding = (
-                    f"{top_claim_text}. {decision_table[0]['candidate']} is the strongest current fit "
+                    f"{decision_table[0]['candidate']} is the strongest current fit "
                     f"for {decision_table[0]['fit']}."
                 )
+                if top_claim_text:
+                    primary_finding += f" {top_claim_text}."
             else:
                 primary_finding = top_claim_text
             if support_phrase:
