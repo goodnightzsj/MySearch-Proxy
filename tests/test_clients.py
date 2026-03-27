@@ -4582,6 +4582,44 @@ class MySearchClientTests(unittest.TestCase):
         self.assertIn("Top official match: useEffectEvent", result["summary"])
         self.assertIn("React Hook", result["summary"])
 
+    def test_search_docs_summary_omits_navigation_shell_for_top_official_match(self) -> None:
+        client = MySearchClient()
+        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "Webhooks | OpenAI API",
+                    "url": "https://developers.openai.com/api/docs/guides/webhooks/",
+                    "snippet": "Guides and concepts for the OpenAI API](/api/docs)[API reference. * [Latest: GPT-5.4](/api/docs/guides/latest-model). * [Overview](/api/docs/guides/agents).",
+                    "content": "",
+                }
+            ],
+            "citations": [
+                {
+                    "title": "Webhooks | OpenAI API",
+                    "url": "https://developers.openai.com/api/docs/guides/webhooks/",
+                }
+            ],
+        }
+
+        result = client.search(
+            query="OpenAI webhooks official docs",
+            mode="docs",
+            strategy="verify",
+            provider="tavily",
+            include_answer=False,
+        )
+
+        self.assertEqual(
+            result["summary"],
+            "Top official match: Webhooks | OpenAI API (openai.com)",
+        )
+
     def test_search_strict_official_mode_reranks_locale_variant_below_canonical_page(self) -> None:
         client = MySearchClient()
         client._search_exa = lambda **kwargs: {  # type: ignore[method-assign]
