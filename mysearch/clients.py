@@ -13027,9 +13027,35 @@ class MySearchClient:
                     )
                 ):
                     evidence_note = ""
-                if not evidence_note:
-                    evidence_note = claim_by_url.get(url, "").strip()
-                if not evidence_note:
+                normalized_note = self._normalize_research_claim_text(
+                    evidence_note,
+                    comparison_like=comparison_like,
+                ) if evidence_note else ""
+                note_is_link_index = bool(evidence_note) and self._research_excerpt_looks_like_link_index_noise(
+                    evidence_note
+                )
+                note_is_substantive = bool(normalized_note) and self._research_excerpt_has_substantive_claim(
+                    normalized_note
+                )
+                claim_note = claim_by_url.get(url, "").strip()
+                if claim_note and (
+                    not evidence_note
+                    or self._research_excerpt_looks_like_navigation_noise(evidence_note)
+                    or note_is_link_index
+                    or not note_is_substantive
+                ):
+                    evidence_note = claim_note
+                    normalized_note = self._normalize_research_claim_text(
+                        evidence_note,
+                        comparison_like=comparison_like,
+                    )
+                    note_is_link_index = False
+                    note_is_substantive = bool(normalized_note) and self._research_excerpt_has_substantive_claim(
+                        normalized_note
+                    )
+                if not evidence_note or (
+                    cluster_label == "official" and (note_is_link_index or not note_is_substantive)
+                ):
                     title_note = self._normalize_research_claim_text(
                         candidate or title,
                         comparison_like=comparison_like,
@@ -13910,6 +13936,10 @@ class MySearchClient:
                     if comparison_like and self._research_claim_is_generic(cleaned_title):
                         return ""
                     return cleaned_title
+                if cleaned_title and self._research_excerpt_looks_like_link_index_noise(cleaned_excerpt):
+                    if comparison_like and self._research_claim_is_generic(cleaned_title):
+                        return ""
+                    return cleaned_title
                 if self._research_excerpt_looks_like_schema_noise(cleaned_excerpt):
                     if cleaned_title and not self._research_claim_is_generic(cleaned_title):
                         return cleaned_title
@@ -14012,6 +14042,8 @@ class MySearchClient:
             if not cleaned:
                 continue
             if self._research_excerpt_looks_like_navigation_noise(cleaned):
+                continue
+            if self._research_excerpt_looks_like_link_index_noise(cleaned):
                 continue
             if self._research_excerpt_looks_like_noise(cleaned):
                 continue
@@ -14425,6 +14457,26 @@ class MySearchClient:
             marker in normalized
             for marker in markers
         )
+
+    def _research_excerpt_looks_like_link_index_noise(self, text: str) -> bool:
+        normalized = re.sub(r"\s+", " ", text).strip()
+        if not normalized:
+            return False
+        lowered = normalized.lower()
+        markdown_link_count = normalized.count("](")
+        if markdown_link_count >= 2:
+            return True
+        if "![image" in lowered or "[![image" in lowered:
+            return True
+        if normalized.startswith(("* [", "- [")) and markdown_link_count >= 1:
+            return True
+        if normalized.startswith("# ") and (
+            markdown_link_count >= 1
+            or "openai developers" in lowered
+            or "api reference" in lowered
+        ):
+            return True
+        return False
 
     def _research_excerpt_looks_like_navigation_noise(self, text: str) -> bool:
         lowered = text.lower()
