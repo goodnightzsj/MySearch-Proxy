@@ -3,6 +3,7 @@ import argparse
 import base64
 import csv
 import json
+import re
 import subprocess
 import sys
 import urllib.parse
@@ -315,6 +316,7 @@ def build_case(row: dict[str, str]) -> dict[str, object]:
 REMOTE_SCRIPT = r"""
 import base64
 import json
+import re
 import sys
 import time
 import urllib.error
@@ -358,6 +360,23 @@ def first_nonempty(*values):
     return ""
 
 
+def extract_urls_from_text(text):
+    if not isinstance(text, str) or not text.strip():
+        return []
+    urls = []
+    for match in re.findall(r"https?://[^\s<>\]\)]+", text):
+        cleaned = match.rstrip(".,);:!?")
+        if cleaned:
+            urls.append(cleaned)
+    deduped = []
+    seen = set()
+    for url in urls:
+        if url not in seen:
+            seen.add(url)
+            deduped.append(url)
+    return deduped
+
+
 def collect_urls(blob):
     urls = []
     if isinstance(blob, dict):
@@ -369,6 +388,7 @@ def collect_urls(blob):
                 for item in value:
                     if isinstance(item, dict) and isinstance(item.get("url"), str) and item["url"]:
                         urls.append(item["url"])
+        urls.extend(extract_urls_from_text(blob.get("content", "")))
     deduped = []
     seen = set()
     for url in urls:
@@ -385,7 +405,28 @@ def collect_citation_count(blob):
         value = blob.get(key)
         if isinstance(value, list) and value:
             return len(value)
+    extracted = extract_urls_from_text(blob.get("content", ""))
+    if extracted:
+        return len(extracted)
     return 0
+
+
+def extract_error_summary(blob):
+    if not isinstance(blob, dict):
+        return ""
+    detail = blob.get("detail")
+    detail_text = ""
+    if isinstance(detail, dict):
+        detail_text = first_nonempty(
+            detail.get("error", ""),
+            detail.get("message", ""),
+            detail.get("detail", ""),
+        )
+    return first_nonempty(
+        blob.get("error", ""),
+        blob.get("message", ""),
+        detail_text,
+    )
 
 
 def collect_conflicts(blob):
@@ -473,6 +514,7 @@ def summarize(blob):
         first_result.get("content", "") if isinstance(first_result, dict) else "",
         blob.get("content", ""),
         blob.get("text", ""),
+        extract_error_summary(blob),
         blob.get("_text", ""),
         blob.get("server_name", ""),
     )
@@ -492,6 +534,30 @@ def summarize(blob):
         "empty_result": not urls and not summary.strip(),
         "fallback_used": fallback_used(blob),
     }
+
+
+def classify_tavily_structural_failure(raw_text, benchmark_id):
+    if not isinstance(raw_text, str) or not raw_text.strip():
+        return ""
+    try:
+        blob = json.loads(raw_text)
+    except Exception:
+        return ""
+    if not isinstance(blob, dict):
+        return ""
+    status = blob.get("status")
+    detail = blob.get("detail")
+    detail_text = ""
+    if isinstance(detail, dict):
+        detail_text = first_nonempty(detail.get("error", ""), detail.get("message", ""))
+    lowered = f"{status} {blob.get('error', '')} {detail_text}".lower()
+    if "research" not in str(benchmark_id).lower():
+        return ""
+    if "excessive requests" in lowered or str(status) == "429":
+        return "tavily-research-upstream-rate-limited"
+    if "usage limit" in lowered or str(status) == "432":
+        return "tavily-research-upstream-plan-limited"
+    return ""
 
 
 class MCPClient:
@@ -763,6 +829,31 @@ def write_raw(raw_dir: Path, benchmark_id: str, provider: str, text: str) -> str
     return str(path)
 
 
+def classify_tavily_structural_failure(raw_text: str, benchmark_id: str) -> str:
+    if not raw_text.strip() or "research" not in str(benchmark_id).lower():
+        return ""
+    try:
+        blob = json.loads(raw_text)
+    except Exception:
+        return ""
+    if not isinstance(blob, dict):
+        return ""
+    detail = blob.get("detail")
+    detail_text = ""
+    if isinstance(detail, dict):
+        for key in ("error", "message", "detail"):
+            value = detail.get(key, "")
+            if isinstance(value, str) and value.strip():
+                detail_text = value.strip()
+                break
+    lowered = f"{blob.get('status', '')} {blob.get('error', '')} {detail_text}".lower()
+    if "excessive requests" in lowered or str(blob.get("status")) == "429":
+        return "tavily-research-upstream-rate-limited"
+    if "usage limit" in lowered or str(blob.get("status")) == "432":
+        return "tavily-research-upstream-plan-limited"
+    return ""
+
+
 def load_existing_rows(path: Path) -> tuple[list[str], dict[str, dict[str, str]]]:
     if not path.exists():
         return [], {}
@@ -824,6 +915,10 @@ def build_output_row(
     row["winner_reason"] = existing.get("winner_reason", "matrix raw capture completed; scoring pending") if preserve_tavily else "matrix raw capture completed; scoring pending"
     row["structural_failure"] = existing.get("structural_failure", "")
     row["optimization_hint"] = existing.get("optimization_hint", "")
+    if not row["structural_failure"]:
+        tavily_failure = classify_tavily_structural_failure(tavily_raw, input_row["benchmark_id"])
+        if tavily_failure:
+            row["structural_failure"] = tavily_failure
     return row
 
 
