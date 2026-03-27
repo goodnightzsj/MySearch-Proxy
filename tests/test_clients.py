@@ -1734,6 +1734,23 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(answer, "Album of the Year winner: Bad Bunny")
 
+    def test_extract_result_event_answer_prefers_artist_for_grammy_official_win_sentence(self) -> None:
+        client = MySearchClient()
+
+        answer = client._extract_result_event_answer(
+            query="2026 Grammy album of the year winner",
+            results=[
+                {
+                    "title": "2026 Grammys: See The Full Winners & Nominees List",
+                    "url": "https://grammy.com/news/2026-grammys-nominations-full-winners-nominees-list",
+                    "snippet": "Bad Bunny wins the Grammy for Album Of The Year at the 2026 Grammys.",
+                    "content": "",
+                }
+            ],
+        )
+
+        self.assertEqual(answer, "Album of the Year winner: Bad Bunny")
+
     def test_extract_result_event_answer_skips_conflicting_award_snippet_before_exact_category_page(self) -> None:
         client = MySearchClient()
 
