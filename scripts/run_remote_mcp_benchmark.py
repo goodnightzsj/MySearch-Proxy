@@ -5,6 +5,7 @@ import csv
 import json
 import subprocess
 import sys
+import urllib.parse
 from datetime import date
 from pathlib import Path
 from typing import Optional
@@ -464,6 +465,9 @@ def summarize(blob):
         blob.get("answer", ""),
         blob.get("summary", ""),
         blob.get("research_summary", ""),
+        blob.get("report", ""),
+        blob.get("response", ""),
+        blob.get("output", "") if isinstance(blob.get("output"), str) else "",
         blob.get("xai_arbitration_summary", ""),
         first_result.get("snippet", "") if isinstance(first_result, dict) else "",
         first_result.get("content", "") if isinstance(first_result, dict) else "",
@@ -591,6 +595,86 @@ class MCPClient:
         raise RuntimeError("unreachable MCP call state")
 
 
+def derive_tavily_rest_url(mcp_url, tool_name):
+    if tool_name == "tavily_search":
+        suffix = "/api/tavily/search"
+    elif tool_name == "tavily_extract":
+        suffix = "/api/tavily/extract"
+    elif tool_name == "tavily_research":
+        suffix = "/api/tavily/research"
+    else:
+        return None
+    parsed = urllib.parse.urlsplit(mcp_url)
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    return f"{base}{suffix}"
+
+
+class TavilyRestClient:
+    def __init__(self, mcp_url, bearer):
+        self.mcp_url = mcp_url
+        self.headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": f"Bearer {bearer}",
+        }
+
+    def _request_json(self, method, url, payload=None, timeout=120, retries=4):
+        data = None if payload is None else json.dumps(payload).encode()
+        last_error = None
+        for attempt in range(retries):
+            req = urllib.request.Request(url, data=data, headers=self.headers, method=method)
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    text = resp.read().decode(errors="replace")
+                    return json.loads(text)
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode(errors="replace")
+                last_error = RuntimeError(f"HTTP {exc.code}: {body[:300]}")
+                if exc.code in {429, 500, 502, 503, 504} and attempt + 1 < retries:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                raise last_error
+            except Exception as exc:
+                last_error = exc
+                if attempt + 1 < retries:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                raise
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("unreachable tavily rest state")
+
+    def call_tool(self, tool_name, arguments):
+        endpoint = derive_tavily_rest_url(self.mcp_url, tool_name)
+        if not endpoint:
+            raise RuntimeError(f"tavily-rest-unsupported:{tool_name}")
+        payload = dict(arguments or {})
+        blob = self._request_json("POST", endpoint, payload, timeout=120, retries=4)
+        if tool_name == "tavily_research" and isinstance(blob, dict):
+            status = str(blob.get("status") or "").lower()
+            request_id = str(blob.get("request_id") or "").strip()
+            if request_id and status in {"pending", "in_progress"}:
+                poll_url = f"{endpoint}/{request_id}"
+                deadline = time.time() + 240
+                while time.time() < deadline:
+                    time.sleep(5)
+                    polled = self._request_json("GET", poll_url, None, timeout=120, retries=4)
+                    if not isinstance(polled, dict):
+                        blob = polled
+                        break
+                    blob = polled
+                    polled_status = str(polled.get("status") or "").lower()
+                    if polled_status not in {"pending", "in_progress"}:
+                        break
+                else:
+                    raise RuntimeError("tavily-rest-research-timeout")
+        if isinstance(blob, dict) and "provider" not in blob:
+            blob["provider"] = "tavily_rest"
+        return {"result": {"content": [{"type": "text", "text": json.dumps(blob, ensure_ascii=False)}]}}
+
+
 def timed_tool_runs(client, tool_name, arguments, repeat_runs):
     latencies = []
     errors = []
@@ -645,9 +729,11 @@ payload = json.loads(base64.b64decode(sys.argv[1]).decode())
 mysearch = MCPClient(payload["mysearch_url"])
 mysearch.initialize()
 tavily = None
+tavily_rest = None
 if not payload.get("mysearch_only"):
     tavily = MCPClient(payload["tavily_url"], {"Authorization": f'Bearer {payload["tavily_bearer"]}'})
     tavily.initialize()
+    tavily_rest = TavilyRestClient(payload["tavily_url"], payload["tavily_bearer"])
 
 output = []
 for case in payload["cases"]:
@@ -722,9 +808,34 @@ for case in payload["cases"]:
                 row["run_status"] = "partial-error" if row["run_status"] == "captured" else row["run_status"]
                 row["error"] = (row["error"] + " ; " if row["error"] else "") + f"tavily-repeat: {observed['error']}"
         except Exception as exc:
-            row["run_status"] = "partial-error" if row["run_status"] == "captured" else "error"
-            row["error"] = (row["error"] + " ; " if row["error"] else "") + f"tavily: {exc}"
-            row["tavily_raw"] = ""
+            detail = str(exc)
+            if "mcp-session-transport-blocked" in detail and tavily_rest is not None:
+                try:
+                    observed = timed_tool_runs(tavily_rest, case["tavily_tool"], case["tavily_args"], repeat_runs)
+                    row["tavily_summary"] = observed["summary"]
+                    row["tavily_top_urls"] = " | ".join(observed["urls"])
+                    row["tavily_citation_count"] = observed["citation_count"]
+                    row["tavily_latency_ms"] = observed["latency_ms"]
+                    row["tavily_repeat_variance"] = observed["repeat_variance"]
+                    row["tavily_empty_result"] = observed["empty_result"]
+                    row["tavily_timeout"] = observed["timeout"]
+                    row["tavily_fallback_used"] = observed["fallback_used"]
+                    row["tavily_raw"] = observed["raw_text"]
+                    row["tavily_tool"] = f"{case['tavily_tool']}:rest-fallback"
+                    if observed["partial_error"]:
+                        row["run_status"] = "partial-error" if row["run_status"] == "captured" else row["run_status"]
+                        row["error"] = (row["error"] + " ; " if row["error"] else "") + f"tavily-rest-repeat: {observed['error']}"
+                except Exception as rest_exc:
+                    row["run_status"] = "partial-error" if row["run_status"] == "captured" else "error"
+                    row["error"] = (
+                        (row["error"] + " ; " if row["error"] else "")
+                        + f"tavily: {exc} ; tavily-rest: {rest_exc}"
+                    )
+                    row["tavily_raw"] = ""
+            else:
+                row["run_status"] = "partial-error" if row["run_status"] == "captured" else "error"
+                row["error"] = (row["error"] + " ; " if row["error"] else "") + f"tavily: {exc}"
+                row["tavily_raw"] = ""
     output.append(row)
 
 print(json.dumps(output, ensure_ascii=False))
@@ -838,7 +949,19 @@ def build_output_row(
     row["structural_failure"] = existing.get("structural_failure", "")
     row["optimization_hint"] = existing.get("optimization_hint", "")
     error_text = str(row.get("error") or "")
-    if "mcp-session-transport-blocked" in error_text:
+    if "tavily-rest-research-timeout" in error_text or (
+        "tavily-rest:" in error_text and "proxy_error" in error_text and "upstream unavailable" in error_text
+    ):
+        row["run_status"] = "comparator-blocked"
+        row["winner"] = "blocked"
+        row["winner_reason"] = (
+            "comparator path blocked; mysearch evidence captured but tavily-hikari research upstream is unavailable"
+        )
+        row["structural_failure"] = "tavily-research-upstream-blocked"
+        row["optimization_hint"] = (
+            "treat Tavily research as temporarily unavailable in internal dual-MCP validation and use direct Tavily REST only once its async upstream stabilizes"
+        )
+    elif "mcp-session-transport-blocked" in error_text:
         row["run_status"] = "comparator-blocked"
         row["winner"] = "blocked"
         row["winner_reason"] = (
