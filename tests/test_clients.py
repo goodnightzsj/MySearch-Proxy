@@ -2459,8 +2459,8 @@ class MySearchClientTests(unittest.TestCase):
             raise MySearchError("xai request timeout after 45s: http://127.0.0.1:9874/social/search")
 
         client._request_json = fake_request_json  # type: ignore[method-assign]
-        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
-            "provider": "tavily",
+        client._search_tavily_social_fallback = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily_social_fallback",
             "transport": "env",
             "query": kwargs["query"],
             "answer": "Fallback social summary",
@@ -2475,6 +2475,7 @@ class MySearchClientTests(unittest.TestCase):
                 }
             ],
             "citations": [{"title": "OpenAI on X", "url": "https://x.com/OpenAI/status/123"}],
+            "fallback": {"from": "xai_compatible", "to": "tavily_social_fallback", "reason": "timeout"},
         }
 
         result = client._search_xai_compatible(
@@ -2490,7 +2491,8 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertEqual(len(calls), 3)
-        self.assertEqual(calls[0]["timeout_seconds"], 120)
+        self.assertGreaterEqual(calls[0]["timeout_seconds"], 100)
+        self.assertLess(calls[0]["timeout_seconds"], 120)
         self.assertEqual(result["provider"], "tavily_social_fallback")
         self.assertEqual(result["results"][0]["url"], "https://x.com/OpenAI/status/123")
         self.assertEqual(result["fallback"]["from"], "xai_compatible")
@@ -2516,8 +2518,8 @@ class MySearchClientTests(unittest.TestCase):
                 }
             ],
         }
-        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
-            "provider": "tavily",
+        client._search_tavily_social_fallback = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily_social_fallback",
             "transport": "env",
             "query": kwargs["query"],
             "answer": "Fallback social summary",
@@ -2532,6 +2534,11 @@ class MySearchClientTests(unittest.TestCase):
                 }
             ],
             "citations": [{"title": "OpenAI on X", "url": "https://x.com/OpenAI/status/456"}],
+            "fallback": {
+                "from": "xai_compatible",
+                "to": "tavily_social_fallback",
+                "reason": "xai compatible returned no x.com/twitter.com results",
+            },
         }
 
         result = client._search_xai_compatible(
@@ -2760,8 +2767,8 @@ class MySearchClientTests(unittest.TestCase):
             raise MySearchError("xai request timeout after 120s: http://127.0.0.1:9874/social/search")
 
         client._request_json = fake_request_json  # type: ignore[method-assign]
-        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
-            "provider": "tavily",
+        client._search_tavily_social_fallback = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily_social_fallback",
             "transport": "env",
             "query": kwargs["query"],
             "answer": "Fallback social summary",
@@ -2961,8 +2968,8 @@ class MySearchClientTests(unittest.TestCase):
             raise AssertionError("custom social should not run when gateway outage cache exists")
 
         client._request_json = fail_request_json  # type: ignore[method-assign]
-        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
-            "provider": "tavily",
+        client._search_tavily_social_fallback = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily_social_fallback",
             "transport": "env",
             "query": kwargs["query"],
             "answer": "Fallback social summary",
@@ -3214,7 +3221,7 @@ class MySearchClientTests(unittest.TestCase):
             include_x_videos=False,
         )
 
-        self.assertEqual(timeout_calls, [120])
+        self.assertEqual(timeout_calls, [105])
         self.assertEqual(result["provider"], "custom_social")
         self.assertTrue(result["cache"]["social"]["hit"])
         self.assertEqual(result["fallback"]["to"], "social_last_good_cache")
@@ -3233,7 +3240,7 @@ class MySearchClientTests(unittest.TestCase):
         client.config.xai_social_timeout_seconds = 120
 
         timeout_calls: list[int] = []
-        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+        client._search_tavily_social_fallback = lambda **kwargs: {  # type: ignore[method-assign]
             "provider": "tavily",
             "transport": "env",
             "query": kwargs["query"],
@@ -3276,12 +3283,12 @@ class MySearchClientTests(unittest.TestCase):
                 include_x_videos=False,
             )
 
-        self.assertEqual(timeout_calls, [120])
-        self.assertEqual(result["provider"], "tavily_social_fallback")
+        self.assertEqual(timeout_calls, [105])
+        self.assertEqual(result["provider"], "social_unavailable")
 
     def test_tavily_social_fallback_diversifies_repeated_handles(self) -> None:
         client = MySearchClient()
-        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+        client._search_tavily_once = lambda **kwargs: {  # type: ignore[method-assign]
             "provider": "tavily",
             "transport": "env",
             "query": kwargs["query"],
@@ -3557,6 +3564,69 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(first["answer"], "Cached social summary")
         self.assertEqual(second["answer"], "Cached social summary")
         self.assertTrue(second.get("cache", {}).get("search", {}).get("hit"))
+
+    def test_xai_compatible_social_reserves_budget_for_tavily_fallback(self) -> None:
+        client = MySearchClient()
+        provider = client.config.xai
+        provider.search_mode = "compatible"
+        provider.default_paths["social_search"] = "/social/search"
+        provider.alternate_base_urls["social_search"] = "http://gateway.example/v1"
+        client._get_key_or_raise = lambda provider: type(  # type: ignore[method-assign]
+            "Record",
+            (),
+            {"key": "gateway-token", "source": "env"},
+        )()
+        client.config.xai_social_timeout_seconds = 120
+        timeout_calls: list[int] = []
+
+        def fake_request_json(**kwargs):  # type: ignore[no-untyped-def]
+            timeout_calls.append(int(kwargs.get("timeout_seconds") or 0))
+            raise MySearchError("xai request timeout after budgeted social window")
+
+        def fake_tavily_social_fallback(**kwargs):  # type: ignore[no-untyped-def]
+            timeout_calls.append(int(kwargs.get("timeout_seconds") or 0))
+            return {
+                "provider": "tavily_social_fallback",
+                "transport": "env",
+                "query": kwargs["query"],
+                "answer": "Fallback social summary",
+                "results": [
+                    {
+                        "provider": "tavily_social_fallback",
+                        "source": "x",
+                        "title": "Fallback post",
+                        "url": "https://x.com/OpenAI/status/123",
+                        "snippet": "Fallback social result",
+                        "content": "",
+                        "author": "OpenAI",
+                    }
+                ],
+                "citations": [{"title": "Fallback post", "url": "https://x.com/OpenAI/status/123"}],
+                "fallback": {
+                    "from": "xai_compatible",
+                    "to": "tavily_social_fallback",
+                    "reason": kwargs["fallback_reason"],
+                },
+            }
+
+        client._request_json = fake_request_json  # type: ignore[method-assign]
+        client._search_tavily_social_fallback = fake_tavily_social_fallback  # type: ignore[method-assign]
+
+        result = client._search_xai_compatible(
+            query="GPT-5.4 reactions on X",
+            sources=["x"],
+            max_results=5,
+            allowed_x_handles=None,
+            excluded_x_handles=None,
+            from_date=None,
+            to_date=None,
+            include_x_images=False,
+            include_x_videos=False,
+        )
+
+        self.assertEqual(result["provider"], "tavily_social_fallback")
+        self.assertEqual(timeout_calls[:-1], [105, 105, 105])
+        self.assertLessEqual(timeout_calls[-1], 15)
 
     def test_github_blob_raw_urls_try_common_branch_aliases(self) -> None:
         client = MySearchClient()
