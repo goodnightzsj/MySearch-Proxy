@@ -873,7 +873,21 @@ def write_raw(raw_dir: Path, benchmark_id: str, provider: str, text: str) -> str
     return str(path)
 
 
-def classify_tavily_structural_failure(raw_text: str, benchmark_id: str) -> str:
+def classify_tavily_structural_failure(
+    raw_text: str,
+    benchmark_id: str,
+    error_text: str = "",
+) -> str:
+    lowered_error = str(error_text or "").lower()
+    if (
+        "tavily: http 502" in lowered_error
+        or lowered_error.count("http 502") >= 2
+    ):
+        return "tavily-upstream-502"
+    if "missing mcp-session-id" in lowered_error or (
+        "mcp-session" in lowered_error and "transport" in lowered_error
+    ):
+        return "tavily-mcp-session-transport-blocked"
     if not raw_text.strip() or "research" not in str(benchmark_id).lower():
         return ""
     try:
@@ -960,7 +974,11 @@ def build_output_row(
     row["structural_failure"] = existing.get("structural_failure", "")
     row["optimization_hint"] = existing.get("optimization_hint", "")
     if not row["structural_failure"]:
-        tavily_failure = classify_tavily_structural_failure(tavily_raw, input_row["benchmark_id"])
+        tavily_failure = classify_tavily_structural_failure(
+            tavily_raw,
+            input_row["benchmark_id"],
+            row.get("error", ""),
+        )
         if tavily_failure:
             row["structural_failure"] = tavily_failure
     return row
