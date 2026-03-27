@@ -12212,6 +12212,123 @@ class MySearchClient:
             return False
         return query_years.isdisjoint(result_years)
 
+    def _build_research_report_source_lines(
+        self,
+        *,
+        query: str,
+        mode: str,
+        ordered_results: list[dict[str, Any]],
+        citations: list[dict[str, Any]],
+        include_domains: list[str] | None,
+        authoritative_preferred: bool,
+        comparison_like: bool,
+        max_items: int = 4,
+    ) -> list[str]:
+        mode_name = cast(SearchMode, mode if mode in SEARCH_MODES else "web")
+        source_entries: list[dict[str, str]] = []
+        seen_lines: set[str] = set()
+
+        def add_source_entry(item: dict[str, Any]) -> None:
+            title = (item.get("title") or "").strip()
+            if not title:
+                return
+            domain = self._registered_domain(self._result_hostname(item))
+            line = f"{title} ({domain})" if domain and domain not in title.lower() else title
+            if not line or line in seen_lines:
+                return
+            seen_lines.add(line)
+            cluster_label = self._research_result_cluster_label(
+                query=query,
+                mode=mode_name,
+                item=item,
+                include_domains=include_domains,
+                authoritative_preferred=authoritative_preferred,
+            )
+            source_entries.append({"line": line, "cluster": cluster_label})
+
+        for item in ordered_results:
+            add_source_entry(item)
+        if not source_entries:
+            for citation in citations:
+                add_source_entry(
+                    {
+                        "title": (citation.get("title") or "").strip(),
+                        "url": (citation.get("url") or "").strip(),
+                        "snippet": "",
+                    }
+                )
+        if not source_entries:
+            return []
+
+        if authoritative_preferred:
+            official_count = sum(
+                1 for item in source_entries if item["cluster"] == "official"
+            )
+            supporting_count = sum(
+                1 for item in source_entries if item["cluster"] == "supporting"
+            )
+            anchor_count = sum(
+                1
+                for item in source_entries
+                if item["cluster"] in {"official", "supporting"}
+            )
+            if official_count >= 2 and supporting_count >= 1:
+                cluster_caps = {"official": max_items, "supporting": 1}
+            elif anchor_count >= 3:
+                cluster_caps = {"official": max_items, "supporting": max_items}
+            elif anchor_count >= 2:
+                cluster_caps = {
+                    "official": max_items,
+                    "supporting": max_items,
+                    "general": 1,
+                }
+            else:
+                cluster_caps = {
+                    "official": max_items,
+                    "supporting": max_items,
+                    "general": 2,
+                    "community": 1,
+                }
+        elif comparison_like:
+            anchor_count = sum(
+                1
+                for item in source_entries
+                if item["cluster"] in {"project", "supporting"}
+            )
+            if anchor_count >= 3:
+                cluster_caps = {"project": max_items, "supporting": max_items}
+            elif anchor_count >= 2:
+                cluster_caps = {
+                    "project": max_items,
+                    "supporting": max_items,
+                    "curated": 1,
+                }
+            else:
+                cluster_caps = {
+                    "project": max_items,
+                    "supporting": max_items,
+                    "curated": 2,
+                    "listicle": 1,
+                    "directory": 1,
+                    "community": 1,
+                }
+        else:
+            cluster_caps = {}
+
+        if not cluster_caps:
+            return [item["line"] for item in source_entries[:max_items]]
+
+        selected_lines: list[str] = []
+        cluster_counts: dict[str, int] = {}
+        for item in source_entries:
+            cluster_label = item["cluster"]
+            line = item["line"]
+            cap = cluster_caps.get(cluster_label, 0)
+            if cap and cluster_counts.get(cluster_label, 0) < cap and len(selected_lines) < max_items:
+                selected_lines.append(line)
+                cluster_counts[cluster_label] = cluster_counts.get(cluster_label, 0) + 1
+        return selected_lines[:max_items]
+
     def _build_research_report_sections(
         self,
         *,
@@ -12311,13 +12428,22 @@ class MySearchClient:
             authoritative_source_count = int(evidence.get("authoritative_source_count") or 0)
             supporting_source_count = int(evidence.get("supporting_source_count") or 0)
             community_source_count = int(evidence.get("community_source_count") or 0)
-        preferred_title_lines = ordered_title_lines or citation_title_lines
         report_mode = str(
             (evidence.get("research_plan") or {}).get("web_mode")
             or web_search.get("intent")
             or "web"
         )
         authoritative_research = bool(evidence.get("authoritative_research"))
+        preferred_title_lines = self._build_research_report_source_lines(
+            query=query,
+            mode=report_mode,
+            ordered_results=ordered_results,
+            citations=citations,
+            include_domains=None,
+            authoritative_preferred=authoritative_research,
+            comparison_like=comparison_like,
+            max_items=4,
+        ) or (ordered_title_lines or citation_title_lines)
         anchor_tokens = self._research_report_anchor_tokens(
             query=query,
             mode=report_mode,
@@ -12488,7 +12614,7 @@ class MySearchClient:
             for item in (evidence.get("conflicts") or [])
             if item and item != "social-search-unavailable"
         ]
-        top_sources = (ordered_title_lines or citation_title_lines)[:4]
+        top_sources = preferred_title_lines[:4]
 
         comparison_lens: list[str] = []
         if comparison_like:
