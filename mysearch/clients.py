@@ -4216,6 +4216,14 @@ class MySearchClient:
         evidence.setdefault("official_filter_reduced", False)
 
         source_domains = self._collect_source_domains(results=results, citations=citations)
+        social_identities = self._collect_social_identities(results=results, citations=citations)
+        social_identity_diversity = len(social_identities)
+        social_identity_diversity_applies = self._should_use_social_identity_diversity(
+            mode=mode,
+            intent=intent,
+            source_domains=source_domains,
+            social_identity_count=social_identity_diversity,
+        )
         official_source_count = self._count_official_resource_results(
             query=query,
             mode=mode,
@@ -4232,9 +4240,17 @@ class MySearchClient:
             official_source_count=official_source_count,
             providers_consulted=providers_consulted,
             official_mode=str(evidence.get("official_mode") or official_mode),
+            social_identity_count=social_identity_diversity,
+            social_identity_diversity_applies=social_identity_diversity_applies,
         )
         evidence["source_diversity"] = len(source_domains)
         evidence["source_domains"] = source_domains[:5]
+        if social_identities or mode == "social" or intent == "social":
+            evidence["social_identity_diversity"] = social_identity_diversity
+            evidence["social_handles"] = social_identities[:5]
+            evidence["diversity_basis"] = (
+                "social_handles" if social_identity_diversity_applies else "domains"
+            )
         evidence["official_source_count"] = official_source_count
         evidence["third_party_source_count"] = max(len(results) - official_source_count, 0)
         evidence["confidence"] = self._estimate_search_confidence(
@@ -4246,6 +4262,8 @@ class MySearchClient:
             verification=str(evidence.get("verification") or "single-provider"),
             conflicts=conflicts,
             official_mode=str(evidence.get("official_mode") or official_mode),
+            social_identity_count=social_identity_diversity,
+            social_identity_diversity_applies=social_identity_diversity_applies,
         )
         evidence["conflicts"] = conflicts
         enriched["evidence"] = evidence
@@ -9035,14 +9053,9 @@ class MySearchClient:
         return normalized
 
     def _social_result_identity(self, item: dict[str, Any]) -> str:
-        author = str(
-            item.get("author")
-            or item.get("handle")
-            or item.get("username")
-            or ""
-        ).strip()
-        if author:
-            return author.lstrip("@").strip().lower()
+        explicit_handle = str(item.get("handle") or item.get("username") or "").strip()
+        if explicit_handle:
+            return explicit_handle.lstrip("@").strip().lower()
         title = str(item.get("title") or "").strip()
         handle_match = re.search(r"\(@?([A-Za-z0-9_]{1,32})\)", title)
         if handle_match:
@@ -9055,6 +9068,9 @@ class MySearchClient:
                 candidate = path_parts[0].strip().lstrip("@")
                 if candidate and candidate.lower() not in {"i", "search", "home", "explore", "status"}:
                     return candidate.lower()
+        author = str(item.get("author") or "").strip()
+        if author:
+            return author.lstrip("@").strip().lower()
         return ""
 
     def _diversify_social_results(
@@ -10590,6 +10606,43 @@ class MySearchClient:
             domains.append(registered_domain)
         return domains
 
+    def _collect_social_identities(
+        self,
+        *,
+        results: list[dict[str, Any]],
+        citations: list[dict[str, Any]],
+    ) -> list[str]:
+        identities: list[str] = []
+        seen: set[str] = set()
+        for item in [*results, *citations]:
+            if not isinstance(item, dict):
+                continue
+            hostname = self._result_hostname(item)
+            if hostname and not hostname.endswith(("x.com", "twitter.com")):
+                continue
+            identity = self._social_result_identity(item)
+            if not identity or identity in seen:
+                continue
+            seen.add(identity)
+            identities.append(identity)
+        return identities
+
+    def _should_use_social_identity_diversity(
+        self,
+        *,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        source_domains: list[str],
+        social_identity_count: int,
+    ) -> bool:
+        if social_identity_count < 2:
+            return False
+        if mode != "social" and intent != "social":
+            return False
+        if not source_domains:
+            return True
+        return all(domain in {"x.com", "twitter.com"} for domain in source_domains)
+
     def _count_official_resource_results(
         self,
         *,
@@ -10632,11 +10685,16 @@ class MySearchClient:
         official_source_count: int,
         providers_consulted: list[str],
         official_mode: str,
+        social_identity_count: int,
+        social_identity_diversity_applies: bool,
     ) -> list[str]:
         conflicts: list[str] = []
-        if len(source_domains) <= 1 and len(results) > 1:
+        effective_diversity = (
+            social_identity_count if social_identity_diversity_applies else len(source_domains)
+        )
+        if effective_diversity <= 1 and len(results) > 1:
             conflicts.append("low-source-diversity")
-        if len(set(providers_consulted)) <= 1 and len(source_domains) <= 1 and results:
+        if len(set(providers_consulted)) <= 1 and effective_diversity <= 1 and results:
             conflicts.append("single-provider-single-domain")
         if self._should_rerank_resource_results(mode=mode, intent=intent):
             if results and official_source_count <= 0:
@@ -10660,7 +10718,12 @@ class MySearchClient:
         verification: str,
         conflicts: list[str],
         official_mode: str,
+        social_identity_count: int,
+        social_identity_diversity_applies: bool,
     ) -> str:
+        effective_diversity = (
+            social_identity_count if social_identity_diversity_applies else source_domain_count
+        )
         if result_count <= 0:
             return "low"
         if official_mode == "strict" and official_source_count <= 0:
@@ -10669,14 +10732,14 @@ class MySearchClient:
             if official_source_count > 0 and "official-source-not-confirmed" not in conflicts:
                 if (
                     verification == "cross-provider"
-                    or (source_domain_count >= 2 and "mixed-official-and-third-party" not in conflicts)
+                    or (effective_diversity >= 2 and "mixed-official-and-third-party" not in conflicts)
                 ):
                     return "high"
                 return "medium"
-            return "medium" if source_domain_count >= 2 else "low"
-        if verification == "cross-provider" and source_domain_count >= 2:
+            return "medium" if effective_diversity >= 2 else "low"
+        if verification == "cross-provider" and effective_diversity >= 2:
             return "high"
-        if source_domain_count >= 2:
+        if effective_diversity >= 2:
             return "medium"
         return "low" if conflicts else "medium"
 
