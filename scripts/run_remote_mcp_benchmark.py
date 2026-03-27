@@ -837,6 +837,17 @@ def build_output_row(
     row["winner_reason"] = existing.get("winner_reason", "matrix raw capture completed; scoring pending") if preserve_tavily else "matrix raw capture completed; scoring pending"
     row["structural_failure"] = existing.get("structural_failure", "")
     row["optimization_hint"] = existing.get("optimization_hint", "")
+    error_text = str(row.get("error") or "")
+    if "mcp-session-transport-blocked" in error_text:
+        row["run_status"] = "comparator-blocked"
+        row["winner"] = "blocked"
+        row["winner_reason"] = (
+            "comparator path blocked; mysearch evidence captured but tavily-hikari MCP transport is unavailable"
+        )
+        row["structural_failure"] = "tavily-mcp-session-transport-blocked"
+        row["optimization_hint"] = (
+            "repair tavily-hikari MCP session transport or switch to an alternate Tavily comparison path before trusting internal dual-MCP deltas"
+        )
     return row
 
 
