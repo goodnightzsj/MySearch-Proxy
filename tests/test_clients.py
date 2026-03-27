@@ -7293,7 +7293,7 @@ class MySearchClientTests(unittest.TestCase):
                 {
                     "provider": "tavily",
                     "title": "Firecrawl vs Tavily: Complete Comparison for AI Agents & RAG (2026)",
-                    "url": "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                    "url": "https://www.firecrawl.dev/compare/firecrawl-vs-tavily",
                     "snippet": "Direct first-party comparison page.",
                 },
                 {
@@ -7319,7 +7319,7 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(
             [item["url"] for item in selected[:2]],
             [
-                "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                "https://www.firecrawl.dev/compare/firecrawl-vs-tavily",
                 "https://www.sagentum.com/blog/exa-vs-tavily-vs-firecrawl",
             ],
         )
@@ -7399,7 +7399,7 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(
             [item["url"] for item in results],
             [
-                "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                "https://www.firecrawl.dev/compare/firecrawl-vs-tavily",
                 "https://docs.tavily.com/documentation/api-reference/search",
                 "https://docs.tavily.com/documentation/api-reference/extract",
                 "https://docs.firecrawl.dev/api-reference/endpoint/scrape",
@@ -7659,10 +7659,10 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         urls = [item["url"] for item in results]
-        self.assertEqual(urls[0], "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily")
+        self.assertEqual(urls[0], "https://www.firecrawl.dev/compare/firecrawl-vs-tavily")
         self.assertIn("https://docs.tavily.com/documentation/api-reference/search", urls)
         self.assertIn("https://docs.firecrawl.dev/api-reference/endpoint/extract", urls)
-        self.assertIn("https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily", urls)
+        self.assertIn("https://www.firecrawl.dev/compare/firecrawl-vs-tavily", urls)
 
     def test_research_known_provider_doc_results_include_firecrawl_exa_comparison_page(
         self,
@@ -7803,7 +7803,7 @@ class MySearchClientTests(unittest.TestCase):
                 {
                     "provider": "tavily",
                     "title": "Firecrawl vs Tavily: Complete Comparison for AI Agents & RAG (2026)",
-                    "url": "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                    "url": "https://www.firecrawl.dev/compare/firecrawl-vs-tavily",
                     "snippet": "Direct first-party comparison page.",
                 },
             ],
@@ -7830,7 +7830,7 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(
             [item["url"] for item in selected[:4]],
             [
-                "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                "https://www.firecrawl.dev/compare/firecrawl-vs-tavily",
                 "https://docs.tavily.com/documentation/api-reference/search",
                 "https://docs.firecrawl.dev/features/scrape",
                 "https://www.sagentum.com/blog/exa-vs-tavily-vs-firecrawl",
@@ -7920,7 +7920,7 @@ class MySearchClientTests(unittest.TestCase):
                 {
                     "provider": "tavily",
                     "title": "Firecrawl vs Tavily: Complete Comparison for AI Agents & RAG (2026)",
-                    "url": "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                    "url": "https://www.firecrawl.dev/compare/firecrawl-vs-tavily",
                     "snippet": "Direct first-party comparison page.",
                 },
             ],
@@ -7953,7 +7953,7 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(
             [item["url"] for item in selected[:3]],
             [
-                "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                "https://www.firecrawl.dev/compare/firecrawl-vs-tavily",
                 "https://docs.tavily.com/documentation/api-reference/search",
                 "https://docs.firecrawl.dev/features/scrape",
             ],
@@ -7974,7 +7974,7 @@ class MySearchClientTests(unittest.TestCase):
                 {
                     "provider": "tavily",
                     "title": "Firecrawl vs Tavily: Complete Comparison for AI Agents & RAG (2026)",
-                    "url": "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                    "url": "https://www.firecrawl.dev/compare/firecrawl-vs-tavily",
                     "snippet": "Direct first-party comparison page.",
                 },
             ],
@@ -8013,7 +8013,7 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(
             [item["url"] for item in selected[:3]],
             [
-                "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                "https://www.firecrawl.dev/compare/firecrawl-vs-tavily",
                 "https://docs.tavily.com/documentation/api-reference/search",
                 "https://docs.firecrawl.dev/api-reference/endpoint/extract",
             ],
@@ -8286,7 +8286,7 @@ class MySearchClientTests(unittest.TestCase):
                 {
                     "provider": "tavily",
                     "title": "Firecrawl vs Tavily: Complete Comparison for AI Agents",
-                    "url": "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                    "url": "https://www.firecrawl.dev/compare/firecrawl-vs-tavily",
                     "snippet": "Firecrawl handles full web extraction while Tavily focuses on search APIs.",
                 },
                 {
@@ -8306,7 +8306,7 @@ class MySearchClientTests(unittest.TestCase):
             citations=[
                 {
                     "title": "Firecrawl vs Tavily: Complete Comparison for AI Agents",
-                    "url": "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                    "url": "https://www.firecrawl.dev/compare/firecrawl-vs-tavily",
                 },
                 {
                     "title": "Tavily Agent Skills",
@@ -8342,7 +8342,7 @@ class MySearchClientTests(unittest.TestCase):
                 {
                     "provider": "tavily",
                     "title": "Firecrawl vs Tavily: Complete Comparison for AI Agents",
-                    "url": "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                    "url": "https://www.firecrawl.dev/compare/firecrawl-vs-tavily",
                     "snippet": "Firecrawl handles full web extraction while Tavily focuses on search APIs.",
                 },
                 {
@@ -8360,7 +8360,7 @@ class MySearchClientTests(unittest.TestCase):
             citations=[
                 {
                     "title": "Firecrawl vs Tavily: Complete Comparison for AI Agents",
-                    "url": "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                    "url": "https://www.firecrawl.dev/compare/firecrawl-vs-tavily",
                 },
                 {
                     "title": "Extract - Firecrawl Docs",
@@ -8390,7 +8390,7 @@ class MySearchClientTests(unittest.TestCase):
                 {
                     "provider": "tavily",
                     "title": "Firecrawl vs Tavily: Complete Comparison for AI Agents",
-                    "url": "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                    "url": "https://www.firecrawl.dev/compare/firecrawl-vs-tavily",
                     "snippet": "Firecrawl handles full web extraction while Tavily focuses on search APIs.",
                 },
                 {
@@ -8435,7 +8435,7 @@ class MySearchClientTests(unittest.TestCase):
                 {
                     "provider": "tavily",
                     "title": "Firecrawl vs Tavily: Complete Comparison for AI Agents",
-                    "url": "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                    "url": "https://www.firecrawl.dev/compare/firecrawl-vs-tavily",
                     "snippet": "Firecrawl handles full web extraction while Tavily focuses on search APIs.",
                 },
                 {
@@ -8480,7 +8480,7 @@ class MySearchClientTests(unittest.TestCase):
                 {
                     "provider": "tavily",
                     "title": "Firecrawl vs Tavily: Complete Comparison for AI Agents",
-                    "url": "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                    "url": "https://www.firecrawl.dev/compare/firecrawl-vs-tavily",
                     "snippet": "Firecrawl handles full web extraction while Tavily focuses on search APIs.",
                 },
                 {
@@ -8576,7 +8576,7 @@ class MySearchClientTests(unittest.TestCase):
                 {
                     "provider": "canonical_research_docs",
                     "title": "Firecrawl vs Tavily - Firecrawl",
-                    "url": "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                    "url": "https://www.firecrawl.dev/compare/firecrawl-vs-tavily",
                     "snippet": "Firecrawl positions itself as an extraction-first workflow with scrape and structured extraction, while Tavily focuses on search and retrieval APIs.",
                 },
                 {
@@ -9195,7 +9195,7 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         top_urls = [item["url"] for item in result["web_search"]["results"][:5]]
-        self.assertIn("https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily", top_urls)
+        self.assertIn("https://www.firecrawl.dev/compare/firecrawl-vs-tavily", top_urls)
 
     def test_research_canonical_vendor_fallback_for_firecrawl_exa_includes_first_party_project_page(
         self,
@@ -9702,6 +9702,69 @@ class MySearchClientTests(unittest.TestCase):
         self.assertIn("| Candidate | Cluster | Provider Support | Evidence Note |", summary)
         self.assertIn("## Decision Table", summary)
 
+    def test_research_report_sections_prefer_substantive_primary_claim_for_executive_summary(
+        self,
+    ) -> None:
+        client = MySearchClient()
+        client._build_research_claim_evidence = lambda *args, **kwargs: [  # type: ignore[method-assign]
+            {
+                "claim": "Proxy support.",
+                "support_level": "multi-source",
+                "support_basis": "multiple shortlisted sources point in the same direction",
+                "providers": ["canonical_research_docs", "exa"],
+            },
+            {
+                "claim": "Tavily exposes a search API for web retrieval, real-time discovery, and agent search workflows.",
+                "support_level": "cross-provider",
+                "support_basis": "same source surfaced by 2 providers",
+                "providers": ["canonical_research_docs", "tavily"],
+            },
+        ]
+
+        sections = client._build_research_report_sections(
+            query="compare Firecrawl and Tavily for AI agent web retrieval 2026",
+            web_search={"intent": "comparison", "answer": ""},
+            ordered_results=[
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Firecrawl vs Tavily: Complete Comparison for AI Agents & RAG (2026)",
+                    "url": "https://www.firecrawl.dev/compare/firecrawl-vs-tavily",
+                    "snippet": "Direct first-party comparison page.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Search API - Tavily",
+                    "url": "https://docs.tavily.com/documentation/api-reference/search",
+                    "snippet": "Tavily exposes a search API for web retrieval, real-time discovery, and agent search workflows.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Extract - Firecrawl Docs",
+                    "url": "https://docs.firecrawl.dev/api-reference/endpoint/extract",
+                    "snippet": "Firecrawl provides an extract API for structured extraction.",
+                },
+            ],
+            pages=[],
+            citations=[],
+            social=None,
+            evidence={
+                "providers_consulted": ["tavily", "exa"],
+                "citation_count": 3,
+                "confidence": "medium",
+                "research_plan": {"scrape_top_n": 2, "web_mode": "research"},
+                "selected_candidate_domains": ["firecrawl.dev", "tavily.com"],
+                "selected_candidate_cluster_counts": {"project": 1, "supporting": 2},
+                "selected_supporting_source_count": 2,
+                "authoritative_research": False,
+            },
+        )
+
+        self.assertIn(
+            "Tavily exposes a search API for web retrieval, real-time discovery, and agent search workflows.",
+            sections["executive_summary"],
+        )
+        self.assertNotIn("Proxy support.", sections["executive_summary"])
+
     def test_research_report_shortlist_uses_canonical_note_for_supporting_docs(self) -> None:
         client = MySearchClient()
 
@@ -9713,7 +9776,7 @@ class MySearchClientTests(unittest.TestCase):
                     "provider": "tavily",
                     "matched_providers": ["tavily"],
                     "title": "Firecrawl vs Tavily: Complete Comparison for AI Agents & RAG (2026)",
-                    "url": "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                    "url": "https://www.firecrawl.dev/compare/firecrawl-vs-tavily",
                     "snippet": "Firecrawl handles full web extraction while Tavily focuses on search APIs.",
                 },
                 {
@@ -9734,7 +9797,7 @@ class MySearchClientTests(unittest.TestCase):
             citations=[
                 {
                     "title": "Firecrawl vs Tavily: Complete Comparison for AI Agents & RAG (2026)",
-                    "url": "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                    "url": "https://www.firecrawl.dev/compare/firecrawl-vs-tavily",
                 },
                 {
                     "title": "Search API - Tavily",
@@ -9954,7 +10017,7 @@ class MySearchClientTests(unittest.TestCase):
                 {
                     "provider": "canonical_research_docs",
                     "title": "Firecrawl vs Tavily: Complete Comparison for AI Agents & RAG (2026)",
-                    "url": "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                    "url": "https://www.firecrawl.dev/compare/firecrawl-vs-tavily",
                     "snippet": "Direct first-party comparison page.",
                 },
                 {

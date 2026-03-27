@@ -2341,7 +2341,7 @@ class MySearchClient:
         comparison_projects: dict[frozenset[str], dict[str, str]] = {
             frozenset({"firecrawl", "tavily"}): {
                 "title": "Firecrawl vs Tavily - Firecrawl",
-                "url": "https://www.firecrawl.dev/alternatives/firecrawl-vs-tavily",
+                "url": "https://www.firecrawl.dev/compare/firecrawl-vs-tavily",
                 "snippet": (
                     "Firecrawl positions itself as an extraction-first workflow with scrape "
                     "and structured extraction, while Tavily focuses on search and retrieval APIs."
@@ -12888,7 +12888,7 @@ class MySearchClient:
                     }
                 )
 
-        top_claim = claim_evidence[0] if claim_evidence else {}
+        top_claim = self._select_research_primary_claim(claim_evidence)
         top_claim_text = str(top_claim.get("claim") or "").strip()
         if (
             top_claim_text
@@ -12919,7 +12919,7 @@ class MySearchClient:
 
         recommendation = ""
         if comparison_like:
-            primary_claim = claim_evidence[0] if claim_evidence else {}
+            primary_claim = self._select_research_primary_claim(claim_evidence)
             primary_support_phrase = self._research_claim_support_phrase(primary_claim)
             runner_up = decision_table[1] if len(decision_table) > 1 else {}
             if authoritative_source_count > 0 and decision_table:
@@ -13920,6 +13920,26 @@ class MySearchClient:
         if not meaningful_tokens and len(tokens) <= 4:
             return True
         return len(tokens) <= 3 and len(meaningful_tokens) <= 1
+
+    def _select_research_primary_claim(
+        self, claim_evidence: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        for item in claim_evidence:
+            claim = str(item.get("claim") or "").strip()
+            if not claim:
+                continue
+            if str(item.get("support_level") or "") == "single-source":
+                continue
+            if self._research_claim_is_generic(claim):
+                continue
+            if not self._research_excerpt_has_substantive_claim(claim):
+                continue
+            return item
+        for item in claim_evidence:
+            claim = str(item.get("claim") or "").strip()
+            if claim and not self._research_claim_is_generic(claim):
+                return item
+        return claim_evidence[0] if claim_evidence else {}
 
     def _research_claim_support_level(
         self,
