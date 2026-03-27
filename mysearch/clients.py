@@ -12142,8 +12142,9 @@ class MySearchClient:
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+(?:won|wins)[^\n]{0,80}\balbum of the year\b",
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+[–—:]\s*album of the year",
                     r"album of the year\s*\.\s*winner\s*[\.\-–—: ]+\s*([^\n.;]{2,100})",
+                    r"album of the year\s*[·•]\s*([^\n.;]{2,100})",
                     r"album of the year\s*[–—:]\s*([^\n.;]{2,100})",
-                    r"album of the year(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)?\s+([^\n.;]{2,100})",
+                    r"album of the year(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)\s+([^\n.;]{2,100})",
                     r"([^\n.;]{2,100})\s+won\s+album of the year",
                     r"([^\n.;]{2,100})\s+(?:won|wins)[^\n]{0,40}\balbum of the year\b",
                 ],
@@ -12280,6 +12281,8 @@ class MySearchClient:
         artist_only_patterns = [
             r"([A-Z][A-Za-z0-9&'’.\- ]{1,80})['’]s win for album of the year",
             r"([A-Z][A-Za-z0-9&'’.\- ]{1,80})['’]s album of the year win",
+            r"([A-Z][A-Za-z0-9&'’.\- ]{1,80})\s+wins\s+the\s+grammy\s+for\s+album\s+of\s+the\s+year",
+            r"([A-Z][A-Za-z0-9&'’.\- ]{1,80})\s+won\s+the\s+grammy\s+for\s+album\s+of\s+the\s+year",
         ]
         for pattern in artist_only_patterns:
             match = re.search(pattern, text, flags=re.IGNORECASE)
