@@ -9591,6 +9591,41 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(claim, "Create large batches of API requests to run asynchronously")
 
+    def test_research_claim_text_strips_docs_copy_page_shell(self) -> None:
+        client = MySearchClient()
+
+        claim = client._research_claim_text(
+            title="useEffectEvent – React",
+            excerpt="Copy pageCopy useEffectEvent useEffectEvent is a React Hook that lets you separate events from Effects.",
+            comparison_like=True,
+        )
+
+        self.assertEqual(
+            claim,
+            "useEffectEvent is a React Hook that lets you separate events from Effects",
+        )
+
+    def test_research_claim_text_strips_react_docs_link_and_copy_shell(self) -> None:
+        client = MySearchClient()
+
+        claim = client._research_claim_text(
+            title="useEffectEvent – React",
+            excerpt=(
+                "[API Reference](https://react.dev/reference/react) "
+                "[Hooks](https://react.dev/reference/react/hooks) "
+                "Copy pageCopy # useEffectEvent "
+                "[Link for this heading](https://react.dev/reference/react/useEffectEvent#undefined "
+                "\"Link for this heading\") `useEffectEvent` is a React Hook that lets you separate "
+                "events from Effects."
+            ),
+            comparison_like=True,
+        )
+
+        self.assertEqual(
+            claim,
+            "useEffectEvent is a React Hook that lets you separate events from Effects",
+        )
+
     def test_research_claim_evidence_prefers_non_generic_claims_over_title_shells(self) -> None:
         client = MySearchClient()
 
