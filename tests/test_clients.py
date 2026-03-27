@@ -3176,6 +3176,19 @@ class MySearchClientTests(unittest.TestCase):
             ],
         )
 
+    def test_social_result_identity_prefers_url_handle_over_display_name_author(self) -> None:
+        client = MySearchClient()
+
+        identity = client._social_result_identity(
+            {
+                "author": "Claire Vo",
+                "title": "Claire Vo on X",
+                "url": "https://x.com/clairevo/status/2029630027613229398",
+            }
+        )
+
+        self.assertEqual(identity, "clairevo")
+
     def test_social_queries_disable_official_resource_mode_even_with_status_like_intent(self) -> None:
         client = MySearchClient()
 
@@ -3199,6 +3212,100 @@ class MySearchClientTests(unittest.TestCase):
                 intent="status",
             )
         )
+
+    def test_enrich_search_result_uses_social_handle_diversity_for_social_queries(self) -> None:
+        client = MySearchClient()
+
+        result = client._augment_evidence_summary(
+            result={
+                "provider": "custom_social",
+                "results": [
+                    {
+                        "provider": "custom_social",
+                        "source": "x",
+                        "title": "Alice (@alice) on X",
+                        "url": "https://x.com/alice/status/1",
+                        "snippet": "Reaction one",
+                        "content": "",
+                    },
+                    {
+                        "provider": "custom_social",
+                        "source": "x",
+                        "title": "Bob (@bob) on X",
+                        "url": "https://x.com/bob/status/2",
+                        "snippet": "Reaction two",
+                        "content": "",
+                    },
+                ],
+                "citations": [
+                    {"title": "Alice (@alice) on X", "url": "https://x.com/alice/status/1"},
+                    {"title": "Bob (@bob) on X", "url": "https://x.com/bob/status/2"},
+                ],
+                "evidence": {
+                    "providers_consulted": ["custom_social"],
+                    "verification": "single-provider",
+                },
+            },
+            query="GPT-5.4 reactions on X",
+            mode="social",
+            intent="social",
+            include_domains=None,
+        )
+
+        self.assertEqual(result["evidence"]["source_diversity"], 1)
+        self.assertEqual(result["evidence"]["social_identity_diversity"], 2)
+        self.assertEqual(result["evidence"]["social_handles"], ["alice", "bob"])
+        self.assertEqual(result["evidence"]["diversity_basis"], "social_handles")
+        self.assertEqual(result["evidence"]["confidence"], "medium")
+        self.assertNotIn("low-source-diversity", result["evidence"]["conflicts"])
+        self.assertNotIn("single-provider-single-domain", result["evidence"]["conflicts"])
+
+    def test_enrich_search_result_keeps_low_diversity_for_single_social_handle(self) -> None:
+        client = MySearchClient()
+
+        result = client._augment_evidence_summary(
+            result={
+                "provider": "custom_social",
+                "results": [
+                    {
+                        "provider": "custom_social",
+                        "source": "x",
+                        "title": "Alice (@alice) on X",
+                        "url": "https://x.com/alice/status/1",
+                        "snippet": "Reaction one",
+                        "content": "",
+                    },
+                    {
+                        "provider": "custom_social",
+                        "source": "x",
+                        "title": "Alice (@alice) on X",
+                        "url": "https://x.com/alice/status/2",
+                        "snippet": "Reaction two",
+                        "content": "",
+                    },
+                ],
+                "citations": [
+                    {"title": "Alice (@alice) on X", "url": "https://x.com/alice/status/1"},
+                    {"title": "Alice (@alice) on X", "url": "https://x.com/alice/status/2"},
+                ],
+                "evidence": {
+                    "providers_consulted": ["custom_social"],
+                    "verification": "single-provider",
+                },
+            },
+            query="GPT-5.4 reactions on X",
+            mode="social",
+            intent="social",
+            include_domains=None,
+        )
+
+        self.assertEqual(result["evidence"]["source_diversity"], 1)
+        self.assertEqual(result["evidence"]["social_identity_diversity"], 1)
+        self.assertEqual(result["evidence"]["social_handles"], ["alice"])
+        self.assertEqual(result["evidence"]["diversity_basis"], "domains")
+        self.assertEqual(result["evidence"]["confidence"], "low")
+        self.assertIn("low-source-diversity", result["evidence"]["conflicts"])
+        self.assertIn("single-provider-single-domain", result["evidence"]["conflicts"])
 
     def test_social_search_reuses_search_cache_for_repeated_x_queries(self) -> None:
         client = MySearchClient()
