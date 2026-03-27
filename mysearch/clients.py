@@ -5506,14 +5506,14 @@ class MySearchClient:
             return _MODE_PROVIDER_POLICY["tutorial"]
         if self._looks_like_changelog_query(query_lower):
             return _MODE_PROVIDER_POLICY["changelog"]
+        if intent == "status" or self._looks_like_status_query(query_lower):
+            return _MODE_PROVIDER_POLICY["status"]
         if include_content:
             return _MODE_PROVIDER_POLICY["content"]
         if explicit_resource_mode:
             return _MODE_PROVIDER_POLICY[mode]
         if intent == "resource" or self._looks_like_docs_query(query_lower):
             return _MODE_PROVIDER_POLICY["resource"]
-        if intent == "status" or self._looks_like_status_query(query_lower):
-            return _MODE_PROVIDER_POLICY["status"]
         if (
             self._looks_like_award_result_query(query_lower)
             and (intent == "news" or mode == "news")

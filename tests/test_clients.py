@@ -3993,6 +3993,30 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(decision.provider, "tavily")
         self.assertEqual(decision.fallback_chain, ["exa"])
 
+    def test_status_route_keeps_tavily_primary_even_when_include_content_is_requested(self) -> None:
+        client = MySearchClient()
+        client.keyring.has_provider = lambda provider: provider in {"tavily", "firecrawl", "exa"}  # type: ignore[method-assign]
+        client._probe_provider_status = lambda provider, key_count: {  # type: ignore[method-assign]
+            "status": "ok",
+            "error": "",
+            "checked_at": "2026-03-27T00:00:00+00:00",
+        }
+
+        decision = client._route_search(
+            query="OpenAI background mode latest status",
+            mode="news",
+            intent="status",
+            provider="auto",
+            sources=["web"],
+            include_content=True,
+            include_domains=None,
+            allowed_x_handles=None,
+            excluded_x_handles=None,
+        )
+
+        self.assertEqual(decision.provider, "tavily")
+        self.assertEqual(decision.fallback_chain, ["exa"])
+
     def test_blended_search_requires_live_ok_providers(self) -> None:
         client = MySearchClient()
         client.keyring.has_provider = lambda provider: provider in {"tavily", "firecrawl"}  # type: ignore[method-assign]
