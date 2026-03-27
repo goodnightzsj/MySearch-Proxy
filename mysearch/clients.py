@@ -7696,6 +7696,7 @@ class MySearchClient:
         exclude_domains: list[str] | None,
         strategy: str = "fast",
         days: int | None = None,
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         provider = self.config.tavily
         key = self._get_key_or_raise(provider)
@@ -7725,6 +7726,7 @@ class MySearchClient:
             path=provider.path("search"),
             payload=payload,
             key=key.key,
+            timeout_seconds=timeout_seconds,
         )
         results = [
             {
@@ -8520,7 +8522,10 @@ class MySearchClient:
             30,
             int(getattr(self.config, "xai_social_timeout_seconds", 120) or 120),
         )
-        social_deadline = time.monotonic() + total_social_timeout
+        social_start = time.monotonic()
+        social_fallback_reserve = max(5, min(15, total_social_timeout // 8 or 5))
+        social_primary_budget = max(30, total_social_timeout - social_fallback_reserve)
+        social_deadline = social_start + social_primary_budget
         last_error: MySearchError | None = None
         if cached_social_gateway_unavailable:
             last_error = MySearchError(
@@ -8626,6 +8631,19 @@ class MySearchClient:
             return cached_social_result
 
         fallback_reason = str(last_error or "xai compatible search failed")
+        elapsed_seconds = max(0.0, time.monotonic() - social_start)
+        remaining_social_budget = max(0, int(math.ceil(total_social_timeout - elapsed_seconds)))
+        if remaining_social_budget < 5:
+            social_unavailable_result = self._build_social_unavailable_result(
+                query=query,
+                fallback_reason=f"{fallback_reason} | social budget exhausted before tavily_social_fallback",
+            )
+            self._cache_set("social_unavailable", social_cache_key, social_unavailable_result)
+            return self._annotate_cache(
+                social_unavailable_result,
+                namespace="social_unavailable",
+                hit=False,
+            )
         try:
             tavily_fallback_result = self._search_tavily_social_fallback(
                 query=query,
@@ -8633,6 +8651,7 @@ class MySearchClient:
                 from_date=from_date,
                 to_date=to_date,
                 fallback_reason=fallback_reason,
+                timeout_seconds=min(remaining_social_budget, social_fallback_reserve),
             )
         except MySearchError as fallback_exc:
             social_unavailable_result = self._build_social_unavailable_result(
@@ -8688,8 +8707,9 @@ class MySearchClient:
         from_date: str | None,
         to_date: str | None,
         fallback_reason: str,
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
-        tavily_result = self._search_tavily(
+        tavily_result = self._search_tavily_once(
             query=query,
             max_results=max_results,
             topic="news",
@@ -8699,6 +8719,7 @@ class MySearchClient:
             exclude_domains=None,
             strategy="fast",
             days=self._infer_tavily_days("status", from_date),
+            timeout_seconds=timeout_seconds,
         )
         fallback_results = [
             {
