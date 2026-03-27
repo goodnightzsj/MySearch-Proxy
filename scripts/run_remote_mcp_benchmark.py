@@ -599,12 +599,16 @@ class MCPClient:
     def initialize(self):
         payload = {
             "jsonrpc": "2.0",
-            "id": 1,
+            "id": 0,
             "method": "initialize",
             "params": {
-                "protocolVersion": "2025-03-26",
+                "protocolVersion": "2025-06-18",
                 "capabilities": {},
-                "clientInfo": {"name": "remote-bench", "version": "0.1"},
+                "clientInfo": {
+                    "name": "codex-mcp-client",
+                    "title": "Codex",
+                    "version": "0.116.0",
+                },
             },
         }
         headers, _ = self._post(payload, self.headers, timeout=20, retries=5)
@@ -612,7 +616,7 @@ class MCPClient:
         notif_headers = dict(self.headers)
         if self.session_id:
             notif_headers["mcp-session-id"] = self.session_id
-        notif = {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}
+        notif = {"jsonrpc": "2.0", "method": "notifications/initialized"}
         self._post(notif, notif_headers, timeout=20, retries=5)
 
     def call_tool(self, tool_name, arguments):
@@ -680,12 +684,21 @@ def timed_tool_runs(client, tool_name, arguments, repeat_runs):
 
 
 payload = json.loads(base64.b64decode(sys.argv[1]).decode())
-mysearch = MCPClient(payload["mysearch_url"])
-mysearch.initialize()
+mysearch = None
+mysearch_init_error = ""
+try:
+    mysearch = MCPClient(payload["mysearch_url"])
+    mysearch.initialize()
+except Exception as exc:
+    mysearch_init_error = str(exc)
 tavily = None
+tavily_init_error = ""
 if not payload.get("mysearch_only"):
-    tavily = MCPClient(payload["tavily_url"], {"Authorization": f'Bearer {payload["tavily_bearer"]}'})
-    tavily.initialize()
+    try:
+        tavily = MCPClient(payload["tavily_url"], {"Authorization": f'Bearer {payload["tavily_bearer"]}'})
+        tavily.initialize()
+    except Exception as exc:
+        tavily_init_error = str(exc)
 
 output = []
 for case in payload["cases"]:
@@ -722,27 +735,32 @@ for case in payload["cases"]:
     }
     repeat_runs = case.get("repeat_runs", 1)
 
-    try:
-        observed = timed_tool_runs(mysearch, case["mysearch_tool"], case["mysearch_args"], repeat_runs)
-        row["mysearch_summary"] = observed["summary"]
-        row["mysearch_top_urls"] = " | ".join(observed["urls"])
-        row["mysearch_provider_trace"] = observed["provider_trace"]
-        row["mysearch_citation_count"] = observed["citation_count"]
-        row["mysearch_official_mode"] = observed["official_mode"]
-        row["mysearch_conflicts"] = " | ".join(observed["conflicts"])
-        row["mysearch_latency_ms"] = observed["latency_ms"]
-        row["mysearch_repeat_variance"] = observed["repeat_variance"]
-        row["mysearch_empty_result"] = observed["empty_result"]
-        row["mysearch_timeout"] = observed["timeout"]
-        row["mysearch_fallback_used"] = observed["fallback_used"]
-        row["mysearch_raw"] = observed["raw_text"]
-        if observed["partial_error"]:
-            row["run_status"] = "partial-error"
-            row["error"] = f"mysearch-repeat: {observed['error']}"
-    except Exception as exc:
+    if mysearch is None:
         row["run_status"] = "partial-error"
-        row["error"] = f"mysearch: {exc}"
-        row["mysearch_raw"] = ""
+        row["error"] = f"mysearch-init: {mysearch_init_error}"
+        row["mysearch_raw"] = json.dumps({"error": mysearch_init_error, "phase": "initialize"}, ensure_ascii=False)
+    else:
+        try:
+            observed = timed_tool_runs(mysearch, case["mysearch_tool"], case["mysearch_args"], repeat_runs)
+            row["mysearch_summary"] = observed["summary"]
+            row["mysearch_top_urls"] = " | ".join(observed["urls"])
+            row["mysearch_provider_trace"] = observed["provider_trace"]
+            row["mysearch_citation_count"] = observed["citation_count"]
+            row["mysearch_official_mode"] = observed["official_mode"]
+            row["mysearch_conflicts"] = " | ".join(observed["conflicts"])
+            row["mysearch_latency_ms"] = observed["latency_ms"]
+            row["mysearch_repeat_variance"] = observed["repeat_variance"]
+            row["mysearch_empty_result"] = observed["empty_result"]
+            row["mysearch_timeout"] = observed["timeout"]
+            row["mysearch_fallback_used"] = observed["fallback_used"]
+            row["mysearch_raw"] = observed["raw_text"]
+            if observed["partial_error"]:
+                row["run_status"] = "partial-error"
+                row["error"] = f"mysearch-repeat: {observed['error']}"
+        except Exception as exc:
+            row["run_status"] = "partial-error"
+            row["error"] = f"mysearch: {exc}"
+            row["mysearch_raw"] = ""
 
     if tavily is not None:
         try:
@@ -763,6 +781,10 @@ for case in payload["cases"]:
             row["run_status"] = "partial-error" if row["run_status"] == "captured" else "error"
             row["error"] = (row["error"] + " ; " if row["error"] else "") + f"tavily: {exc}"
             row["tavily_raw"] = ""
+    elif tavily_init_error:
+        row["run_status"] = "partial-error" if row["run_status"] == "captured" else row["run_status"]
+        row["error"] = (row["error"] + " ; " if row["error"] else "") + f"tavily-init: {tavily_init_error}"
+        row["tavily_raw"] = json.dumps({"error": tavily_init_error, "phase": "initialize"}, ensure_ascii=False)
     output.append(row)
 
 print(json.dumps(output, ensure_ascii=False))
@@ -799,7 +821,29 @@ def run_remote_cases(
         "-",
         payload_b64,
     ]
-    proc = subprocess.run(cmd, check=False, capture_output=True, text=True, input=REMOTE_SCRIPT)
+    try:
+        proc = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            input=REMOTE_SCRIPT,
+            timeout=max(180, 90 * max(1, len(cases))),
+        )
+    except subprocess.TimeoutExpired as exc:
+        timeout_rows: list[dict[str, str]] = []
+        message = f"remote-benchmark-timeout after {int(exc.timeout)}s"
+        for case in cases:
+            timeout_rows.append(
+                {
+                    "benchmark_id": str(case.get("benchmark_id", "")),
+                    "run_status": "partial-error",
+                    "error": message,
+                    "mysearch_raw": "",
+                    "tavily_raw": "",
+                }
+            )
+        return timeout_rows
     parsed_stdout = None
     if proc.stdout.strip():
         try:
