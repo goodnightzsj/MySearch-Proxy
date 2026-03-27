@@ -13662,15 +13662,33 @@ class MySearchClient:
         excerpt = re.sub(r"\s+", " ", excerpt).strip()
         if excerpt:
             sentence_ready_excerpt = re.sub(r"\bvs\.\s+", "vs ", excerpt, flags=re.IGNORECASE)
-            first_sentence = re.split(
+            raw_sentences = re.split(
                 r"(?<=[.!?。！？])\s+",
                 sentence_ready_excerpt,
-                maxsplit=1,
-            )[0].strip()
-            cleaned_excerpt = self._normalize_research_claim_text(
-                first_sentence,
-                comparison_like=comparison_like,
             )
+            cleaned_sentences = [
+                cleaned
+                for sentence in raw_sentences[:3]
+                if (cleaned := self._normalize_research_claim_text(
+                    sentence.strip(),
+                    comparison_like=comparison_like,
+                ))
+            ]
+            cleaned_excerpt = cleaned_sentences[0] if cleaned_sentences else ""
+            if comparison_like and len(cleaned_sentences) > 1:
+                preferred_excerpt = ""
+                fallback_excerpt = cleaned_excerpt
+                for candidate in cleaned_sentences:
+                    if not self._research_excerpt_has_substantive_claim(candidate):
+                        continue
+                    if not self._research_claim_is_generic(candidate):
+                        preferred_excerpt = candidate
+                        break
+                    if not fallback_excerpt or not self._research_excerpt_has_substantive_claim(
+                        fallback_excerpt
+                    ):
+                        fallback_excerpt = candidate
+                cleaned_excerpt = preferred_excerpt or fallback_excerpt
             if cleaned_excerpt:
                 if cleaned_title:
                     title_prefix = f"{cleaned_title} "
@@ -14199,6 +14217,9 @@ class MySearchClient:
                 "await exa.getcontents(",
                 "highlights: {",
                 "maxcharacters:",
+                "start getting web data for free",
+                "no credit card needed",
+                "scale seamlessly as your project expands",
                 "reasoning tokens pricing per 1m tokens",
                 "context window",
                 "knowledge cutoff",

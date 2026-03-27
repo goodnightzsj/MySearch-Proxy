@@ -8857,7 +8857,7 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(
             claim,
-            "When building autonomous agents, the choice of backend dictates capability",
+            "Exa is faster, more accurate on hard queries, and has dedicated people, company, and code search",
         )
 
     def test_research_claim_text_accepts_short_imperative_vendor_doc_excerpt(self) -> None:
