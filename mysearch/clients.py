@@ -11779,7 +11779,43 @@ class MySearchClient:
         if not snippet:
             return ""
         snippet = re.sub(r"^[#>*`\-\s]+", "", snippet).strip()
+        if self._search_summary_excerpt_looks_like_noise(snippet):
+            return ""
         return self._build_excerpt(snippet, limit=limit)
+
+    def _search_summary_excerpt_looks_like_noise(self, text: str) -> bool:
+        normalized = re.sub(r"\s+", " ", text).strip()
+        if not normalized:
+            return False
+        lowered = normalized.lower()
+        if normalized.count("](") >= 2:
+            return True
+        if normalized.startswith(("* [", "- [")):
+            return True
+        if normalized.startswith("# ") and (
+            "openai api" in lowered
+            or "openai developers" in lowered
+            or "api reference" in lowered
+            or "[![image" in lowered
+        ):
+            return True
+        return any(
+            marker in lowered
+            for marker in (
+                "guides and concepts for the openai api",
+                "api reference.",
+                "primary navigation",
+                "search docs",
+                "showcase demo apps",
+                "latest: gpt-5.4",
+                "import openai",
+                "const client =",
+                "from \"openai\"",
+                "copy markdown",
+                "open in chatgpt",
+                "skip to content",
+            )
+        )
 
     def _apply_result_event_answer_override(
         self,
