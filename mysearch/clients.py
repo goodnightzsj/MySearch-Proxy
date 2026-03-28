@@ -3369,6 +3369,15 @@ class MySearchClient:
             if item.strip(" ,.;:")
         ]
 
+    def _research_comparison_subject_phrase(self, query: str) -> str:
+        subjects = self._research_parse_comparison_subjects(query)
+        if len(subjects) < 2:
+            return ""
+        trimmed = [item.strip(" ,.;:") for item in subjects[:2] if item.strip(" ,.;:")]
+        if len(trimmed) < 2:
+            return ""
+        return f"{trimmed[0]} vs {trimmed[1]}"
+
     def _research_ambiguous_product_tokens(self) -> set[str]:
         return {
             "assistants",
@@ -13182,6 +13191,15 @@ class MySearchClient:
             if support_phrase:
                 primary_finding += f" {support_phrase.capitalize()}."
 
+        comparison_subject_phrase = self._research_comparison_subject_phrase(query)
+        if comparison_like and comparison_subject_phrase:
+            primary_finding_lower = primary_finding.lower()
+            if comparison_subject_phrase.lower() not in primary_finding_lower:
+                primary_finding = (
+                    f"{comparison_subject_phrase} is the core comparison for this query. "
+                    f"{primary_finding}"
+                ).strip()
+
         consensus_snapshot: list[str] = []
         for item in claim_evidence[:3]:
             claim = str(item.get("claim") or "").strip()
@@ -13221,6 +13239,13 @@ class MySearchClient:
                     recommendation += (
                         f" {runner_up['candidate']} remains the strongest alternate angle for "
                         f"{runner_up['fit']}."
+                    )
+            if recommendation and comparison_subject_phrase:
+                recommendation_lower = recommendation.lower()
+                if comparison_subject_phrase.lower() not in recommendation_lower:
+                    recommendation = (
+                        f"Keep {comparison_subject_phrase} as the explicit comparison frame. "
+                        f"{recommendation}"
                     )
 
         visible_source_domains = self._research_report_source_domains(top_sources)

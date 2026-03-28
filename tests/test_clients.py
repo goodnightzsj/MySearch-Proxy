@@ -10515,6 +10515,57 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertIn("discounted asynchronous processing", sections["executive_summary"].lower())
 
+    def test_research_report_sections_keep_comparison_subjects_visible_in_summary_and_recommendation(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        sections = client._build_research_report_sections(
+            query="compare OpenAI Responses API and Batch API for long-running tasks 2026",
+            web_search={"intent": "comparison", "answer": ""},
+            ordered_results=[
+                {
+                    "provider": "tavily",
+                    "matched_providers": ["tavily"],
+                    "title": "Batch API - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/guides/batch/",
+                    "snippet": "Batch API supports discounted asynchronous processing for large jobs.",
+                },
+                {
+                    "provider": "tavily",
+                    "matched_providers": ["tavily"],
+                    "title": "Migrate to the Responses API | OpenAI API",
+                    "url": "https://developers.openai.com/api/docs/guides/migrate-to-responses",
+                    "snippet": "The Responses API is the primary API for interactive and tool-using workflows.",
+                },
+            ],
+            pages=[],
+            citations=[
+                {
+                    "title": "Batch API - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/guides/batch/",
+                },
+                {
+                    "title": "Migrate to the Responses API | OpenAI API",
+                    "url": "https://developers.openai.com/api/docs/guides/migrate-to-responses",
+                },
+            ],
+            social=None,
+            evidence={
+                "providers_consulted": ["tavily"],
+                "citation_count": 2,
+                "confidence": "high",
+                "research_plan": {"scrape_top_n": 2, "web_mode": "research"},
+                "selected_candidate_domains": ["openai.com"],
+                "selected_candidate_cluster_counts": {"official": 2},
+                "selected_authoritative_source_count": 2,
+                "authoritative_research": True,
+            },
+        )
+
+        self.assertIn("responses api vs batch api", sections["executive_summary"].lower())
+        self.assertIn("responses api vs batch api", sections["recommendation"].lower())
+
     def test_research_report_sections_ignore_unanchored_web_answer_when_vendor_docs_anchor_shortlist(
         self,
     ) -> None:
