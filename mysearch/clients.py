@@ -3525,6 +3525,9 @@ class MySearchClient:
         item: dict[str, Any],
         entity_tokens: tuple[str, ...],
     ) -> bool:
+        tokens = [str(token).strip().lower() for token in entity_tokens if str(token).strip()]
+        if not tokens:
+            return False
         text = " ".join(
             [
                 (item.get("title") or "").lower(),
@@ -3532,7 +3535,32 @@ class MySearchClient:
                 (item.get("snippet") or "").lower(),
             ]
         )
-        return any(token in text for token in entity_tokens)
+        return any(token in text for token in tokens)
+
+    def _research_result_matches_comparison_subject(
+        self,
+        *,
+        item: dict[str, Any],
+        entity_tokens: tuple[str, ...],
+    ) -> bool:
+        tokens = [str(token).strip().lower() for token in entity_tokens if str(token).strip()]
+        if not tokens:
+            return False
+        text = " ".join(
+            [
+                (item.get("title") or "").lower(),
+                (item.get("url") or "").lower(),
+                (item.get("snippet") or "").lower(),
+            ]
+        )
+        if len(tokens) == 1:
+            return tokens[0] in text
+        specific_tokens = tokens[1:] or tokens
+        specific_match_count = sum(1 for token in specific_tokens if token in text)
+        required_specific_matches = 1 if len(specific_tokens) == 1 else min(2, len(specific_tokens))
+        if specific_match_count >= required_specific_matches:
+            return True
+        return all(token in text for token in tokens)
 
     def _research_official_candidate_kind_rank(self, item: dict[str, Any]) -> int:
         url = str(item.get("url") or "")
@@ -13091,7 +13119,7 @@ class MySearchClient:
                             "url": url,
                             "title": url_to_title.get(url, ""),
                         }
-                        if not self._research_result_matches_entity(
+                        if not self._research_result_matches_comparison_subject(
                             item=item,
                             entity_tokens=entity_tokens,
                         ):
