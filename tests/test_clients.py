@@ -10744,6 +10744,7 @@ class MySearchClientTests(unittest.TestCase):
         self.assertTrue(any("batch" in candidate for candidate in row_candidates), row_candidates)
         self.assertTrue(any("response" in candidate for candidate in row_candidates), row_candidates)
 
+
     def test_research_report_sections_ignore_unanchored_web_answer_when_vendor_docs_anchor_shortlist(
         self,
     ) -> None:
