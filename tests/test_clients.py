@@ -10565,6 +10565,18 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertIn("responses api vs batch api", sections["executive_summary"].lower())
         self.assertIn("responses api vs batch api", sections["recommendation"].lower())
+        row_candidates = [row.get("candidate") for row in (sections.get("comparison_rows") or [])]
+        self.assertTrue(
+            any("responses" in str(candidate).lower() for candidate in row_candidates),
+            row_candidates,
+        )
+        self.assertTrue(
+            any("batch" in str(candidate).lower() for candidate in row_candidates),
+            row_candidates,
+        )
+        top_sources_text = " ".join(sections.get("top_sources") or []).lower()
+        self.assertIn("responses", top_sources_text)
+        self.assertIn("batch", top_sources_text)
 
     def test_research_report_sections_ignore_unanchored_web_answer_when_vendor_docs_anchor_shortlist(
         self,
