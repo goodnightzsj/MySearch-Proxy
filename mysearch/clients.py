@@ -3602,7 +3602,7 @@ class MySearchClient:
             matches = [
                 (index, item)
                 for index, item in indexed_remaining
-                if self._research_result_matches_entity(
+                if self._research_result_matches_comparison_subject(
                     item=item,
                     entity_tokens=entity_tokens,
                 )
@@ -3647,7 +3647,7 @@ class MySearchClient:
             matches = [
                 (index, item)
                 for index, item in indexed_remaining
-                if self._research_result_matches_entity(
+                if self._research_result_matches_comparison_subject(
                     item=item,
                     entity_tokens=entity_tokens,
                 )
@@ -13202,7 +13202,22 @@ class MySearchClient:
                     normalized_note
                 )
                 claim_note = claim_by_url.get(url, "").strip()
-                if claim_note and (
+                if (
+                    claim_note
+                    and comparison_like
+                    and cluster_label == "official"
+                    and not self._research_claim_is_generic(claim_note)
+                ):
+                    evidence_note = claim_note
+                    normalized_note = self._normalize_research_claim_text(
+                        evidence_note,
+                        comparison_like=comparison_like,
+                    )
+                    note_is_link_index = False
+                    note_is_substantive = bool(normalized_note) and self._research_excerpt_has_substantive_claim(
+                        normalized_note
+                    )
+                elif claim_note and (
                     not evidence_note
                     or self._research_excerpt_looks_like_navigation_noise(evidence_note)
                     or note_is_link_index
