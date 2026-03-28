@@ -10638,6 +10638,20 @@ class MySearchClientTests(unittest.TestCase):
         consensus_text = " ".join(sections.get("consensus_snapshot") or []).lower()
         self.assertIn("responses", consensus_text)
         self.assertIn("batch", consensus_text)
+        criteria_text = " ".join(sections.get("decision_criteria") or []).lower()
+        self.assertIn("responses", criteria_text)
+        self.assertIn("batch", criteria_text)
+        matrix_rows = sections.get("comparison_matrix") or []
+        matrix_candidates = [str(row.get("candidate") or "").lower() for row in matrix_rows]
+        self.assertTrue(any("response" in candidate for candidate in matrix_candidates), matrix_candidates)
+        self.assertTrue(any("batch" in candidate for candidate in matrix_candidates), matrix_candidates)
+        matrix_text = " ".join(
+            " ".join(str(value).lower() for value in row.values())
+            for row in matrix_rows
+            if isinstance(row, dict)
+        )
+        self.assertIn("interactive", matrix_text)
+        self.assertIn("bulk asynchronous", matrix_text)
 
     def test_research_result_matches_comparison_subject_requires_specific_subject_tokens(self) -> None:
         client = MySearchClient()
