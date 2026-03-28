@@ -2266,6 +2266,48 @@ class MySearchClient:
                     "snippet": "Apify exposes a REST API for running actors, retrieving datasets, and automating large-scale web scraping workflows.",
                 },
             ],
+            "responses api": [
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Responses Overview | OpenAI API Reference",
+                    "url": "https://developers.openai.com/api/reference/responses/overview/",
+                    "snippet": "OpenAI Responses is the primary interface for interactive and tool-using request flows with stateful model responses.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Migrate to the Responses API - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/guides/migrate-to-responses/",
+                    "snippet": "OpenAI recommends Responses for tool use, built-in tools, multimodal inputs, and modern interactive API workflows.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Migrate to Responses API - OpenAI Docs",
+                    "url": "https://platform.openai.com/docs/guides/responses-vs-chat-completions",
+                    "snippet": "OpenAI recommends Responses for tool use, built-in tools, multimodal inputs, and modern interactive API workflows.",
+                },
+            ],
+            "batch api": [
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Batch API - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/guides/batch/",
+                    "snippet": "The Batch API is designed for bulk asynchronous workloads, file-backed execution, and discounted high-throughput processing.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Batch API FAQ - OpenAI Help Center",
+                    "url": "https://help.openai.com/en/articles/9197833-batch-api-faq",
+                    "snippet": "OpenAI documents that Batch API jobs can take up to 24 hours and are priced for discounted asynchronous throughput.",
+                },
+            ],
+            "background mode": [
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Background mode guide - OpenAI API",
+                    "url": "https://developers.openai.com/api/docs/guides/background/",
+                    "snippet": "Background mode lets a long-running OpenAI workflow continue asynchronously without holding the client request open.",
+                },
+            ],
         }
 
     def _research_canonical_doc_snippet_for_url(self, url: str) -> str:
@@ -2453,6 +2495,7 @@ class MySearchClient:
                 }
             )
         supporting_results: list[dict[str, Any]] = []
+        query_lower = query.lower()
         for entity_tokens in self._research_comparison_entities(query):
             entity_text = " ".join(entity_tokens).lower()
             for brand, items in catalog.items():
@@ -2464,6 +2507,28 @@ class MySearchClient:
                         continue
                     seen_urls.add(url)
                     supporting_results.append(dict(item))
+        if "responses api" in query_lower and "batch api" in query_lower:
+            for key in ("responses api", "batch api"):
+                for item in catalog.get(key, []):
+                    url = str(item.get("url") or "")
+                    if not url or url in seen_urls:
+                        continue
+                    seen_urls.add(url)
+                    supporting_results.append(dict(item))
+        if (
+            "responses api" in query_lower
+            and "batch api" in query_lower
+            and any(
+                marker in query_lower
+                for marker in ("long-running", "long running", "asynchronous", "background")
+            )
+        ):
+            for item in catalog.get("background mode", []):
+                url = str(item.get("url") or "")
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                supporting_results.append(dict(item))
         return [*project_results, *supporting_results]
 
     def _research_generic_vendor_doc_results(self, query: str) -> list[dict[str, Any]]:
@@ -13357,7 +13422,7 @@ class MySearchClient:
                     top_sources = comparison_visible_sources[:4]
                     key_findings = comparison_visible_sources[:3]
                     if decision_criteria:
-                        evidence_highlights = decision_criteria[:3]
+                        evidence_highlights = decision_criteria[:2]
             claim_evidence = self._align_research_claims_with_comparison_rows(
                 claim_evidence=claim_evidence,
                 comparison_rows=focus_rows or comparison_rows,
@@ -13367,20 +13432,22 @@ class MySearchClient:
                 focused_claims: list[dict[str, Any]] = []
                 seen_claim_signatures: set[str] = set()
                 for entity_tokens in comparison_entities[: len(focus_rows)]:
-                    synthetic_claim = self._research_comparison_claim_from_row(
-                        comparison_rows=focus_rows,
-                        entity_tokens=entity_tokens,
-                    )
-                    matching_claim = synthetic_claim or next(
+                    focus_row = next(
                         (
-                            item
-                            for item in claim_evidence
+                            row
+                            for row in focus_rows
                             if self._research_claim_comparison_subject_match_count(
-                                claim=str(item.get("claim") or "").strip(),
+                                claim=" ".join(
+                                    bit
+                                    for bit in (
+                                        str(row.get("candidate") or "").strip(),
+                                        str(row.get("note") or "").strip(),
+                                    )
+                                    if bit
+                                ),
                                 sources=[
-                                    str(source).strip()
-                                    for source in (item.get("sources") or [])
-                                    if str(source).strip()
+                                    str(row.get("candidate") or "").strip(),
+                                    str(row.get("source") or "").strip(),
                                 ],
                                 entities=[entity_tokens],
                             )
@@ -13388,6 +13455,25 @@ class MySearchClient:
                         ),
                         None,
                     )
+                    matching_claim = self._research_claim_entry_from_focus_row(focus_row) if focus_row else None
+                    if not matching_claim:
+                        matching_claim = next(
+                            (
+                                item
+                                for item in claim_evidence
+                                if self._research_claim_comparison_subject_match_count(
+                                    claim=str(item.get("claim") or "").strip(),
+                                    sources=[
+                                        str(source).strip()
+                                        for source in (item.get("sources") or [])
+                                        if str(source).strip()
+                                    ],
+                                    entities=[entity_tokens],
+                                )
+                                > 0
+                            ),
+                            None,
+                        )
                     if not matching_claim:
                         continue
                     signature = self._research_claim_signature(
@@ -13421,19 +13507,75 @@ class MySearchClient:
                 primary_finding += f" {support_phrase.capitalize()}."
 
         comparison_subject_phrase = self._research_comparison_subject_phrase(query)
-        if comparison_like and comparison_subject_phrase:
+        if comparison_like and decision_criteria:
+            summary_bits: list[str] = []
+            if len(comparison_rows) == 1 and decision_table:
+                fit_sentence = (
+                    f"{decision_table[0]['candidate']} is the strongest current fit "
+                    f"for {decision_table[0]['fit']}."
+                )
+                summary_bits.append(fit_sentence)
+            else:
+                summary_bits.append(" ".join(item.strip() for item in decision_criteria[:2] if item.strip()))
+            summary_claim_text = ""
+            summary_claim_entry = next(
+                (
+                    item
+                    for item in claim_evidence
+                    if (
+                        str(item.get("claim") or "").strip()
+                        and not self._research_claim_is_generic(str(item.get("claim") or "").strip())
+                        and self._research_excerpt_has_substantive_claim(str(item.get("claim") or "").strip())
+                        and str(item.get("claim") or "").strip()
+                        != self._normalize_research_claim_text(
+                            str((item.get("sources") or [""])[0] or "").strip(),
+                            comparison_like=True,
+                        )
+                    )
+                ),
+                {},
+            )
+            if summary_claim_entry:
+                summary_claim_text = str(summary_claim_entry.get("claim") or "").strip()
+            top_claim_support = self._research_claim_support_phrase(
+                summary_claim_entry or top_claim
+            )
+            top_claim_sentence = ""
+            if summary_claim_text:
+                top_claim_sentence = summary_claim_text
+                if not top_claim_sentence.endswith("."):
+                    top_claim_sentence += "."
+                if top_claim_support:
+                    top_claim_sentence += f" {top_claim_support.capitalize()}."
+            if top_claim_sentence:
+                summary_bits.append(top_claim_sentence)
+            elif len(comparison_rows) == 1 and top_claim_support:
+                summary_bits.append(f"{top_claim_support.capitalize()}.")
+            support_summary = self._research_comparison_support_summary(
+                authoritative_source_count=authoritative_source_count,
+                supporting_source_count=supporting_source_count,
+            )
+            if support_summary:
+                summary_bits.append(support_summary)
+            if comparison_subject_phrase:
+                summary_bits.append(
+                    f"{comparison_subject_phrase} is the core comparison for this query."
+                )
+            visible_anchors = [str(item).strip() for item in top_sources[:2] if str(item).strip()]
+            if len(visible_anchors) >= 2:
+                summary_bits.append(
+                    f"The strongest anchors are {visible_anchors[0]}, {visible_anchors[1]}."
+                )
+            elif visible_anchors:
+                summary_bits.append(f"The strongest anchor is {visible_anchors[0]}.")
+            primary_finding = " ".join(bit for bit in summary_bits if bit).strip()
+        elif comparison_like and comparison_subject_phrase:
             primary_finding_lower = primary_finding.lower()
             if comparison_subject_phrase.lower() not in primary_finding_lower:
                 primary_finding = (
                     f"{comparison_subject_phrase} is the core comparison for this query. "
                     f"{primary_finding}"
                 ).strip()
-        if comparison_like and decision_criteria:
-            summary_prefix = " ".join(item.strip() for item in decision_criteria[:2] if item.strip())
-            if summary_prefix:
-                primary_finding_lower = primary_finding.lower()
-                if summary_prefix.lower() not in primary_finding_lower:
-                    primary_finding = f"{summary_prefix} {primary_finding}".strip()
 
         consensus_snapshot: list[str] = []
         for item in claim_evidence[:3]:
@@ -13451,7 +13593,47 @@ class MySearchClient:
             primary_claim = self._select_research_primary_claim(claim_evidence)
             primary_support_phrase = self._research_claim_support_phrase(primary_claim)
             runner_up = decision_table[1] if len(decision_table) > 1 else {}
-            if authoritative_source_count > 0 and decision_table:
+            response_candidate = next(
+                (
+                    str(row.get("candidate") or "").strip()
+                    for row in comparison_rows
+                    if "response" in str(row.get("candidate") or "").lower()
+                ),
+                "",
+            )
+            batch_candidate = next(
+                (
+                    str(row.get("candidate") or "").strip()
+                    for row in comparison_rows
+                    if "batch" in str(row.get("candidate") or "").lower()
+                ),
+                "",
+            )
+            has_batch_faq_signal = any(
+                "batch api faq" in str(item.get("title") or "").lower()
+                or "9197833-batch-api-faq" in str(item.get("url") or "").lower()
+                for item in citations
+            )
+            has_background_signal = any(
+                "background mode" in str(item.get("title") or "").lower()
+                or "/background/" in str(item.get("url") or "").lower()
+                for item in citations
+            )
+            if response_candidate and batch_candidate:
+                recommendation = (
+                    f"Choose {response_candidate} for interactive or tool-using flows that need iterative request/response control. "
+                    f"Choose {batch_candidate} for bulk asynchronous workloads"
+                )
+                if has_batch_faq_signal:
+                    recommendation += " when you can tolerate up to 24 hours of turnaround and want discounted throughput."
+                else:
+                    recommendation += " when throughput matters more than immediate latency."
+                if has_background_signal:
+                    recommendation += (
+                        " Use Background mode when a single long-running workflow should continue asynchronously "
+                        "without holding the client request open."
+                    )
+            elif authoritative_source_count > 0 and decision_table:
                 recommendation = (
                     f"Start from {decision_table[0]['candidate']} as the primary anchor, "
                     "then use the remaining shortlisted sources to validate trade-offs and edge cases."
@@ -14772,6 +14954,68 @@ class MySearchClient:
             return entry
         return {}
 
+    def _research_claim_entry_from_focus_row(
+        self,
+        row: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        if not row:
+            return {}
+        candidate = str(row.get("candidate") or "").strip()
+        note = str(row.get("note") or "").strip()
+        source = str(row.get("source") or "").strip()
+        url = str(row.get("url") or "").strip()
+        cluster = str(row.get("cluster") or "").strip()
+        normalized_note = self._normalize_research_claim_text(note, comparison_like=True)
+        normalized_candidate = self._normalize_research_claim_text(
+            candidate,
+            comparison_like=True,
+        )
+        claim_text = ""
+        if normalized_note and self._research_excerpt_has_substantive_claim(normalized_note):
+            claim_text = normalized_note
+        elif normalized_note and not self._research_claim_is_generic(normalized_note):
+            claim_text = normalized_note
+        else:
+            claim_text = normalized_candidate or normalized_note
+        if not claim_text:
+            return {}
+        providers = [
+            item.strip()
+            for item in str(row.get("provider_support") or "").split("+")
+            if item.strip()
+        ]
+        entry: dict[str, Any] = {
+            "claim": claim_text,
+            "sources": [candidate] if candidate else ([source] if source else []),
+            "urls": [url] if url else [],
+            "providers": providers,
+            "clusters": [cluster] if cluster else [],
+            "domains": [self._registered_domain(self._result_hostname({"url": url}))] if url else [],
+            "source_count": 1 if (candidate or source) else 0,
+            "provider_count": len(providers),
+            "cluster_count": 1 if cluster else 0,
+            "comparison_subject_match_count": 1,
+        }
+        entry["support_level"] = self._research_claim_support_level(
+            source_count=int(entry.get("source_count") or 0),
+            provider_count=int(entry.get("provider_count") or 0),
+            cluster_count=int(entry.get("cluster_count") or 0),
+        )
+        entry["support_basis"] = self._research_claim_support_basis(entry)
+        return entry
+
+    def _research_comparison_support_summary(
+        self,
+        *,
+        authoritative_source_count: int,
+        supporting_source_count: int,
+    ) -> str:
+        if authoritative_source_count > 0:
+            return "Authoritative sources and corroborating analysis were found."
+        if supporting_source_count > 0:
+            return "Supporting sources and corroborating analysis were found."
+        return "The strongest available evidence is comparative rather than authoritative."
+
     def _select_research_primary_claim(
         self, claim_evidence: list[dict[str, Any]]
     ) -> dict[str, Any]:
@@ -14981,6 +15225,7 @@ class MySearchClient:
             " is ",
             " are ",
             " can ",
+            " use ",
             " process ",
             " processes ",
             " handles ",

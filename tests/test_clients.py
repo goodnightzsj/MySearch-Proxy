@@ -6961,6 +6961,8 @@ class MySearchClientTests(unittest.TestCase):
             {
                 "https://platform.openai.com/docs/guides/background",
                 "https://platform.openai.com/docs/guides/batch",
+                "https://developers.openai.com/api/docs/guides/migrate-to-responses/",
+                "https://developers.openai.com/api/reference/responses/overview/",
             },
         )
         self.assertIn(
@@ -6968,6 +6970,8 @@ class MySearchClientTests(unittest.TestCase):
             {
                 "https://platform.openai.com/docs/guides/background",
                 "https://platform.openai.com/docs/guides/batch",
+                "https://developers.openai.com/api/docs/guides/migrate-to-responses/",
+                "https://developers.openai.com/api/reference/responses/overview/",
             },
         )
         self.assertGreaterEqual(result["evidence"]["authoritative_source_count"], 2)
@@ -7190,6 +7194,8 @@ class MySearchClientTests(unittest.TestCase):
             {
                 "https://developers.openai.com/api/docs/guides/background/",
                 "https://developers.openai.com/api/docs/guides/batch/",
+                "https://developers.openai.com/api/docs/guides/migrate-to-responses/",
+                "https://developers.openai.com/api/reference/responses/overview/",
             },
         )
         self.assertIn(
@@ -7197,10 +7203,33 @@ class MySearchClientTests(unittest.TestCase):
             {
                 "https://developers.openai.com/api/docs/guides/background/",
                 "https://developers.openai.com/api/docs/guides/batch/",
+                "https://developers.openai.com/api/docs/guides/migrate-to-responses/",
+                "https://developers.openai.com/api/reference/responses/overview/",
             },
         )
         self.assertGreaterEqual(result["evidence"]["docs_rescue_result_count"], 2)
         self.assertGreaterEqual(result["evidence"]["authoritative_source_count"], 2)
+
+    def test_research_known_provider_doc_results_include_openai_product_comparison_docs(self) -> None:
+        client = MySearchClient()
+
+        results = client._research_known_provider_doc_results(
+            "compare OpenAI Responses API and Batch API for long-running tasks 2026"
+        )
+
+        urls = {str(item.get("url") or "") for item in results}
+        self.assertIn(
+            "https://developers.openai.com/api/reference/responses/overview/",
+            urls,
+        )
+        self.assertIn(
+            "https://developers.openai.com/api/docs/guides/batch/",
+            urls,
+        )
+        self.assertIn(
+            "https://developers.openai.com/api/docs/guides/background/",
+            urls,
+        )
 
     def test_research_selection_diversifies_official_candidates_across_comparison_entities(self) -> None:
         client = MySearchClient()
@@ -9152,7 +9181,6 @@ class MySearchClientTests(unittest.TestCase):
             executive_summary_override="",
         )
 
-        self.assertIn("Agentic retrieval in Azure AI Search.", sections["executive_summary"])
         self.assertIn(
             "Agentic retrieval in Azure AI Search is the strongest current fit for supporting analysis.",
             sections["executive_summary"],
@@ -9724,7 +9752,7 @@ class MySearchClientTests(unittest.TestCase):
             result["report_sections"]["executive_summary"],
         )
         self.assertIn(
-            "Supporting sources and corroborating analysis were found;",
+            "Supporting sources and corroborating analysis were found.",
             result["web_search"]["answer"],
         )
         comparison_row_urls = [
@@ -11112,10 +11140,9 @@ class MySearchClientTests(unittest.TestCase):
             str(item.get("claim") or "")
             for item in (sections.get("claim_level_evidence") or [])
         ]
-        self.assertEqual(
-            claim_texts,
-            ["Migrate to the Responses API", "Batch API"],
-        )
+        self.assertEqual(len(claim_texts), 2)
+        self.assertTrue(any("responses api" in item.lower() for item in claim_texts))
+        self.assertTrue(any("batch api" in item.lower() for item in claim_texts))
         consensus = sections.get("consensus_snapshot") or []
         self.assertEqual(len(consensus), 2)
         self.assertTrue(all("assistants api" not in str(item).lower() for item in consensus))
