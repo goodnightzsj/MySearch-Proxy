@@ -3357,6 +3357,57 @@ class MySearchClientTests(unittest.TestCase):
             ],
         )
 
+    def test_tavily_social_fallback_retries_transient_error_once(self) -> None:
+        client = MySearchClient()
+        timeout_calls: list[int] = []
+        call_count = 0
+
+        def fake_search_tavily_once(**kwargs):  # type: ignore[no-untyped-def]
+            nonlocal call_count
+            call_count += 1
+            timeout_calls.append(int(kwargs.get("timeout_seconds") or 0))
+            if call_count == 1:
+                raise MySearchHTTPError(
+                    provider="tavily",
+                    status_code=502,
+                    detail="proxy_error",
+                    url="http://127.0.0.1:9874/api/tavily/search",
+                )
+            return {
+                "provider": "tavily",
+                "transport": "env",
+                "query": kwargs["query"],
+                "answer": "Fallback social summary",
+                "results": [
+                    {
+                        "provider": "tavily",
+                        "source": "web",
+                        "title": "OpenAI on X",
+                        "url": "https://x.com/OpenAI/status/123",
+                        "snippet": "Latest OpenAI post",
+                        "content": "",
+                    }
+                ],
+                "citations": [{"title": "OpenAI on X", "url": "https://x.com/OpenAI/status/123"}],
+            }
+
+        client._search_tavily_once = fake_search_tavily_once  # type: ignore[method-assign]
+
+        result = client._search_tavily_social_fallback(
+            query="OpenAI webhooks reactions on X",
+            max_results=5,
+            from_date=None,
+            to_date=None,
+            fallback_reason="xai request timeout after 45s",
+            timeout_seconds=30,
+        )
+
+        self.assertEqual(call_count, 2)
+        self.assertEqual(timeout_calls[0], 10)
+        self.assertLessEqual(timeout_calls[1], 30)
+        self.assertEqual(result["provider"], "tavily_social_fallback")
+        self.assertEqual(result["results"][0]["url"], "https://x.com/OpenAI/status/123")
+
     def test_normalize_social_gateway_response_diversifies_repeated_handles(self) -> None:
         client = MySearchClient()
 
