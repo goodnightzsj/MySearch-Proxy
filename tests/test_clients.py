@@ -10639,6 +10639,111 @@ class MySearchClientTests(unittest.TestCase):
         self.assertIn("responses", consensus_text)
         self.assertIn("batch", consensus_text)
 
+    def test_research_result_matches_comparison_subject_requires_specific_subject_tokens(self) -> None:
+        client = MySearchClient()
+
+        batch_item = {
+            "title": "Batch API - OpenAI Developers",
+            "url": "https://developers.openai.com/api/docs/guides/batch/",
+            "snippet": "Batch API supports discounted asynchronous processing for large jobs.",
+        }
+        responses_item = {
+            "title": "Migrate to the Responses API | OpenAI API",
+            "url": "https://developers.openai.com/api/docs/guides/migrate-to-responses",
+            "snippet": "The Responses API is the primary API for interactive and tool-using workflows.",
+        }
+
+        self.assertTrue(
+            client._research_result_matches_comparison_subject(
+                item=batch_item,
+                entity_tokens=("openai", "batch"),
+            )
+        )
+        self.assertFalse(
+            client._research_result_matches_comparison_subject(
+                item=batch_item,
+                entity_tokens=("openai", "responses"),
+            )
+        )
+        self.assertTrue(
+            client._research_result_matches_comparison_subject(
+                item=responses_item,
+                entity_tokens=("openai", "responses"),
+            )
+        )
+
+    def test_research_report_sections_comparison_rows_keep_both_shared_brand_subjects(self) -> None:
+        client = MySearchClient()
+
+        sections = client._build_research_report_sections(
+            query="compare OpenAI Responses API and Batch API for long-running tasks 2026",
+            web_search={"intent": "comparison", "answer": ""},
+            ordered_results=[
+                {
+                    "provider": "tavily",
+                    "matched_providers": ["tavily"],
+                    "title": "Batch API - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/guides/batch/",
+                    "snippet": "Batch API supports discounted asynchronous processing for large jobs.",
+                },
+                {
+                    "provider": "tavily",
+                    "matched_providers": ["tavily"],
+                    "title": "Create batch | OpenAI API Reference",
+                    "url": "https://developers.openai.com/api/reference/resources/batches/methods/create/",
+                    "snippet": "Create a batch job for asynchronous processing.",
+                },
+                {
+                    "provider": "tavily",
+                    "matched_providers": ["tavily"],
+                    "title": "Migrate to the Responses API | OpenAI API",
+                    "url": "https://developers.openai.com/api/docs/guides/migrate-to-responses",
+                    "snippet": "The Responses API is the primary API for interactive and tool-using workflows.",
+                },
+                {
+                    "provider": "tavily",
+                    "matched_providers": ["tavily"],
+                    "title": "Create a model response | OpenAI API Reference",
+                    "url": "https://developers.openai.com/api/reference/resources/responses/methods/create/",
+                    "snippet": "Create a model response with the Responses API.",
+                },
+            ],
+            pages=[],
+            citations=[
+                {
+                    "title": "Batch API - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/guides/batch/",
+                },
+                {
+                    "title": "Create batch | OpenAI API Reference",
+                    "url": "https://developers.openai.com/api/reference/resources/batches/methods/create/",
+                },
+                {
+                    "title": "Migrate to the Responses API | OpenAI API",
+                    "url": "https://developers.openai.com/api/docs/guides/migrate-to-responses",
+                },
+                {
+                    "title": "Create a model response | OpenAI API Reference",
+                    "url": "https://developers.openai.com/api/reference/resources/responses/methods/create/",
+                },
+            ],
+            social=None,
+            evidence={
+                "providers_consulted": ["tavily"],
+                "citation_count": 4,
+                "confidence": "high",
+                "research_plan": {"scrape_top_n": 2, "web_mode": "research"},
+                "selected_candidate_domains": ["openai.com"],
+                "selected_candidate_cluster_counts": {"official": 4},
+                "selected_authoritative_source_count": 4,
+                "authoritative_research": True,
+            },
+        )
+
+        row_candidates = [str(row.get("candidate") or "").lower() for row in (sections.get("comparison_rows") or [])]
+        self.assertTrue(any("batch" in candidate for candidate in row_candidates), row_candidates)
+        self.assertTrue(any("response" in candidate for candidate in row_candidates), row_candidates)
+
     def test_research_report_sections_ignore_unanchored_web_answer_when_vendor_docs_anchor_shortlist(
         self,
     ) -> None:
