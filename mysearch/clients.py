@@ -13821,11 +13821,25 @@ class MySearchClient:
             claims_by_key = fallback_claims_by_key
             claim_order = fallback_claim_order
         claims: list[dict[str, Any]] = []
+        comparison_entities = (
+            self._research_comparison_entities(query)
+            if comparison_like
+            else []
+        )
         for order_index, key in enumerate(claim_order):
             entry = claims_by_key[key]
             entry["source_count"] = len(entry["sources"])
             entry["provider_count"] = len(entry["providers"])
             entry["cluster_count"] = len(entry["clusters"])
+            entry["comparison_subject_match_count"] = (
+                self._research_claim_comparison_subject_match_count(
+                    claim=str(entry.get("claim") or "").strip(),
+                    sources=[str(item) for item in (entry.get("sources") or []) if item],
+                    entities=comparison_entities,
+                )
+                if comparison_entities
+                else 0
+            )
             entry["support_level"] = self._research_claim_support_level(
                 source_count=int(entry["source_count"] or 0),
                 provider_count=int(entry["provider_count"] or 0),
@@ -13854,6 +13868,7 @@ class MySearchClient:
                     authoritative_preferred=authoritative_preferred,
                 ),
                 -self._research_claim_support_rank(str(entry.get("support_level") or "")),
+                -int(entry.get("comparison_subject_match_count") or 0),
                 -int(entry.get("source_count") or 0),
                 -int(entry.get("provider_count") or 0),
                 int(entry.get("_order_index") or 0),
@@ -14370,6 +14385,23 @@ class MySearchClient:
         if not meaningful_tokens and len(tokens) <= 4:
             return True
         return len(tokens) <= 3 and len(meaningful_tokens) <= 1
+
+    def _research_claim_comparison_subject_match_count(
+        self,
+        *,
+        claim: str,
+        sources: Sequence[str],
+        entities: Sequence[Sequence[str]],
+    ) -> int:
+        if not claim or not entities:
+            return 0
+        haystack = " ".join([claim, *sources]).lower()
+        match_count = 0
+        for entity_tokens in entities[:4]:
+            tokens = [str(token).strip().lower() for token in entity_tokens if str(token).strip()]
+            if tokens and all(token in haystack for token in tokens):
+                match_count += 1
+        return match_count
 
     def _select_research_primary_claim(
         self, claim_evidence: list[dict[str, Any]]
