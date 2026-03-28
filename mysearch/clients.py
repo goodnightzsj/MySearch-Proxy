@@ -2031,6 +2031,30 @@ class MySearchClient:
         ):
             web_search = dict(web_search)
             web_search["answer"] = visible_summary
+            comparison_row_urls = [
+                str(row.get("url") or "").strip()
+                for row in (report_sections.get("comparison_rows") or [])
+                if str(row.get("url") or "").strip()
+            ]
+            if comparison_row_urls:
+                ordered_results_by_url = {
+                    str(item.get("url") or "").strip(): dict(item)
+                    for item in ordered_research_results
+                    if str(item.get("url") or "").strip()
+                }
+                visible_results = [
+                    ordered_results_by_url[url]
+                    for url in comparison_row_urls
+                    if url in ordered_results_by_url
+                ]
+            else:
+                visible_results = [dict(item) for item in ordered_research_results[:4] if item]
+            if visible_results:
+                web_search["results"] = visible_results
+                web_search["citations"] = self._align_citations_with_results(
+                    results=visible_results,
+                    citations=citations or web_search.get("citations") or [],
+                )
 
         return {
             "provider": "hybrid",
@@ -13041,6 +13065,24 @@ class MySearchClient:
             if comparison_entities:
                 prioritized_shortlist_urls: list[str] = []
                 seen_prioritized_urls: set[str] = set()
+                project_url = next(
+                    (
+                        url
+                        for url in shortlist_urls
+                        if url
+                        and self._research_project_candidate_kind_rank(
+                            ordered_result_by_url.get(url) or {
+                                "url": url,
+                                "title": url_to_title.get(url, ""),
+                            }
+                        )
+                        == 0
+                    ),
+                    "",
+                )
+                if project_url:
+                    prioritized_shortlist_urls.append(project_url)
+                    seen_prioritized_urls.add(project_url)
                 for entity_tokens in comparison_entities[:4]:
                     for url in shortlist_urls:
                         if not url or url in seen_prioritized_urls:

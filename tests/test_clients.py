@@ -9686,6 +9686,17 @@ class MySearchClientTests(unittest.TestCase):
             "Supporting sources and corroborating analysis were found;",
             result["web_search"]["answer"],
         )
+        comparison_row_urls = [
+            row["url"]
+            for row in (result["report_sections"].get("comparison_rows") or [])
+            if row.get("url")
+        ]
+        visible_result_urls = [item["url"] for item in result["web_search"]["results"][:4]]
+        self.assertEqual(visible_result_urls, comparison_row_urls[:4])
+        self.assertEqual(
+            [item["url"] for item in result["web_search"]["citations"][:4]],
+            visible_result_urls,
+        )
 
     def test_dedupe_research_results_preserves_matched_providers(self) -> None:
         client = MySearchClient()
