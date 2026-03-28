@@ -13254,6 +13254,11 @@ class MySearchClient:
                         ),
                     }
                 )
+            claim_evidence = self._align_research_claims_with_comparison_rows(
+                claim_evidence=claim_evidence,
+                comparison_rows=comparison_rows,
+                comparison_entities=comparison_entities,
+            )
 
         top_claim = self._select_research_primary_claim(claim_evidence)
         top_claim_text = str(top_claim.get("claim") or "").strip()
@@ -14402,6 +14407,114 @@ class MySearchClient:
             if tokens and all(token in haystack for token in tokens):
                 match_count += 1
         return match_count
+
+    def _align_research_claims_with_comparison_rows(
+        self,
+        *,
+        claim_evidence: list[dict[str, Any]],
+        comparison_rows: Sequence[Mapping[str, Any]],
+        comparison_entities: Sequence[Sequence[str]],
+    ) -> list[dict[str, Any]]:
+        if not claim_evidence or not comparison_rows or not comparison_entities:
+            return claim_evidence[:4]
+
+        aligned: list[dict[str, Any]] = []
+        seen_signatures: set[str] = set()
+
+        def append_entry(entry: Mapping[str, Any]) -> None:
+            if len(aligned) >= 4:
+                return
+            claim_text = str(entry.get("claim") or "").strip()
+            signature = self._research_claim_signature(claim_text)
+            if not claim_text or not signature or signature in seen_signatures:
+                return
+            aligned.append(dict(entry))
+            seen_signatures.add(signature)
+
+        for entity_tokens in comparison_entities[:4]:
+            matching_claim = next(
+                (
+                    item
+                    for item in claim_evidence
+                    if self._research_claim_comparison_subject_match_count(
+                        claim=str(item.get("claim") or "").strip(),
+                        sources=[str(source) for source in (item.get("sources") or []) if source],
+                        entities=[entity_tokens],
+                    )
+                    > 0
+                ),
+                None,
+            )
+            if matching_claim:
+                append_entry(matching_claim)
+                continue
+            synthetic_claim = self._research_comparison_claim_from_row(
+                comparison_rows=comparison_rows,
+                entity_tokens=entity_tokens,
+            )
+            if synthetic_claim:
+                append_entry(synthetic_claim)
+
+        for entry in claim_evidence:
+            append_entry(entry)
+            if len(aligned) >= 4:
+                break
+        return aligned[:4]
+
+    def _research_comparison_claim_from_row(
+        self,
+        *,
+        comparison_rows: Sequence[Mapping[str, Any]],
+        entity_tokens: Sequence[str],
+    ) -> dict[str, Any]:
+        for row in comparison_rows:
+            candidate = str(row.get("candidate") or "").strip()
+            note = str(row.get("note") or "").strip()
+            source = str(row.get("source") or "").strip()
+            url = str(row.get("url") or "").strip()
+            cluster = str(row.get("cluster") or "").strip()
+            claim_text = self._normalize_research_claim_text(
+                note or candidate,
+                comparison_like=True,
+            )
+            if not claim_text:
+                claim_text = self._normalize_research_claim_text(
+                    candidate,
+                    comparison_like=True,
+                )
+            if not claim_text:
+                continue
+            if self._research_claim_comparison_subject_match_count(
+                claim=claim_text,
+                sources=[candidate, source],
+                entities=[entity_tokens],
+            ) <= 0:
+                continue
+            providers = [
+                item.strip()
+                for item in str(row.get("provider_support") or "").split("+")
+                if item.strip()
+            ]
+            entry: dict[str, Any] = {
+                "claim": claim_text,
+                "sources": [candidate] if candidate else ([source] if source else []),
+                "urls": [url] if url else [],
+                "providers": providers,
+                "clusters": [cluster] if cluster else [],
+                "domains": [self._registered_domain(self._result_hostname({"url": url}))] if url else [],
+                "source_count": 1 if (candidate or source) else 0,
+                "provider_count": len(providers),
+                "cluster_count": 1 if cluster else 0,
+                "comparison_subject_match_count": 1,
+            }
+            entry["support_level"] = self._research_claim_support_level(
+                source_count=int(entry.get("source_count") or 0),
+                provider_count=int(entry.get("provider_count") or 0),
+                cluster_count=int(entry.get("cluster_count") or 0),
+            )
+            entry["support_basis"] = self._research_claim_support_basis(entry)
+            return entry
+        return {}
 
     def _select_research_primary_claim(
         self, claim_evidence: list[dict[str, Any]]

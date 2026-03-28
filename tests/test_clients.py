@@ -10629,6 +10629,15 @@ class MySearchClientTests(unittest.TestCase):
         top_sources_text = " ".join(sections.get("top_sources") or []).lower()
         self.assertIn("responses", top_sources_text)
         self.assertIn("batch", top_sources_text)
+        claim_text = " ".join(
+            str(item.get("claim") or "").lower()
+            for item in (sections.get("claim_level_evidence") or [])
+        )
+        self.assertIn("responses", claim_text)
+        self.assertIn("batch", claim_text)
+        consensus_text = " ".join(sections.get("consensus_snapshot") or []).lower()
+        self.assertIn("responses", consensus_text)
+        self.assertIn("batch", consensus_text)
 
     def test_research_report_sections_ignore_unanchored_web_answer_when_vendor_docs_anchor_shortlist(
         self,
