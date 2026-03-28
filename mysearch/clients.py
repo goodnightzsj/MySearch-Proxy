@@ -13066,6 +13066,8 @@ class MySearchClient:
         decision_table: list[dict[str, str]] = []
         decision_criteria: list[str] = []
         comparison_matrix: list[dict[str, str]] = []
+        operational_tradeoffs: list[str] = []
+        decision_checklist: list[dict[str, str]] = []
         if comparison_like:
             comparison_entities = self._research_comparison_entities(query)
             ordered_result_by_url = {
@@ -13304,10 +13306,38 @@ class MySearchClient:
                 comparison_entities=comparison_entities,
                 selected_urls=list(ordered_result_by_url.keys()),
             )
+            if focus_rows:
+                comparison_rows = [dict(row) for row in focus_rows[:4]]
+                visible_candidates = {
+                    str(row.get("candidate") or "").strip()
+                    for row in comparison_rows
+                    if str(row.get("candidate") or "").strip()
+                }
+                if visible_candidates and decision_table:
+                    filtered_decision_table: list[dict[str, str]] = []
+                    seen_decision_candidates: set[str] = set()
+                    for row in decision_table:
+                        candidate = str(row.get("candidate") or "").strip()
+                        if (
+                            not candidate
+                            or candidate in seen_decision_candidates
+                            or candidate not in visible_candidates
+                        ):
+                            continue
+                        filtered_decision_table.append(dict(row))
+                        seen_decision_candidates.add(candidate)
+                    if filtered_decision_table:
+                        decision_table = filtered_decision_table[:4]
             decision_criteria = self._research_build_decision_criteria(
                 focus_rows=focus_rows,
             )
             comparison_matrix = self._research_build_comparison_matrix(
+                focus_rows=focus_rows,
+            )
+            operational_tradeoffs = self._research_build_operational_tradeoffs(
+                focus_rows=focus_rows,
+            )
+            decision_checklist = self._research_build_decision_checklist(
                 focus_rows=focus_rows,
             )
             if focus_rows:
@@ -13330,9 +13360,45 @@ class MySearchClient:
                         evidence_highlights = decision_criteria[:3]
             claim_evidence = self._align_research_claims_with_comparison_rows(
                 claim_evidence=claim_evidence,
-                comparison_rows=comparison_rows,
+                comparison_rows=focus_rows or comparison_rows,
                 comparison_entities=comparison_entities,
             )
+            if focus_rows and comparison_entities:
+                focused_claims: list[dict[str, Any]] = []
+                seen_claim_signatures: set[str] = set()
+                for entity_tokens in comparison_entities[: len(focus_rows)]:
+                    synthetic_claim = self._research_comparison_claim_from_row(
+                        comparison_rows=focus_rows,
+                        entity_tokens=entity_tokens,
+                    )
+                    matching_claim = synthetic_claim or next(
+                        (
+                            item
+                            for item in claim_evidence
+                            if self._research_claim_comparison_subject_match_count(
+                                claim=str(item.get("claim") or "").strip(),
+                                sources=[
+                                    str(source).strip()
+                                    for source in (item.get("sources") or [])
+                                    if str(source).strip()
+                                ],
+                                entities=[entity_tokens],
+                            )
+                            > 0
+                        ),
+                        None,
+                    )
+                    if not matching_claim:
+                        continue
+                    signature = self._research_claim_signature(
+                        str(matching_claim.get("claim") or "").strip()
+                    )
+                    if not signature or signature in seen_claim_signatures:
+                        continue
+                    focused_claims.append(dict(matching_claim))
+                    seen_claim_signatures.add(signature)
+                if focused_claims:
+                    claim_evidence = focused_claims[:4]
 
         top_claim = self._select_research_primary_claim(claim_evidence)
         top_claim_text = str(top_claim.get("claim") or "").strip()
@@ -13454,6 +13520,8 @@ class MySearchClient:
             "decision_table": decision_table,
             "decision_criteria": decision_criteria,
             "comparison_matrix": comparison_matrix,
+            "operational_tradeoffs": operational_tradeoffs,
+            "decision_checklist": decision_checklist,
             "recommendation": recommendation,
         }
 
@@ -13612,6 +13680,36 @@ class MySearchClient:
                 lines.append(
                     f"| {candidate} | {best_for} | {operational_model} | {tradeoff} |"
                 )
+
+        operational_tradeoffs = [
+            str(item).strip()
+            for item in (sections.get("operational_tradeoffs") or [])
+            if str(item).strip()
+        ]
+        if operational_tradeoffs:
+            lines.extend(["", "## Operational Trade-offs"])
+            for item in operational_tradeoffs[:4]:
+                lines.append(f"- {item}")
+
+        decision_checklist = [
+            item
+            for item in (sections.get("decision_checklist") or [])
+            if isinstance(item, dict) and item.get("factor")
+        ]
+        if decision_checklist:
+            lines.extend(
+                [
+                    "",
+                    "## Decision Checklist",
+                    "| Factor | Prefer | Why |",
+                    "|---|---|---|",
+                ]
+            )
+            for row in decision_checklist[:5]:
+                factor = str(row.get("factor") or "").replace("|", "/").strip()
+                prefer = str(row.get("prefer") or "").replace("|", "/").strip()
+                rationale = str(row.get("rationale") or "").replace("|", "/").strip()
+                lines.append(f"| {factor} | {prefer} | {rationale} |")
 
         provider_roles = [
             str(item).strip()
@@ -14547,34 +14645,77 @@ class MySearchClient:
             seen_signatures.add(signature)
 
         for entity_tokens in comparison_entities[:4]:
-            matching_claim = next(
-                (
-                    item
-                    for item in claim_evidence
-                    if self._research_claim_comparison_subject_match_count(
-                        claim=str(item.get("claim") or "").strip(),
-                        sources=[str(source) for source in (item.get("sources") or []) if source],
-                        entities=[entity_tokens],
-                    )
-                    > 0
-                ),
-                None,
-            )
-            if matching_claim:
-                append_entry(matching_claim)
-                continue
             synthetic_claim = self._research_comparison_claim_from_row(
                 comparison_rows=comparison_rows,
                 entity_tokens=entity_tokens,
             )
+            matching_claims = [
+                item
+                for item in claim_evidence
+                if self._research_claim_comparison_subject_match_count(
+                    claim=str(item.get("claim") or "").strip(),
+                    sources=[str(source) for source in (item.get("sources") or []) if source],
+                    entities=[entity_tokens],
+                )
+                > 0
+            ]
             if synthetic_claim:
-                append_entry(synthetic_claim)
+                matching_claims.append(synthetic_claim)
+            if matching_claims:
+                def claim_rank(entry: Mapping[str, Any]) -> tuple[int, int, int, int]:
+                    claim = str(entry.get("claim") or "").strip()
+                    clusters = [
+                        str(cluster).strip()
+                        for cluster in (entry.get("clusters") or [])
+                        if str(cluster).strip()
+                    ]
+                    return (
+                        int(entry.get("comparison_subject_match_count") or 0),
+                        self._research_claim_best_cluster_rank(
+                            clusters=clusters,
+                            authoritative_preferred=True,
+                        ),
+                        self._research_claim_support_rank(str(entry.get("support_level") or "").strip()),
+                        len(claim),
+                    )
+
+                append_entry(max(matching_claims, key=claim_rank))
 
         for entry in claim_evidence:
+            claim_text = str(entry.get("claim") or "").strip()
+            match_count = self._research_claim_comparison_subject_match_count(
+                claim=claim_text,
+                sources=[str(source) for source in (entry.get("sources") or []) if source],
+                entities=comparison_entities,
+            )
+            if match_count <= 0 and not self._research_claim_is_comparison_tail_relevant(claim_text):
+                continue
             append_entry(entry)
             if len(aligned) >= 4:
                 break
         return aligned[:4]
+
+    def _research_claim_is_comparison_tail_relevant(self, claim: str) -> bool:
+        normalized = f" {claim.lower().strip()} "
+        if not normalized.strip():
+            return False
+        return any(
+            marker in normalized
+            for marker in (
+                " background ",
+                " async ",
+                " asynchronous ",
+                " latency ",
+                " streaming ",
+                " long running ",
+                " long-running ",
+                " bulk ",
+                " batch api ",
+                " responses api ",
+                " tool-using ",
+                " interactive ",
+            )
+        )
 
     def _research_comparison_claim_from_row(
         self,
@@ -15157,6 +15298,7 @@ class MySearchClient:
         focus_rows: Sequence[Mapping[str, Any]],
     ) -> list[str]:
         criteria: list[str] = []
+        focus_profiles: list[tuple[str, dict[str, str]]] = []
         for row in focus_rows[:3]:
             candidate = str(row.get("candidate") or "").strip()
             if not candidate:
@@ -15167,8 +15309,44 @@ class MySearchClient:
                 fit=self._research_cluster_fit_summary(str(row.get("cluster") or "").strip()),
                 url=str(row.get("url") or "").strip(),
             )
+            focus_profiles.append((candidate, profile))
             criteria.append(
                 f"Use {candidate} when you need {profile['best_for']}."
+            )
+        responses_candidate = next(
+            (
+                candidate
+                for candidate, _profile in focus_profiles
+                if "responses" in candidate.lower() or "response" in candidate.lower()
+            ),
+            "",
+        )
+        batch_candidate = next(
+            (
+                candidate
+                for candidate, _profile in focus_profiles
+                if "batch" in candidate.lower()
+            ),
+            "",
+        )
+        background_candidate = next(
+            (
+                candidate
+                for candidate, _profile in focus_profiles
+                if "background" in candidate.lower()
+            ),
+            "",
+        )
+        if responses_candidate and batch_candidate:
+            criteria.append(
+                f"Prefer {batch_candidate} when discounted throughput matters more than immediate latency."
+            )
+            criteria.append(
+                f"Prefer {responses_candidate} when iterative request/response control matters more than offline throughput."
+            )
+        if background_candidate:
+            criteria.append(
+                f"Reach for {background_candidate} when work should continue asynchronously without holding the client connection open."
             )
         return criteria[:4]
 
@@ -15197,6 +15375,94 @@ class MySearchClient:
                 }
             )
         return matrix[:3]
+
+    def _research_build_operational_tradeoffs(
+        self,
+        *,
+        focus_rows: Sequence[Mapping[str, Any]],
+    ) -> list[str]:
+        tradeoffs: list[str] = []
+        responses_candidate = ""
+        batch_candidate = ""
+        background_candidate = ""
+        for row in focus_rows[:4]:
+            candidate = str(row.get("candidate") or "").strip()
+            candidate_lower = candidate.lower()
+            if not responses_candidate and ("responses" in candidate_lower or "response" in candidate_lower):
+                responses_candidate = candidate
+            if not batch_candidate and "batch" in candidate_lower:
+                batch_candidate = candidate
+            if not background_candidate and "background" in candidate_lower:
+                background_candidate = candidate
+        if responses_candidate and batch_candidate:
+            tradeoffs.append(
+                f"Interaction model: {responses_candidate} is stronger for interactive or tool-using request flows, while {batch_candidate} is stronger for bulk asynchronous workloads."
+            )
+            tradeoffs.append(
+                f"Latency model: {responses_candidate} keeps a request/response loop, while {batch_candidate} trades latency for discounted high-volume execution."
+            )
+            tradeoffs.append(
+                f"Cost and scale: {batch_candidate} is the better fit when discounted throughput matters more than immediate answers."
+            )
+        if background_candidate:
+            anchor = responses_candidate or "the request/response path"
+            tradeoffs.append(
+                f"Asynchronous execution: {background_candidate} complements {anchor} when work should continue after handoff without keeping the client request open."
+            )
+        return tradeoffs[:4]
+
+    def _research_build_decision_checklist(
+        self,
+        *,
+        focus_rows: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, str]]:
+        checklist: list[dict[str, str]] = []
+        responses_candidate = ""
+        batch_candidate = ""
+        background_candidate = ""
+        for row in focus_rows[:4]:
+            candidate = str(row.get("candidate") or "").strip()
+            lowered = candidate.lower()
+            if not responses_candidate and ("responses" in lowered or "response" in lowered):
+                responses_candidate = candidate
+            if not batch_candidate and "batch" in lowered:
+                batch_candidate = candidate
+            if not background_candidate and "background" in lowered:
+                background_candidate = candidate
+        if responses_candidate and batch_candidate:
+            checklist.extend(
+                [
+                    {
+                        "factor": "Task duration",
+                        "prefer": responses_candidate,
+                        "rationale": "better when the answer needs to come back in an interactive request/response loop",
+                    },
+                    {
+                        "factor": "Workload volume",
+                        "prefer": batch_candidate,
+                        "rationale": "better when the job is bulk, asynchronous, and throughput-sensitive",
+                    },
+                    {
+                        "factor": "Latency sensitivity",
+                        "prefer": responses_candidate,
+                        "rationale": "better when immediate feedback matters more than discounted offline throughput",
+                    },
+                    {
+                        "factor": "Cost sensitivity",
+                        "prefer": batch_candidate,
+                        "rationale": "better when discounted high-volume execution matters more than immediate completion",
+                    },
+                ]
+            )
+        if background_candidate:
+            checklist.append(
+                {
+                    "factor": "Asynchronous continuation",
+                    "prefer": background_candidate,
+                    "rationale": "better when work should continue after handoff without holding the client request open",
+                }
+            )
+        return checklist[:5]
 
     def _research_decision_strengths(
         self,
