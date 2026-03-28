@@ -8838,18 +8838,38 @@ class MySearchClient:
         fallback_reason: str,
         timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
-        tavily_result = self._search_tavily_once(
-            query=query,
-            max_results=max_results,
-            topic="news",
-            include_answer=True,
-            include_content=False,
-            include_domains=["x.com"],
-            exclude_domains=None,
-            strategy="fast",
-            days=self._infer_tavily_days("status", from_date),
-            timeout_seconds=timeout_seconds,
-        )
+        tavily_timeout_budget = max(3, int(timeout_seconds or 15))
+        tavily_deadline = time.monotonic() + tavily_timeout_budget
+        last_error: MySearchError | None = None
+        tavily_result: dict[str, Any] | None = None
+        for attempt in range(2):
+            remaining_budget = tavily_deadline - time.monotonic()
+            if remaining_budget <= 0:
+                break
+            attempt_timeout = max(3, math.ceil(remaining_budget))
+            if attempt == 0:
+                attempt_timeout = min(attempt_timeout, 10)
+            try:
+                tavily_result = self._search_tavily_once(
+                    query=query,
+                    max_results=max_results,
+                    topic="news",
+                    include_answer=True,
+                    include_content=False,
+                    include_domains=["x.com"],
+                    exclude_domains=None,
+                    strategy="fast",
+                    days=self._infer_tavily_days("status", from_date),
+                    timeout_seconds=attempt_timeout,
+                )
+                break
+            except MySearchError as exc:
+                last_error = exc
+                if not self._is_retryable_social_gateway_error(exc) or attempt > 0:
+                    raise
+                continue
+        if tavily_result is None:
+            raise last_error or MySearchError(fallback_reason)
         fallback_results = [
             {
                 "provider": "tavily_social_fallback",
