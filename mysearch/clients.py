@@ -13302,6 +13302,7 @@ class MySearchClient:
             focus_rows = self._research_select_comparison_focus_rows(
                 comparison_rows=comparison_rows,
                 comparison_entities=comparison_entities,
+                selected_urls=list(ordered_result_by_url.keys()),
             )
             decision_criteria = self._research_build_decision_criteria(
                 focus_rows=focus_rows,
@@ -13309,6 +13310,24 @@ class MySearchClient:
             comparison_matrix = self._research_build_comparison_matrix(
                 focus_rows=focus_rows,
             )
+            if focus_rows:
+                comparison_visible_sources: list[str] = []
+                for row in focus_rows[:3]:
+                    row_url = str(row.get("url") or "").strip()
+                    row_title = url_to_title.get(row_url, "").strip() or str(row.get("candidate") or "").strip()
+                    if not row_title:
+                        continue
+                    domain = self._registered_domain(self._result_hostname({"url": row_url}))
+                    line = f"{row_title} ({domain})" if domain and domain not in row_title.lower() else row_title
+                    if line not in comparison_visible_sources:
+                        comparison_visible_sources.append(line)
+                if comparison_visible_sources:
+                    top_sources = comparison_visible_sources[:4]
+                if len(comparison_visible_sources) >= 2:
+                    top_sources = comparison_visible_sources[:4]
+                    key_findings = comparison_visible_sources[:3]
+                    if decision_criteria:
+                        evidence_highlights = decision_criteria[:3]
             claim_evidence = self._align_research_claims_with_comparison_rows(
                 claim_evidence=claim_evidence,
                 comparison_rows=comparison_rows,
@@ -15014,12 +15033,18 @@ class MySearchClient:
         *,
         comparison_rows: Sequence[Mapping[str, Any]],
         comparison_entities: Sequence[Sequence[str]],
+        selected_urls: Sequence[str] | None = None,
     ) -> list[dict[str, str]]:
         if not comparison_rows:
             return []
 
         focus_rows: list[dict[str, str]] = []
         seen_urls: set[str] = set()
+        selected_url_set = {
+            str(url).strip()
+            for url in (selected_urls or [])
+            if str(url).strip()
+        }
 
         def append_row(row: Mapping[str, Any]) -> None:
             if len(focus_rows) >= 4:
@@ -15030,6 +15055,13 @@ class MySearchClient:
             focus_rows.append(dict(row))
             if url:
                 seen_urls.add(url)
+
+        if not comparison_entities and selected_url_set:
+            for row in comparison_rows:
+                if str(row.get("url") or "").strip() in selected_url_set:
+                    append_row(row)
+            if focus_rows:
+                return focus_rows[:4]
 
         for entity_tokens in comparison_entities[:4]:
             matching_row = next(
@@ -15057,6 +15089,10 @@ class MySearchClient:
             )
             if matching_row:
                 append_row(matching_row)
+
+        required_subject_rows = min(2, len(comparison_entities[:4]))
+        if required_subject_rows and len(focus_rows) >= required_subject_rows:
+            return focus_rows[:4]
 
         for row in comparison_rows:
             append_row(row)
