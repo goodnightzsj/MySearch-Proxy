@@ -8649,8 +8649,11 @@ class MySearchClient:
             int(getattr(self.config, "xai_social_timeout_seconds", 120) or 120),
         )
         social_start = time.monotonic()
-        social_fallback_reserve = max(5, min(15, total_social_timeout // 8 or 5))
-        social_primary_budget = max(30, total_social_timeout - social_fallback_reserve)
+        social_fallback_reserve = max(15, min(30, total_social_timeout // 4 or 15))
+        social_primary_budget = min(
+            45,
+            max(15, total_social_timeout - social_fallback_reserve),
+        )
         social_deadline = social_start + social_primary_budget
         last_error: MySearchError | None = None
         if cached_social_gateway_unavailable:

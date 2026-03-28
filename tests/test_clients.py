@@ -2491,8 +2491,7 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertEqual(len(calls), 3)
-        self.assertGreaterEqual(calls[0]["timeout_seconds"], 100)
-        self.assertLess(calls[0]["timeout_seconds"], 120)
+        self.assertEqual(calls[0]["timeout_seconds"], 45)
         self.assertEqual(result["provider"], "tavily_social_fallback")
         self.assertEqual(result["results"][0]["url"], "https://x.com/OpenAI/status/123")
         self.assertEqual(result["fallback"]["from"], "xai_compatible")
@@ -3221,7 +3220,7 @@ class MySearchClientTests(unittest.TestCase):
             include_x_videos=False,
         )
 
-        self.assertEqual(timeout_calls, [105])
+        self.assertEqual(timeout_calls, [45])
         self.assertEqual(result["provider"], "custom_social")
         self.assertTrue(result["cache"]["social"]["hit"])
         self.assertEqual(result["fallback"]["to"], "social_last_good_cache")
@@ -3283,7 +3282,7 @@ class MySearchClientTests(unittest.TestCase):
                 include_x_videos=False,
             )
 
-        self.assertEqual(timeout_calls, [105])
+        self.assertEqual(timeout_calls, [45])
         self.assertEqual(result["provider"], "social_unavailable")
 
     def test_tavily_social_fallback_diversifies_repeated_handles(self) -> None:
@@ -3625,8 +3624,8 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertEqual(result["provider"], "tavily_social_fallback")
-        self.assertEqual(timeout_calls[:-1], [105, 105, 105])
-        self.assertLessEqual(timeout_calls[-1], 15)
+        self.assertEqual(timeout_calls[:-1], [45, 45, 45])
+        self.assertLessEqual(timeout_calls[-1], 30)
 
     def test_github_blob_raw_urls_try_common_branch_aliases(self) -> None:
         client = MySearchClient()
