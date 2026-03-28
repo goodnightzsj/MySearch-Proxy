@@ -10652,6 +10652,17 @@ class MySearchClientTests(unittest.TestCase):
         )
         self.assertIn("interactive", matrix_text)
         self.assertIn("bulk asynchronous", matrix_text)
+        tradeoff_text = " ".join(sections.get("operational_tradeoffs") or []).lower()
+        self.assertIn("latency model", tradeoff_text)
+        self.assertIn("interactive", tradeoff_text)
+        self.assertIn("bulk asynchronous", tradeoff_text)
+        checklist_text = " ".join(
+            " ".join(str(value).lower() for value in row.values())
+            for row in (sections.get("decision_checklist") or [])
+            if isinstance(row, dict)
+        )
+        self.assertIn("task duration", checklist_text)
+        self.assertIn("cost sensitivity", checklist_text)
 
     def test_research_result_matches_comparison_subject_requires_specific_subject_tokens(self) -> None:
         client = MySearchClient()
@@ -10757,6 +10768,11 @@ class MySearchClientTests(unittest.TestCase):
         row_candidates = [str(row.get("candidate") or "").lower() for row in (sections.get("comparison_rows") or [])]
         self.assertTrue(any("batch" in candidate for candidate in row_candidates), row_candidates)
         self.assertTrue(any("response" in candidate for candidate in row_candidates), row_candidates)
+        claim_text = " ".join(
+            str(item.get("claim") or "").lower()
+            for item in (sections.get("claim_level_evidence") or [])
+        )
+        self.assertNotIn("create a model response", claim_text)
 
 
     def test_research_report_sections_ignore_unanchored_web_answer_when_vendor_docs_anchor_shortlist(
@@ -11009,6 +11025,100 @@ class MySearchClientTests(unittest.TestCase):
                 "Batch API FAQ - OpenAI Help Center (openai.com)",
             ],
         )
+
+    def test_research_report_sections_visible_comparison_sections_follow_focus_subjects(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        sections = client._build_research_report_sections(
+            query="compare OpenAI Responses API and Batch API for long-running tasks 2026",
+            web_search={"intent": "comparison", "answer": ""},
+            ordered_results=[
+                {
+                    "provider": "exa",
+                    "matched_providers": ["exa"],
+                    "title": "Migrate to the Responses API | OpenAI API",
+                    "url": "https://developers.openai.com/api/docs/guides/migrate-to-responses",
+                    "snippet": "Use the Responses API for interactive and tool-using request flows.",
+                },
+                {
+                    "provider": "tavily",
+                    "matched_providers": ["tavily", "exa"],
+                    "title": "Batch API - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/guides/batch/",
+                    "snippet": "Use Batch API for bulk asynchronous workloads.",
+                },
+                {
+                    "provider": "tavily",
+                    "matched_providers": ["tavily"],
+                    "title": "Batch processing with the Batch API - OpenAI Developers",
+                    "url": "https://developers.openai.com/cookbook/examples/batch_processing/",
+                    "snippet": "Batch processing with the Batch API for large workloads.",
+                },
+                {
+                    "provider": "exa",
+                    "matched_providers": ["exa"],
+                    "title": "OpenAI Assistants API vs. OpenAI Responses API (Updated for Jan 2026)",
+                    "url": "https://ragwalla.com/blog/openai-assistants-api-vs-openai-responses-api-complete-comparison-guide",
+                    "snippet": "Third-party comparison of Assistants API and Responses API.",
+                },
+            ],
+            pages=[],
+            citations=[
+                {
+                    "title": "Migrate to the Responses API | OpenAI API",
+                    "url": "https://developers.openai.com/api/docs/guides/migrate-to-responses",
+                },
+                {
+                    "title": "Batch API - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/guides/batch/",
+                },
+                {
+                    "title": "Batch processing with the Batch API - OpenAI Developers",
+                    "url": "https://developers.openai.com/cookbook/examples/batch_processing/",
+                },
+                {
+                    "title": "OpenAI Assistants API vs. OpenAI Responses API (Updated for Jan 2026)",
+                    "url": "https://ragwalla.com/blog/openai-assistants-api-vs-openai-responses-api-complete-comparison-guide",
+                },
+            ],
+            social=None,
+            evidence={
+                "providers_consulted": ["tavily", "exa"],
+                "citation_count": 4,
+                "confidence": "high",
+                "research_plan": {"scrape_top_n": 2, "web_mode": "docs"},
+                "selected_candidate_domains": ["openai.com"],
+                "selected_candidate_cluster_counts": {"official": 2},
+                "selected_authoritative_source_count": 2,
+                "authoritative_research": True,
+            },
+        )
+
+        comparison_candidates = [
+            str(row.get("candidate") or "")
+            for row in (sections.get("comparison_rows") or [])
+        ]
+        self.assertEqual(
+            comparison_candidates,
+            ["Migrate to the Responses API", "Batch API"],
+        )
+        self.assertEqual(
+            [str(row.get("candidate") or "") for row in (sections.get("decision_table") or [])],
+            ["Migrate to the Responses API", "Batch API"],
+        )
+        claim_texts = [
+            str(item.get("claim") or "")
+            for item in (sections.get("claim_level_evidence") or [])
+        ]
+        self.assertEqual(
+            claim_texts,
+            ["Migrate to the Responses API", "Batch API"],
+        )
+        consensus = sections.get("consensus_snapshot") or []
+        self.assertEqual(len(consensus), 2)
+        self.assertTrue(all("assistants api" not in str(item).lower() for item in consensus))
 
 
 if __name__ == "__main__":
