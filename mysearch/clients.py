@@ -13064,6 +13064,8 @@ class MySearchClient:
 
         comparison_rows: list[dict[str, str]] = []
         decision_table: list[dict[str, str]] = []
+        decision_criteria: list[str] = []
+        comparison_matrix: list[dict[str, str]] = []
         if comparison_like:
             comparison_entities = self._research_comparison_entities(query)
             ordered_result_by_url = {
@@ -13297,6 +13299,16 @@ class MySearchClient:
                         ),
                     }
                 )
+            focus_rows = self._research_select_comparison_focus_rows(
+                comparison_rows=comparison_rows,
+                comparison_entities=comparison_entities,
+            )
+            decision_criteria = self._research_build_decision_criteria(
+                focus_rows=focus_rows,
+            )
+            comparison_matrix = self._research_build_comparison_matrix(
+                focus_rows=focus_rows,
+            )
             claim_evidence = self._align_research_claims_with_comparison_rows(
                 claim_evidence=claim_evidence,
                 comparison_rows=comparison_rows,
@@ -13331,6 +13343,12 @@ class MySearchClient:
                     f"{comparison_subject_phrase} is the core comparison for this query. "
                     f"{primary_finding}"
                 ).strip()
+        if comparison_like and decision_criteria:
+            summary_prefix = " ".join(item.strip() for item in decision_criteria[:2] if item.strip())
+            if summary_prefix:
+                primary_finding_lower = primary_finding.lower()
+                if summary_prefix.lower() not in primary_finding_lower:
+                    primary_finding = f"{summary_prefix} {primary_finding}".strip()
 
         consensus_snapshot: list[str] = []
         for item in claim_evidence[:3]:
@@ -13415,6 +13433,8 @@ class MySearchClient:
             "comparison_lens": comparison_lens,
             "comparison_rows": comparison_rows,
             "decision_table": decision_table,
+            "decision_criteria": decision_criteria,
+            "comparison_matrix": comparison_matrix,
             "recommendation": recommendation,
         }
 
@@ -13540,6 +13560,39 @@ class MySearchClient:
                 strengths = str(row.get("strengths") or "").replace("|", "/").strip()
                 cautions = str(row.get("cautions") or "").replace("|", "/").strip()
                 lines.append(f"| {candidate} | {fit} | {strengths} | {cautions} |")
+
+        decision_criteria = [
+            str(item).strip()
+            for item in (sections.get("decision_criteria") or [])
+            if str(item).strip()
+        ]
+        if decision_criteria:
+            lines.extend(["", "## Decision Criteria"])
+            for item in decision_criteria[:4]:
+                lines.append(f"- {item}")
+
+        comparison_matrix = [
+            item
+            for item in (sections.get("comparison_matrix") or [])
+            if isinstance(item, dict) and item.get("candidate")
+        ]
+        if comparison_matrix:
+            lines.extend(
+                [
+                    "",
+                    "## Comparison Matrix",
+                    "| Candidate | Best For | Operational Model | Trade-off |",
+                    "|---|---|---|---|",
+                ]
+            )
+            for row in comparison_matrix[:4]:
+                candidate = str(row.get("candidate") or "").replace("|", "/").strip()
+                best_for = str(row.get("best_for") or "").replace("|", "/").strip()
+                operational_model = str(row.get("operational_model") or "").replace("|", "/").strip()
+                tradeoff = str(row.get("tradeoff") or "").replace("|", "/").strip()
+                lines.append(
+                    f"| {candidate} | {best_for} | {operational_model} | {tradeoff} |"
+                )
 
         provider_roles = [
             str(item).strip()
@@ -14955,6 +15008,159 @@ class MySearchClient:
             "listicle": "broad scan",
             "directory": "directory-style inventory",
         }.get(cluster_label, "general coverage")
+
+    def _research_select_comparison_focus_rows(
+        self,
+        *,
+        comparison_rows: Sequence[Mapping[str, Any]],
+        comparison_entities: Sequence[Sequence[str]],
+    ) -> list[dict[str, str]]:
+        if not comparison_rows:
+            return []
+
+        focus_rows: list[dict[str, str]] = []
+        seen_urls: set[str] = set()
+
+        def append_row(row: Mapping[str, Any]) -> None:
+            if len(focus_rows) >= 4:
+                return
+            url = str(row.get("url") or "").strip()
+            if url and url in seen_urls:
+                return
+            focus_rows.append(dict(row))
+            if url:
+                seen_urls.add(url)
+
+        for entity_tokens in comparison_entities[:4]:
+            matching_row = next(
+                (
+                    row
+                    for row in comparison_rows
+                    if self._research_claim_comparison_subject_match_count(
+                        claim=" ".join(
+                            part
+                            for part in (
+                                str(row.get("candidate") or "").strip(),
+                                str(row.get("note") or "").strip(),
+                            )
+                            if part
+                        ),
+                        sources=[
+                            str(row.get("candidate") or "").strip(),
+                            str(row.get("source") or "").strip(),
+                        ],
+                        entities=[entity_tokens],
+                    )
+                    > 0
+                ),
+                None,
+            )
+            if matching_row:
+                append_row(matching_row)
+
+        for row in comparison_rows:
+            append_row(row)
+            if len(focus_rows) >= 4:
+                break
+        return focus_rows[:4]
+
+    def _research_comparison_profile(
+        self,
+        *,
+        candidate: str,
+        note: str,
+        fit: str,
+        url: str,
+    ) -> dict[str, str]:
+        text = " ".join(bit for bit in (candidate, note, fit, url) if bit).lower()
+        if any(token in text for token in ("responses api", "response api", "model response", "tool-using", "streaming")):
+            return {
+                "best_for": "interactive or tool-using request flows",
+                "operational_model": "request/response workflow with iterative calls",
+                "tradeoff": "less cost-efficient than batch for very large asynchronous jobs",
+            }
+        if any(token in text for token in ("batch api", "create batch", "batches", "jsonl", "bulk", "completion_window", "asynchronous")):
+            return {
+                "best_for": "bulk asynchronous workloads",
+                "operational_model": "file-backed batch execution",
+                "tradeoff": "higher latency and weaker fit for interactive request/response flows",
+            }
+        if "background" in text:
+            return {
+                "best_for": "long-running tasks without holding the client request open",
+                "operational_model": "background execution with later retrieval or polling",
+                "tradeoff": "complements, but does not replace, bulk batch processing",
+            }
+        if fit == "project-native source":
+            return {
+                "best_for": "direct product-side comparison context",
+                "operational_model": "product-native comparison page",
+                "tradeoff": "may be narrower than broader ecosystem analysis",
+            }
+        if fit == "canonical ground truth":
+            return {
+                "best_for": "canonical product guidance",
+                "operational_model": "first-party product documentation",
+                "tradeoff": "may describe capabilities more than head-to-head trade-offs",
+            }
+        if fit == "supporting analysis":
+            return {
+                "best_for": "secondary validation and implementation nuance",
+                "operational_model": "supporting vendor or official documentation",
+                "tradeoff": "usually complements, rather than replaces, canonical guidance",
+            }
+        return {
+            "best_for": fit or "general comparison coverage",
+            "operational_model": "comparison-oriented supporting source",
+            "tradeoff": "requires cross-checking against canonical product documentation",
+        }
+
+    def _research_build_decision_criteria(
+        self,
+        *,
+        focus_rows: Sequence[Mapping[str, Any]],
+    ) -> list[str]:
+        criteria: list[str] = []
+        for row in focus_rows[:3]:
+            candidate = str(row.get("candidate") or "").strip()
+            if not candidate:
+                continue
+            profile = self._research_comparison_profile(
+                candidate=candidate,
+                note=str(row.get("note") or "").strip(),
+                fit=self._research_cluster_fit_summary(str(row.get("cluster") or "").strip()),
+                url=str(row.get("url") or "").strip(),
+            )
+            criteria.append(
+                f"Use {candidate} when you need {profile['best_for']}."
+            )
+        return criteria[:4]
+
+    def _research_build_comparison_matrix(
+        self,
+        *,
+        focus_rows: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, str]]:
+        matrix: list[dict[str, str]] = []
+        for row in focus_rows[:3]:
+            candidate = str(row.get("candidate") or "").strip()
+            if not candidate:
+                continue
+            profile = self._research_comparison_profile(
+                candidate=candidate,
+                note=str(row.get("note") or "").strip(),
+                fit=self._research_cluster_fit_summary(str(row.get("cluster") or "").strip()),
+                url=str(row.get("url") or "").strip(),
+            )
+            matrix.append(
+                {
+                    "candidate": candidate,
+                    "best_for": profile["best_for"],
+                    "operational_model": profile["operational_model"],
+                    "tradeoff": profile["tradeoff"],
+                }
+            )
+        return matrix[:3]
 
     def _research_decision_strengths(
         self,
