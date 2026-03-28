@@ -880,6 +880,14 @@ def classify_tavily_structural_failure(
 ) -> str:
     lowered_error = str(error_text or "").lower()
     if (
+        "timed out awaiting tools/call" in lowered_error
+        or " timed out" in lowered_error
+        or " timeout" in lowered_error
+    ):
+        if "tavily_research" in lowered_error or "research" in str(benchmark_id).lower():
+            return "tavily-research-tool-timeout"
+        return "tavily-search-tool-timeout"
+    if (
         "tavily: http 502" in lowered_error
         or lowered_error.count("http 502") >= 2
     ):
