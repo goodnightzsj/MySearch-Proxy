@@ -13013,6 +13013,12 @@ class MySearchClient:
         comparison_rows: list[dict[str, str]] = []
         decision_table: list[dict[str, str]] = []
         if comparison_like:
+            comparison_entities = self._research_comparison_entities(query)
+            ordered_result_by_url = {
+                (item.get("url") or "").strip(): item
+                for item in ordered_results
+                if (item.get("url") or "").strip()
+            }
             url_to_excerpt = {
                 (page.get("url") or "").strip(): self._build_excerpt(
                     (page.get("excerpt") or page.get("content") or "").strip(),
@@ -13032,6 +13038,28 @@ class MySearchClient:
                 for page in pages
                 if (page.get("url") or "").strip() and not page.get("error")
             )
+            if comparison_entities:
+                prioritized_shortlist_urls: list[str] = []
+                seen_prioritized_urls: set[str] = set()
+                for entity_tokens in comparison_entities[:4]:
+                    for url in shortlist_urls:
+                        if not url or url in seen_prioritized_urls:
+                            continue
+                        item = ordered_result_by_url.get(url) or {
+                            "url": url,
+                            "title": url_to_title.get(url, ""),
+                        }
+                        if not self._research_result_matches_entity(
+                            item=item,
+                            entity_tokens=entity_tokens,
+                        ):
+                            continue
+                        prioritized_shortlist_urls.append(url)
+                        seen_prioritized_urls.add(url)
+                        break
+                shortlist_urls = prioritized_shortlist_urls + [
+                    url for url in shortlist_urls if url and url not in seen_prioritized_urls
+                ]
             for url in shortlist_urls:
                 if not url or url in seen_shortlist_urls:
                     continue
@@ -13136,6 +13164,7 @@ class MySearchClient:
                 comparison_rows.append(
                     {
                         "candidate": candidate[:80],
+                        "url": url,
                         "source": self._registered_domain(self._result_hostname({"url": url})) or url,
                         "cluster": cluster_label,
                         "provider_support": " + ".join(providers[:3]) if providers else "unknown",
@@ -13144,6 +13173,19 @@ class MySearchClient:
                 )
                 if len(comparison_rows) >= 4:
                     break
+            if comparison_entities and comparison_rows:
+                comparison_top_sources: list[str] = []
+                for row in comparison_rows[:4]:
+                    row_url = str(row.get("url") or "").strip()
+                    row_title = url_to_title.get(row_url, "").strip() or str(row.get("candidate") or "").strip()
+                    if not row_title:
+                        continue
+                    domain = self._registered_domain(self._result_hostname({"url": row_url}))
+                    line = f"{row_title} ({domain})" if domain and domain not in row_title.lower() else row_title
+                    if line not in comparison_top_sources:
+                        comparison_top_sources.append(line)
+                if len(comparison_top_sources) >= 2:
+                    top_sources = comparison_top_sources[:4]
             for row in comparison_rows[:4]:
                 cluster_label = str(row.get("cluster") or "").strip()
                 cluster_detail = next(
