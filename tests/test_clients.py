@@ -8997,6 +8997,47 @@ class MySearchClientTests(unittest.TestCase):
         self.assertTrue(all("completion_window" not in claim for claim in claim_texts))
         self.assertLessEqual(len(claim_texts), 2)
 
+    def test_research_claim_evidence_prefers_claims_matching_comparison_subjects(self) -> None:
+        client = MySearchClient()
+
+        claims = client._build_research_claim_evidence(
+            query="compare OpenAI Responses API and Batch API for long-running tasks 2026",
+            mode="docs",
+            ordered_results=[
+                {
+                    "provider": "canonical_research_docs",
+                    "matched_providers": ["canonical_research_docs", "tavily"],
+                    "title": "Migrate to the Responses API | OpenAI API",
+                    "url": "https://developers.openai.com/api/docs/guides/migrate-to-responses",
+                    "snippet": "Use the Responses API for long-running tasks and agent workflows.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "matched_providers": ["canonical_research_docs", "tavily"],
+                    "title": "Batch API - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/guides/batch/",
+                    "snippet": "Process jobs asynchronously with Batch API.",
+                },
+                {
+                    "provider": "exa",
+                    "matched_providers": ["exa"],
+                    "title": "Shell + Skills + Compaction: Tips for long-running agents",
+                    "url": "https://example.com/blog/agent-compaction",
+                    "snippet": "Long-running agents benefit from compaction and checkpointing.",
+                },
+            ],
+            pages=[],
+            citations=[],
+            comparison_like=True,
+            include_domains=None,
+            authoritative_preferred=True,
+        )
+
+        claim_texts = [str(item.get("claim") or "") for item in claims]
+        self.assertGreaterEqual(len(claim_texts), 2)
+        self.assertIn("Responses API", claim_texts[0])
+        self.assertIn("Batch API", claim_texts[1])
+
     def test_normalize_research_claim_text_drops_json_shell(self) -> None:
         client = MySearchClient()
 
