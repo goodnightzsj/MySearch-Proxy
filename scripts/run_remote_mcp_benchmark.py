@@ -620,15 +620,26 @@ class MCPClient:
         self._post(notif, notif_headers, timeout=20, retries=5)
 
     def call_tool(self, tool_name, arguments):
-        headers = dict(self.headers)
-        if self.session_id:
-            headers["mcp-session-id"] = self.session_id
         payload = {
             "jsonrpc": "2.0",
             "id": 2,
             "method": "tools/call",
             "params": {"name": tool_name, "arguments": arguments},
         }
+        headers = dict(self.headers)
+        if self.session_id:
+            headers["mcp-session-id"] = self.session_id
+        try:
+            _, response_payload = self._post(payload, headers, timeout=120, retries=4)
+            return response_payload
+        except Exception as exc:
+            lowered = str(exc).lower()
+            if "session not found" not in lowered and "missing mcp-session-id" not in lowered:
+                raise
+        self.initialize()
+        headers = dict(self.headers)
+        if self.session_id:
+            headers["mcp-session-id"] = self.session_id
         _, response_payload = self._post(payload, headers, timeout=120, retries=4)
         return response_payload
 
