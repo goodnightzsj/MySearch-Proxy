@@ -907,7 +907,7 @@ def classify_tavily_structural_failure(
         "mcp-session" in lowered_error and "transport" in lowered_error
     ):
         return "tavily-mcp-session-transport-blocked"
-    if not raw_text.strip() or "research" not in str(benchmark_id).lower():
+    if not raw_text.strip():
         return ""
     try:
         blob = json.loads(raw_text)
