@@ -925,9 +925,15 @@ def classify_tavily_structural_failure(
                 break
     lowered = f"{blob.get('status', '')} {blob.get('error', '')} {detail_text}".lower()
     if "excessive requests" in lowered or str(blob.get("status")) == "429":
-        return "tavily-research-upstream-rate-limited"
+        if "research" in str(benchmark_id).lower():
+            return "tavily-research-upstream-rate-limited"
+        return "tavily-search-upstream-rate-limited"
     if "usage limit" in lowered or str(blob.get("status")) == "432":
-        return "tavily-research-upstream-plan-limited"
+        if "research" in str(benchmark_id).lower():
+            return "tavily-research-upstream-plan-limited"
+        if "extract" in str(benchmark_id).lower():
+            return "tavily-extract-upstream-plan-limited"
+        return "tavily-search-upstream-plan-limited"
     return ""
 
 

@@ -312,7 +312,7 @@ class MySearchConfig:
                 default="grok-4.20-beta-latest-non-reasoning",
             ),
             max_parallel_workers=max(1, _get_int("MYSEARCH_MAX_PARALLEL_WORKERS", 4)),
-            search_cache_ttl_seconds=max(0, _get_int("MYSEARCH_SEARCH_CACHE_TTL_SECONDS", 30)),
+            search_cache_ttl_seconds=max(0, _get_int("MYSEARCH_SEARCH_CACHE_TTL_SECONDS", 120)),
             extract_cache_ttl_seconds=max(0, _get_int("MYSEARCH_EXTRACT_CACHE_TTL_SECONDS", 300)),
             mcp_host=_get_str("MYSEARCH_MCP_HOST", default="127.0.0.1"),
             mcp_port=_get_int("MYSEARCH_MCP_PORT", 8000),
