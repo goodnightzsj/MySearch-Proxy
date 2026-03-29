@@ -2815,6 +2815,74 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(cached_result["provider"], "tavily_social_fallback")
         self.assertEqual(cached_result["results"][0]["url"], "https://x.com/OpenAI/status/555")
 
+    def test_xai_compatible_search_uses_exa_social_fallback_when_tavily_fails(self) -> None:
+        client = MySearchClient()
+        provider = client.config.xai
+        provider.search_mode = "compatible"
+        provider.default_paths["social_search"] = "/social/search"
+        provider.alternate_base_urls["social_search"] = "http://gateway.example/v1"
+        client._get_key_or_raise = lambda provider: type(  # type: ignore[method-assign]
+            "Record",
+            (),
+            {"key": "gateway-token", "source": "env"},
+        )()
+        client._provider_can_serve = lambda provider: provider.name == "exa"  # type: ignore[method-assign]
+
+        def fake_request_json(**kwargs):  # type: ignore[no-untyped-def]
+            raise MySearchError("xai request timeout after 45s: http://127.0.0.1:9874/social/search")
+
+        def fake_tavily_social_fallback(**kwargs):  # type: ignore[no-untyped-def]
+            raise MySearchError(
+                "tavily request failed (HTTP 432): "
+                '{"error": "This request exceeds your plan\'s set usage limit."}'
+            )
+
+        client._request_json = fake_request_json  # type: ignore[method-assign]
+        client._search_tavily_social_fallback = fake_tavily_social_fallback  # type: ignore[method-assign]
+        client._search_exa = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "exa",
+            "transport": "env",
+            "query": kwargs["query"],
+            "results": [
+                {
+                    "provider": "exa",
+                    "source": "web",
+                    "title": "Alice on X",
+                    "url": "https://x.com/alice/status/1",
+                    "snippet": "Alice reaction",
+                    "content": "",
+                },
+                {
+                    "provider": "exa",
+                    "source": "web",
+                    "title": "Bob on X",
+                    "url": "https://x.com/bob/status/2",
+                    "snippet": "Bob reaction",
+                    "content": "",
+                },
+            ],
+            "citations": [],
+        }
+
+        result = client._search_xai_compatible(
+            query="GPT-5.4 reactions on X",
+            sources=["x"],
+            max_results=5,
+            allowed_x_handles=None,
+            excluded_x_handles=None,
+            from_date=None,
+            to_date=None,
+            include_x_images=False,
+            include_x_videos=False,
+        )
+
+        self.assertEqual(result["provider"], "exa_social_fallback")
+        self.assertEqual(result["fallback"]["to"], "exa_social_fallback")
+        self.assertEqual(
+            [item["url"] for item in result["results"]],
+            ["https://x.com/alice/status/1", "https://x.com/bob/status/2"],
+        )
+
     def test_xai_compatible_search_returns_cached_tavily_social_fallback_before_retrying(self) -> None:
         client = MySearchClient()
         provider = client.config.xai
@@ -3713,6 +3781,40 @@ class MySearchClientTests(unittest.TestCase):
             result["metadata"]["raw_url"],
             "https://raw.githubusercontent.com/openai/openai-node/master/README.md",
         )
+
+    def test_extract_url_retries_transient_firecrawl_failure_once(self) -> None:
+        client = MySearchClient()
+        attempts = 0
+
+        def fake_scrape_firecrawl(**kwargs):  # type: ignore[no-untyped-def]
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise MySearchHTTPError(
+                    provider="firecrawl",
+                    status_code=502,
+                    detail={"detail": ""},
+                    url="https://api.firecrawl.dev/v1/scrape",
+                )
+            return {
+                "provider": "firecrawl",
+                "url": kwargs["url"],
+                "content": "Validated extract content. " * 12,
+                "metadata": {},
+            }
+
+        client._scrape_firecrawl = fake_scrape_firecrawl  # type: ignore[method-assign]
+        client._extract_tavily = lambda **kwargs: (_ for _ in ()).throw(AssertionError("should not call tavily after successful firecrawl retry"))  # type: ignore[method-assign]
+        client._provider_can_serve = lambda provider: False  # type: ignore[method-assign]
+
+        result = client.extract_url(
+            url="https://react.dev/reference/react/useEffectEvent",
+            provider="auto",
+        )
+
+        self.assertEqual(attempts, 2)
+        self.assertEqual(result["provider"], "firecrawl")
+        self.assertFalse(result["cache"]["extract"]["hit"])
 
     def test_firecrawl_domain_filtered_search_falls_back_to_tavily(self) -> None:
         client = MySearchClient()
