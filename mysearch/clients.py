@@ -8789,7 +8789,7 @@ class MySearchClient:
                 timeout_seconds=min(remaining_social_budget, social_fallback_reserve),
             )
         except MySearchError as fallback_exc:
-            if self._provider_can_serve(self.config.exa):
+            if self._provider_can_attempt_fallback(self.config.exa):
                 try:
                     exa_fallback_result = self._search_exa_social_fallback(
                         query=query,
@@ -8928,6 +8928,12 @@ class MySearchClient:
 
     def _is_retryable_transient_error(self, exc: Exception) -> bool:
         return isinstance(exc, MySearchHTTPError) and exc.status_code in {429, 502, 503, 504}
+
+    def _provider_can_attempt_fallback(self, provider: ProviderConfig) -> bool:
+        if not self.keyring.has_provider(provider.name):
+            return False
+        status = self._provider_live_status(provider)
+        return status != "auth_error"
 
     def _search_tavily_social_fallback(
         self,
