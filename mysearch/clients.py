@@ -1432,37 +1432,43 @@ class MySearchClient:
                 )
 
         if provider in {"auto", "firecrawl"}:
-            try:
-                firecrawl_result = self._scrape_firecrawl(
-                    url=url,
-                    formats=formats,
-                    only_main_content=only_main_content,
-                )
-                firecrawl_issue = self._extract_quality_issue(firecrawl_result) or ""
-                if not firecrawl_issue:
-                    self._cache_set("extract", cache_key, firecrawl_result)
-                    return self._annotate_cache(
-                        firecrawl_result,
-                        namespace="extract",
-                        hit=False,
+            firecrawl_attempts = 2
+            for attempt in range(firecrawl_attempts):
+                try:
+                    firecrawl_result = self._scrape_firecrawl(
+                        url=url,
+                        formats=formats,
+                        only_main_content=only_main_content,
                     )
+                    firecrawl_issue = self._extract_quality_issue(firecrawl_result) or ""
+                    if not firecrawl_issue:
+                        self._cache_set("extract", cache_key, firecrawl_result)
+                        return self._annotate_cache(
+                            firecrawl_result,
+                            namespace="extract",
+                            hit=False,
+                        )
 
-                errors.append(f"firecrawl scrape returned {firecrawl_issue}")
+                    errors.append(f"firecrawl scrape returned {firecrawl_issue}")
 
-                if provider == "firecrawl":
-                    result = self._annotate_extract_warning(
-                        firecrawl_result,
-                        warning=f"firecrawl scrape returned {firecrawl_issue}",
-                    )
-                    return self._annotate_cache(
-                        result,
-                        namespace="extract",
-                        hit=False,
-                    )
-            except MySearchError as exc:
-                errors.append(f"firecrawl scrape failed: {exc}")
-                if provider == "firecrawl":
-                    raise
+                    if provider == "firecrawl":
+                        result = self._annotate_extract_warning(
+                            firecrawl_result,
+                            warning=f"firecrawl scrape returned {firecrawl_issue}",
+                        )
+                        return self._annotate_cache(
+                            result,
+                            namespace="extract",
+                            hit=False,
+                        )
+                    break
+                except MySearchError as exc:
+                    if attempt < firecrawl_attempts - 1 and self._is_retryable_transient_error(exc):
+                        continue
+                    errors.append(f"firecrawl scrape failed: {exc}")
+                    if provider == "firecrawl":
+                        raise
+                    break
 
         if provider in {"auto", "tavily"}:
             try:
@@ -8783,6 +8789,36 @@ class MySearchClient:
                 timeout_seconds=min(remaining_social_budget, social_fallback_reserve),
             )
         except MySearchError as fallback_exc:
+            if self._provider_can_serve(self.config.exa):
+                try:
+                    exa_fallback_result = self._search_exa_social_fallback(
+                        query=query,
+                        max_results=max_results,
+                        fallback_reason=f"{fallback_reason} | tavily_social_fallback failed: {fallback_exc}",
+                        from_date=from_date,
+                        to_date=to_date,
+                    )
+                except MySearchError as exa_exc:
+                    social_unavailable_result = self._build_social_unavailable_result(
+                        query=query,
+                        fallback_reason=(
+                            f"{fallback_reason} | tavily_social_fallback failed: {fallback_exc}"
+                            f" | exa_social_fallback failed: {exa_exc}"
+                        ),
+                    )
+                    self._cache_set("social_unavailable", social_cache_key, social_unavailable_result)
+                    return self._annotate_cache(
+                        social_unavailable_result,
+                        namespace="social_unavailable",
+                        hit=False,
+                    )
+                self._cache_delete("social_unavailable", social_cache_key)
+                self._cache_set("social", social_cache_key, exa_fallback_result)
+                return self._annotate_cache(
+                    exa_fallback_result,
+                    namespace="social",
+                    hit=False,
+                )
             social_unavailable_result = self._build_social_unavailable_result(
                 query=query,
                 fallback_reason=f"{fallback_reason} | tavily_social_fallback failed: {fallback_exc}",
@@ -8810,8 +8846,70 @@ class MySearchClient:
             return result
         return tavily_fallback_result
 
+    def _search_exa_social_fallback(
+        self,
+        *,
+        query: str,
+        max_results: int,
+        fallback_reason: str,
+        from_date: str | None,
+        to_date: str | None,
+    ) -> dict[str, Any]:
+        exa_result = self._search_exa(
+            query=query,
+            max_results=max(max_results * 3, 8),
+            include_domains=["x.com", "twitter.com"],
+            exclude_domains=None,
+            include_content=False,
+            mode="social",
+            intent="status",
+            from_date=from_date,
+            to_date=to_date,
+        )
+        filtered_results = []
+        for item in exa_result.get("results", []):
+            url = str(item.get("url") or "")
+            hostname = self._result_hostname({"url": url})
+            if hostname not in {"x.com", "twitter.com"}:
+                continue
+            filtered_results.append(
+                {
+                    "provider": "exa_social_fallback",
+                    "source": "x",
+                    "title": item.get("title", ""),
+                    "url": url,
+                    "snippet": item.get("snippet", ""),
+                    "content": item.get("content", ""),
+                    "author": self._social_result_identity(item),
+                }
+            )
+        filtered_results = self._diversify_social_results(
+            filtered_results,
+            max_results=max_results,
+            max_per_identity=1,
+        )
+        if not filtered_results:
+            raise MySearchError("exa social fallback returned no x.com/twitter.com results")
+        return {
+            "provider": "exa_social_fallback",
+            "transport": exa_result.get("transport", ""),
+            "query": query,
+            "answer": "",
+            "results": filtered_results,
+            "citations": [
+                {"title": item.get("title", ""), "url": item.get("url", "")}
+                for item in filtered_results
+                if item.get("url")
+            ],
+            "fallback": {
+                "from": "xai_compatible",
+                "to": "exa_social_fallback",
+                "reason": fallback_reason,
+            },
+        }
+
     def _is_retryable_social_gateway_error(self, exc: Exception) -> bool:
-        if isinstance(exc, MySearchHTTPError) and exc.status_code in {429, 502, 503, 504}:
+        if self._is_retryable_transient_error(exc):
             return True
         detail_text = str(exc).lower()
         return any(
@@ -8827,6 +8925,9 @@ class MySearchClient:
                 "eof",
             )
         )
+
+    def _is_retryable_transient_error(self, exc: Exception) -> bool:
+        return isinstance(exc, MySearchHTTPError) and exc.status_code in {429, 502, 503, 504}
 
     def _search_tavily_social_fallback(
         self,
