@@ -8935,6 +8935,7 @@ class MySearchClient:
             return True
         if hostname in {
             "xcancel.com",
+            "threadreaderapp.com",
             "nitter.net",
             "fxtwitter.com",
             "fixupx.com",
