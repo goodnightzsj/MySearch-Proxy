@@ -2884,6 +2884,92 @@ class MySearchClientTests(unittest.TestCase):
             ["https://x.com/alice/status/1", "https://x.com/bob/status/2"],
         )
 
+    def test_xai_compatible_search_uses_exa_social_proxy_fallback_when_direct_x_results_are_empty(self) -> None:
+        client = MySearchClient()
+        provider = client.config.xai
+        provider.search_mode = "compatible"
+        provider.default_paths["social_search"] = "/social/search"
+        provider.alternate_base_urls["social_search"] = "http://gateway.example/v1"
+        client._get_key_or_raise = lambda provider: type(  # type: ignore[method-assign]
+            "Record",
+            (),
+            {"key": "gateway-token", "source": "env"},
+        )()
+
+        def fake_request_json(**kwargs):  # type: ignore[no-untyped-def]
+            raise MySearchError("xai request timeout after 45s: http://127.0.0.1:9874/social/search")
+
+        def fake_tavily_social_fallback(**kwargs):  # type: ignore[no-untyped-def]
+            raise MySearchError(
+                "tavily request failed (HTTP 432): "
+                '{"error": "This request exceeds your plan\'s set usage limit."}'
+            )
+
+        exa_calls = []
+
+        def fake_search_exa(**kwargs):  # type: ignore[no-untyped-def]
+            exa_calls.append(kwargs)
+            if len(exa_calls) == 1:
+                return {
+                    "provider": "exa",
+                    "transport": "env",
+                    "query": kwargs["query"],
+                    "results": [],
+                    "citations": [],
+                }
+            return {
+                "provider": "exa",
+                "transport": "env",
+                "query": kwargs["query"],
+                "results": [
+                    {
+                        "provider": "exa",
+                        "source": "web",
+                        "title": "OpenAI (@OpenAI) on XCancel",
+                        "url": "https://xcancel.com/OpenAI/status/2029620619743219811",
+                        "snippet": "OpenAI (@OpenAI): \"GPT-5.4 Thinking and GPT-5.4 Pro...\"",
+                        "content": "",
+                    },
+                    {
+                        "provider": "exa",
+                        "source": "web",
+                        "title": "GPT-5.4 Review After One Week of Testing and Use | Tech Twitter",
+                        "url": "https://www.techtwitter.com/tweet/a0b7998d-dfde-47f4-91b2-9c0731c3a91e",
+                        "snippet": "Reaction thread about GPT-5.4 on X",
+                        "content": "",
+                    },
+                ],
+                "citations": [],
+            }
+
+        client._request_json = fake_request_json  # type: ignore[method-assign]
+        client._search_tavily_social_fallback = fake_tavily_social_fallback  # type: ignore[method-assign]
+        client._search_exa = fake_search_exa  # type: ignore[method-assign]
+
+        result = client._search_xai_compatible(
+            query="GPT-5.4 reactions on X",
+            sources=["x"],
+            max_results=5,
+            allowed_x_handles=None,
+            excluded_x_handles=None,
+            from_date=None,
+            to_date=None,
+            include_x_images=False,
+            include_x_videos=False,
+        )
+
+        self.assertEqual(result["provider"], "exa_social_fallback")
+        self.assertEqual(len(exa_calls), 2)
+        self.assertEqual(exa_calls[0]["include_domains"], ["x.com", "twitter.com"])
+        self.assertIn("site:x.com OR site:twitter.com", exa_calls[1]["query"])
+        self.assertEqual(
+            [item["url"] for item in result["results"]],
+            [
+                "https://xcancel.com/OpenAI/status/2029620619743219811",
+                "https://www.techtwitter.com/tweet/a0b7998d-dfde-47f4-91b2-9c0731c3a91e",
+            ],
+        )
+
     def test_xai_compatible_search_returns_cached_tavily_social_fallback_before_retrying(self) -> None:
         client = MySearchClient()
         provider = client.config.xai

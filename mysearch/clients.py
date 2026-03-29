@@ -8854,6 +8854,7 @@ class MySearchClient:
         from_date: str | None,
         to_date: str | None,
     ) -> dict[str, Any]:
+        filtered_results: list[dict[str, Any]] = []
         exa_result = self._search_exa(
             query=query,
             max_results=max(max_results * 3, 8),
@@ -8865,30 +8866,29 @@ class MySearchClient:
             from_date=from_date,
             to_date=to_date,
         )
-        filtered_results = []
-        for item in exa_result.get("results", []):
-            url = str(item.get("url") or "")
-            hostname = self._result_hostname({"url": url})
-            if hostname not in {"x.com", "twitter.com"}:
-                continue
-            filtered_results.append(
-                {
-                    "provider": "exa_social_fallback",
-                    "source": "x",
-                    "title": item.get("title", ""),
-                    "url": url,
-                    "snippet": item.get("snippet", ""),
-                    "content": item.get("content", ""),
-                    "author": self._social_result_identity(item),
-                }
+        filtered_results.extend(self._normalize_exa_social_fallback_results(exa_result.get("results", [])))
+        if not filtered_results:
+            exa_result = self._search_exa(
+                query=f"{query} site:x.com OR site:twitter.com",
+                max_results=max(max_results * 3, 8),
+                include_domains=None,
+                exclude_domains=None,
+                include_content=False,
+                mode="web",
+                intent="status",
+                from_date=from_date,
+                to_date=to_date,
             )
+            filtered_results.extend(self._normalize_exa_social_fallback_results(exa_result.get("results", [])))
+        if not filtered_results:
+            raise MySearchError("exa social fallback returned no X-adjacent results")
         filtered_results = self._diversify_social_results(
             filtered_results,
             max_results=max_results,
             max_per_identity=1,
         )
         if not filtered_results:
-            raise MySearchError("exa social fallback returned no x.com/twitter.com results")
+            raise MySearchError("exa social fallback returned no X-adjacent results after diversification")
         return {
             "provider": "exa_social_fallback",
             "transport": exa_result.get("transport", ""),
@@ -8906,6 +8906,52 @@ class MySearchClient:
                 "reason": fallback_reason,
             },
         }
+
+    def _normalize_exa_social_fallback_results(
+        self,
+        results: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for item in results:
+            if not self._is_exa_social_candidate(item):
+                continue
+            url = str(item.get("url") or "")
+            normalized.append(
+                {
+                    "provider": "exa_social_fallback",
+                    "source": "x",
+                    "title": item.get("title", ""),
+                    "url": url,
+                    "snippet": item.get("snippet", ""),
+                    "content": item.get("content", ""),
+                    "author": self._social_result_identity(item),
+                }
+            )
+        return normalized
+
+    def _is_exa_social_candidate(self, item: dict[str, Any]) -> bool:
+        hostname = self._result_hostname(item)
+        if hostname in {"x.com", "twitter.com"}:
+            return True
+        if hostname in {
+            "xcancel.com",
+            "nitter.net",
+            "fxtwitter.com",
+            "fixupx.com",
+            "vxtwitter.com",
+            "techtwitter.com",
+            "getdaytrends.com",
+        }:
+            return True
+        combined = " ".join(
+            [
+                str(item.get("title") or ""),
+                str(item.get("snippet") or ""),
+                str(item.get("content") or ""),
+                str(item.get("url") or ""),
+            ]
+        ).lower()
+        return "twitter.com/" in combined or "x.com/" in combined
 
     def _is_retryable_social_gateway_error(self, exc: Exception) -> bool:
         if self._is_retryable_transient_error(exc):
