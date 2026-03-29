@@ -2826,7 +2826,8 @@ class MySearchClientTests(unittest.TestCase):
             (),
             {"key": "gateway-token", "source": "env"},
         )()
-        client._provider_can_serve = lambda provider: provider.name == "exa"  # type: ignore[method-assign]
+        client.keyring.has_provider = lambda name: name == "exa"  # type: ignore[method-assign]
+        client._provider_live_status = lambda provider: None if provider.name == "exa" else "auth_error"  # type: ignore[method-assign]
 
         def fake_request_json(**kwargs):  # type: ignore[no-untyped-def]
             raise MySearchError("xai request timeout after 45s: http://127.0.0.1:9874/social/search")
