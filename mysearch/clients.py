@@ -8875,7 +8875,7 @@ class MySearchClient:
                 exclude_domains=None,
                 include_content=False,
                 mode="web",
-                intent="status",
+                intent="factual",
                 from_date=from_date,
                 to_date=to_date,
             )
