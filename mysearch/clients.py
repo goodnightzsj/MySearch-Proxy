@@ -8789,36 +8789,35 @@ class MySearchClient:
                 timeout_seconds=min(remaining_social_budget, social_fallback_reserve),
             )
         except MySearchError as fallback_exc:
-            if self._provider_can_attempt_fallback(self.config.exa):
-                try:
-                    exa_fallback_result = self._search_exa_social_fallback(
-                        query=query,
-                        max_results=max_results,
-                        fallback_reason=f"{fallback_reason} | tavily_social_fallback failed: {fallback_exc}",
-                        from_date=from_date,
-                        to_date=to_date,
-                    )
-                except MySearchError as exa_exc:
-                    social_unavailable_result = self._build_social_unavailable_result(
-                        query=query,
-                        fallback_reason=(
-                            f"{fallback_reason} | tavily_social_fallback failed: {fallback_exc}"
-                            f" | exa_social_fallback failed: {exa_exc}"
-                        ),
-                    )
-                    self._cache_set("social_unavailable", social_cache_key, social_unavailable_result)
-                    return self._annotate_cache(
-                        social_unavailable_result,
-                        namespace="social_unavailable",
-                        hit=False,
-                    )
-                self._cache_delete("social_unavailable", social_cache_key)
-                self._cache_set("social", social_cache_key, exa_fallback_result)
+            try:
+                exa_fallback_result = self._search_exa_social_fallback(
+                    query=query,
+                    max_results=max_results,
+                    fallback_reason=f"{fallback_reason} | tavily_social_fallback failed: {fallback_exc}",
+                    from_date=from_date,
+                    to_date=to_date,
+                )
+            except MySearchError as exa_exc:
+                social_unavailable_result = self._build_social_unavailable_result(
+                    query=query,
+                    fallback_reason=(
+                        f"{fallback_reason} | tavily_social_fallback failed: {fallback_exc}"
+                        f" | exa_social_fallback failed: {exa_exc}"
+                    ),
+                )
+                self._cache_set("social_unavailable", social_cache_key, social_unavailable_result)
                 return self._annotate_cache(
-                    exa_fallback_result,
-                    namespace="social",
+                    social_unavailable_result,
+                    namespace="social_unavailable",
                     hit=False,
                 )
+            self._cache_delete("social_unavailable", social_cache_key)
+            self._cache_set("social", social_cache_key, exa_fallback_result)
+            return self._annotate_cache(
+                exa_fallback_result,
+                namespace="social",
+                hit=False,
+            )
             social_unavailable_result = self._build_social_unavailable_result(
                 query=query,
                 fallback_reason=f"{fallback_reason} | tavily_social_fallback failed: {fallback_exc}",
@@ -8928,12 +8927,6 @@ class MySearchClient:
 
     def _is_retryable_transient_error(self, exc: Exception) -> bool:
         return isinstance(exc, MySearchHTTPError) and exc.status_code in {429, 502, 503, 504}
-
-    def _provider_can_attempt_fallback(self, provider: ProviderConfig) -> bool:
-        if not self.keyring.has_provider(provider.name):
-            return False
-        status = self._provider_live_status(provider)
-        return status != "auth_error"
 
     def _search_tavily_social_fallback(
         self,
