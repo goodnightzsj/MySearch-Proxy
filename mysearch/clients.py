@@ -4632,6 +4632,8 @@ class MySearchClient:
             return False
         query_lower = query.lower()
         explicit_resource_mode = mode in {"docs", "github", "pdf"}
+        if self._looks_like_github_release_query(query_lower):
+            return False
         if include_domains:
             return True
         if intent == "tutorial" and not explicit_resource_mode:
@@ -4680,6 +4682,8 @@ class MySearchClient:
     def _looks_like_changelog_query(self, query_lower: str) -> bool:
         keywords = [
             "changelog",
+            "latest release",
+            "latest releases",
             "release notes",
             "what's new",
             "whats new",
@@ -4689,6 +4693,14 @@ class MySearchClient:
             "版本更新",
         ]
         return any(keyword in query_lower for keyword in keywords)
+
+    def _looks_like_github_release_query(self, query_lower: str) -> bool:
+        if "github" not in query_lower:
+            return False
+        return any(
+            marker in query_lower
+            for marker in ("latest release", "latest releases", "release", "releases", "changelog")
+        )
 
     def _apply_official_resource_policy(
         self,
@@ -9740,6 +9752,12 @@ class MySearchClient:
             mode == "github"
             and flags["hostname"] in {"github.com", "raw.githubusercontent.com"}
         )
+        github_release_query = self._looks_like_github_release_query(query.lower())
+        canonical_github_release_page_match = int(
+            github_release_query
+            and hostname == "github.com"
+            and path.rstrip("/").endswith("/releases")
+        )
         pdf_bonus = int(mode == "pdf" and self._looks_like_pdf_url(item.get("url", "")))
         non_derivative_paper_bonus = int(
             mode == "pdf"
@@ -10024,6 +10042,7 @@ class MySearchClient:
         content_score, snippet_score, title_score = self._result_quality_score(item)
         return (
             include_match,
+            canonical_github_release_page_match,
             non_community_official,
             official_resource_match,
             official_topic_exact_match,
@@ -11922,15 +11941,14 @@ class MySearchClient:
         return any(keyword in text for keyword in keywords)
 
     def _looks_like_status_query(self, query_lower: str) -> bool:
+        if self._looks_like_changelog_query(query_lower):
+            return False
         keywords = [
             "status",
             "incident",
             "outage",
-            "release",
             "roadmap",
-            "version",
             "版本",
-            "发布",
             "进展",
             "现状",
         ]
@@ -12103,6 +12121,9 @@ class MySearchClient:
         return summary
 
     def _search_summary_excerpt(self, item: Mapping[str, Any], limit: int = 160) -> str:
+        github_release_excerpt = self._github_release_summary_excerpt(item)
+        if github_release_excerpt:
+            return self._build_excerpt(github_release_excerpt, limit=limit)
         snippet = re.sub(
             r"\s+",
             " ",
@@ -12114,6 +12135,46 @@ class MySearchClient:
         if self._search_summary_excerpt_looks_like_noise(snippet):
             return ""
         return self._build_excerpt(snippet, limit=limit)
+
+    def _github_release_summary_excerpt(self, item: Mapping[str, Any]) -> str:
+        url = str(item.get("url") or "").strip()
+        if not url:
+            return ""
+        parsed = urlparse(url)
+        hostname = self._registered_domain(parsed.hostname or "")
+        if hostname != "github.com" or not parsed.path.rstrip("/").endswith("/releases"):
+            return ""
+        text = re.sub(r"\s+", " ", str(item.get("snippet") or item.get("content") or "").strip()).strip()
+        matches = re.findall(
+            r"(?:##\s+)?(v?\d+\.\d+\.\d+(?:[-+._][a-z0-9]+)?)\s*\((\d{4}-\d{2}-\d{2})\)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if not matches:
+            try:
+                extracted_page = self.extract_url(
+                    url=url,
+                    provider="auto",
+                    formats=["markdown"],
+                    only_main_content=True,
+                )
+            except MySearchError:
+                extracted_page = {}
+            extracted_text = re.sub(
+                r"\s+",
+                " ",
+                str(extracted_page.get("content") or "").strip(),
+            ).strip()
+            if extracted_text:
+                matches = re.findall(
+                    r"(?:##\s+)?(v?\d+\.\d+\.\d+(?:[-+._][a-z0-9]+)?)\s*\((\d{4}-\d{2}-\d{2})\)",
+                    extracted_text,
+                    flags=re.IGNORECASE,
+                )
+        if not matches:
+            return ""
+        version, date = max(matches, key=lambda item: item[1])
+        return f"Latest release {version} ({date})"
 
     def _search_summary_excerpt_looks_like_noise(self, text: str) -> bool:
         normalized = re.sub(r"\s+", " ", text).strip()
