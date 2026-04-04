@@ -5216,6 +5216,77 @@ class MySearchClientTests(unittest.TestCase):
             "Top source: Releases · openai/openai-node - GitHub (github.com) — Latest release 6.33.0 (2026-03-25)",
         )
 
+    def test_search_github_latest_release_query_rescues_canonical_releases_page_for_explicit_repo_slug(self) -> None:
+        client = MySearchClient()
+        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "openai/openai-python",
+                    "url": "https://github.com/openai/openai-python",
+                    "snippet": "Official Python library for the OpenAI API.",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "Tags · openai/openai-python · GitHub",
+                    "url": "https://github.com/openai/openai-python/tags",
+                    "snippet": "Browse tags for openai/openai-python.",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "v2.21.0",
+                    "url": "https://github.com/openai/openai-python/releases/tag/v2.21.0",
+                    "snippet": "Older release tag page.",
+                    "content": "",
+                },
+            ],
+            "citations": [
+                {
+                    "title": "openai/openai-python",
+                    "url": "https://github.com/openai/openai-python",
+                },
+                {
+                    "title": "Tags · openai/openai-python · GitHub",
+                    "url": "https://github.com/openai/openai-python/tags",
+                },
+                {
+                    "title": "v2.21.0",
+                    "url": "https://github.com/openai/openai-python/releases/tag/v2.21.0",
+                },
+            ],
+        }
+        client.extract_url = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "firecrawl",
+            "url": kwargs["url"],
+            "content": "## v2.29.0\n\n## 2.29.0 (2026-03-17)\n\nFull Changelog: v2.28.0...v2.29.0",
+        }
+
+        result = client.search(
+            query="openai/openai-python latest release github",
+            mode="github",
+            strategy="verify",
+            provider="tavily",
+            include_answer=False,
+        )
+
+        self.assertEqual(
+            result["results"][0]["url"],
+            "https://github.com/openai/openai-python/releases",
+        )
+        self.assertEqual(
+            result["summary"],
+            "Top source: Releases · openai/openai-python - GitHub (github.com) — Latest release 2.29.0 (2026-03-17)",
+        )
+
     def test_github_release_summary_prefers_first_release_in_descending_release_page(self) -> None:
         client = MySearchClient()
 
@@ -5228,6 +5299,34 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertEqual(excerpt, "Latest release 6.33.0 (2026-03-25)")
+
+    def test_strict_docs_policy_rescues_releases_page_for_explicit_github_repo_slug(self) -> None:
+        client = MySearchClient()
+
+        rescue_candidate = client._build_known_canonical_resource_rescue(
+            query="openai/openai-python latest release github",
+            mode="github",
+            intent="resource",
+        )
+
+        self.assertIsNotNone(rescue_candidate)
+        self.assertTrue(
+            client._should_apply_canonical_resource_rescue(
+                query="openai/openai-python latest release github",
+                mode="github",
+                intent="resource",
+                official_candidates=[
+                    {
+                        "provider": "tavily",
+                        "title": "v2.21.0",
+                        "url": "https://github.com/openai/openai-python/releases/tag/v2.21.0",
+                        "snippet": "Older release tag page.",
+                        "content": "",
+                    }
+                ],
+                rescue_candidate=rescue_candidate or {},
+            )
+        )
 
     def test_search_strict_official_mode_reranks_locale_variant_below_canonical_page(self) -> None:
         client = MySearchClient()
@@ -6285,6 +6384,51 @@ class MySearchClientTests(unittest.TestCase):
         self.assertTrue(result["evidence"]["official_filter_applied"])
         self.assertEqual(result["evidence"]["official_rescue_source"], "canonical-map")
 
+    def test_strict_docs_policy_injects_known_react_hook_reference_when_provider_returns_empty(self) -> None:
+        client = MySearchClient()
+
+        result = client._apply_official_resource_policy(
+            query="React useActionState docs",
+            mode="docs",
+            intent="resource",
+            result={
+                "results": [],
+                "citations": [],
+                "evidence": {},
+            },
+            include_domains=None,
+        )
+
+        self.assertEqual(result["results"][0]["url"], "https://react.dev/reference/react/useActionState")
+        self.assertTrue(result["evidence"]["official_filter_applied"])
+        self.assertEqual(result["evidence"]["official_rescue_source"], "canonical-map")
+
+    def test_strict_docs_policy_promotes_canonical_react_hook_over_locale_variant(self) -> None:
+        client = MySearchClient()
+
+        result = client._apply_official_resource_policy(
+            query="React useActionState docs",
+            mode="docs",
+            intent="resource",
+            result={
+                "results": [
+                    {
+                        "provider": "tavily",
+                        "title": "useActionState – React",
+                        "url": "https://fr.react.dev/reference/react/useActionState",
+                        "snippet": "Localized React docs page",
+                    }
+                ],
+                "citations": [],
+                "evidence": {},
+            },
+            include_domains=None,
+        )
+
+        self.assertEqual(result["results"][0]["url"], "https://react.dev/reference/react/useActionState")
+        self.assertTrue(result["evidence"]["official_filter_applied"])
+        self.assertEqual(result["evidence"]["official_rescue_source"], "canonical-map")
+
     def test_rerank_general_web_prefers_status_page_for_status_queries(self) -> None:
         client = MySearchClient()
 
@@ -6554,6 +6698,60 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(reranked[0]["url"], "https://openai.com/api/pricing/")
 
+    def test_rerank_resource_results_prefers_non_locale_react_docs_variant(self) -> None:
+        client = MySearchClient()
+
+        reranked = client._rerank_resource_results(
+            query="React useActionState docs",
+            mode="docs",
+            include_domains=None,
+            results=[
+                {
+                    "provider": "tavily",
+                    "title": "useActionState – React",
+                    "url": "https://fr.react.dev/reference/react/useActionState",
+                    "snippet": "Localized React docs page",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "useActionState - React",
+                    "url": "https://react.dev/reference/react/useActionState",
+                    "snippet": "Canonical React docs page",
+                    "content": "",
+                },
+            ],
+        )
+
+        self.assertEqual(reranked[0]["url"], "https://react.dev/reference/react/useActionState")
+
+    def test_rerank_resource_results_prefers_canonical_react_docs_over_versioned_preview_variant(self) -> None:
+        client = MySearchClient()
+
+        reranked = client._rerank_resource_results(
+            query="React useActionState docs",
+            mode="docs",
+            include_domains=None,
+            results=[
+                {
+                    "provider": "tavily",
+                    "title": "useActionState – React",
+                    "url": "https://18.react.dev/reference/react/useActionState",
+                    "snippet": "Versioned React docs page",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "useActionState - React",
+                    "url": "https://react.dev/reference/react/useActionState",
+                    "snippet": "Canonical React docs page",
+                    "content": "",
+                },
+            ],
+        )
+
+        self.assertEqual(reranked[0]["url"], "https://react.dev/reference/react/useActionState")
+
     def test_rerank_resource_results_demotes_official_community_pages_for_strict_web_queries(self) -> None:
         client = MySearchClient()
 
@@ -6625,6 +6823,34 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertEqual(reranked[0]["url"], "https://nextjs.org/blog/next-16")
+
+    def test_strict_docs_policy_rescues_canonical_react_docs_over_versioned_preview_host(self) -> None:
+        client = MySearchClient()
+
+        rescue_candidate = client._build_known_canonical_resource_rescue(
+            query="React useActionState docs",
+            mode="docs",
+            intent="resource",
+        )
+
+        self.assertIsNotNone(rescue_candidate)
+        self.assertTrue(
+            client._should_apply_canonical_resource_rescue(
+                query="React useActionState docs",
+                mode="docs",
+                intent="resource",
+                official_candidates=[
+                    {
+                        "provider": "tavily",
+                        "title": "useActionState – React",
+                        "url": "https://18.react.dev/reference/react/useActionState",
+                        "snippet": "Versioned React docs page",
+                        "content": "",
+                    }
+                ],
+                rescue_candidate=rescue_candidate or {},
+            )
+        )
 
     def test_rerank_resource_results_demotes_generic_blog_index_for_changelog_query(self) -> None:
         client = MySearchClient()

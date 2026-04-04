@@ -4738,7 +4738,7 @@ class MySearchClient:
             strict_official=official_mode == "strict",
         )
         official_rescue_candidate: dict[str, Any] | None = None
-        if official_mode == "strict":
+        if official_mode in {"strict", "standard"}:
             official_rescue_candidate = self._build_known_canonical_resource_rescue(
                 query=query,
                 mode=mode,
@@ -4761,6 +4761,25 @@ class MySearchClient:
                 ]
                 evidence["official_rescue_applied"] = True
                 evidence["official_rescue_source"] = "canonical-map"
+                if official_mode == "standard" and self._looks_like_github_release_query(query.lower()):
+                    promoted_results = [
+                        official_rescue_candidate,
+                        *[
+                            dict(item)
+                            for item in results
+                            if item.get("url") != official_rescue_candidate.get("url")
+                        ],
+                    ]
+                    enriched["results"] = self._rerank_resource_results(
+                        query=query,
+                        mode=mode,
+                        results=promoted_results,
+                        include_domains=include_domains,
+                    )
+                    enriched["citations"] = self._align_citations_with_results(
+                        results=enriched["results"],
+                        citations=[*citations, official_rescue_candidate],
+                    )
         evidence["official_candidate_count"] = len(official_candidates)
         if official_mode == "strict" and official_candidates:
             evidence["official_filter_applied"] = True
@@ -4823,6 +4842,17 @@ class MySearchClient:
                 "provider": "canonical-rescue",
                 "matched_providers": ["canonical-rescue"],
             }
+        if self._looks_like_github_release_query(query_lower):
+            repo_slug = self._extract_explicit_github_repo_slug(query)
+            if repo_slug is not None:
+                owner, repo = repo_slug
+                return {
+                    "title": f"Releases · {owner}/{repo} - GitHub",
+                    "url": f"https://github.com/{owner}/{repo}/releases",
+                    "snippet": f"Official GitHub releases page for {owner}/{repo}.",
+                    "provider": "canonical-rescue",
+                    "matched_providers": ["canonical-rescue"],
+                }
         if "openai" in query_lower and "webhook" in query_lower:
             return {
                 "title": "Webhooks | OpenAI API",
@@ -4839,7 +4869,80 @@ class MySearchClient:
                 "provider": "canonical-rescue",
                 "matched_providers": ["canonical-rescue"],
             }
+        react_hook = self._extract_known_react_hook_reference(query)
+        if react_hook is not None:
+            react_locale = self._preferred_react_docs_locale(query)
+            locale_prefix = f"{react_locale}." if react_locale else ""
+            react_title = (
+                f"{react_hook} – React 中文文档"
+                if react_locale == "zh-hans"
+                else f"{react_hook} - React"
+            )
+            return {
+                "title": react_title,
+                "url": f"https://{locale_prefix}react.dev/reference/react/{react_hook}",
+                "snippet": f"Official React API reference for {react_hook}.",
+                "provider": "canonical-rescue",
+                "matched_providers": ["canonical-rescue"],
+            }
         return None
+
+    def _extract_known_react_hook_reference(self, query: str) -> str | None:
+        query_lower = query.lower()
+        if "react" not in query_lower:
+            return None
+        known_hooks = {
+            "useactionstate": "useActionState",
+            "useeffectevent": "useEffectEvent",
+            "useoptimistic": "useOptimistic",
+            "usetransition": "useTransition",
+            "usedeferredvalue": "useDeferredValue",
+        }
+        for raw_token in re.findall(r"\buse[A-Za-z0-9]+\b", query):
+            normalized = raw_token.lower()
+            if normalized in known_hooks:
+                return known_hooks[normalized]
+            if len(raw_token) > 3:
+                return raw_token
+        for token in self._query_precision_tokens(query):
+            if token in known_hooks:
+                return known_hooks[token]
+        return None
+
+    def _extract_explicit_github_repo_slug(self, query: str) -> tuple[str, str] | None:
+        match = re.search(
+            r"\b([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)\b",
+            query,
+        )
+        if not match:
+            return None
+        return match.group(1), match.group(2)
+
+    def _preferred_react_docs_locale(self, query: str) -> str | None:
+        query_lower = query.lower()
+        if "中文" in query or "简体" in query or "zh-hans" in query_lower:
+            return "zh-hans"
+        if "繁體" in query or "繁体" in query or "zh-hant" in query_lower:
+            return "zh-hant"
+        return None
+
+    def _query_prefers_versioned_react_docs(self, query: str, *, version: str) -> bool:
+        query_lower = query.lower()
+        return bool(
+            re.search(rf"\breact\s*v?{re.escape(version)}\b", query_lower)
+            or re.search(rf"\breact{re.escape(version)}\b", query_lower)
+        )
+
+    def _looks_like_noncanonical_react_docs_hostname(self, hostname: str, *, query: str = "") -> bool:
+        normalized = self._clean_hostname(hostname)
+        if normalized in {"beta.reactjs.org", "legacy.reactjs.org"}:
+            return True
+        match = re.fullmatch(r"(?P<version>\d+)\.react\.dev", normalized)
+        if not match:
+            return False
+        if query and self._query_prefers_versioned_react_docs(query, version=match.group("version")):
+            return False
+        return True
 
     def _should_apply_canonical_resource_rescue(
         self,
@@ -4869,6 +4972,34 @@ class MySearchClient:
                 return False
             return True
         if "openai" in query_lower and ("webhook" in query_lower or "background mode" in query_lower):
+            return True
+        if self._looks_like_github_release_query(query_lower):
+            repo_slug = self._extract_explicit_github_repo_slug(query)
+            if repo_slug is not None:
+                owner, repo = repo_slug
+                normalized_path = top_path.rstrip("/")
+                repo_prefix = f"/{owner.lower()}/{repo.lower()}"
+                if not normalized_path.startswith(f"{repo_prefix}/releases"):
+                    return True
+                if "/releases/tag/" in normalized_path:
+                    return True
+        if self._preferred_react_docs_locale(query):
+            return False
+        if (
+            mode == "docs"
+            or intent in {"resource", "tutorial"}
+        ) and self._looks_like_noncanonical_react_docs_hostname(
+            self._result_hostname(top_candidate),
+            query=query,
+        ):
+            return True
+        if (
+            mode == "docs"
+            or intent in {"resource", "tutorial"}
+        ) and (
+            self._looks_like_locale_prefixed_path(top_path)
+            or self._looks_like_locale_prefixed_hostname(self._result_hostname(top_candidate))
+        ):
             return True
         if self._looks_like_language_specific_sdk_reference_result(
             hostname=self._result_hostname(top_candidate),
@@ -9701,7 +9832,15 @@ class MySearchClient:
         precision_tokens = self._query_precision_tokens(query)
         exact_identifier_tokens = self._query_exact_identifier_tokens(query)
         topic_specific_tokens = self._query_topic_specific_tokens(query)
-        strict_official = bool(include_domains) or self._looks_like_official_query(query)
+        strict_official = bool(include_domains) or (
+            self._resolve_official_result_mode(
+                query=query,
+                mode=mode,
+                intent="resource",
+                include_domains=include_domains,
+            )
+            == "strict"
+        )
         ranked = sorted(
             enumerate(results),
             key=lambda pair: (
@@ -10035,7 +10174,16 @@ class MySearchClient:
         non_locale_variant = int(
             not (
                 strict_official
-                and self._looks_like_locale_prefixed_path(path)
+                and (
+                    self._looks_like_locale_prefixed_path(path)
+                    or self._looks_like_locale_prefixed_hostname(hostname)
+                )
+            )
+        )
+        non_preview_react_variant = int(
+            not (
+                strict_official
+                and self._looks_like_noncanonical_react_docs_hostname(hostname, query=query)
             )
         )
         matched_provider_count = len(item.get("matched_providers") or [])
@@ -10073,6 +10221,7 @@ class MySearchClient:
             pricing_page_match,
             exact_path_hits,
             exact_total_hits,
+            non_preview_react_variant,
             non_locale_variant,
             path_precision_hits,
             total_precision_hits,
@@ -10294,6 +10443,13 @@ class MySearchClient:
         if len(parts) < 2:
             return False
         first = parts[0].strip().lower()
+        return bool(re.fullmatch(r"[a-z]{2}(?:-[a-z0-9]{2,8}){0,2}", first))
+
+    def _looks_like_locale_prefixed_hostname(self, hostname: str) -> bool:
+        labels = [item for item in (hostname or "").split(".") if item]
+        if len(labels) < 3:
+            return False
+        first = labels[0].strip().lower()
         return bool(re.fullmatch(r"[a-z]{2}(?:-[a-z0-9]{2,8}){0,2}", first))
 
     def _looks_like_generic_arxiv_subject_title(self, title_text: str) -> bool:
