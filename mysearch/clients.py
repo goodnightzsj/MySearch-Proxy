@@ -2291,6 +2291,12 @@ class MySearchClient:
                     "url": "https://platform.openai.com/docs/guides/responses-vs-chat-completions",
                     "snippet": "OpenAI recommends Responses for tool use, built-in tools, multimodal inputs, and modern interactive API workflows.",
                 },
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Rate limits - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/guides/rate-limits/",
+                    "snippet": "Rate limits vary by model and tier and should be considered when interactive request flows need predictable throughput.",
+                },
             ],
             "batch api": [
                 {
@@ -2304,6 +2310,12 @@ class MySearchClient:
                     "title": "Batch API FAQ - OpenAI Help Center",
                     "url": "https://help.openai.com/en/articles/9197833-batch-api-faq",
                     "snippet": "OpenAI documents that Batch API jobs can take up to 24 hours and are priced for discounted asynchronous throughput.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Pricing - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/pricing/",
+                    "snippet": "Batch API requests are billed at a discount compared with standard online requests, making them a better fit for high-volume asynchronous workloads.",
                 },
             ],
             "background mode": [
@@ -13836,10 +13848,128 @@ class MySearchClient:
                     )
 
         visible_source_domains = self._research_report_source_domains(top_sources)
+        supporting_context: list[str] = []
+        if comparison_like:
+            visible_urls = {
+                str(row.get("url") or "").strip()
+                for row in comparison_rows
+                if str(row.get("url") or "").strip()
+            }
+            seen_supporting_context: set[str] = set()
+            for item in ordered_results:
+                url = str(item.get("url") or "").strip()
+                if not url or url in visible_urls:
+                    continue
+                cluster_label = self._research_result_cluster_label(
+                    query=query,
+                    mode=report_mode,
+                    item=item,
+                    include_domains=None,
+                    authoritative_preferred=authoritative_research,
+                )
+                if cluster_label not in {"official", "supporting"}:
+                    continue
+                title = str(item.get("title") or url_to_title.get(url) or "").strip()
+                candidate = re.split(r"\s[\-|:|]\s", title, maxsplit=1)[0].strip() or title
+                note = claim_by_url.get(url, "").strip()
+                if not note:
+                    matching_page = next(
+                        (
+                            page
+                            for page in pages
+                            if (page.get("url") or "").strip() == url and not page.get("error")
+                        ),
+                        {},
+                    )
+                    note = self._select_research_claim_excerpt(
+                        page_excerpt=(matching_page.get("excerpt") or "").strip(),
+                        snippet=(item.get("snippet") or "").strip(),
+                        content=(matching_page.get("content") or item.get("content") or "").strip(),
+                    )
+                canonical_doc_snippet = self._research_canonical_doc_snippet_for_url(url)
+                if canonical_doc_snippet and (
+                    not note
+                    or self._research_excerpt_looks_like_navigation_noise(note)
+                    or not self._research_excerpt_has_substantive_claim(note)
+                ):
+                    note = canonical_doc_snippet
+                note = self._normalize_research_claim_text(
+                    note,
+                    comparison_like=comparison_like,
+                ) if note else ""
+                if (
+                    not note
+                    or self._research_claim_is_generic(note)
+                    or not self._research_excerpt_has_substantive_claim(note)
+                ):
+                    continue
+                prefix = candidate or title
+                if prefix and prefix.lower() not in note.lower():
+                    if note[:1].islower():
+                        context_line = f"{prefix} {note}"
+                    else:
+                        context_line = f"{prefix}: {note}"
+                else:
+                    context_line = note
+                signature = self._research_claim_signature(context_line)
+                if not signature or signature in seen_supporting_context:
+                    continue
+                seen_supporting_context.add(signature)
+                supporting_context.append(context_line)
+                if len(supporting_context) >= 3:
+                    break
+            if len(supporting_context) < 3:
+                for citation in citations:
+                    url = str(citation.get("url") or "").strip()
+                    if not url or url in visible_urls or not self._research_is_canonical_vendor_doc(url):
+                        continue
+                    pseudo_item = {
+                        "provider": "canonical_research_docs",
+                        "title": str(citation.get("title") or "").strip(),
+                        "url": url,
+                        "matched_providers": ["canonical_research_docs"],
+                    }
+                    cluster_label = self._research_result_cluster_label(
+                        query=query,
+                        mode=report_mode,
+                        item=pseudo_item,
+                        include_domains=None,
+                        authoritative_preferred=authoritative_research,
+                    )
+                    if cluster_label not in {"official", "supporting"}:
+                        continue
+                    title = str(citation.get("title") or url_to_title.get(url) or "").strip()
+                    candidate = re.split(r"\s[\-|:|]\s", title, maxsplit=1)[0].strip() or title
+                    note = claim_by_url.get(url, "").strip() or self._research_canonical_doc_snippet_for_url(url)
+                    note = self._normalize_research_claim_text(
+                        note,
+                        comparison_like=comparison_like,
+                    ) if note else ""
+                    if (
+                        not note
+                        or self._research_claim_is_generic(note)
+                        or not self._research_excerpt_has_substantive_claim(note)
+                    ):
+                        continue
+                    if candidate and candidate.lower() not in note.lower():
+                        if note[:1].islower():
+                            context_line = f"{candidate} {note}"
+                        else:
+                            context_line = f"{candidate}: {note}"
+                    else:
+                        context_line = note
+                    signature = self._research_claim_signature(context_line)
+                    if not signature or signature in seen_supporting_context:
+                        continue
+                    seen_supporting_context.add(signature)
+                    supporting_context.append(context_line)
+                    if len(supporting_context) >= 3:
+                        break
         return {
             "executive_summary": primary_finding,
             "key_findings": key_findings[:3],
             "evidence_highlights": evidence_highlights[:3],
+            "supporting_context": supporting_context[:3],
             "consensus_snapshot": consensus_snapshot[:3],
             "provider_roles": provider_roles[:4],
             "coverage_bits": coverage_bits,
@@ -13897,6 +14027,16 @@ class MySearchClient:
         if evidence_highlights:
             lines.extend(["", "## Evidence Highlights"])
             for item in evidence_highlights:
+                lines.append(f"- {item}")
+
+        supporting_context = [
+            str(item).strip()
+            for item in (sections.get("supporting_context") or [])
+            if str(item).strip()
+        ]
+        if supporting_context:
+            lines.extend(["", "## Supporting Context"])
+            for item in supporting_context[:3]:
                 lines.append(f"- {item}")
 
         consensus_snapshot = [
@@ -15396,6 +15536,7 @@ class MySearchClient:
             " are ",
             " can ",
             " use ",
+            " vary by ",
             " process ",
             " processes ",
             " handles ",
@@ -15413,6 +15554,7 @@ class MySearchClient:
             " designed to ",
             " suited to ",
             " better suited ",
+            " should be considered ",
             " unlike ",
             " compared with ",
             " compared to ",
