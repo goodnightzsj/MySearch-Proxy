@@ -5015,6 +5015,220 @@ class MySearchClientTests(unittest.TestCase):
             "Top official match: useActionState - React (react.dev)",
         )
 
+    def test_search_github_release_summary_extracts_latest_version_from_noisy_release_page(self) -> None:
+        client = MySearchClient()
+        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "Releases · openai/openai-node - GitHub",
+                    "url": "https://github.com/openai/openai-node/releases",
+                    "snippet": "There was an error while loading. Please reload this page. ## 6.30.1 (2026-03-16) Full Changelog: v6.30.0...v6.30.1 ## v6.33.0 ## 6.33.0 (2026-03-25) Full Changelog: v6.32.0...v6.33.0",
+                    "content": "",
+                }
+            ],
+            "citations": [
+                {
+                    "title": "Releases · openai/openai-node - GitHub",
+                    "url": "https://github.com/openai/openai-node/releases",
+                }
+            ],
+        }
+
+        result = client.search(
+            query="openai/openai-node latest release github",
+            mode="github",
+            strategy="verify",
+            provider="tavily",
+            include_answer=False,
+        )
+
+        self.assertEqual(
+            result["summary"],
+            "Top source: Releases · openai/openai-node - GitHub (github.com) — Latest release 6.33.0 (2026-03-25)",
+        )
+
+    def test_search_github_release_summary_hydrates_latest_version_from_release_page(self) -> None:
+        client = MySearchClient()
+        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "Releases · openai/openai-node - GitHub",
+                    "url": "https://github.com/openai/openai-node/releases",
+                    "snippet": "Official JavaScript / TypeScript library for the OpenAI API - Releases · openai/openai-node.",
+                    "content": "",
+                }
+            ],
+            "citations": [
+                {
+                    "title": "Releases · openai/openai-node - GitHub",
+                    "url": "https://github.com/openai/openai-node/releases",
+                }
+            ],
+        }
+        client.extract_url = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "firecrawl",
+            "url": kwargs["url"],
+            "content": "## v6.33.0\n\n## 6.33.0 (2026-03-25)\n\nFull Changelog: v6.32.0...v6.33.0",
+        }
+
+        result = client.search(
+            query="openai/openai-node latest release github",
+            mode="github",
+            strategy="verify",
+            provider="tavily",
+            include_answer=False,
+        )
+
+        self.assertEqual(
+            result["summary"],
+            "Top source: Releases · openai/openai-node - GitHub (github.com) — Latest release 6.33.0 (2026-03-25)",
+        )
+
+    def test_resolve_intent_treats_github_latest_release_query_as_resource(self) -> None:
+        client = MySearchClient()
+
+        resolved_intent = client._resolve_intent(
+            query="openai/openai-node latest release github",
+            mode="auto",
+            intent="auto",
+            sources=["web"],
+        )
+
+        self.assertEqual(resolved_intent, "resource")
+        self.assertFalse(client._looks_like_status_query("openai/openai-node latest release github"))
+        self.assertTrue(client._looks_like_github_release_query("openai/openai-node latest release github"))
+
+    def test_search_github_latest_release_query_skips_status_rescue(self) -> None:
+        client = MySearchClient()
+        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "Releases · openai/openai-node - GitHub",
+                    "url": "https://github.com/openai/openai-node/releases",
+                    "snippet": "Official JavaScript / TypeScript library for the OpenAI API - Releases · openai/openai-node.",
+                    "content": "",
+                }
+            ],
+            "citations": [
+                {
+                    "title": "Releases · openai/openai-node - GitHub",
+                    "url": "https://github.com/openai/openai-node/releases",
+                }
+            ],
+        }
+        client.extract_url = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "firecrawl",
+            "url": kwargs["url"],
+            "content": "## v6.33.0\n\n## 6.33.0 (2026-03-25)\n\nFull Changelog: v6.32.0...v6.33.0",
+        }
+
+        result = client.search(
+            query="openai/openai-node latest release github",
+            mode="auto",
+            strategy="verify",
+            provider="tavily",
+            include_answer=False,
+        )
+
+        self.assertEqual(result["intent"], "resource")
+        self.assertFalse(result["evidence"].get("status_rescue_applied"))
+        self.assertEqual(result["evidence"].get("official_mode"), "standard")
+        self.assertFalse(result["evidence"].get("official_filter_applied"))
+        self.assertEqual(
+            result["results"][0]["url"],
+            "https://github.com/openai/openai-node/releases",
+        )
+
+    def test_search_github_latest_release_query_prefers_releases_page_over_brand_docs(self) -> None:
+        client = MySearchClient()
+        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "Libraries | OpenAI API",
+                    "url": "https://developers.openai.com/api/docs/libraries/",
+                    "snippet": "Discover language-specific libraries for using the OpenAI API, including Python, Node.js, .NET, and more.",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "Releases · openai/openai-node - GitHub",
+                    "url": "https://github.com/openai/openai-node/releases",
+                    "snippet": "Official JavaScript / TypeScript library for the OpenAI API - Releases · openai/openai-node.",
+                    "content": "",
+                },
+            ],
+            "citations": [
+                {
+                    "title": "Libraries | OpenAI API",
+                    "url": "https://developers.openai.com/api/docs/libraries/",
+                },
+                {
+                    "title": "Releases · openai/openai-node - GitHub",
+                    "url": "https://github.com/openai/openai-node/releases",
+                },
+            ],
+        }
+        client.extract_url = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "firecrawl",
+            "url": kwargs["url"],
+            "content": "## v6.33.0\n\n## 6.33.0 (2026-03-25)\n\nFull Changelog: v6.32.0...v6.33.0",
+        }
+
+        result = client.search(
+            query="openai/openai-node latest release github",
+            mode="auto",
+            strategy="verify",
+            provider="tavily",
+            include_answer=False,
+        )
+
+        self.assertEqual(
+            result["results"][0]["url"],
+            "https://github.com/openai/openai-node/releases",
+        )
+        self.assertEqual(
+            result["summary"],
+            "Top source: Releases · openai/openai-node - GitHub (github.com) — Latest release 6.33.0 (2026-03-25)",
+        )
+
+    def test_github_release_summary_prefers_first_release_in_descending_release_page(self) -> None:
+        client = MySearchClient()
+
+        excerpt = client._github_release_summary_excerpt(
+            {
+                "url": "https://github.com/openai/openai-node/releases",
+                "snippet": "",
+                "content": "## 6.33.0 (2026-03-25) Full Changelog: v6.32.0...v6.33.0 ## 6.32.0 (2026-03-17) Full Changelog: v6.31.0...v6.32.0",
+            }
+        )
+
+        self.assertEqual(excerpt, "Latest release 6.33.0 (2026-03-25)")
+
     def test_search_strict_official_mode_reranks_locale_variant_below_canonical_page(self) -> None:
         client = MySearchClient()
         client._search_exa = lambda **kwargs: {  # type: ignore[method-assign]
