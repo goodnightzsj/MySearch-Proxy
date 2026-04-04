@@ -9990,6 +9990,10 @@ class MySearchClientTests(unittest.TestCase):
             result["web_search"]["answer"],
             result["report_sections"]["executive_summary"],
         )
+        self.assertEqual(
+            result["web_search"]["summary"],
+            result["report_sections"]["executive_summary"],
+        )
         self.assertIn(
             "Supporting sources and corroborating analysis were found.",
             result["web_search"]["answer"],
@@ -11480,6 +11484,69 @@ class MySearchClientTests(unittest.TestCase):
             supporting_context,
         )
         self.assertIn("## Supporting Context", summary)
+
+    def test_research_supporting_context_prefers_canonical_faq_snippet_over_search_shell(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        sections = client._build_research_report_sections(
+            query="compare OpenAI Responses API and Batch API for long-running tasks 2026",
+            web_search={"intent": "comparison", "answer": ""},
+            ordered_results=[
+                {
+                    "provider": "canonical_research_docs",
+                    "matched_providers": ["canonical_research_docs"],
+                    "title": "Migrate to the Responses API - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/guides/migrate-to-responses/",
+                    "snippet": "Use the Responses API for interactive or tool-using request flows.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "matched_providers": ["canonical_research_docs"],
+                    "title": "Batch API - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/guides/batch/",
+                    "snippet": "Use Batch API for bulk asynchronous workloads.",
+                },
+            ],
+            pages=[],
+            citations=[
+                {
+                    "title": "Migrate to the Responses API - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/guides/migrate-to-responses/",
+                },
+                {
+                    "title": "Batch API - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/guides/batch/",
+                },
+                {
+                    "title": "Batch API FAQ - OpenAI Help Center",
+                    "url": "https://help.openai.com/en/articles/9197833-batch-api-faq",
+                },
+            ],
+            social=None,
+            evidence={
+                "providers_consulted": ["canonical_research_docs", "tavily"],
+                "citation_count": 3,
+                "confidence": "high",
+                "research_plan": {"scrape_top_n": 2, "web_mode": "research"},
+                "selected_candidate_domains": ["openai.com"],
+                "selected_candidate_cluster_counts": {"official": 2, "supporting": 1},
+                "selected_authoritative_source_count": 2,
+                "selected_supporting_source_count": 1,
+                "authoritative_research": True,
+            },
+        )
+
+        supporting_context = sections.get("supporting_context") or []
+        self.assertTrue(
+            any("24 hours" in str(item).lower() for item in supporting_context),
+            supporting_context,
+        )
+        self.assertTrue(
+            all("how does the batch api work" not in str(item).lower() for item in supporting_context),
+            supporting_context,
+        )
 
 
 if __name__ == "__main__":

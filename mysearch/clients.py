@@ -2037,6 +2037,7 @@ class MySearchClient:
         ):
             web_search = dict(web_search)
             web_search["answer"] = visible_summary
+            web_search["summary"] = visible_summary
             comparison_row_urls = [
                 str(row.get("url") or "").strip()
                 for row in (report_sections.get("comparison_rows") or [])
@@ -13940,7 +13941,8 @@ class MySearchClient:
                         continue
                     title = str(citation.get("title") or url_to_title.get(url) or "").strip()
                     candidate = re.split(r"\s[\-|:|]\s", title, maxsplit=1)[0].strip() or title
-                    note = claim_by_url.get(url, "").strip() or self._research_canonical_doc_snippet_for_url(url)
+                    canonical_doc_snippet = self._research_canonical_doc_snippet_for_url(url)
+                    note = canonical_doc_snippet or claim_by_url.get(url, "").strip()
                     note = self._normalize_research_claim_text(
                         note,
                         comparison_like=comparison_like,
