@@ -13888,6 +13888,15 @@ class MySearchClient:
                         content=(matching_page.get("content") or item.get("content") or "").strip(),
                     )
                 canonical_doc_snippet = self._research_canonical_doc_snippet_for_url(url)
+                title_lower = title.lower()
+                if canonical_doc_snippet and (
+                    str(item.get("provider") or "") != "canonical_research_docs"
+                    or any(
+                        marker in title_lower
+                        for marker in ("faq", "overview", "pricing", "rate limits", "background")
+                    )
+                ):
+                    note = canonical_doc_snippet
                 if canonical_doc_snippet and (
                     not note
                     or self._research_excerpt_looks_like_navigation_noise(note)
