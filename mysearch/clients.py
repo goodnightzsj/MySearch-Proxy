@@ -7345,6 +7345,7 @@ class MySearchClient:
             )
         )
         local_life_query = self._looks_like_local_life_query(query_lower)
+        non_social_query = not self._query_prefers_web_social_sources(query_lower)
         canonical_local_guide_match = int(
             local_life_query
             and self._looks_like_canonical_local_life_guide_result(
@@ -7367,6 +7368,22 @@ class MySearchClient:
                 and self._is_obvious_local_life_repost_domain(registered_domain)
             )
         )
+        non_low_signal_social_repost = int(
+            not (
+                non_social_query
+                and registered_domain in {
+                    "facebook.com",
+                    "instagram.com",
+                    "threads.com",
+                    "tiktok.com",
+                    "twitter.com",
+                    "weibo.com",
+                    "x.com",
+                    "youtube.com",
+                    "youtu.be",
+                }
+            )
+        )
         non_aggregator = int(not self._is_obvious_web_aggregator(registered_domain))
         matched_provider_count = len(item.get("matched_providers") or [])
         cross_provider_boost = min(matched_provider_count, 3)
@@ -7387,6 +7404,7 @@ class MySearchClient:
             canonical_local_guide_match,
             local_guide_match,
             non_local_life_repost,
+            non_low_signal_social_repost,
             exact_path_hits,
             exact_total_hits,
             path_precision_hits,
@@ -7400,6 +7418,27 @@ class MySearchClient:
             content_score,
             max(snippet_score, title_score),
         )
+
+    def _query_prefers_web_social_sources(self, query_lower: str) -> bool:
+        social_markers = (
+            "community",
+            "facebook",
+            "forum",
+            "forums",
+            "instagram",
+            "reddit",
+            "reactions",
+            "rumor",
+            "rumors",
+            "social",
+            "threads",
+            "tiktok",
+            "twitter",
+            "weibo",
+            "x.com",
+            "youtube",
+        )
+        return any(marker in query_lower for marker in social_markers)
 
     def _result_published_timestamp(self, item: dict[str, Any]) -> float | None:
         for field in ("published_date", "publishedDate", "created_at"):
