@@ -6591,6 +6591,33 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(reranked[0]["url"], "https://m.sh.bendibao.com/tour/flowers?month=3%E6%9C%88")
 
+    def test_rerank_general_web_demotes_social_repost_for_non_social_life_query(self) -> None:
+        client = MySearchClient()
+
+        reranked = client._rerank_general_results(
+            query="remove coffee stain from shirt",
+            result_profile="web",
+            include_domains=None,
+            results=[
+                {
+                    "provider": "tavily",
+                    "title": "What can I use to remove coffee stains from my tee shirts",
+                    "url": "https://www.facebook.com/groups/homemakingtips/posts/887872945242536/",
+                    "snippet": "Community repost with stain tips.",
+                    "content": "",
+                },
+                {
+                    "provider": "tavily",
+                    "title": "How to Remove Coffee Stains from Clothes",
+                    "url": "https://www.thekitchn.com/how-to-remove-coffee-stains-23701492",
+                    "snippet": "Editorial stain-removal guide.",
+                    "content": "",
+                },
+            ],
+        )
+
+        self.assertEqual(reranked[0]["url"], "https://www.thekitchn.com/how-to-remove-coffee-stains-23701492")
+
     def test_rerank_general_web_demotes_official_community_threads_for_status_queries(self) -> None:
         client = MySearchClient()
 
