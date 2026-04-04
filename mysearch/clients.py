@@ -5474,7 +5474,7 @@ class MySearchClient:
         if prefer_tavily_official_discovery:
             return RouteDecision(
                 provider="tavily",
-                reason="严格官方 / 精确资源页优先用 Tavily 做发现，再由 Firecrawl 接正文验证",
+                reason="精确 docs / 官方资源页优先用 Tavily 做发现，再由 Firecrawl 接正文验证",
                 tavily_topic=policy.tavily_topic,
                 firecrawl_categories=list(policy.firecrawl_categories) or None,
                 fallback_chain=self._explicit_provider_fallback_chain(
@@ -5618,6 +5618,8 @@ class MySearchClient:
             intent=intent,
             include_domains=include_domains,
         )
+        if mode == "docs" and intent == "resource":
+            return True
         if include_content and not (
             exact_docs_topic
             or pricing_query
@@ -12138,8 +12140,11 @@ class MySearchClient:
                 "search docs",
                 "showcase demo apps",
                 "latest: gpt-5.4",
+                "import {",
                 "import openai",
                 "const client =",
+                "export default function",
+                "async function ",
                 "from \"openai\"",
                 "copy markdown",
                 "open in chatgpt",

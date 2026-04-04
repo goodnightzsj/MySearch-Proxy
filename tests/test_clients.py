@@ -4434,6 +4434,54 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(decision.provider, "firecrawl")
 
+    def test_docs_route_prefers_tavily_discovery_for_exact_docs_queries(self) -> None:
+        client = MySearchClient()
+        client.keyring.has_provider = lambda provider: provider in {"tavily", "firecrawl", "exa"}  # type: ignore[method-assign]
+        client._probe_provider_status = lambda provider, key_count: {  # type: ignore[method-assign]
+            "status": "ok",
+            "error": "",
+            "checked_at": "2026-04-05T00:00:00+00:00",
+        }
+
+        decision = client._route_search(
+            query="Playwright UI Mode docs",
+            mode="docs",
+            intent="resource",
+            provider="auto",
+            sources=["web"],
+            include_content=False,
+            include_domains=None,
+            allowed_x_handles=None,
+            excluded_x_handles=None,
+        )
+
+        self.assertEqual(decision.provider, "tavily")
+        self.assertEqual(decision.fallback_chain, ["firecrawl", "exa"])
+
+    def test_docs_route_keeps_tavily_discovery_when_content_is_requested(self) -> None:
+        client = MySearchClient()
+        client.keyring.has_provider = lambda provider: provider in {"tavily", "firecrawl", "exa"}  # type: ignore[method-assign]
+        client._probe_provider_status = lambda provider, key_count: {  # type: ignore[method-assign]
+            "status": "ok",
+            "error": "",
+            "checked_at": "2026-04-05T00:00:00+00:00",
+        }
+
+        decision = client._route_search(
+            query="Playwright UI Mode docs",
+            mode="docs",
+            intent="resource",
+            provider="auto",
+            sources=["web"],
+            include_content=True,
+            include_domains=None,
+            allowed_x_handles=None,
+            excluded_x_handles=None,
+        )
+
+        self.assertEqual(decision.provider, "tavily")
+        self.assertEqual(decision.fallback_chain, ["firecrawl", "exa"])
+
     def test_web_route_prefers_exa_when_tavily_probe_is_degraded(self) -> None:
         client = MySearchClient()
         client.keyring.has_provider = lambda provider: provider in {"tavily", "firecrawl", "exa"}  # type: ignore[method-assign]
@@ -4927,6 +4975,44 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(
             result["summary"],
             "Top official match: Webhooks | OpenAI API (openai.com)",
+        )
+
+    def test_search_docs_summary_omits_code_shell_for_top_official_match(self) -> None:
+        client = MySearchClient()
+        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "useActionState - React",
+                    "url": "https://react.dev/reference/react/useActionState",
+                    "snippet": "import { useActionState, useOptimistic } from 'react'; export default function Checkout() { const [count, dispatchAction, isPending] = useActionState(updateCartAction, 0); }",
+                    "content": "",
+                }
+            ],
+            "citations": [
+                {
+                    "title": "useActionState - React",
+                    "url": "https://react.dev/reference/react/useActionState",
+                }
+            ],
+        }
+
+        result = client.search(
+            query="React useActionState docs",
+            mode="docs",
+            strategy="verify",
+            provider="tavily",
+            include_answer=False,
+        )
+
+        self.assertEqual(
+            result["summary"],
+            "Top official match: useActionState - React (react.dev)",
         )
 
     def test_search_strict_official_mode_reranks_locale_variant_below_canonical_page(self) -> None:
