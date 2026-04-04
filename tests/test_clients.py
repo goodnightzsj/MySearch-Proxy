@@ -11386,6 +11386,101 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(len(consensus), 2)
         self.assertTrue(all("assistants api" not in str(item).lower() for item in consensus))
 
+    def test_research_report_sections_include_supporting_context_from_extra_vendor_docs(
+        self,
+    ) -> None:
+        client = MySearchClient()
+
+        sections = client._build_research_report_sections(
+            query="compare OpenAI Responses API and Batch API for long-running tasks 2026",
+            web_search={"intent": "comparison", "answer": ""},
+            ordered_results=[
+                {
+                    "provider": "canonical_research_docs",
+                    "matched_providers": ["canonical_research_docs"],
+                    "title": "Migrate to the Responses API - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/guides/migrate-to-responses/",
+                    "snippet": "Use the Responses API for interactive or tool-using request flows.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "matched_providers": ["canonical_research_docs"],
+                    "title": "Batch API - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/guides/batch/",
+                    "snippet": "Use Batch API for bulk asynchronous workloads.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "matched_providers": ["canonical_research_docs"],
+                    "title": "Pricing - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/pricing/",
+                    "snippet": "Batch requests are billed at a discount compared with standard online requests.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "matched_providers": ["canonical_research_docs"],
+                    "title": "Rate limits - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/guides/rate-limits/",
+                    "snippet": "Rate limits vary by model and tier and should be considered for online request flows.",
+                },
+                {
+                    "provider": "tavily",
+                    "matched_providers": ["tavily"],
+                    "title": "OpenAI Assistants API vs. OpenAI Responses API",
+                    "url": "https://example.com/assistants-vs-responses",
+                    "snippet": "Third-party comparison noise.",
+                },
+            ],
+            pages=[],
+            citations=[
+                {
+                    "title": "Migrate to the Responses API - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/guides/migrate-to-responses/",
+                },
+                {
+                    "title": "Batch API - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/guides/batch/",
+                },
+                {
+                    "title": "Pricing - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/pricing/",
+                },
+                {
+                    "title": "Rate limits - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/guides/rate-limits/",
+                },
+            ],
+            social=None,
+            evidence={
+                "providers_consulted": ["canonical_research_docs", "tavily"],
+                "citation_count": 4,
+                "confidence": "high",
+                "research_plan": {"scrape_top_n": 2, "web_mode": "research"},
+                "selected_candidate_domains": ["openai.com"],
+                "selected_candidate_cluster_counts": {"official": 2, "supporting": 2},
+                "selected_authoritative_source_count": 2,
+                "selected_supporting_source_count": 2,
+                "authoritative_research": True,
+            },
+        )
+
+        supporting_context = sections.get("supporting_context") or []
+        summary = client._render_research_report(sections)
+
+        self.assertTrue(
+            any("discount" in str(item).lower() for item in supporting_context),
+            supporting_context,
+        )
+        self.assertTrue(
+            any("rate limits vary by model" in str(item).lower() for item in supporting_context),
+            supporting_context,
+        )
+        self.assertTrue(
+            all("assistants api" not in str(item).lower() for item in supporting_context),
+            supporting_context,
+        )
+        self.assertIn("## Supporting Context", summary)
+
 
 if __name__ == "__main__":
     unittest.main()
