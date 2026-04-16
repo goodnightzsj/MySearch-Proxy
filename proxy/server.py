@@ -28,6 +28,9 @@ MYSEARCH_PROXY_BOOTSTRAP_TOKEN = os.environ.get("MYSEARCH_PROXY_BOOTSTRAP_TOKEN"
 TAVILY_API_BASE = "https://api.tavily.com"
 TAVILY_SEARCH_PATH = "/search"
 TAVILY_EXTRACT_PATH = "/extract"
+TAVILY_UPSTREAM_ADMIN_BASE_URL = os.environ.get("TAVILY_UPSTREAM_ADMIN_BASE_URL", "").strip().rstrip("/")
+TAVILY_UPSTREAM_ADMIN_HEADERS = os.environ.get("TAVILY_UPSTREAM_ADMIN_HEADERS", "").strip()
+TAVILY_UPSTREAM_ADMIN_COOKIE = os.environ.get("TAVILY_UPSTREAM_ADMIN_COOKIE", "").strip()
 FIRECRAWL_API_BASE = "https://api.firecrawl.dev"
 EXA_API_BASE = "https://api.exa.ai"
 
@@ -43,6 +46,19 @@ def _derive_social_gateway_admin_base_url(upstream_base_url):
     if upstream_base_url.endswith("/v1"):
         return upstream_base_url[:-3]
     return upstream_base_url
+
+
+def _derive_tavily_admin_base_url(upstream_base_url):
+    normalized_base = str(upstream_base_url or "").strip().rstrip("/")
+    if not normalized_base:
+        return ""
+    parsed = urlparse(normalized_base)
+    base_path = parsed.path.rstrip("/")
+    if base_path.endswith("/api/tavily"):
+        next_path = base_path[: -len("/api/tavily")]
+    else:
+        next_path = base_path
+    return urlunparse((parsed.scheme, parsed.netloc, next_path, "", "", "")).rstrip("/")
 
 
 def _is_hikari_access_token(value):
@@ -115,13 +131,143 @@ def _looks_like_tavily_hikari_gateway(config):
     return _is_hikari_access_token(api_key) or base_path.endswith("/api/tavily")
 
 
+def parse_admin_header_mapping(value):
+    if not value:
+        return {}
+    if isinstance(value, dict):
+        return {
+            str(key).strip(): str(item).strip()
+            for key, item in value.items()
+            if str(key).strip() and str(item).strip()
+        }
+
+    text = str(value or "").strip()
+    if not text:
+        return {}
+
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        parsed = None
+
+    if isinstance(parsed, dict):
+        return {
+            str(key).strip(): str(item).strip()
+            for key, item in parsed.items()
+            if str(key).strip() and str(item).strip()
+        }
+
+    headers = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if ":" in line:
+            key, item = line.split(":", 1)
+        elif "=" in line:
+            key, item = line.split("=", 1)
+        else:
+            continue
+        key = str(key).strip()
+        item = str(item).strip()
+        if key and item:
+            headers[key] = item
+    return headers
+
+
+def summarize_admin_header_mapping(value):
+    headers = parse_admin_header_mapping(value)
+    if not headers:
+        return ""
+    names = list(headers.keys())
+    preview = ", ".join(names[:2])
+    if len(names) > 2:
+        preview = f"{preview}…"
+    return f"已配置 {len(names)} 个 header（{preview}）"
+
+
+def unwrap_tavily_api_keys_payload(payload):
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key_name in ("items", "data", "keys", "result"):
+            candidate = payload.get(key_name)
+            if isinstance(candidate, list):
+                return candidate
+    return []
+
+
+def build_tavily_admin_headers(config):
+    headers = parse_admin_header_mapping((config or {}).get("upstream_admin_headers"))
+    cookie_value = str((config or {}).get("upstream_admin_cookie") or "").strip()
+    if cookie_value and not any(str(name).lower() == "cookie" for name in headers):
+        headers["Cookie"] = cookie_value
+    return headers
+
+
+def build_tavily_admin_keys_summary(payload):
+    api_keys = unwrap_tavily_api_keys_payload(payload)
+    summary = {
+        "total_keys": 0,
+        "active_keys": 0,
+        "exhausted_keys": 0,
+        "quarantined_keys": 0,
+        "total_requests": 0,
+        "success_count": 0,
+        "error_count": 0,
+        "quota_exhausted_count": 0,
+        "total_quota_limit": 0,
+        "total_quota_remaining": 0,
+    }
+    if not api_keys:
+        return summary
+
+    for item in api_keys:
+        if not isinstance(item, dict):
+            continue
+        summary["total_keys"] += 1
+        status = str(item.get("status") or "").strip().lower()
+        quarantine = item.get("quarantine")
+        if quarantine or status == "quarantined":
+            summary["quarantined_keys"] += 1
+        elif status in {"exhausted", "quota_exhausted", "limited"}:
+            summary["exhausted_keys"] += 1
+        elif status not in {"disabled", "deleted", "inactive", "revoked"}:
+            summary["active_keys"] += 1
+
+        summary["total_requests"] += parse_usage_number(item.get("total_requests")) or 0
+        summary["success_count"] += parse_usage_number(item.get("success_count")) or 0
+        summary["error_count"] += parse_usage_number(item.get("error_count")) or 0
+        summary["quota_exhausted_count"] += parse_usage_number(item.get("quota_exhausted_count")) or 0
+        summary["total_quota_limit"] += parse_usage_number(item.get("quota_limit")) or 0
+        summary["total_quota_remaining"] += parse_usage_number(item.get("quota_remaining")) or 0
+
+    return summary
+
+
 async def fetch_tavily_upstream_summary(config):
     request_target = _build_tavily_hikari_public_url(config.get("upstream_base_url"), "/api/summary")
+    explicit_admin_base = str(config.get("upstream_admin_base_url") or "").strip().rstrip("/")
+    admin_base_url = explicit_admin_base or _derive_tavily_admin_base_url(config.get("upstream_base_url"))
+    admin_request_target = _build_tavily_hikari_public_url(admin_base_url, "/api/keys") if admin_base_url else ""
+    admin_headers = build_tavily_admin_headers(config)
+    admin_attempted = bool(admin_request_target and (explicit_admin_base or admin_headers))
     payload = {
         "available": False,
         "detail": "",
         "request_target": request_target,
         "summary_source": "unavailable",
+        "source_label": "未读取到上游摘要",
+        "capability_level": "unavailable",
+        "key_detail_supported": False,
+        "admin_configured": bool(
+            str(config.get("upstream_admin_base_url") or "").strip()
+            or str(config.get("upstream_admin_headers") or "").strip()
+            or str(config.get("upstream_admin_cookie") or "").strip()
+        ),
+        "admin_connected": False,
+        "admin_request_target": admin_request_target,
+        "admin_detail": "",
         "total_keys": 0,
         "active_keys": 0,
         "exhausted_keys": 0,
@@ -134,12 +280,13 @@ async def fetch_tavily_upstream_summary(config):
         "total_quota_remaining": 0,
         "last_activity": None,
     }
-    if not _looks_like_tavily_hikari_gateway(config):
+    if not _looks_like_tavily_hikari_gateway(config) and not str(config.get("upstream_admin_base_url") or "").strip():
         payload["detail"] = "当前上游未显式暴露 Tavily Hikari 公共摘要接口。"
         return payload
     if not request_target:
         payload["detail"] = "当前上游地址为空，无法读取上游摘要。"
         return payload
+    public_data = {}
     try:
         response = await http_client.get(request_target)
         data = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
@@ -148,35 +295,82 @@ async def fetch_tavily_upstream_summary(config):
             if isinstance(data, dict):
                 detail = data.get("detail") or data.get("message") or ""
             payload["detail"] = detail or response.text.strip()[:200] or f"HTTP {response.status_code}"
-            return payload
-        if not isinstance(data, dict):
+        elif not isinstance(data, dict):
             payload["detail"] = "上游摘要返回了非 JSON 响应。"
-            return payload
-        active_keys = int(data.get("active_keys") or 0)
-        exhausted_keys = int(data.get("exhausted_keys") or 0)
-        quarantined_keys = int(data.get("quarantined_keys") or 0)
-        payload.update(
-            {
-                "available": True,
-                "detail": "已读取上游 Tavily Hikari 公共摘要。",
-                "summary_source": "hikari_public_summary",
-                "total_keys": active_keys + exhausted_keys + quarantined_keys,
-                "active_keys": active_keys,
-                "exhausted_keys": exhausted_keys,
-                "quarantined_keys": quarantined_keys,
-                "total_requests": int(data.get("total_requests") or 0),
-                "success_count": int(data.get("success_count") or 0),
-                "error_count": int(data.get("error_count") or 0),
-                "quota_exhausted_count": int(data.get("quota_exhausted_count") or 0),
-                "total_quota_limit": int(data.get("total_quota_limit") or 0),
-                "total_quota_remaining": int(data.get("total_quota_remaining") or 0),
-                "last_activity": data.get("last_activity"),
-            }
-        )
-        return payload
+        else:
+            public_data = data
+            active_keys = int(data.get("active_keys") or 0)
+            exhausted_keys = int(data.get("exhausted_keys") or 0)
+            quarantined_keys = int(data.get("quarantined_keys") or 0)
+            payload.update(
+                {
+                    "available": True,
+                    "detail": "已读取上游 Tavily Hikari 公共摘要。",
+                    "summary_source": "hikari_public_summary",
+                    "source_label": "Hikari 公共摘要",
+                    "capability_level": "public_summary",
+                    "total_keys": active_keys + exhausted_keys + quarantined_keys,
+                    "active_keys": active_keys,
+                    "exhausted_keys": exhausted_keys,
+                    "quarantined_keys": quarantined_keys,
+                    "total_requests": int(data.get("total_requests") or 0),
+                    "success_count": int(data.get("success_count") or 0),
+                    "error_count": int(data.get("error_count") or 0),
+                    "quota_exhausted_count": int(data.get("quota_exhausted_count") or 0),
+                    "total_quota_limit": int(data.get("total_quota_limit") or 0),
+                    "total_quota_remaining": int(data.get("total_quota_remaining") or 0),
+                    "last_activity": data.get("last_activity"),
+                }
+            )
     except Exception as exc:
         payload["detail"] = str(exc)
-        return payload
+
+    if admin_attempted:
+        try:
+            admin_response = await http_client.get(admin_request_target, headers=admin_headers)
+            admin_data = (
+                admin_response.json()
+                if admin_response.headers.get("content-type", "").startswith("application/json")
+                else {}
+            )
+            if admin_response.status_code >= 400:
+                admin_detail = ""
+                if isinstance(admin_data, dict):
+                    admin_detail = admin_data.get("detail") or admin_data.get("message") or ""
+                payload["admin_detail"] = admin_detail or admin_response.text.strip()[:200] or f"HTTP {admin_response.status_code}"
+            else:
+                admin_summary = build_tavily_admin_keys_summary(admin_data)
+                payload.update(
+                    {
+                        "available": True,
+                        "detail": "已读取上游 Tavily Hikari 管理 API。",
+                        "summary_source": "hikari_admin_keys",
+                        "source_label": "Hikari 管理 API",
+                        "capability_level": "admin_keys",
+                        "key_detail_supported": True,
+                        "admin_connected": True,
+                        "admin_detail": "已通过 /api/keys 聚合上游 Key 与额度。",
+                        "total_keys": admin_summary["total_keys"],
+                        "active_keys": admin_summary["active_keys"],
+                        "exhausted_keys": admin_summary["exhausted_keys"],
+                        "quarantined_keys": admin_summary["quarantined_keys"],
+                        "total_requests": admin_summary["total_requests"],
+                        "success_count": admin_summary["success_count"],
+                        "error_count": admin_summary["error_count"],
+                        "quota_exhausted_count": admin_summary["quota_exhausted_count"],
+                        "total_quota_limit": admin_summary["total_quota_limit"],
+                        "total_quota_remaining": admin_summary["total_quota_remaining"],
+                        "last_activity": payload.get("last_activity") or public_data.get("last_activity"),
+                    }
+                )
+        except Exception as exc:
+            payload["admin_detail"] = str(exc)
+    elif payload["available"]:
+        payload["detail"] = "已读取上游 Tavily Hikari 公共摘要；如需 Key 级额度细项，请补充上游 Admin 认证。"
+
+    if not payload["available"] and payload["admin_detail"]:
+        payload["detail"] = payload["admin_detail"]
+    return payload
 
 
 SOCIAL_GATEWAY_UPSTREAM_BASE_URL = os.environ.get(
@@ -461,6 +655,9 @@ def get_runtime_tavily_config():
             TAVILY_EXTRACT_PATH,
         ),
         "upstream_api_key": get_setting_text("tavily_upstream_api_key", ""),
+        "upstream_admin_base_url": get_setting_text("tavily_upstream_admin_base_url", TAVILY_UPSTREAM_ADMIN_BASE_URL).rstrip("/"),
+        "upstream_admin_headers": get_setting_text("tavily_upstream_admin_headers", TAVILY_UPSTREAM_ADMIN_HEADERS),
+        "upstream_admin_cookie": get_setting_text("tavily_upstream_admin_cookie", TAVILY_UPSTREAM_ADMIN_COOKIE),
     }
 
 
@@ -525,6 +722,16 @@ def build_candidate_tavily_config(body):
         config["upstream_api_key"] = ""
     elif "upstream_api_key" in body:
         config["upstream_api_key"] = str(body.get("upstream_api_key") or "").strip()
+    if "upstream_admin_base_url" in body:
+        config["upstream_admin_base_url"] = str(body.get("upstream_admin_base_url") or "").strip().rstrip("/")
+    if body.get("clear_upstream_admin_headers"):
+        config["upstream_admin_headers"] = ""
+    elif "upstream_admin_headers" in body:
+        config["upstream_admin_headers"] = str(body.get("upstream_admin_headers") or "").strip()
+    if body.get("clear_upstream_admin_cookie"):
+        config["upstream_admin_cookie"] = ""
+    elif "upstream_admin_cookie" in body:
+        config["upstream_admin_cookie"] = str(body.get("upstream_admin_cookie") or "").strip()
     return config
 
 
@@ -1579,8 +1786,13 @@ async def build_settings_payload():
             "upstream_base_url": tavily["upstream_base_url"],
             "upstream_search_path": tavily["upstream_search_path"],
             "upstream_extract_path": tavily["upstream_extract_path"],
+            "upstream_admin_base_url": tavily["upstream_admin_base_url"],
             "upstream_api_key_configured": bool(tavily["upstream_api_key"]),
             "upstream_api_key_masked": mask_secret(tavily["upstream_api_key"]),
+            "upstream_admin_headers_configured": bool(parse_admin_header_mapping(tavily["upstream_admin_headers"])),
+            "upstream_admin_headers_summary": summarize_admin_header_mapping(tavily["upstream_admin_headers"]),
+            "upstream_admin_cookie_configured": bool(tavily["upstream_admin_cookie"]),
+            "upstream_admin_cookie_masked": mask_secret(tavily["upstream_admin_cookie"]),
             "local_key_count": len(tavily_active_keys),
         },
         "social": {
@@ -2699,6 +2911,7 @@ async def update_tavily_settings(request: Request, _=Depends(verify_admin)):
         "upstream_base_url": "tavily_upstream_base_url",
         "upstream_search_path": "tavily_upstream_search_path",
         "upstream_extract_path": "tavily_upstream_extract_path",
+        "upstream_admin_base_url": "tavily_upstream_admin_base_url",
     }
     for field, setting_key in text_fields.items():
         if field not in body:
@@ -2712,6 +2925,18 @@ async def update_tavily_settings(request: Request, _=Depends(verify_admin)):
         value = str(body.get("upstream_api_key") or "").strip()
         if value:
             db.set_setting("tavily_upstream_api_key", value)
+    if body.get("clear_upstream_admin_headers"):
+        db.set_setting("tavily_upstream_admin_headers", "")
+    elif "upstream_admin_headers" in body:
+        value = str(body.get("upstream_admin_headers") or "").strip()
+        if value:
+            db.set_setting("tavily_upstream_admin_headers", value)
+    if body.get("clear_upstream_admin_cookie"):
+        db.set_setting("tavily_upstream_admin_cookie", "")
+    elif "upstream_admin_cookie" in body:
+        value = str(body.get("upstream_admin_cookie") or "").strip()
+        if value:
+            db.set_setting("tavily_upstream_admin_cookie", value)
 
     reset_stats_cache()
     return {

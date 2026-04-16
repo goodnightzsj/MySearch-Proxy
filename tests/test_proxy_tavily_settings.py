@@ -42,6 +42,9 @@ class ProxyTavilySettingsTests(unittest.TestCase):
         self.assertEqual(config["upstream_search_path"], "/search")
         self.assertEqual(config["upstream_extract_path"], "/extract")
         self.assertEqual(config["upstream_api_key"], "")
+        self.assertEqual(config["upstream_admin_base_url"], "")
+        self.assertEqual(config["upstream_admin_headers"], "")
+        self.assertEqual(config["upstream_admin_cookie"], "")
 
     def test_get_runtime_tavily_config_reads_upstream_settings(self) -> None:
         values = {
@@ -50,6 +53,9 @@ class ProxyTavilySettingsTests(unittest.TestCase):
             "tavily_upstream_search_path": "/search",
             "tavily_upstream_extract_path": "/extract",
             "tavily_upstream_api_key": "th-demo-token",
+            "tavily_upstream_admin_base_url": "http://127.0.0.1:8787",
+            "tavily_upstream_admin_headers": '{"X-Forwarded-User":"admin@example.com"}',
+            "tavily_upstream_admin_cookie": "hikari_admin_session=test",
         }
 
         def fake_get_setting(key, default=None):
@@ -61,6 +67,9 @@ class ProxyTavilySettingsTests(unittest.TestCase):
         self.assertEqual(config["mode"], "upstream")
         self.assertEqual(config["upstream_base_url"], "http://127.0.0.1:8787/api/tavily")
         self.assertEqual(config["upstream_api_key"], "th-demo-token")
+        self.assertEqual(config["upstream_admin_base_url"], "http://127.0.0.1:8787")
+        self.assertIn("X-Forwarded-User", config["upstream_admin_headers"])
+        self.assertEqual(config["upstream_admin_cookie"], "hikari_admin_session=test")
 
     def test_usage_sync_meta_is_disabled_in_tavily_upstream_mode(self) -> None:
         values = {
@@ -127,6 +136,106 @@ class ProxyTavilySettingsTests(unittest.TestCase):
         self.assertIn("text/html", response.headers.get("content-type", ""))
         self.assertEqual(mysearch_response.status_code, 200)
         self.assertIn("text/html", mysearch_response.headers.get("content-type", ""))
+
+    def test_fetch_tavily_upstream_summary_reads_public_summary_only(self) -> None:
+        config = {
+            "upstream_base_url": "http://127.0.0.1:8787/api/tavily",
+            "upstream_api_key": "th-demo-token",
+            "upstream_admin_base_url": "",
+            "upstream_admin_headers": "",
+            "upstream_admin_cookie": "",
+        }
+
+        class _Response:
+            def __init__(self, status_code, payload):
+                self.status_code = status_code
+                self._payload = payload
+                self.headers = {"content-type": "application/json"}
+                self.text = ""
+
+            def json(self):
+                return self._payload
+
+        async def _run():
+            async def fake_get(url, headers=None):
+                self.assertEqual(url, "http://127.0.0.1:8787/api/summary")
+                self.assertIsNone(headers)
+                return _Response(
+                    200,
+                    {
+                        "active_keys": 2,
+                        "exhausted_keys": 1,
+                        "quarantined_keys": 0,
+                        "total_requests": 30,
+                        "success_count": 25,
+                        "error_count": 5,
+                        "quota_exhausted_count": 1,
+                        "total_quota_limit": 3000,
+                        "total_quota_remaining": 1800,
+                    },
+                )
+
+            with patch.object(self.module, "http_client") as fake_client:
+                fake_client.get.side_effect = fake_get
+                return await self.module.fetch_tavily_upstream_summary(config)
+
+        result = asyncio.run(_run())
+        self.assertTrue(result["available"])
+        self.assertEqual(result["summary_source"], "hikari_public_summary")
+        self.assertEqual(result["capability_level"], "public_summary")
+        self.assertFalse(result["key_detail_supported"])
+        self.assertIn("公共摘要", result["detail"])
+
+    def test_fetch_tavily_upstream_summary_aggregates_admin_keys_when_configured(self) -> None:
+        config = {
+            "upstream_base_url": "http://127.0.0.1:8787/api/tavily",
+            "upstream_api_key": "th-demo-token",
+            "upstream_admin_base_url": "http://127.0.0.1:8787",
+            "upstream_admin_headers": '{"X-Forwarded-User":"admin@example.com","X-Forwarded-Admin":"true"}',
+            "upstream_admin_cookie": "",
+        }
+
+        class _Response:
+            def __init__(self, status_code, payload):
+                self.status_code = status_code
+                self._payload = payload
+                self.headers = {"content-type": "application/json"}
+                self.text = ""
+
+            def json(self):
+                return self._payload
+
+        async def _run():
+            async def fake_get(url, headers=None):
+                if url == "http://127.0.0.1:8787/api/summary":
+                    return _Response(200, {"active_keys": 9, "total_quota_remaining": 9999, "last_activity": "2026-04-16T12:00:00Z"})
+                if url == "http://127.0.0.1:8787/api/keys":
+                    self.assertEqual(headers["X-Forwarded-User"], "admin@example.com")
+                    self.assertEqual(headers["X-Forwarded-Admin"], "true")
+                    return _Response(
+                        200,
+                        [
+                            {"status": "active", "quota_limit": 1000, "quota_remaining": 500, "total_requests": 10, "success_count": 8, "error_count": 2, "quota_exhausted_count": 0},
+                            {"status": "exhausted", "quota_limit": 1000, "quota_remaining": 0, "total_requests": 12, "success_count": 10, "error_count": 2, "quota_exhausted_count": 1},
+                            {"status": "active", "quota_limit": 2000, "quota_remaining": 1500, "total_requests": 20, "success_count": 19, "error_count": 1, "quota_exhausted_count": 0},
+                        ],
+                    )
+                raise AssertionError(f"unexpected url: {url}")
+
+            with patch.object(self.module, "http_client") as fake_client:
+                fake_client.get.side_effect = fake_get
+                return await self.module.fetch_tavily_upstream_summary(config)
+
+        result = asyncio.run(_run())
+        self.assertTrue(result["available"])
+        self.assertEqual(result["summary_source"], "hikari_admin_keys")
+        self.assertEqual(result["capability_level"], "admin_keys")
+        self.assertTrue(result["key_detail_supported"])
+        self.assertTrue(result["admin_connected"])
+        self.assertEqual(result["active_keys"], 2)
+        self.assertEqual(result["exhausted_keys"], 1)
+        self.assertEqual(result["total_quota_limit"], 4000)
+        self.assertEqual(result["total_quota_remaining"], 2000)
 
 
 if __name__ == "__main__":

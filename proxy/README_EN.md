@@ -283,6 +283,26 @@ SOCIAL_GATEWAY_MODEL=grok-4.1-fast
 SOCIAL_GATEWAY_TOKEN=
 ```
 
+### Optional `tavily-hikari` admin visibility
+
+If Tavily is routed through `tavily-hikari`, the console can always read the public
+`/api/summary`. That is enough for basic upstream availability and aggregate quota,
+but not enough for per-key visibility.
+
+If you also want the console to aggregate upstream key counts and quota details from
+`/api/keys`, add an optional admin route with either ForwardAuth headers or a built-in
+admin cookie:
+
+```env
+TAVILY_UPSTREAM_ADMIN_BASE_URL=https://tavily.example.com
+TAVILY_UPSTREAM_ADMIN_HEADERS={"X-Forwarded-User":"admin@example.com","X-Forwarded-Admin":"true"}
+# or
+TAVILY_UPSTREAM_ADMIN_COOKIE=hikari_admin_session=...
+```
+
+Without these admin credentials, the console now stays in "public summary only"
+mode instead of pretending that detailed upstream key/quota data is available.
+
 ### Recommended `grok2api` setup
 
 If the upstream is `grok2api`, it is better to set only:
