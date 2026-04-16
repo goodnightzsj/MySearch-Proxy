@@ -72,6 +72,23 @@ class _FakeHttpClient:
         return self._responses.pop(0)
 
 
+class _FakeGetClient:
+    def __init__(self, responses: dict[str, _FakeResponse]) -> None:
+        self._responses = dict(responses)
+        self.calls: list[dict[str, object]] = []
+
+    async def get(
+        self,
+        url: str,
+        headers: dict[str, str],
+    ) -> _FakeResponse:
+        self.calls.append({"url": url, "headers": headers})
+        response = self._responses.get(url)
+        if response is None:
+            return _FakeResponse(404, {"detail": "Not Found"}, "Not Found")
+        return response
+
+
 class _FakeRequest:
     def __init__(self, body: dict[str, object]) -> None:
         self._body = body
@@ -358,6 +375,91 @@ class SocialFallbackRouteTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["route"]["fallback"]["reason"], "upstream_error")
             self.assertTrue(result["route"]["fallback"]["used"])
             self.assertEqual(len(result["results"]), 2)
+
+
+class SocialAdminCompatibilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_social_gateway_falls_back_to_latest_admin_paths(self) -> None:
+        original_http_client = social_gateway.http_client
+        social_gateway.state_cache["value"] = None
+        social_gateway.state_cache["expires_at"] = 0.0
+        social_gateway.ADMIN_APP_KEY = "admin-key"
+        social_gateway.ADMIN_BASE_URL = "http://example.test:8000"
+        social_gateway.ADMIN_CONFIG_PATH = "/v1/admin/config"
+        social_gateway.ADMIN_TOKENS_PATH = "/v1/admin/tokens"
+        fake_client = _FakeGetClient(
+            {
+                "http://example.test:8000/admin/api/config": _FakeResponse(
+                    200,
+                    {"app": {"api_key": "upstream-key"}},
+                ),
+                "http://example.test:8000/admin/api/tokens": _FakeResponse(
+                    200,
+                    {"ssoBasic": [{"token": "client-token", "status": "active", "quota": 8}]},
+                ),
+            }
+        )
+        social_gateway.http_client = fake_client
+        try:
+            state = await social_gateway.resolve_gateway_state(force=True)
+        finally:
+            social_gateway.http_client = original_http_client
+
+        self.assertTrue(state["admin_connected"])
+        self.assertEqual(state["admin_config_path"], "/admin/api/config")
+        self.assertEqual(state["admin_tokens_path"], "/admin/api/tokens")
+        self.assertEqual(state["resolved_upstream_api_key"], "upstream-key")
+        self.assertEqual(state["stats"]["token_total"], 1)
+        called_urls = {item["url"] for item in fake_client.calls}
+        self.assertIn("http://example.test:8000/v1/admin/config", called_urls)
+        self.assertIn("http://example.test:8000/admin/api/config", called_urls)
+        self.assertIn("http://example.test:8000/v1/admin/tokens", called_urls)
+        self.assertIn("http://example.test:8000/admin/api/tokens", called_urls)
+
+    async def test_proxy_server_falls_back_to_latest_admin_paths(self) -> None:
+        original_http_client = proxy_server.http_client
+        config = {
+            "upstream_base_url": "http://example.test/v1",
+            "upstream_responses_path": "/responses",
+            "admin_base_url": "http://example.test:8000",
+            "admin_verify_path": "/v1/admin/verify",
+            "admin_config_path": "/v1/admin/config",
+            "admin_tokens_path": "/v1/admin/tokens",
+            "admin_app_key": "admin-key",
+            "upstream_api_key": "",
+            "gateway_token": "",
+            "model": "grok-3-mini",
+            "fallback_model": "grok-4.1-fast",
+            "fallback_min_results": 3,
+            "cache_ttl_seconds": 60,
+        }
+        fake_client = _FakeGetClient(
+            {
+                "http://example.test:8000/admin/api/config": _FakeResponse(
+                    200,
+                    {"data": {"app": {"api_key": "proxy-upstream-key"}}},
+                ),
+                "http://example.test:8000/admin/api/tokens": _FakeResponse(
+                    200,
+                    {"tokens": {"ssoBasic": [{"token": "proxy-client-token", "status": "active", "quota": 5}]}},
+                ),
+            }
+        )
+        proxy_server.http_client = fake_client
+        try:
+            state = await proxy_server.resolve_social_gateway_state_for_config(config)
+        finally:
+            proxy_server.http_client = original_http_client
+
+        self.assertTrue(state["admin_connected"])
+        self.assertEqual(state["admin_config_path"], "/admin/api/config")
+        self.assertEqual(state["admin_tokens_path"], "/admin/api/tokens")
+        self.assertEqual(state["resolved_upstream_api_key"], "proxy-upstream-key")
+        self.assertEqual(state["stats"]["token_total"], 1)
+        called_urls = {item["url"] for item in fake_client.calls}
+        self.assertIn("http://example.test:8000/v1/admin/config", called_urls)
+        self.assertIn("http://example.test:8000/admin/api/config", called_urls)
+        self.assertIn("http://example.test:8000/v1/admin/tokens", called_urls)
+        self.assertIn("http://example.test:8000/admin/api/tokens", called_urls)
 
 
 async def _fake_gateway_state(force: bool = False) -> dict[str, object]:

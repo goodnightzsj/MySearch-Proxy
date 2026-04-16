@@ -2195,8 +2195,8 @@ function fillSettingsForm(settings) {
   document.getElementById('settings-social-upstream-responses-path').value = social.upstream_responses_path || '/responses';
   document.getElementById('settings-social-admin-base-url').value = social.admin_base_url || '';
   document.getElementById('settings-social-admin-verify-path').value = social.admin_verify_path || '/v1/admin/verify';
-  document.getElementById('settings-social-admin-config-path').value = social.admin_config_path || '/v1/admin/config';
-  document.getElementById('settings-social-admin-tokens-path').value = social.admin_tokens_path || '/v1/admin/tokens';
+  document.getElementById('settings-social-admin-config-path').value = social.admin_config_path || '/admin/api/config';
+  document.getElementById('settings-social-admin-tokens-path').value = social.admin_tokens_path || '/admin/api/tokens';
   document.getElementById('settings-social-model').value = social.model || 'grok-4.1-fast';
   document.getElementById('settings-social-fallback-model').value = social.fallback_model || 'grok-4.1-fast';
   document.getElementById('settings-social-cache-ttl-seconds').value = String(social.cache_ttl_seconds || 60);
