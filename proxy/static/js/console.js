@@ -909,7 +909,14 @@ function getTavilyUpstreamSummary(payload) {
   return {
     available: Boolean(summary.available),
     detail: summary.detail || '',
+    sourceLabel: summary.source_label || '',
+    capabilityLevel: summary.capability_level || 'unavailable',
+    keyDetailSupported: Boolean(summary.key_detail_supported),
     requestTarget: summary.request_target || '',
+    adminConfigured: Boolean(summary.admin_configured),
+    adminConnected: Boolean(summary.admin_connected),
+    adminDetail: summary.admin_detail || '',
+    adminRequestTarget: summary.admin_request_target || '',
     activeKeys,
     exhaustedKeys,
     quarantinedKeys,
@@ -1036,7 +1043,7 @@ function getQuickstartProviderCards(services = latestServices, social = latestSo
       title: tavilyState.upstreamConfigured ? '上游 Gateway' : '待配置上游',
       desc: tavilyState.upstreamConfigured
         ? (tavilyUpstream.available
-          ? `上游活跃 ${fmtNum(tavilyUpstream.activeKeys)} / 总 ${fmtNum(tavilyUpstream.totalKeys)} · 剩余 ${fmtNum(tavilyUpstream.totalQuotaRemaining)}`
+          ? `上游活跃 ${fmtNum(tavilyUpstream.activeKeys)} / 总 ${fmtNum(tavilyUpstream.totalKeys)} · 剩余 ${fmtNum(tavilyUpstream.totalQuotaRemaining)}${tavilyUpstream.keyDetailSupported ? ' · 已接通 admin 明细' : ' · 当前为公共摘要'}`
           : `${tavilyModeSourceLabel(tavilyState.modeSource)} · 当前直接转发 /api/search，也可回退本地池`)
         : '当前已切上游模式，但还没有可用的上游凭证',
     });
@@ -1894,9 +1901,14 @@ function collectTavilySettingsForm() {
     upstream_base_url: document.getElementById('settings-tavily-upstream-base-url').value.trim(),
     upstream_search_path: document.getElementById('settings-tavily-upstream-search-path').value.trim(),
     upstream_extract_path: document.getElementById('settings-tavily-upstream-extract-path').value.trim(),
+    upstream_admin_base_url: document.getElementById('settings-tavily-upstream-admin-base-url').value.trim(),
   };
   const upstreamApiKey = document.getElementById('settings-tavily-upstream-api-key').value.trim();
+  const upstreamAdminHeaders = document.getElementById('settings-tavily-upstream-admin-headers').value.trim();
+  const upstreamAdminCookie = document.getElementById('settings-tavily-upstream-admin-cookie').value.trim();
   if (upstreamApiKey) body.upstream_api_key = upstreamApiKey;
+  if (upstreamAdminHeaders) body.upstream_admin_headers = upstreamAdminHeaders;
+  if (upstreamAdminCookie) body.upstream_admin_cookie = upstreamAdminCookie;
   return body;
 }
 
@@ -2180,15 +2192,25 @@ function fillSettingsForm(settings) {
   document.getElementById('settings-tavily-upstream-base-url').value = tavily.upstream_base_url || '';
   document.getElementById('settings-tavily-upstream-search-path').value = tavily.upstream_search_path || '/search';
   document.getElementById('settings-tavily-upstream-extract-path').value = tavily.upstream_extract_path || '/extract';
+  document.getElementById('settings-tavily-upstream-admin-base-url').value = tavily.upstream_admin_base_url || '';
   document.getElementById('settings-tavily-upstream-api-key').value = '';
+  document.getElementById('settings-tavily-upstream-admin-headers').value = '';
+  document.getElementById('settings-tavily-upstream-admin-cookie').value = '';
   document.getElementById('settings-tavily-upstream-api-key-hint').textContent =
     describeConfiguredSecret(tavily.upstream_api_key_masked, tavily.upstream_api_key_configured);
+  document.getElementById('settings-tavily-upstream-admin-headers-hint').textContent =
+    tavily.upstream_admin_headers_configured
+      ? (tavily.upstream_admin_headers_summary || '当前已配置 admin headers，留空表示保持不变。')
+      : '当前未配置 admin headers。';
+  document.getElementById('settings-tavily-upstream-admin-cookie-hint').textContent =
+    describeConfiguredSecret(tavily.upstream_admin_cookie_masked, tavily.upstream_admin_cookie_configured);
   document.getElementById('settings-tavily-meta').textContent = [
     `配置模式：${tavilyModeLabel(tavily.mode || 'auto')}`,
     `当前实际：${tavilyModeLabel(tavily.effective_mode || tavily.mode || 'auto')}`,
     `来源：${tavilyModeSourceLabel(tavily.mode_source || 'auto_pending')}`,
     tavily.upstream_base_url ? `Base URL：${tavily.upstream_base_url}` : '',
     tavily.upstream_api_key_configured ? '已配置上游凭证' : `本地活跃 Key ${fmtNum(tavily.local_key_count || 0)}`,
+    tavily.upstream_admin_headers_configured || tavily.upstream_admin_cookie_configured ? '已配置上游 Admin 认证' : '当前只读 public summary',
   ].filter(Boolean).join(' · ');
 
   document.getElementById('settings-social-upstream-base-url').value = social.upstream_base_url || '';
@@ -2830,6 +2852,7 @@ function renderSyncMeta(service, payload) {
       if (tavilyUpstream?.available) {
         parts.push(`上游活跃 ${fmtNum(tavilyUpstream.activeKeys)} / 总 ${fmtNum(tavilyUpstream.totalKeys)}`);
         parts.push(`上游剩余 ${fmtNum(tavilyUpstream.totalQuotaRemaining)}`);
+        parts.push(tavilyUpstream.keyDetailSupported ? 'admin 明细已接通' : '当前为公共摘要');
       } else if (tavilyUpstream?.detail) {
         parts.push(tavilyUpstream.detail);
       }
@@ -2914,17 +2937,17 @@ function renderOverview(service, payload) {
       <div class="stat-box">
         <div class="label">上游 Key 状态</div>
         <div class="value">${upstreamAvailable ? `${fmtNum(tavilyUpstream.activeKeys)} <span class="muted">/ ${fmtNum(tavilyUpstream.totalKeys)}</span>` : '未读取到'}</div>
-        <div class="hint">${upstreamAvailable ? `耗尽 ${fmtNum(tavilyUpstream.exhaustedKeys)} · 隔离 ${fmtNum(tavilyUpstream.quarantinedKeys)}` : escapeHtml(tavilyUpstream?.detail || '当前上游没有提供公开摘要接口。')}</div>
+        <div class="hint">${upstreamAvailable ? `耗尽 ${fmtNum(tavilyUpstream.exhaustedKeys)} · 隔离 ${fmtNum(tavilyUpstream.quarantinedKeys)} · ${escapeHtml(tavilyUpstream.sourceLabel || 'Hikari 公共摘要')}` : escapeHtml(tavilyUpstream?.detail || '当前上游没有提供公开摘要接口。')}</div>
       </div>
       <div class="stat-box">
         <div class="label">上游剩余额度</div>
         <div class="value" style="${upstreamRemainStyle}">${upstreamAvailable ? fmtNum(tavilyUpstream.totalQuotaRemaining) : '未读取到'}</div>
-        <div class="hint">${upstreamAvailable ? `上限 ${fmtNum(tavilyUpstream.totalQuotaLimit)} · 来自 Hikari 公共摘要` : '当前仍可继续使用本地池作为回退库存。'}</div>
+        <div class="hint">${upstreamAvailable ? `上限 ${fmtNum(tavilyUpstream.totalQuotaLimit)} · 来自 ${escapeHtml(tavilyUpstream.sourceLabel || 'Hikari 公共摘要')}` : '当前仍可继续使用本地池作为回退库存。'}</div>
       </div>
       <div class="stat-box">
         <div class="label">上游累计请求</div>
         <div class="value">${upstreamAvailable ? fmtNum(tavilyUpstream.totalRequests) : '未读取到'}</div>
-        <div class="hint">${upstreamAvailable ? `成功 ${fmtNum(tavilyUpstream.successCount)} · 错误 ${fmtNum(tavilyUpstream.errorCount)} · 配额耗尽 ${fmtNum(tavilyUpstream.quotaExhaustedCount)}` : '当前只确认了 Gateway 可转发，未拿到上游请求统计。'}</div>
+        <div class="hint">${upstreamAvailable ? `成功 ${fmtNum(tavilyUpstream.successCount)} · 错误 ${fmtNum(tavilyUpstream.errorCount)} · 配额耗尽 ${fmtNum(tavilyUpstream.quotaExhaustedCount)}${tavilyUpstream.adminConfigured && !tavilyUpstream.adminConnected && tavilyUpstream.adminDetail ? ` · admin: ${escapeHtml(tavilyUpstream.adminDetail)}` : ''}` : '当前只确认了 Gateway 可转发，未拿到上游请求统计。'}</div>
       </div>
       <div class="stat-box">
         <div class="label">本地回退 Key</div>

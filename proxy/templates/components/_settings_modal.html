@@ -87,7 +87,7 @@
               <div class="settings-field" data-tavily-upstream-field="true">
                 <label for="settings-tavily-upstream-base-url">上游 Base URL</label>
                 <input type="text" id="settings-tavily-upstream-base-url" placeholder="https://tavily.example.com/api/tavily">
-                <div class="hint">例如 `tavily-hikari` 可直接填写到 `/api/tavily`。</div>
+                <div class="hint">例如 `tavily-hikari` 可填写主机根地址或 `/api/tavily`，系统会自动兼容。</div>
               </div>
               <div class="settings-field" data-tavily-upstream-field="true">
                 <label for="settings-tavily-upstream-search-path">Search Path</label>
@@ -104,10 +104,31 @@
               </div>
             </div>
 
+            <details class="settings-advanced">
+              <summary>上游 Admin 细项（可选）</summary>
+              <div class="settings-fields">
+                <div class="settings-field full-width">
+                  <label for="settings-tavily-upstream-admin-base-url">Admin Base URL</label>
+                  <input type="text" id="settings-tavily-upstream-admin-base-url" placeholder="https://tavily.example.com">
+                  <div class="hint">只在你希望读取 Tavily Hikari 的 `/api/keys` 明细时需要；默认会从上游 Base URL 自动推导。</div>
+                </div>
+                <div class="settings-field full-width">
+                  <label for="settings-tavily-upstream-admin-headers">Admin Headers</label>
+                  <textarea id="settings-tavily-upstream-admin-headers" rows="4" placeholder='支持 JSON 或逐行 `Header: Value`，例如 {&quot;X-Forwarded-User&quot;:&quot;admin@example.com&quot;,&quot;X-Forwarded-Admin&quot;:&quot;true&quot;}'></textarea>
+                  <div class="hint" id="settings-tavily-upstream-admin-headers-hint">未配置</div>
+                </div>
+                <div class="settings-field full-width">
+                  <label for="settings-tavily-upstream-admin-cookie">Admin Cookie</label>
+                  <input type="password" id="settings-tavily-upstream-admin-cookie" placeholder="留空表示保持当前值">
+                  <div class="hint" id="settings-tavily-upstream-admin-cookie-hint">未配置</div>
+                </div>
+              </div>
+            </details>
+
             <div class="settings-footer">
               <div class="settings-footer-copy">
                 <strong>这里决定 Tavily 是本地池还是上游网关。</strong>
-                <span>切换后会立即影响 `/api/search` 与 `/api/extract` 的实际转发行为。</span>
+                <span>切换后会立即影响 `/api/search` 与 `/api/extract` 的实际转发行为；上游 key/quota 细项只会在接通 Hikari admin 后展示。</span>
               </div>
               <div class="settings-footer-actions">
                 <button type="button" class="btn btn-soft" onclick="testTavilySettings(this)">测试当前连接</button>

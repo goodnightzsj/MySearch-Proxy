@@ -40,6 +40,11 @@
 - 使用量同步
 - 调用统计
 
+补充说明：
+
+- 如果上游是 `tavily-hikari`，控制台默认只读取公开的 `/api/summary`
+- 只有补了 Hikari 的 admin 认证（ForwardAuth headers 或内建 admin cookie），控制台才会继续聚合 `/api/keys` 的 key / quota 细项
+
 ### Firecrawl
 
 代理入口：
