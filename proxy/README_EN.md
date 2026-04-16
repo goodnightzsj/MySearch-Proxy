@@ -68,8 +68,9 @@ So it is a real backend for search agents, not only a UI for manual ops.
 
 If your X / Social layer comes from `grok2api`, the console can:
 
-- read `/v1/admin/config`
-- read `/v1/admin/tokens`
+- prefer `/admin/api/config`
+- prefer `/admin/api/tokens`
+- fall back to `/v1/admin/*` and `/api/v1/admin/*` when needed
 - inherit `app.api_key`
 - display token state in the same workspace
 
@@ -274,8 +275,8 @@ SOCIAL_GATEWAY_UPSTREAM_RESPONSES_PATH=/responses
 SOCIAL_GATEWAY_ADMIN_BASE_URL=https://media.example.com
 SOCIAL_GATEWAY_ADMIN_APP_KEY=
 SOCIAL_GATEWAY_ADMIN_VERIFY_PATH=/v1/admin/verify
-SOCIAL_GATEWAY_ADMIN_CONFIG_PATH=/v1/admin/config
-SOCIAL_GATEWAY_ADMIN_TOKENS_PATH=/v1/admin/tokens
+SOCIAL_GATEWAY_ADMIN_CONFIG_PATH=/admin/api/config
+SOCIAL_GATEWAY_ADMIN_TOKENS_PATH=/admin/api/tokens
 SOCIAL_GATEWAY_CACHE_TTL_SECONDS=60
 SOCIAL_GATEWAY_UPSTREAM_API_KEY=
 SOCIAL_GATEWAY_MODEL=grok-4.1-fast
@@ -295,8 +296,8 @@ SOCIAL_GATEWAY_MODEL=grok-4.1-fast
 
 The console will then:
 
-- inherit `app.api_key` from `/v1/admin/config`
-- read token state from `/v1/admin/tokens`
+- inherit `app.api_key` from `/admin/api/config`
+- read token state from `/admin/api/tokens`
 - reuse inherited credentials when `SOCIAL_GATEWAY_UPSTREAM_API_KEY` or
   `SOCIAL_GATEWAY_TOKEN` are not explicitly set
 

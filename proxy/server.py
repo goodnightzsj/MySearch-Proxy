@@ -210,12 +210,12 @@ SOCIAL_GATEWAY_ADMIN_VERIFY_PATH = _normalize_path(
     "/v1/admin/verify",
 )
 SOCIAL_GATEWAY_ADMIN_CONFIG_PATH = _normalize_path(
-    os.environ.get("SOCIAL_GATEWAY_ADMIN_CONFIG_PATH", "/v1/admin/config"),
-    "/v1/admin/config",
+    os.environ.get("SOCIAL_GATEWAY_ADMIN_CONFIG_PATH", "/admin/api/config"),
+    "/admin/api/config",
 )
 SOCIAL_GATEWAY_ADMIN_TOKENS_PATH = _normalize_path(
-    os.environ.get("SOCIAL_GATEWAY_ADMIN_TOKENS_PATH", "/v1/admin/tokens"),
-    "/v1/admin/tokens",
+    os.environ.get("SOCIAL_GATEWAY_ADMIN_TOKENS_PATH", "/admin/api/tokens"),
+    "/admin/api/tokens",
 )
 SOCIAL_GATEWAY_ADMIN_APP_KEY = os.environ.get("SOCIAL_GATEWAY_ADMIN_APP_KEY", "").strip()
 SOCIAL_GATEWAY_CACHE_TTL_SECONDS = max(
@@ -955,6 +955,57 @@ async def fetch_social_admin_json(config, path):
     return payload if isinstance(payload, dict) else {}
 
 
+def build_social_admin_path_candidates(path, *, kind):
+    normalized = _normalize_path(path, f"/admin/api/{kind}")
+    candidates = [normalized]
+    variants = {
+        normalized,
+        normalized.replace("/v1/admin/", "/admin/api/"),
+        normalized.replace("/api/v1/admin/", "/admin/api/"),
+        normalized.replace("/admin/api/", "/v1/admin/"),
+        normalized.replace("/admin/api/", "/api/v1/admin/"),
+        normalized.replace("/v1/admin/", "/api/v1/admin/"),
+        normalized.replace("/api/v1/admin/", "/v1/admin/"),
+    }
+    ordered = [
+        f"/admin/api/{kind}",
+        f"/v1/admin/{kind}",
+        f"/api/v1/admin/{kind}",
+    ]
+    for candidate in ordered:
+        if candidate in variants and candidate not in candidates:
+            candidates.append(candidate)
+    for candidate in variants:
+        if candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
+def extract_social_admin_api_keys(admin_config):
+    candidates = [
+        (admin_config.get("app") or {}).get("api_key"),
+        admin_config.get("api_key"),
+        admin_config.get("app_key"),
+        ((admin_config.get("data") or {}).get("app") or {}).get("api_key"),
+        ((admin_config.get("config") or {}).get("app") or {}).get("api_key"),
+    ]
+    resolved = []
+    for candidate in candidates:
+        resolved.extend(parse_secret_values(candidate))
+    return unique_preserve_order(resolved)
+
+
+async def fetch_social_admin_json_with_fallback(config, path, *, kind):
+    errors = []
+    for candidate in build_social_admin_path_candidates(path, kind=kind):
+        try:
+            payload = await fetch_social_admin_json(config, candidate)
+            return payload, candidate
+        except Exception as exc:
+            errors.append(str(exc))
+    raise RuntimeError("; ".join(errors[:3]))
+
+
 async def resolve_social_gateway_state_for_config(config):
     state = {
         "upstream_base_url": config["upstream_base_url"],
@@ -984,11 +1035,13 @@ async def resolve_social_gateway_state_for_config(config):
 
     if state["admin_configured"]:
         try:
-            admin_config, admin_tokens = await asyncio.gather(
-                fetch_social_admin_json(config, config["admin_config_path"]),
-                fetch_social_admin_json(config, config["admin_tokens_path"]),
+            (admin_config, resolved_config_path), (admin_tokens, resolved_tokens_path) = await asyncio.gather(
+                fetch_social_admin_json_with_fallback(config, config["admin_config_path"], kind="config"),
+                fetch_social_admin_json_with_fallback(config, config["admin_tokens_path"], kind="tokens"),
             )
-            app_api_keys = parse_secret_values((admin_config.get("app") or {}).get("api_key"))
+            state["admin_config_path"] = resolved_config_path
+            state["admin_tokens_path"] = resolved_tokens_path
+            app_api_keys = extract_social_admin_api_keys(admin_config)
             state["admin_connected"] = True
             state["admin_api_keys"] = app_api_keys
             if not state["upstream_api_keys"]:
