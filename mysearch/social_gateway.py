@@ -16,7 +16,8 @@ import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 
-from .config import _BUILTIN_GROK_MODELS, _resolve_grok_models
+# r7 A1: 改从 grok_registry 子模块导入，避免触发 config 顶层 bootstrap 副作用。
+from .grok_registry import _BUILTIN_GROK_MODELS, _resolve_grok_models
 
 
 def _env_str(name: str, default: str = "") -> str:
@@ -71,9 +72,30 @@ UPSTREAM_RESPONSES_PATH = _normalize_path(
     "/responses",
 )
 UPSTREAM_API_KEY = _env_str("SOCIAL_GATEWAY_UPSTREAM_API_KEY")
-_PRIMARY_DEFAULT = _grok_default_primary()
-MODEL = _env_str("SOCIAL_GATEWAY_MODEL") or _PRIMARY_DEFAULT
-FALLBACK_MODEL = _env_str("SOCIAL_GATEWAY_FALLBACK_MODEL") or _grok_default_fallback(_PRIMARY_DEFAULT)
+
+
+# r7 A2: MODEL / FALLBACK_MODEL 保留 module 顶层快照（backward-compat：
+# 历史调用方、tests 通过 `social_gateway.MODEL` 访问），但请求路径必须改用
+# current_*() 实时函数。这样：
+#   - 启动期 env 已就绪：快照 == 实时值（行为不变）
+#   - 常驻进程运行时 env 被改：current_*() 反映最新，MODEL 快照仍是启动值
+#   - 外部模块通过 PEP 562 也能拿到当前值（见 __getattr__）
+def current_model() -> str:
+    """实时获取 social gateway 主模型——优先 env override，回落到 registry 首项。"""
+    explicit = _env_str("SOCIAL_GATEWAY_MODEL")
+    return explicit or _grok_default_primary()
+
+
+def current_fallback_model() -> str:
+    """实时获取 social gateway fallback——优先 env override，回落到 registry 第 2 项。"""
+    explicit = _env_str("SOCIAL_GATEWAY_FALLBACK_MODEL")
+    if explicit:
+        return explicit
+    return _grok_default_fallback(current_model())
+
+
+MODEL = current_model()
+FALLBACK_MODEL = current_fallback_model()
 GATEWAY_TOKEN = _env_str("SOCIAL_GATEWAY_TOKEN")
 ADMIN_BASE_URL = _env_str("SOCIAL_GATEWAY_ADMIN_BASE_URL") or _derive_admin_base_url(UPSTREAM_BASE_URL)
 ADMIN_VERIFY_PATH = _normalize_path(
@@ -420,8 +442,9 @@ async def resolve_gateway_state(force: bool = False) -> dict[str, Any]:
             "token_source": "not_configured",
             "error": "",
             "mode": "manual",
-            "model": MODEL,
-            "fallback_model": FALLBACK_MODEL,
+            # r7 A2: 用 current_*() 实时获取，跟随运行时 env 变更
+            "model": current_model(),
+            "fallback_model": current_fallback_model(),
             "fallback_min_results": FALLBACK_MIN_RESULTS,
         }
 
@@ -764,9 +787,11 @@ def build_upstream_payload(body: dict[str, Any], model: str | None = None) -> tu
         f"Return up to {max_results} results. Prefer direct x.com status URLs. "
         "Use empty strings for unknown fields."
     )
+    # r7 A2: 默认值实时解析；显式 `model` 入参（per-request override）仍优先。
+    _model_default = current_model()
     return (
         {
-            "model": (model or MODEL).strip() or MODEL,
+            "model": (model or _model_default).strip() or _model_default,
             "input": [{"role": "user", "content": prompt}],
             "tools": tools,
             "temperature": 0,
@@ -1074,7 +1099,7 @@ def normalize_search_response(
         "citations": citations,
         "tool_usage": {
             "social_search_calls": 1,
-            "model": model or payload.get("model") or MODEL,
+            "model": model or payload.get("model") or current_model(),
         },
         "raw_text": text,
     }

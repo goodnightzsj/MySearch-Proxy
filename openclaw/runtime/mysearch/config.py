@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 import sys
 from dataclasses import dataclass as _dataclass, field
 from pathlib import Path
@@ -149,77 +148,17 @@ def _get_list(*names: str) -> list[str]:
     return []
 
 
-@dataclass(slots=True, frozen=True)
-class GrokModelSpec:
-    """单个 Grok 模型登记项。
-
-    `source` = `"builtin"` 表示来自项目内置默认清单（与上游 chenyme/grok2api
-    basic 层一致），`"user"` 表示来自环境变量自定义。`tier` 仅作展示用，
-    不参与请求校验——用户每次请求传入的 `model` 仍会原样透传给上游。
-    """
-
-    id: str
-    tier: str = "custom"
-    source: str = "user"
-
-
-_BUILTIN_GROK_MODELS: tuple[GrokModelSpec, ...] = (
-    GrokModelSpec(id="grok-4.20-fast", tier="basic", source="builtin"),
-    GrokModelSpec(id="grok-4.20-0309-non-reasoning", tier="basic", source="builtin"),
-    GrokModelSpec(id="grok-4.3-beta", tier="basic", source="builtin"),
+# r7 A1: registry 已抽到独立子模块 mysearch/grok_registry.py（openclaw 镜像
+# 也复制了一份），避免独立部署的 social_gateway / proxy 通过 from .config import
+# 触发 _bootstrap_runtime_env 副作用。本文件保留 re-export 以维持向后兼容。
+from mysearch.grok_registry import (
+    GrokModelSpec,
+    _BUILTIN_GROK_MODELS,
+    _GROK_MODEL_ID_PATTERN,
+    _MAX_GROK_MODEL_ENTRIES,
+    _resolve_grok_models,
+    _sanitize_grok_model_ids,
 )
-
-
-_GROK_MODEL_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:/\-]{1,128}$")
-_MAX_GROK_MODEL_ENTRIES = 256
-
-
-def _sanitize_grok_model_ids(raw: list[str]) -> list[str]:
-    """过滤非法 ID，保序去重，截断到上限（与主仓 mysearch/config.py 对齐）。"""
-
-    seen: set[str] = set()
-    filtered: list[str] = []
-    for item in raw:
-        if len(filtered) >= _MAX_GROK_MODEL_ENTRIES:
-            break
-        cleaned = item.strip()
-        if not cleaned or cleaned in seen:
-            continue
-        if not _GROK_MODEL_ID_PATTERN.match(cleaned):
-            continue
-        seen.add(cleaned)
-        filtered.append(cleaned)
-    return filtered
-
-
-def _resolve_grok_models() -> tuple[GrokModelSpec, ...]:
-    """合并内置 basic-tier 默认清单与用户自定义条目。
-
-    - `MYSEARCH_GROK_MODELS`：逗号分隔；非空时**完全替换**内置清单。
-    - `MYSEARCH_GROK_EXTRA_MODELS`：逗号分隔；在内置清单之后追加，重复 ID 去重。
-    两个 env 均未设置时返回 `_BUILTIN_GROK_MODELS`。
-
-    用户提供的 ID 会经过 `_sanitize_grok_model_ids` 过滤，非法字符或超长条目
-    静默跳过；如果过滤后清单为空，回退到 `_BUILTIN_GROK_MODELS`。
-    """
-
-    override = _sanitize_grok_model_ids(_get_list("MYSEARCH_GROK_MODELS"))
-    if override:
-        return tuple(
-            GrokModelSpec(id=mid, tier="custom", source="user") for mid in override
-        )
-
-    extras = _sanitize_grok_model_ids(_get_list("MYSEARCH_GROK_EXTRA_MODELS"))
-    if not extras:
-        return _BUILTIN_GROK_MODELS
-
-    builtin_ids = {m.id for m in _BUILTIN_GROK_MODELS}
-    appended = tuple(
-        GrokModelSpec(id=mid, tier="custom", source="user")
-        for mid in extras
-        if mid not in builtin_ids
-    )
-    return _BUILTIN_GROK_MODELS + appended
 
 
 def _normalize_base_url(url: str) -> str:

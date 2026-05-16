@@ -36,8 +36,8 @@ function showToast(message, type = 'info') {
   if (!root) return;
   const toast = document.createElement('div');
   toast.className = `toast toast-${type}`;
-  toast.setAttribute('role', 'status');
-  toast.setAttribute('aria-live', 'polite');
+  // r7 U4: 外层 #toast-root 容器已 role=status + aria-live=polite，子 toast
+  // 不再重复声明，避免 AT 把同一条消息读两次。
   toast.textContent = message;
   root.appendChild(toast);
   setTimeout(() => {
@@ -567,7 +567,15 @@ function openDetailDrawer({
   document.getElementById('detail-drawer-actions').innerHTML = actionsHtml;
   shell.classList.remove('hidden');
   syncOverlayState();
-  focusOverlay('detail-drawer');
+  // r7 U3: 焦点落到标题（programmatic focus）而非关闭按钮，避免 Tab 立即跳到末尾。
+  // 标题节点加 tabindex=-1 才能 .focus()，但不出现在 Tab 序列里。
+  const titleEl = document.getElementById('detail-drawer-title');
+  if (titleEl) {
+    titleEl.setAttribute('tabindex', '-1');
+    titleEl.focus();
+  } else {
+    focusOverlay('detail-drawer');
+  }
 }
 
 function closeDetailDrawer() {
@@ -2304,6 +2312,9 @@ async function openSettingsModal() {
   document.getElementById('settings-modal').classList.remove('hidden');
   setActiveSettingsTab(document.querySelector('.settings-tab.is-active')?.dataset.settingsTab || 'console');
   syncOverlayState();
+  // r7 U2: modal 打开时把 #dashboard 设 inert，确保 Tab 不会跑到 modal 外
+  const dashboard = document.getElementById('dashboard');
+  if (dashboard && 'inert' in dashboard) dashboard.inert = true;
   focusOverlay('settings-modal');
   try {
     await loadSettings();
@@ -2319,6 +2330,9 @@ async function openSettingsModal() {
 
 function closeSettingsModal() {
   document.getElementById('settings-modal').classList.add('hidden');
+  // r7 U2: 关闭 modal 后取消 dashboard inert，恢复 Tab 顺序
+  const dashboard = document.getElementById('dashboard');
+  if (dashboard && 'inert' in dashboard) dashboard.inert = false;
   syncOverlayState();
   restoreOverlayFocus('settings-modal');
 }
