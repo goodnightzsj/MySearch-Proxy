@@ -12,6 +12,12 @@ RUN pip install --no-cache-dir -r /tmp/mysearch-requirements.txt
 COPY . /app/mysearch
 RUN chmod +x /app/mysearch/docker-entrypoint.sh
 
+# r6 C3: 非 root 用户运行
+RUN groupadd --system --gid 10001 app \
+ && useradd --system --uid 10001 --gid 10001 --home-dir /app --no-create-home app \
+ && chown -R app:app /app
+USER app
+
 EXPOSE 8000
 
 ENTRYPOINT ["/app/mysearch/docker-entrypoint.sh"]
