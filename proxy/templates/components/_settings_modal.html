@@ -38,7 +38,10 @@
             <div class="settings-fields">
               <div class="settings-field full-width">
                 <label for="settings-new-pwd">新密码</label>
-                <input type="password" id="settings-new-pwd" placeholder="至少 4 位" autocomplete="new-password">
+                <div class="input-reveal-wrap">
+                  <input type="password" id="settings-new-pwd" placeholder="至少 4 位" autocomplete="new-password">
+                  <button type="button" class="input-reveal-btn" aria-label="显示密码" aria-pressed="false" data-reveal-target="settings-new-pwd"><span class="reveal-icon" aria-hidden="true">👁</span></button>
+                </div>
                 <div class="hint">控制台登录密码会立即更新到当前会话。</div>
               </div>
             </div>
@@ -99,7 +102,10 @@
               </div>
               <div class="settings-field full-width" data-tavily-upstream-field="true">
                 <label for="settings-tavily-upstream-api-key">上游 API key / Gateway token</label>
-                <input type="password" id="settings-tavily-upstream-api-key" placeholder="留空表示保持当前值">
+                <div class="input-reveal-wrap">
+                  <input type="password" id="settings-tavily-upstream-api-key" placeholder="留空表示保持当前值">
+                  <button type="button" class="input-reveal-btn" aria-label="显示密码" aria-pressed="false" data-reveal-target="settings-tavily-upstream-api-key"><span class="reveal-icon" aria-hidden="true">👁</span></button>
+                </div>
                 <div class="hint" id="settings-tavily-upstream-api-key-hint">未配置</div>
               </div>
             </div>
@@ -119,7 +125,10 @@
                 </div>
                 <div class="settings-field full-width">
                   <label for="settings-tavily-upstream-admin-cookie">Admin Cookie</label>
-                  <input type="password" id="settings-tavily-upstream-admin-cookie" placeholder="留空表示保持当前值">
+                  <div class="input-reveal-wrap">
+                    <input type="password" id="settings-tavily-upstream-admin-cookie" placeholder="留空表示保持当前值">
+                    <button type="button" class="input-reveal-btn" aria-label="显示密码" aria-pressed="false" data-reveal-target="settings-tavily-upstream-admin-cookie"><span class="reveal-icon" aria-hidden="true">👁</span></button>
+                  </div>
                   <div class="hint" id="settings-tavily-upstream-admin-cookie-hint">未配置</div>
                 </div>
               </div>
@@ -164,14 +173,20 @@
               </div>
               <div class="settings-field">
                 <label for="settings-social-model">模型</label>
-                <input type="text" id="settings-social-model" placeholder="grok-4.1-fast">
-                <div class="hint">用于 `x_search` 请求的默认模型名。</div>
+                <input type="text" id="settings-social-model" placeholder="grok-4.20-fast" list="grok-models-builtin" autocomplete="off">
+                <div class="hint">用于 `x_search` 请求的默认模型名。默认对齐上游 grok2api basic 层（免费账号可用）。</div>
               </div>
               <div class="settings-field">
                 <label for="settings-social-fallback-model">Fallback 模型</label>
-                <input type="text" id="settings-social-fallback-model" placeholder="grok-4.1-fast">
+                <input type="text" id="settings-social-fallback-model" placeholder="grok-4.20-0309-non-reasoning" list="grok-models-builtin" autocomplete="off">
                 <div class="hint">当主模型结果太少或请求失败时，自动补一轮的候选模型。</div>
               </div>
+              <!-- 保持与 mysearch/config.py:_BUILTIN_GROK_MODELS 同步；用户自定义清单仍可手输。 -->
+              <datalist id="grok-models-builtin">
+                <option value="grok-4.20-fast">basic · 默认主模型</option>
+                <option value="grok-4.20-0309-non-reasoning">basic · 默认 fallback</option>
+                <option value="grok-4.3-beta">basic · beta</option>
+              </datalist>
               <div class="settings-field">
                 <label for="settings-social-admin-base-url">后台管理地址</label>
                 <input type="text" id="settings-social-admin-base-url" placeholder="https://media.example.com">
@@ -179,17 +194,26 @@
               </div>
               <div class="settings-field">
                 <label for="settings-social-admin-app-key">后台管理 app key</label>
-                <input type="password" id="settings-social-admin-app-key" placeholder="留空表示保持当前值">
+                <div class="input-reveal-wrap">
+                  <input type="password" id="settings-social-admin-app-key" placeholder="留空表示保持当前值">
+                  <button type="button" class="input-reveal-btn" aria-label="显示密码" aria-pressed="false" data-reveal-target="settings-social-admin-app-key"><span class="reveal-icon" aria-hidden="true">👁</span></button>
+                </div>
                 <div class="hint" id="settings-social-admin-app-key-hint">未配置</div>
               </div>
               <div class="settings-field">
                 <label for="settings-social-upstream-api-key">搜索上游 API key</label>
-                <input type="password" id="settings-social-upstream-api-key" placeholder="留空表示保持当前值">
+                <div class="input-reveal-wrap">
+                  <input type="password" id="settings-social-upstream-api-key" placeholder="留空表示保持当前值">
+                  <button type="button" class="input-reveal-btn" aria-label="显示密码" aria-pressed="false" data-reveal-target="settings-social-upstream-api-key"><span class="reveal-icon" aria-hidden="true">👁</span></button>
+                </div>
                 <div class="hint" id="settings-social-upstream-api-key-hint">未配置</div>
               </div>
               <div class="settings-field">
                 <label for="settings-social-gateway-token">客户端访问 token</label>
-                <input type="password" id="settings-social-gateway-token" placeholder="留空表示保持当前值">
+                <div class="input-reveal-wrap">
+                  <input type="password" id="settings-social-gateway-token" placeholder="留空表示保持当前值">
+                  <button type="button" class="input-reveal-btn" aria-label="显示密码" aria-pressed="false" data-reveal-target="settings-social-gateway-token"><span class="reveal-icon" aria-hidden="true">👁</span></button>
+                </div>
                 <div class="hint" id="settings-social-gateway-token-hint">未配置</div>
               </div>
             </div>

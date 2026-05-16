@@ -2396,7 +2396,7 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(calls[1]["method"], "POST")
         self.assertEqual(calls[1]["path"], "/social/search")
         self.assertEqual(calls[1]["payload"]["max_results"], 1)
-        self.assertEqual(calls[1]["payload"]["model"], "grok-4.1-fast")
+        self.assertEqual(calls[1]["payload"]["model"], "grok-4.20-fast")
 
     def test_xai_official_health_probe_uses_status_page(self) -> None:
         client = MySearchClient()
@@ -2439,7 +2439,7 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(len(text_calls), 1)
         self.assertEqual(len(json_calls), 1)
         self.assertEqual(json_calls[0]["path"], "/responses")
-        self.assertEqual(json_calls[0]["payload"]["model"], "grok-4.1-fast")
+        self.assertEqual(json_calls[0]["payload"]["model"], "grok-4.20-fast")
 
     def test_xai_compatible_search_timeout_falls_back_to_tavily_x_results(self) -> None:
         client = MySearchClient()
@@ -12170,6 +12170,119 @@ class MySearchClientTests(unittest.TestCase):
             all("how does the batch api work" not in str(item).lower() for item in supporting_context),
             supporting_context,
         )
+
+
+class CacheKeyCorrectnessTests(unittest.TestCase):
+    """perf-r4 P0 AC1：日期窗口 / handles 必须进 search cache key。"""
+
+    def _build_key(self, client: MySearchClient, **overrides):
+        from mysearch.clients import RouteDecision as _RD
+        defaults = dict(
+            query="OpenAI announcements",
+            mode="auto",
+            resolved_intent="factual",
+            resolved_strategy="auto",
+            provider="auto",
+            normalized_sources=["x"],
+            include_content=False,
+            include_answer=True,
+            include_domains=None,
+            exclude_domains=None,
+            decision=_RD(provider="xai", reason="test-fixture"),
+        )
+        defaults.update(overrides)
+        return client._build_search_cache_key(**defaults)
+
+    def test_cache_key_includes_from_date(self) -> None:
+        client = MySearchClient()
+        key_a = self._build_key(client, from_date="2026-05-01")
+        key_b = self._build_key(client, from_date="2026-05-10")
+        self.assertNotEqual(
+            key_a, key_b, "different from_date must produce different cache keys"
+        )
+
+    def test_cache_key_includes_to_date(self) -> None:
+        client = MySearchClient()
+        key_a = self._build_key(client, to_date="2026-05-01")
+        key_b = self._build_key(client, to_date="2026-05-15")
+        self.assertNotEqual(key_a, key_b)
+
+    def test_cache_key_includes_allowed_x_handles(self) -> None:
+        client = MySearchClient()
+        key_a = self._build_key(client, allowed_x_handles=["openai"])
+        key_b = self._build_key(client, allowed_x_handles=["anthropic"])
+        self.assertNotEqual(key_a, key_b)
+
+    def test_cache_key_includes_excluded_x_handles(self) -> None:
+        client = MySearchClient()
+        key_a = self._build_key(client, excluded_x_handles=["spam_handle"])
+        key_b = self._build_key(client, excluded_x_handles=[])
+        self.assertNotEqual(key_a, key_b)
+
+    def test_cache_key_includes_x_media_flags(self) -> None:
+        client = MySearchClient()
+        key_a = self._build_key(client, include_x_images=True)
+        key_b = self._build_key(client, include_x_images=False)
+        self.assertNotEqual(key_a, key_b)
+
+
+class ExaSocialFallbackBudgetTests(unittest.TestCase):
+    """perf-r4 P0 AC2：_search_exa_social_fallback 必须把 timeout_seconds 拆分到两次 exa 调用。"""
+
+    def test_timeout_seconds_is_split_between_two_exa_calls(self) -> None:
+        client = MySearchClient()
+        captured: list[int | None] = []
+
+        def fake_search_exa(**kwargs):
+            captured.append(kwargs.get("timeout_seconds"))
+            # 第一次返回 0 结果触发第二次调用
+            return {"results": []}
+
+        client._search_exa = fake_search_exa  # type: ignore[method-assign]
+        with self.assertRaises(MySearchError):
+            # 没有 X-adjacent 结果会抛错，但本测试关心 timeout 拆分
+            client._search_exa_social_fallback(
+                query="test",
+                max_results=5,
+                fallback_reason="primary timed out",
+                from_date=None,
+                to_date=None,
+                timeout_seconds=30,
+            )
+        # 两次调用，每次拆分到 max(5, 30//2) = 15 秒
+        self.assertEqual(len(captured), 2)
+        self.assertEqual(captured[0], 15)
+        self.assertEqual(captured[1], 15)
+
+    def test_no_budget_passed_keeps_request_default(self) -> None:
+        client = MySearchClient()
+        captured: list[int | None] = []
+
+        def fake_search_exa(**kwargs):
+            captured.append(kwargs.get("timeout_seconds"))
+            return {"results": []}
+
+        client._search_exa = fake_search_exa  # type: ignore[method-assign]
+        with self.assertRaises(MySearchError):
+            client._search_exa_social_fallback(
+                query="test",
+                max_results=5,
+                fallback_reason="primary failed",
+                from_date=None,
+                to_date=None,
+            )
+        # 未传 budget 时透传 None，让 _request_json 用 config.timeout_seconds 兜底
+        self.assertEqual(captured[0], None)
+
+
+class LoggingObservabilityTests(unittest.TestCase):
+    """perf-r4 P0 AC3：fallback / 预算耗尽路径必须打 logger.warning。"""
+
+    def test_clients_logger_initialized(self) -> None:
+        import logging as _logging
+        from mysearch import clients as _clients
+        self.assertIsInstance(_clients.logger, _logging.Logger)
+        self.assertEqual(_clients.logger.name, "mysearch.clients")
 
 
 if __name__ == "__main__":

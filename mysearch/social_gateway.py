@@ -16,9 +16,40 @@ import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 
+from .config import _BUILTIN_GROK_MODELS, _resolve_grok_models
+
 
 def _env_str(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
+
+
+def _grok_default_primary() -> str:
+    """social gateway 主模型默认值。
+
+    优先使用用户在 `MYSEARCH_GROK_MODELS` / `MYSEARCH_GROK_EXTRA_MODELS` 配置的清单第 1 项，
+    回退到内置 basic 层第 1 项（`grok-4.20-fast`）。这样 `SOCIAL_GATEWAY_MODEL` 与
+    `MYSEARCH_GROK_MODELS` 在零配置下天然一致。
+    """
+
+    resolved = _resolve_grok_models()
+    if resolved:
+        return resolved[0].id
+    return _BUILTIN_GROK_MODELS[0].id
+
+
+def _grok_default_fallback(primary: str) -> str:
+    """social gateway fallback 模型默认值。
+
+    取清单第 2 项；若清单只有 1 项则与主模型相同（此时 `has_social_fallback`
+    会自动判定 fallback 不可用，不会触发额外请求）。
+    """
+
+    resolved = _resolve_grok_models()
+    if len(resolved) >= 2:
+        return resolved[1].id
+    if len(_BUILTIN_GROK_MODELS) >= 2:
+        return _BUILTIN_GROK_MODELS[1].id
+    return primary
 
 
 def _normalize_path(value: str, default: str) -> str:
@@ -40,8 +71,9 @@ UPSTREAM_RESPONSES_PATH = _normalize_path(
     "/responses",
 )
 UPSTREAM_API_KEY = _env_str("SOCIAL_GATEWAY_UPSTREAM_API_KEY")
-MODEL = _env_str("SOCIAL_GATEWAY_MODEL", "grok-4.1-fast")
-FALLBACK_MODEL = _env_str("SOCIAL_GATEWAY_FALLBACK_MODEL", "grok-4.1-fast")
+_PRIMARY_DEFAULT = _grok_default_primary()
+MODEL = _env_str("SOCIAL_GATEWAY_MODEL") or _PRIMARY_DEFAULT
+FALLBACK_MODEL = _env_str("SOCIAL_GATEWAY_FALLBACK_MODEL") or _grok_default_fallback(_PRIMARY_DEFAULT)
 GATEWAY_TOKEN = _env_str("SOCIAL_GATEWAY_TOKEN")
 ADMIN_BASE_URL = _env_str("SOCIAL_GATEWAY_ADMIN_BASE_URL") or _derive_admin_base_url(UPSTREAM_BASE_URL)
 ADMIN_VERIFY_PATH = _normalize_path(

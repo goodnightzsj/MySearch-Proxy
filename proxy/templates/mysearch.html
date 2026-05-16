@@ -52,11 +52,7 @@
           <p>把统一接入配置、安装命令和通用 Token 单独放在一页，让默认搜索控制台专注 provider 工作台，而这里专门负责客户端接入。</p>
         </div>
         <div class="access-shell-actions">
-          <button class="user-btn theme-btn" type="button" onclick="toggleTheme()" id="theme-toggle">
-            <svg class="icon w-4 h-4 mr-1 inline-block" viewBox="0 0 24 24"><path d="M12 3v3"/><path d="M12 18v3"/><path d="M4.22 4.22 6.34 6.34"/><path d="m17.66 17.66 2.12 2.12"/><path d="M3 12h3"/><path d="M18 12h3"/><path d="m4.22 19.78 2.12-2.12"/><path d="m17.66 6.34 2.12-2.12"/><circle cx="12" cy="12" r="4"/></svg>
-            <span id="theme-toggle-label">夜间模式</span>
-          </button>
-          <button class="user-btn settings-btn" type="button" onclick="openSettingsModal()">控制台设置</button>
+          {% include 'components/_topbar_actions.html' %}
           <button class="user-btn" type="button" onclick="window.location.href='/'">返回搜索控制台</button>
         </div>
       </div>

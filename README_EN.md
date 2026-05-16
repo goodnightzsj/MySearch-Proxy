@@ -283,6 +283,36 @@ Without X / Social:
 So no X provider is not a blocker for MySearch as a general-purpose search
 stack.
 
+#### Grok model registry (basic-tier defaults + user overlay)
+
+Heads-up: as of 2026-05-15, several Grok models retired from the xAI API
+(`grok-3-mini`, `grok-4.1-fast`, `grok-4-fast`, `grok-4`, `grok-code-fast-1`).
+Project defaults now align with
+[`chenyme/grok2api`](https://github.com/chenyme/grok2api) **basic tier**
+(free-account compatible):
+
+- Primary: `grok-4.20-fast`
+- Fallback: `grok-4.20-0309-non-reasoning`
+- Also recognized: `grok-4.3-beta`
+
+The registry is overlay-driven, controlled by two env variables:
+
+- `MYSEARCH_GROK_MODELS` — comma-separated; **replaces** the built-in list
+  entirely (for private deployments with a custom upstream)
+- `MYSEARCH_GROK_EXTRA_MODELS` — comma-separated; **appends** to the
+  built-in list with automatic dedup (for adding super/heavy tiers or
+  custom aliases)
+
+The active registry is exposed via `mysearch_health.known_grok_models` as
+`[{id, tier, source}, ...]` for AI assistants and the console to discover
+configured models. Default `MYSEARCH_XAI_MODEL` and `SOCIAL_GATEWAY_MODEL`
+stay **unchanged** when overlay env is set — the registry is informational
+and discovery-only; per-request `model` is still passed through verbatim to
+upstream.
+
+Spec: `.trellis/spec/backend/grok-model-registry.md` (canonical invariants
+and retirement workflow).
+
 ## Installation paths
 
 You do not need every part of the repo for every deployment.

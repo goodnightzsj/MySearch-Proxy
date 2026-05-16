@@ -304,6 +304,10 @@ class MySearchClient:
             "server_name": self.config.server_name,
             "timeout_seconds": self.config.timeout_seconds,
             "xai_model": self.config.xai_model,
+            "known_grok_models": [
+                {"id": m.id, "tier": m.tier, "source": m.source}
+                for m in self.config.xai_models
+            ],
             "mcp": {
                 "default_transport": "stdio",
                 "host": self.config.mcp_host,
@@ -475,7 +479,14 @@ class MySearchClient:
         include_domains: list[str] | None,
         exclude_domains: list[str] | None,
         decision: RouteDecision,
+        allowed_x_handles: list[str] | None = None,
+        excluded_x_handles: list[str] | None = None,
+        from_date: str | None = None,
+        to_date: str | None = None,
+        include_x_images: bool = False,
+        include_x_videos: bool = False,
     ) -> str:
+        # perf-r4 P0：日期窗口/handles 必须进 cache key（同主仓 mysearch/clients.py）。
         return self._build_cache_key(
             "search",
             {
@@ -492,6 +503,12 @@ class MySearchClient:
                 "route_provider": decision.provider,
                 "tavily_topic": decision.tavily_topic,
                 "firecrawl_categories": decision.firecrawl_categories or [],
+                "allowed_x_handles": sorted(set(allowed_x_handles or [])),
+                "excluded_x_handles": sorted(set(excluded_x_handles or [])),
+                "from_date": from_date or "",
+                "to_date": to_date or "",
+                "include_x_images": include_x_images,
+                "include_x_videos": include_x_videos,
             },
         )
 
@@ -660,6 +677,12 @@ class MySearchClient:
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
                 decision=decision,
+                allowed_x_handles=allowed_x_handles,
+                excluded_x_handles=excluded_x_handles,
+                from_date=from_date,
+                to_date=to_date,
+                include_x_images=include_x_images,
+                include_x_videos=include_x_videos,
             )
             cached_result = self._cache_get("search", cache_key)
             if cached_result is not None:
@@ -8031,7 +8054,11 @@ class MySearchClient:
             raise MySearchError(str(exc)) from exc
 
     def _xai_probe_model(self) -> str:
-        return "grok-4.1-fast"
+        # Probe 取当前 registry 首项，跟随 MYSEARCH_GROK_MODELS / EXTRA_MODELS 自定义。
+        models = self.config.xai_models
+        if models:
+            return models[0].id
+        return "grok-4.20-fast"
 
     def _derive_root_health_base_url(self, provider: ProviderConfig) -> str:
         candidate = (

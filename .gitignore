@@ -39,3 +39,8 @@ htmlcov/
 llmdoc/
 .codex-tasks/
 extract.py
+
+# Trellis 工作流（本地协作产物，不入仓）
+.trellis/
+.claude/
+AGENTS.md

@@ -1,4 +1,36 @@
 
+// Grok 默认模型字面量散落在本文件 5 处（model 默认值 / quickstart env / settings 回填），
+// 必须与 mysearch/config.py:_BUILTIN_GROK_MODELS、proxy/server.py SOCIAL_GATEWAY_MODEL 系列保持同步。
+// 退役模型再次出现时优先改 _BUILTIN_GROK_MODELS（registry），proxy/server.py 已经派生；
+// 本文件因仅作为客户端兜底显示，仍保留字面量但**必须与 registry 首/次项一致**。
+
+// r5 P2-14: 高频文案抽到字典，便于后续接入 i18n 框架时一次性替换。
+// 当前仅抽最高频的鉴权 / 加载 / 复制反馈，未引入 i18next 等 runtime。
+const COPY = {
+  loginBusy: '登录中...',
+  loginEnter: '进入控制台',
+  copySuccess: '已复制',
+  copySuccessToast: '已复制到剪贴板',
+  copyFailed: '复制失败',
+};
+
+// r5 P0-1: 全局 password reveal toggle（事件委托，6 个输入框共用）
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('.input-reveal-btn');
+  if (!btn) return;
+  e.preventDefault();
+  const targetId = btn.getAttribute('data-reveal-target');
+  if (!targetId) return;
+  const input = document.getElementById(targetId);
+  if (!input) return;
+  const currentlyHidden = input.type === 'password';
+  input.type = currentlyHidden ? 'text' : 'password';
+  btn.setAttribute('aria-pressed', String(currentlyHidden));
+  btn.setAttribute('aria-label', currentlyHidden ? '隐藏密码' : '显示密码');
+  const iconSpan = btn.querySelector('.reveal-icon');
+  if (iconSpan) iconSpan.textContent = currentlyHidden ? '🙈' : '👁';
+});
+
 function showToast(message, type = 'info') {
   const root = document.getElementById('toast-root');
   if (!root) return;
@@ -612,7 +644,7 @@ function renderSettingsSummaries(settings = latestSettings) {
     socialSummary.innerHTML = [
       summaryCard('工作模式', socialModeLabel(social.mode || 'manual'), social.admin_connected ? '后台已连通' : '可手动覆写上游'),
       summaryCard('Token 来源', socialTokenSourceLabel(social.token_source || ''), social.gateway_token_configured ? '客户端 token 已配置' : '可直接复用统一 token'),
-      summaryCard('默认模型', social.model || 'grok-4.1-fast', social.fallback_model ? `Fallback ${social.fallback_model}` : '未配置 fallback'),
+      summaryCard('默认模型', social.model || 'grok-4.20-fast', social.fallback_model ? `Fallback ${social.fallback_model}` : '未配置 fallback'),
     ].join('');
   }
 }
@@ -763,7 +795,7 @@ function setLoginBusy(isBusy) {
     if (isBusy) {
       button.classList.remove('is-success', 'is-error');
     }
-    button.textContent = isBusy ? '登录中...' : '进入控制台';
+    button.textContent = isBusy ? COPY.loginBusy : COPY.loginEnter;
   }
 }
 
@@ -775,6 +807,8 @@ function showDashboard(options = {}) {
   loginBox.classList.add('hidden');
   dashboard.classList.remove('hidden');
   dashboard.classList.remove('is-entering');
+  // r5 P1-5: 已登录用户进来时打上 has-session，CSS 把 hero 营销文案折叠
+  document.body.classList.add('has-session');
   if (animate) {
     dashboard.classList.add('is-entering');
     setTimeout(() => {
@@ -790,6 +824,8 @@ function showLogin() {
   dashboard.classList.remove('is-entering');
   dashboard.classList.add('hidden');
   loginBox.classList.remove('hidden');
+  // r5 P1-5: 退到登录页时恢复 hero 营销文案
+  document.body.classList.remove('has-session');
   closeSettingsModal();
   closeDetailDrawer();
   closeAppDialog(false);
@@ -1364,11 +1400,14 @@ function renderHeroFocus(services, social) {
 function buildSocialProxyEnv(social) {
   const baseUrl = social.upstream_base_url || 'https://media.example.com/v1';
   const adminBaseUrl = social.admin_base_url || baseUrl.replace(/\/v1$/, '');
+  const model = social.model || 'grok-4.20-fast';
+  const fallbackModel = social.fallback_model || 'grok-4.20-0309-non-reasoning';
   return `# 推荐：只填 grok2api 后台地址和后台 app_key，proxy 会自动继承上游凭证与 token 池
 SOCIAL_GATEWAY_UPSTREAM_BASE_URL=${baseUrl}
 SOCIAL_GATEWAY_ADMIN_BASE_URL=${adminBaseUrl}
 SOCIAL_GATEWAY_ADMIN_APP_KEY=YOUR_GROK2API_APP_KEY
-SOCIAL_GATEWAY_MODEL=grok-4.1-fast
+SOCIAL_GATEWAY_MODEL=${model}
+SOCIAL_GATEWAY_FALLBACK_MODEL=${fallbackModel}
 
 # 可选：只有你想覆写默认行为时才需要
 # SOCIAL_GATEWAY_UPSTREAM_API_KEY=
@@ -1853,10 +1892,10 @@ function renderMySearchQuickstart(mysearch, social) {
               <table>
                 <thead>
                   <tr>
-                    <th>Token</th>
-                    <th>名称</th>
-                    <th>运行摘要</th>
-                    <th>操作</th>
+                    <th scope="col">Token</th>
+                    <th scope="col">名称</th>
+                    <th scope="col">运行摘要</th>
+                    <th scope="col">操作</th>
                   </tr>
                 </thead>
                 <tbody id="tokens-body-mysearch"></tbody>
@@ -2219,8 +2258,8 @@ function fillSettingsForm(settings) {
   document.getElementById('settings-social-admin-verify-path').value = social.admin_verify_path || '/v1/admin/verify';
   document.getElementById('settings-social-admin-config-path').value = social.admin_config_path || '/admin/api/config';
   document.getElementById('settings-social-admin-tokens-path').value = social.admin_tokens_path || '/admin/api/tokens';
-  document.getElementById('settings-social-model').value = social.model || 'grok-4.1-fast';
-  document.getElementById('settings-social-fallback-model').value = social.fallback_model || 'grok-4.1-fast';
+  document.getElementById('settings-social-model').value = social.model || 'grok-4.20-fast';
+  document.getElementById('settings-social-fallback-model').value = social.fallback_model || 'grok-4.20-0309-non-reasoning';
   document.getElementById('settings-social-cache-ttl-seconds').value = String(social.cache_ttl_seconds || 60);
   document.getElementById('settings-social-fallback-min-results').value = String(social.fallback_min_results || 3);
 
@@ -2308,7 +2347,7 @@ function renderServiceShells() {
           </div>
             <div class="service-tools">
               <div class="service-tool-kicker">Live Status</div>
-              <div id="sync-meta-${service}" class="service-sync-meta">等待同步状态...</div>
+              <div id="sync-meta-${service}" class="service-sync-meta" aria-live="polite">等待同步状态...</div>
             <button class="btn btn-soft" id="sync-btn-${service}" onclick="syncUsage('${service}', true, this)">${meta.syncButton}</button>
           </div>
         </div>
@@ -2393,10 +2432,10 @@ function renderServiceShells() {
 	                  <table>
 	                    <thead>
 	                      <tr>
-	                        <th>Token</th>
-	                        <th>备注</th>
-	                        <th>运行摘要</th>
-	                        <th>操作</th>
+	                        <th scope="col">Token</th>
+	                        <th scope="col">备注</th>
+	                        <th scope="col">运行摘要</th>
+	                        <th scope="col">操作</th>
 	                      </tr>
 	                    </thead>
 	                    <tbody id="tokens-body-${service}"></tbody>
@@ -2456,13 +2495,13 @@ function renderServiceShells() {
 	                  <table>
 	                    <thead>
 	                      <tr>
-	                        <th>ID</th>
-	                        <th>Key</th>
-	                        <th>邮箱</th>
-	                        <th>同步 / 状态</th>
-	                        <th>代理摘要</th>
-	                        <th>状态</th>
-	                        <th>操作</th>
+	                        <th scope="col">ID</th>
+	                        <th scope="col">Key</th>
+	                        <th scope="col">邮箱</th>
+	                        <th scope="col">同步 / 状态</th>
+	                        <th scope="col">代理摘要</th>
+	                        <th scope="col">状态</th>
+	                        <th scope="col">操作</th>
 	                      </tr>
 	                    </thead>
                     <tbody id="keys-body-${service}"></tbody>
@@ -2490,7 +2529,7 @@ function renderServiceShells() {
         </div>
         <div class="service-tools">
           <div class="service-tool-kicker">Live Status</div>
-          <div id="sync-meta-social" class="service-sync-meta">等待 Social 状态...</div>
+          <div id="sync-meta-social" class="service-sync-meta" aria-live="polite">等待 Social 状态...</div>
           <div class="service-sync-meta">用于查看 token 池、剩余额度、调用次数和客户端接线方式。</div>
         </div>
       </div>
@@ -2688,6 +2727,39 @@ function fmtNum(value) {
   }
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric.toLocaleString() : String(value);
+}
+
+// r5 P2-11: 在 stat-box .value 内的纯数字节点上做 rAF countUp 动画。
+// 调用方在 innerHTML 渲染完成后 animateNumericChildren(containerEl) 即可。
+// 受 prefers-reduced-motion 控制——开启时跳过动画直接显示终值。
+function animateNumericChildren(rootEl, durationMs = 600) {
+  if (!rootEl) return;
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    return;
+  }
+  const valueEls = rootEl.querySelectorAll('.stat-box .value');
+  valueEls.forEach((el) => {
+    // 取 .value 直接 textNode 里的第一个数字（容忍后跟 <span class="muted">/ X</span>）
+    const firstTextNode = Array.from(el.childNodes).find((n) => n.nodeType === Node.TEXT_NODE);
+    if (!firstTextNode) return;
+    const raw = firstTextNode.textContent.trim();
+    const cleaned = raw.replace(/[,，]/g, '');
+    const target = Number(cleaned);
+    if (!Number.isFinite(target) || target <= 0) return;
+    const start = performance.now();
+    const initial = 0;
+    function tick(now) {
+      const elapsed = now - start;
+      const progress = Math.min(1, elapsed / durationMs);
+      const eased = 1 - Math.pow(1 - progress, 3); // easeOutCubic
+      const current = Math.round(initial + (target - initial) * eased);
+      firstTextNode.textContent = current.toLocaleString() + ' ';
+      if (progress < 1) requestAnimationFrame(tick);
+      else firstTextNode.textContent = raw + ' ';
+    }
+    firstTextNode.textContent = '0 ';
+    requestAnimationFrame(tick);
+  });
 }
 
 function escapeHtml(value) {
@@ -2889,7 +2961,8 @@ function renderOverview(service, payload) {
     const todaySuccess = Number(overview.today_success || 0);
     const successRate = todayCount ? `${Math.round((todaySuccess / todayCount) * 100)}%` : '暂无';
 
-    document.getElementById(`overview-${service}`).innerHTML = `
+    const overviewEl = document.getElementById(`overview-${service}`);
+    overviewEl.innerHTML = `
       <div class="stat-box">
         <div class="label">实时额度</div>
         <div class="value">暂时无法查询</div>
@@ -2921,6 +2994,8 @@ function renderOverview(service, payload) {
         <div class="hint">${payload.usage_sync?.detail || 'Exa 实时额度暂时无法查询，后续如果接入官方读取会补充显示。'}</div>
       </div>
     `;
+    // r5 P2-11: 数字滚动微动效（reduced-motion 时跳过）
+    animateNumericChildren(overviewEl);
     return;
   }
 
@@ -3262,13 +3337,22 @@ function renderTokens(service, tokens) {
   const tbody = document.getElementById(`tokens-body-${service}`);
   syncTokenToolbar(service);
   if (!tokens || tokens.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="4" class="muted">当前还没有 Token，先创建一个给下游使用。</td></tr>';
+    tbody.innerHTML = `<tr><td colspan="4"><div class="empty-state">
+      <div class="empty-state-icon" aria-hidden="true">🪙</div>
+      <strong>还没有 Token</strong>
+      <p>创建一个 Token，下游 MCP / Agent 就能用它接入当前 service。</p>
+      <button type="button" class="btn btn-soft btn-sm empty-state-cta" onclick="document.getElementById('token-name-${service}')?.focus()">去顶部创建 Token</button>
+    </div></td></tr>`;
     return;
   }
 
   const filtered = getFilteredTokens(service, tokens);
   if (!filtered.length) {
-    tbody.innerHTML = '<tr><td colspan="4" class="muted">没有符合当前筛选条件的 Token。</td></tr>';
+    tbody.innerHTML = `<tr><td colspan="4"><div class="empty-state">
+      <div class="empty-state-icon" aria-hidden="true">🔍</div>
+      <strong>没有符合当前筛选条件的 Token</strong>
+      <p>调整上方"显示禁用"或筛选词，或者新建一个再试。</p>
+    </div></td></tr>`;
     return;
   }
 
@@ -3291,8 +3375,8 @@ function renderTokens(service, tokens) {
         <td>${renderTokenSummary(token)}</td>
         <td>
           <div class="table-actions">
+            <!-- r5 P0-2: 删除按钮已挪到抽屉的 Danger Zone（点击行展开），避免误删。 -->
             <button class="btn btn-sm" onclick='event.stopPropagation(); copyText(${JSON.stringify(token.token)}, this)'>复制</button>
-            <button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); delToken('${service}', ${token.id})">删除</button>
           </div>
         </td>
       </tr>
@@ -3357,13 +3441,21 @@ function renderKeys(service, keys) {
   const tbody = document.getElementById(`keys-body-${service}`);
   syncKeyToolbar(service);
   if (!keys || keys.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="7" class="muted">当前服务还没有导入 Key。</td></tr>';
+    tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state">
+      <div class="empty-state-icon" aria-hidden="true">🔑</div>
+      <strong>当前 service 还没有导入 Key</strong>
+      <p>在上方输入框单条或批量导入上游 key，proxy 会自动做 round-robin。</p>
+    </div></td></tr>`;
     return;
   }
 
   const filtered = getFilteredKeys(service, keys);
   if (!filtered.length) {
-    tbody.innerHTML = '<tr><td colspan="7" class="muted">没有符合当前筛选条件的 Key。</td></tr>';
+    tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state">
+      <div class="empty-state-icon" aria-hidden="true">🔍</div>
+      <strong>没有符合当前筛选条件的 Key</strong>
+      <p>调整筛选词或切换"显示禁用"再试。</p>
+    </div></td></tr>`;
     return;
   }
 
@@ -3390,8 +3482,8 @@ function renderKeys(service, keys) {
         <td><span class="tag ${active ? 'tag-ok' : 'tag-off'}">${active ? '正常' : '禁用'}</span></td>
         <td>
           <div class="table-actions">
+            <!-- r5 P0-2: 删除按钮已挪到抽屉的 Danger Zone，行内只保留启用/禁用。 -->
             <button class="btn btn-sm" onclick="event.stopPropagation(); toggleKey('${service}', ${key.id}, ${active ? 0 : 1})">${active ? '禁用' : '启用'}</button>
-            <button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); delKey('${service}', ${key.id})">删除</button>
           </div>
         </td>
       </tr>

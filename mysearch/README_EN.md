@@ -372,7 +372,8 @@ Minimal config:
 SOCIAL_GATEWAY_UPSTREAM_BASE_URL=https://media.example.com/v1
 SOCIAL_GATEWAY_UPSTREAM_RESPONSES_PATH=/responses
 SOCIAL_GATEWAY_UPSTREAM_API_KEY=your-upstream-key
-SOCIAL_GATEWAY_MODEL=grok-4.1-fast
+SOCIAL_GATEWAY_MODEL=grok-4.20-fast
+SOCIAL_GATEWAY_FALLBACK_MODEL=grok-4.20-0309-non-reasoning
 SOCIAL_GATEWAY_TOKEN=your-social-gateway-token
 ```
 
