@@ -18,6 +18,14 @@ COPY docker /app/docker
 
 RUN chmod +x /app/docker/combined-entrypoint.sh /app/mysearch/docker-entrypoint.sh
 
+# r6 C3: 非 root 运行。entrypoint 启动两个 uvicorn，所有 /data 写入必须可访问，
+# 因此先 chown /app + /data 再 USER 切换。
+RUN groupadd --system --gid 10001 app \
+ && useradd --system --uid 10001 --gid 10001 --home-dir /app --no-create-home app \
+ && mkdir -p /data \
+ && chown -R app:app /app /data
+USER app
+
 EXPOSE 9874 8000
 
 CMD ["/app/docker/combined-entrypoint.sh"]

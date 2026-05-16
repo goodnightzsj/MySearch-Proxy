@@ -1,4 +1,6 @@
+# r6 C5: 用 PEP 440 兼容版本范围。`mcp[cli]` 仍精确钉死（协议/SDK 演进
+# 不向后兼容，必须显式 upgrade）。
 mcp[cli]==1.26.0
-fastapi>=0.104.0
-uvicorn>=0.24.0
-httpx>=0.25.0
+fastapi>=0.104.0,<1.0.0
+uvicorn>=0.24.0,<1.0.0
+httpx>=0.25.0,<1.0.0

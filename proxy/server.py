@@ -50,6 +50,23 @@ ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin")
 ADMIN_SESSION_COOKIE = os.environ.get("ADMIN_SESSION_COOKIE", "mysearch_proxy_session")
 ADMIN_SESSION_MAX_AGE = max(300, int(os.environ.get("ADMIN_SESSION_MAX_AGE", "2592000")))
 MYSEARCH_PROXY_BOOTSTRAP_TOKEN = os.environ.get("MYSEARCH_PROXY_BOOTSTRAP_TOKEN", "").strip()
+
+# r6 C1 / C2: 弱默认值启动告警。默认 `admin` / `change-me` / `change-me-bootstrap-token`
+# 在公网暴露的实例会被立即劫持。这里只 warn 不 fail——dev 环境仍可用，
+# 生产部署看到 warn 应立即覆盖。
+_KNOWN_WEAK_PASSWORDS = {"admin", "change-me", "password", "123456"}
+_MYSEARCH_WEAK_DEFAULTS = []
+if ADMIN_PASSWORD in _KNOWN_WEAK_PASSWORDS:
+    _MYSEARCH_WEAK_DEFAULTS.append(f"ADMIN_PASSWORD={ADMIN_PASSWORD}（已知弱默认）")
+if MYSEARCH_PROXY_BOOTSTRAP_TOKEN == "change-me-bootstrap-token":
+    _MYSEARCH_WEAK_DEFAULTS.append("MYSEARCH_PROXY_BOOTSTRAP_TOKEN=change-me-bootstrap-token（已知弱默认）")
+if _MYSEARCH_WEAK_DEFAULTS:
+    print(
+        "\n!!! [MySearch Proxy security] 检测到弱默认凭证，公网暴露的实例会被劫持：\n  - "
+        + "\n  - ".join(_MYSEARCH_WEAK_DEFAULTS)
+        + "\n  生产部署请显式覆盖这些 env，dev 环境可忽略本提示。\n",
+        flush=True,
+    )
 TAVILY_API_BASE = "https://api.tavily.com"
 TAVILY_SEARCH_PATH = "/search"
 TAVILY_EXTRACT_PATH = "/extract"
@@ -941,7 +958,11 @@ def verify_admin(request: Request):
     auth = request.headers.get("Authorization", "")
     password = request.headers.get("X-Admin-Password", "")
     pwd = get_admin_password()
-    if auth == f"Bearer {pwd}" or password == pwd or has_valid_admin_session(request):
+    # r6 C4: 用 hmac.compare_digest 替代 `==`，恒定时间比较，防侧信道。
+    bearer_expected = f"Bearer {pwd}"
+    bearer_ok = bool(auth) and hmac.compare_digest(auth, bearer_expected)
+    password_ok = bool(password) and hmac.compare_digest(password, pwd)
+    if bearer_ok or password_ok or has_valid_admin_session(request):
         return True
     raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -1696,9 +1717,14 @@ def build_real_quota_summary(keys):
 
 
 def mask_key_rows(keys):
+    # r6 C6: 之前仅追加 key_masked 字段而不删 raw key，导致 GET /api/keys 返回
+    # 同时含明文 key + key_masked，admin session 一旦泄漏（如浏览器扩展窃取
+    # JSON 响应、log 泄漏 Response）就直接暴露上游凭证。改为追加 + 删除原文。
     for key in keys:
-        raw = key["key"]
+        raw = key.get("key", "") or ""
         key["key_masked"] = raw[:8] + "***" + raw[-4:] if len(raw) > 12 else raw
+        # 显式删原文。如果调用方真的需要原文，请直接调 db.get_all_keys（不要经过 mask）。
+        key.pop("key", None)
     return keys
 
 

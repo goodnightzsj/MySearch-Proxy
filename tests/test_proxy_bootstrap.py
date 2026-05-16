@@ -92,5 +92,43 @@ class ProxyBootstrapTests(unittest.TestCase):
         self.assertIn("mysp-bootstrap", written)
 
 
+class ProxySecurityHardeningTests(unittest.TestCase):
+    """r6 Critical 安全修复回归测试。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        if str(PROXY_ROOT) not in sys.path:
+            sys.path.insert(0, str(PROXY_ROOT))
+        cls.proxy_server = _load_module(
+            "test_proxy_server_security",
+            PROXY_ROOT / "server.py",
+        )
+
+    def test_c6_mask_key_rows_removes_raw_key(self) -> None:
+        """C6: /api/keys 返回必须不含明文 key 字段。"""
+        rows = [{"id": 1, "key": "sk-1234567890abcdef-tail", "active": 1}]
+        masked = self.proxy_server.mask_key_rows([dict(r) for r in rows])
+        self.assertEqual(len(masked), 1)
+        self.assertNotIn("key", masked[0], "raw key 必须被删除，仅保留 key_masked")
+        self.assertIn("key_masked", masked[0])
+        self.assertEqual(masked[0]["key_masked"], "sk-12345***tail")
+
+    def test_c6_mask_key_rows_empty_or_short(self) -> None:
+        """C6 边界：极短 key 不挂掉，且仍删原文。"""
+        masked = self.proxy_server.mask_key_rows([{"id": 2, "key": "short"}])
+        self.assertNotIn("key", masked[0])
+        # 极短 key 全文显示（仍是脱敏，因为太短无法保留首尾）
+        self.assertEqual(masked[0]["key_masked"], "short")
+
+    def test_c4_verify_admin_uses_hmac_compare_digest(self) -> None:
+        """C4: verify_admin 不能用 `==` 比较密码（侧信道风险）。"""
+        import inspect
+        source = inspect.getsource(self.proxy_server.verify_admin)
+        # 关键断言：源码不再出现 == pwd 这种比较
+        self.assertNotIn("password == pwd", source)
+        self.assertNotIn('auth == f"Bearer {pwd}"', source)
+        self.assertIn("compare_digest", source)
+
+
 if __name__ == "__main__":
     unittest.main()
