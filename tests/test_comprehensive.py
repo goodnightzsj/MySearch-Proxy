@@ -79,6 +79,7 @@ def _minimal_config(
         timeout_seconds=10,
         xai_social_timeout_seconds=120,
         xai_model="grok-test",
+        xai_models=(),
         max_parallel_workers=2,
         search_cache_ttl_seconds=search_cache_ttl,
         extract_cache_ttl_seconds=extract_cache_ttl,

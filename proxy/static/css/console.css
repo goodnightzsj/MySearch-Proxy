@@ -449,7 +449,97 @@ textarea {
 
 input::placeholder,
 textarea::placeholder {
-  color: var(--muted);
+  /* a11y r4: --muted on --surface 约 3.85:1，不达 WCAG 4.5:1；
+     --text-soft 浅色约 7.6:1 / 深色 ~8:1，且与正文色仍有视觉层次。 */
+  color: var(--text-soft);
+  opacity: 0.85;
+}
+
+/* r5 P1-5: 已登录用户进来时 hero 折叠——只保留品牌条 + 命令按钮，
+   隐藏营销文案、usage-grid、hero-lanes 等下一屏内容 */
+body.has-session .hero-intro,
+body.has-session .hero-usage-grid,
+body.has-session .hero-lanes,
+body.has-session .hero-pill-row {
+  display: none;
+}
+body.has-session .hero {
+  padding-bottom: 18px;
+}
+body.has-session .hero-main {
+  gap: 12px;
+}
+
+/* a11y r5 P0-4: 表格空状态组件 */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 36px 24px;
+  text-align: center;
+  color: var(--text-soft);
+}
+.empty-state-icon {
+  font-size: 28px;
+  line-height: 1;
+  opacity: 0.7;
+}
+.empty-state strong {
+  color: var(--text);
+  font-size: 14px;
+}
+.empty-state p {
+  margin: 0;
+  font-size: 13px;
+  max-width: 360px;
+  line-height: 1.5;
+}
+.empty-state-cta {
+  margin-top: 4px;
+}
+
+/* a11y r5 P0-1: 6 个 password 输入框的显示/隐藏 toggle 包裹层 */
+.input-reveal-wrap {
+  position: relative;
+  display: block;
+}
+.input-reveal-wrap > input {
+  padding-right: 40px;
+  width: 100%;
+}
+.input-reveal-btn {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: transparent;
+  border: 0;
+  padding: 6px 8px;
+  cursor: pointer;
+  color: var(--text-soft);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  line-height: 1;
+  min-height: 32px;
+  min-width: 32px;
+  font-size: 16px;
+}
+.input-reveal-btn:hover {
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.05);
+}
+body.theme-dark .input-reveal-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+.input-reveal-btn[aria-pressed="true"] {
+  color: var(--info);
+}
+.input-reveal-btn:focus-visible {
+  outline: 2px solid var(--info, #1d4ed8);
+  outline-offset: 1px;
 }
 
 input:focus,
@@ -476,12 +566,22 @@ textarea:focus {
 }
 
 .btn:hover {
+  /* r5 P1-7: 仅给大尺寸按钮 hover translate；列表里 8-10 个 btn-sm 同时上抬太跳，
+     在 .btn-sm:hover 里覆盖回 transform: none。 */
   transform: translateY(-1px);
+}
+.btn-sm:hover {
+  transform: none;
+}
+.btn:active {
+  transform: scale(0.98);
 }
 
 .btn:disabled {
-  cursor: default;
+  /* a11y r4: 原仅去 transform，视觉与 enabled 几乎一致；补 opacity + 非交互光标 */
+  cursor: not-allowed;
   transform: none;
+  opacity: 0.55;
 }
 
 .btn.is-busy {
@@ -551,8 +651,11 @@ textarea:focus {
 }
 
 .btn-sm {
-  padding: 7px 12px;
+  /* r5 P1-9: 原 padding 7px 12px 实测高度约 28-30px，移动端误触；
+     min-height 提到 32px 满足 WCAG 2.5.8 AA (24×24) 并接近 AAA (44×44)。 */
+  padding: 8px 14px;
   font-size: 12px;
+  min-height: 32px;
 }
 
 .user-btn {
@@ -1896,9 +1999,17 @@ body.theme-dark .hero-focus {
 }
 
 table {
+  /* r5 P1-6: 固定布局 + 限制 token 列宽，1024-1280px 区间不再重排 */
   width: 100%;
   border-collapse: collapse;
   text-align: left;
+  table-layout: fixed;
+}
+table .mono,
+table td .mono {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 th,
@@ -2327,8 +2438,24 @@ summary:focus-visible,
 .settings-tab:focus-visible,
 .mode-switch-btn:focus-visible,
 .mini-switch-btn:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 4px rgba(29, 78, 216, 0.14);
+  /* a11y r5 P0-3: 原 outline:none + 14% 透明蓝环在深色主题对比度<2:1。
+     改成实 outline + 更高不透明度的辅助阴影，光暗主题都 ≥ 3:1。 */
+  outline: 2px solid rgba(29, 78, 216, 0.85);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px rgba(29, 78, 216, 0.25);
+}
+body.theme-dark a:focus-visible,
+body.theme-dark button:focus-visible,
+body.theme-dark input:focus-visible,
+body.theme-dark textarea:focus-visible,
+body.theme-dark summary:focus-visible,
+body.theme-dark .service-toggle:focus-visible,
+body.theme-dark .settings-tab:focus-visible,
+body.theme-dark .mode-switch-btn:focus-visible,
+body.theme-dark .mini-switch-btn:focus-visible {
+  /* 深色主题用浅蓝以保证对比度 ≥ 3:1 */
+  outline-color: rgba(96, 165, 250, 0.9);
+  box-shadow: 0 0 0 4px rgba(96, 165, 250, 0.28);
 }
 
 .social-integration-head {
@@ -3311,6 +3438,52 @@ body.theme-dark .app-dialog {
   .toast {
     width: 100%;
   }
+
+  /* r5 P1-8: 移动端表格卡片化——把 row 展开为 stacked card，避免 360px 横拉 3 屏 */
+  .table-wrap table,
+  .table-wrap tbody,
+  .table-wrap tr,
+  .table-wrap td {
+    display: block;
+    width: 100%;
+  }
+  .table-wrap thead {
+    /* 隐藏表头，每行用 data-label 自带标签 */
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  .table-wrap tr {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    margin-bottom: 12px;
+    padding: 8px 0;
+    background: var(--surface);
+  }
+  .table-wrap td {
+    border-bottom: 1px dashed var(--border);
+    padding: 10px 14px;
+    position: relative;
+  }
+  .table-wrap td:last-child {
+    border-bottom: 0;
+  }
+  .table-wrap td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-soft);
+    margin-bottom: 4px;
+  }
+  /* 空状态 td 在移动端撑满整张表，不显示 data-label */
+  .table-wrap td .empty-state {
+    padding: 24px 12px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -3325,5 +3498,13 @@ body.theme-dark .app-dialog {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
+  }
+
+  /* r5 P2-13: 通用规则把 animation 压成 0.01ms 但 beacon-pulse 仍会
+     scale/透明度残留闪烁；显式 animation: none 彻底关掉。 */
+  .service-toggle-signal,
+  .hero-focus-signal,
+  [class*="beacon"] {
+    animation: none !important;
   }
 }

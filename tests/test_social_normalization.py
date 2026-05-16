@@ -256,11 +256,11 @@ class SocialFallbackRouteTests(unittest.IsolatedAsyncioTestCase):
                 ],
             )
             self.assertEqual(len(client.calls), 2)
-            self.assertEqual(client.calls[0]["json"]["model"], "grok-3-mini")
-            self.assertEqual(client.calls[1]["json"]["model"], "grok-4.1-fast")
+            self.assertEqual(client.calls[0]["json"]["model"], "grok-4.20-fast")
+            self.assertEqual(client.calls[1]["json"]["model"], "grok-4.20-0309-non-reasoning")
             self.assertEqual(result["tool_usage"]["social_search_calls"], 2)
-            self.assertEqual(result["tool_usage"]["model"], "grok-4.1-fast")
-            self.assertEqual(result["route"]["selected_model"], "grok-4.1-fast")
+            self.assertEqual(result["tool_usage"]["model"], "grok-4.20-0309-non-reasoning")
+            self.assertEqual(result["route"]["selected_model"], "grok-4.20-0309-non-reasoning")
 
     async def test_requested_model_overrides_primary_model(self) -> None:
         primary = _payload(
@@ -275,7 +275,7 @@ class SocialFallbackRouteTests(unittest.IsolatedAsyncioTestCase):
                     "query": "Model Context Protocol",
                     "source": "x",
                     "max_results": 1,
-                    "model": "grok-4.20-beta-latest-non-reasoning",
+                    "model": "grok-4.20-multi-agent-0309",
                 }
             )
             original_http_client = module.http_client
@@ -305,8 +305,8 @@ class SocialFallbackRouteTests(unittest.IsolatedAsyncioTestCase):
                     module.resolve_social_gateway_state = original_resolve  # type: ignore[assignment]
                     module.verify_social_gateway_token = original_verify  # type: ignore[assignment]
 
-            self.assertEqual(fake_client.calls[0]["json"]["model"], "grok-4.20-beta-latest-non-reasoning")
-            self.assertEqual(result["route"]["selected_model"], "grok-4.20-beta-latest-non-reasoning")
+            self.assertEqual(fake_client.calls[0]["json"]["model"], "grok-4.20-multi-agent-0309")
+            self.assertEqual(result["route"]["selected_model"], "grok-4.20-multi-agent-0309")
             self.assertFalse(result["route"]["fallback"]["triggered"])
             self.assertFalse(result["route"]["fallback"]["used"])
             self.assertEqual(result["route"]["fallback"]["reason"], "")
@@ -329,8 +329,8 @@ class SocialFallbackRouteTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(len(client.calls), 1)
             self.assertEqual(result["tool_usage"]["social_search_calls"], 1)
-            self.assertEqual(result["tool_usage"]["model"], "grok-3-mini")
-            self.assertEqual(result["route"]["selected_model"], "grok-3-mini")
+            self.assertEqual(result["tool_usage"]["model"], "grok-4.20-fast")
+            self.assertEqual(result["route"]["selected_model"], "grok-4.20-fast")
             self.assertFalse(result["route"]["fallback"]["triggered"])
             self.assertFalse(result["route"]["fallback"]["used"])
 
@@ -370,8 +370,8 @@ class SocialFallbackRouteTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(len(client.calls), 2)
             self.assertEqual(result["tool_usage"]["social_search_calls"], 2)
-            self.assertEqual(result["tool_usage"]["model"], "grok-4.1-fast")
-            self.assertEqual(result["route"]["selected_model"], "grok-4.1-fast")
+            self.assertEqual(result["tool_usage"]["model"], "grok-4.20-0309-non-reasoning")
+            self.assertEqual(result["route"]["selected_model"], "grok-4.20-0309-non-reasoning")
             self.assertEqual(result["route"]["fallback"]["reason"], "upstream_error")
             self.assertTrue(result["route"]["fallback"]["used"])
             self.assertEqual(len(result["results"]), 2)
@@ -427,8 +427,8 @@ class SocialAdminCompatibilityTests(unittest.IsolatedAsyncioTestCase):
             "admin_app_key": "admin-key",
             "upstream_api_key": "",
             "gateway_token": "",
-            "model": "grok-3-mini",
-            "fallback_model": "grok-4.1-fast",
+            "model": "grok-4.20-fast",
+            "fallback_model": "grok-4.20-0309-non-reasoning",
             "fallback_min_results": 3,
             "cache_ttl_seconds": 60,
         }
@@ -468,8 +468,8 @@ async def _fake_gateway_state(force: bool = False) -> dict[str, object]:
         "upstream_responses_path": "/responses",
         "accepted_tokens": ["test-token"],
         "resolved_upstream_api_key": "upstream-key",
-        "model": "grok-3-mini",
-        "fallback_model": "grok-4.1-fast",
+        "model": "grok-4.20-fast",
+        "fallback_model": "grok-4.20-0309-non-reasoning",
         "fallback_min_results": 3,
     }
 
@@ -480,8 +480,8 @@ async def _fake_proxy_state(force: bool = False) -> dict[str, object]:
         "upstream_responses_path": "/responses",
         "accepted_tokens": ["test-token"],
         "resolved_upstream_api_key": "upstream-key",
-        "model": "grok-3-mini",
-        "fallback_model": "grok-4.1-fast",
+        "model": "grok-4.20-fast",
+        "fallback_model": "grok-4.20-0309-non-reasoning",
         "fallback_min_results": 3,
     }
 

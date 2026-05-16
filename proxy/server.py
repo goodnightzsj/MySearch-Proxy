@@ -21,6 +21,31 @@ from fastapi.templating import Jinja2Templates
 import database as db
 from key_pool import pool
 
+# 模型默认值统一从 mysearch 侧的 registry 派生，避免 retired 模型再次出现时
+# proxy 与 mysearch 双源漂移。运行时若用户设置了 SOCIAL_GATEWAY_MODEL /
+# SOCIAL_GATEWAY_FALLBACK_MODEL，仍以显式 env 为准。
+try:
+    from mysearch.config import _BUILTIN_GROK_MODELS, _resolve_grok_models
+except ImportError:  # pragma: no cover - 极端隔离部署兜底
+    _BUILTIN_GROK_MODELS = None  # type: ignore[assignment]
+    _resolve_grok_models = None  # type: ignore[assignment]
+
+
+def _default_social_model() -> str:
+    if _resolve_grok_models is not None:
+        resolved = _resolve_grok_models()
+        if resolved:
+            return resolved[0].id
+    return "grok-4.20-fast"
+
+
+def _default_social_fallback_model(primary: str) -> str:
+    if _resolve_grok_models is not None:
+        resolved = _resolve_grok_models()
+        if len(resolved) >= 2:
+            return resolved[1].id
+    return "grok-4.20-0309-non-reasoning" if primary != "grok-4.20-0309-non-reasoning" else primary
+
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin")
 ADMIN_SESSION_COOKIE = os.environ.get("ADMIN_SESSION_COOKIE", "mysearch_proxy_session")
 ADMIN_SESSION_MAX_AGE = max(300, int(os.environ.get("ADMIN_SESSION_MAX_AGE", "2592000")))
@@ -382,11 +407,12 @@ SOCIAL_GATEWAY_UPSTREAM_RESPONSES_PATH = _normalize_path(
     "/responses",
 )
 SOCIAL_GATEWAY_UPSTREAM_API_KEY = os.environ.get("SOCIAL_GATEWAY_UPSTREAM_API_KEY", "").strip()
-SOCIAL_GATEWAY_MODEL = os.environ.get("SOCIAL_GATEWAY_MODEL", "grok-4.1-fast").strip()
-SOCIAL_GATEWAY_FALLBACK_MODEL = os.environ.get(
-    "SOCIAL_GATEWAY_FALLBACK_MODEL",
-    "grok-4.1-fast",
-).strip()
+_default_model = _default_social_model()
+SOCIAL_GATEWAY_MODEL = os.environ.get("SOCIAL_GATEWAY_MODEL", "").strip() or _default_model
+SOCIAL_GATEWAY_FALLBACK_MODEL = (
+    os.environ.get("SOCIAL_GATEWAY_FALLBACK_MODEL", "").strip()
+    or _default_social_fallback_model(_default_model)
+)
 try:
     SOCIAL_GATEWAY_FALLBACK_MIN_RESULTS = max(
         1,
@@ -594,9 +620,9 @@ def get_runtime_social_config():
             SOCIAL_GATEWAY_UPSTREAM_API_KEY,
         ),
         "model": get_setting_text("social_model", SOCIAL_GATEWAY_MODEL) or SOCIAL_GATEWAY_MODEL,
-        "fallback_model": get_setting_text(
-            "social_fallback_model",
-            SOCIAL_GATEWAY_FALLBACK_MODEL,
+        "fallback_model": (
+            get_setting_text("social_fallback_model", SOCIAL_GATEWAY_FALLBACK_MODEL)
+            or SOCIAL_GATEWAY_FALLBACK_MODEL
         ),
         "fallback_min_results": fallback_min_results,
         "gateway_token": get_setting_text("social_gateway_token", SOCIAL_GATEWAY_TOKEN),

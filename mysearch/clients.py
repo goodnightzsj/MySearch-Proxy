@@ -6,6 +6,7 @@ import copy
 import hashlib
 import html
 import json
+import logging
 import math
 import re
 import sys
@@ -24,6 +25,8 @@ import httpx
 
 from mysearch.config import MySearchConfig, ProviderConfig
 from mysearch.keyring import MySearchKeyRing
+
+logger = logging.getLogger(__name__)
 
 
 def dataclass(*args, **kwargs):
@@ -322,6 +325,10 @@ class MySearchClient:
             "server_name": self.config.server_name,
             "timeout_seconds": self.config.timeout_seconds,
             "xai_model": self.config.xai_model,
+            "known_grok_models": [
+                {"id": m.id, "tier": m.tier, "source": m.source}
+                for m in self.config.xai_models
+            ],
             "mcp": {
                 "default_transport": "stdio",
                 "host": self.config.mcp_host,
@@ -501,7 +508,16 @@ class MySearchClient:
         include_domains: list[str] | None,
         exclude_domains: list[str] | None,
         decision: RouteDecision,
+        allowed_x_handles: list[str] | None = None,
+        excluded_x_handles: list[str] | None = None,
+        from_date: str | None = None,
+        to_date: str | None = None,
+        include_x_images: bool = False,
+        include_x_videos: bool = False,
     ) -> str:
+        # `search()` 接受日期窗口和 X handle 过滤参数，且这些会改变上游请求的实际
+        # query / 结果集；不把它们放进 cache key 会导致两次"同 query 但不同日期范围"
+        # 的请求误命中同一条缓存（perf-r4 P0 正确性 bug）。
         return self._build_cache_key(
             "search",
             {
@@ -518,6 +534,12 @@ class MySearchClient:
                 "route_provider": decision.provider,
                 "tavily_topic": decision.tavily_topic,
                 "firecrawl_categories": decision.firecrawl_categories or [],
+                "allowed_x_handles": sorted(set(allowed_x_handles or [])),
+                "excluded_x_handles": sorted(set(excluded_x_handles or [])),
+                "from_date": from_date or "",
+                "to_date": to_date or "",
+                "include_x_images": include_x_images,
+                "include_x_videos": include_x_videos,
             },
         )
 
@@ -727,6 +749,12 @@ class MySearchClient:
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
                 decision=decision,
+                allowed_x_handles=allowed_x_handles,
+                excluded_x_handles=excluded_x_handles,
+                from_date=from_date,
+                to_date=to_date,
+                include_x_images=include_x_images,
+                include_x_videos=include_x_videos,
             )
             cached_result = self._cache_get("search", cache_key)
             if cached_result is not None:
@@ -8615,6 +8643,7 @@ class MySearchClient:
         intent: str = "",
         from_date: str | None = None,
         to_date: str | None = None,
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         provider = self.config.exa
         key = self._get_key_or_raise(provider)
@@ -8650,6 +8679,7 @@ class MySearchClient:
             path=provider.path("search"),
             payload=payload,
             key=key.key,
+            timeout_seconds=timeout_seconds,
         )
         raw_results = response.get("results") or response.get("data") or []
         results = []
@@ -8966,6 +8996,12 @@ class MySearchClient:
         elapsed_seconds = max(0.0, time.monotonic() - social_start)
         remaining_social_budget = max(0, int(math.ceil(total_social_timeout - elapsed_seconds)))
         if remaining_social_budget < 5:
+            logger.warning(
+                "event=social_budget_exhausted reason=%s elapsed=%.2fs total=%ss",
+                fallback_reason,
+                elapsed_seconds,
+                total_social_timeout,
+            )
             social_unavailable_result = self._build_social_unavailable_result(
                 query=query,
                 fallback_reason=f"{fallback_reason} | social budget exhausted before tavily_social_fallback",
@@ -8976,6 +9012,11 @@ class MySearchClient:
                 namespace="social_unavailable",
                 hit=False,
             )
+        logger.warning(
+            "event=tavily_social_fallback_trigger reason=%s remaining_budget=%ss",
+            fallback_reason,
+            remaining_social_budget,
+        )
         try:
             tavily_fallback_result = self._search_tavily_social_fallback(
                 query=query,
@@ -8986,6 +9027,15 @@ class MySearchClient:
                 timeout_seconds=min(remaining_social_budget, social_fallback_reserve),
             )
         except MySearchError as fallback_exc:
+            elapsed_after_tavily = max(0.0, time.monotonic() - social_start)
+            remaining_for_exa = max(
+                0, int(math.ceil(total_social_timeout - elapsed_after_tavily))
+            )
+            logger.warning(
+                "event=exa_social_fallback_trigger reason=%s remaining_budget=%ss",
+                fallback_exc,
+                remaining_for_exa,
+            )
             try:
                 exa_fallback_result = self._search_exa_social_fallback(
                     query=query,
@@ -8993,6 +9043,7 @@ class MySearchClient:
                     fallback_reason=f"{fallback_reason} | tavily_social_fallback failed: {fallback_exc}",
                     from_date=from_date,
                     to_date=to_date,
+                    timeout_seconds=remaining_for_exa,
                 )
             except MySearchError as exa_exc:
                 social_unavailable_result = self._build_social_unavailable_result(
@@ -9050,7 +9101,16 @@ class MySearchClient:
         fallback_reason: str,
         from_date: str | None,
         to_date: str | None,
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
+        # perf-r4 P0：内部最多两次 _search_exa，必须把外部传入的剩余 social budget 拆分，
+        # 避免 worst-case `45s + 45s` 超出 xai_social_timeout_seconds（默认 120s）总预算。
+        # `timeout_seconds=None` 表示沿用 _request_json 的 config.timeout_seconds 兜底。
+        per_call_timeout: int | None
+        if timeout_seconds is not None and timeout_seconds > 0:
+            per_call_timeout = max(5, timeout_seconds // 2)
+        else:
+            per_call_timeout = None
         filtered_results: list[dict[str, Any]] = []
         exa_result = self._search_exa(
             query=query,
@@ -9062,6 +9122,7 @@ class MySearchClient:
             intent="status",
             from_date=from_date,
             to_date=to_date,
+            timeout_seconds=per_call_timeout,
         )
         filtered_results.extend(self._normalize_exa_social_fallback_results(exa_result.get("results", [])))
         if not filtered_results:
@@ -9075,6 +9136,7 @@ class MySearchClient:
                 intent="factual",
                 from_date=from_date,
                 to_date=to_date,
+                timeout_seconds=per_call_timeout,
             )
             filtered_results.extend(self._normalize_exa_social_fallback_results(exa_result.get("results", [])))
         if not filtered_results:
@@ -11496,7 +11558,12 @@ class MySearchClient:
             raise MySearchError(str(exc)) from exc
 
     def _xai_probe_model(self) -> str:
-        return "grok-4.1-fast"
+        # Probe 取当前 registry 首项，跟随 MYSEARCH_GROK_MODELS / EXTRA_MODELS 自定义。
+        # 极端测试场景下 xai_models 可能为空 tuple，回退到内置 basic 层首项。
+        models = self.config.xai_models
+        if models:
+            return models[0].id
+        return "grok-4.20-fast"
 
     def _derive_root_health_base_url(self, provider: ProviderConfig) -> str:
         candidate = (
