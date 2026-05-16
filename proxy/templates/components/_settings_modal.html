@@ -16,12 +16,12 @@
     </div>
 
     <div class="settings-tabs" role="tablist" aria-label="Settings tabs">
-      <button type="button" class="settings-tab is-active" data-settings-tab="console" aria-selected="true" onclick="setActiveSettingsTab('console')">控制台</button>
-      <button type="button" class="settings-tab" data-settings-tab="tavily" aria-selected="false" onclick="setActiveSettingsTab('tavily')">Tavily</button>
-      <button type="button" class="settings-tab" data-settings-tab="social" aria-selected="false" onclick="setActiveSettingsTab('social')">Social / X</button>
+      <button type="button" class="settings-tab is-active" role="tab" id="settings-tab-console" data-settings-tab="console" aria-selected="true" aria-controls="settings-panel-console" onclick="setActiveSettingsTab('console')">控制台</button>
+      <button type="button" class="settings-tab" role="tab" id="settings-tab-tavily" data-settings-tab="tavily" aria-selected="false" aria-controls="settings-panel-tavily" onclick="setActiveSettingsTab('tavily')">Tavily</button>
+      <button type="button" class="settings-tab" role="tab" id="settings-tab-social" data-settings-tab="social" aria-selected="false" aria-controls="settings-panel-social" onclick="setActiveSettingsTab('social')">Social / X</button>
     </div>
 
-    <section class="settings-panel settings-tab-panel is-active" data-settings-panel="console">
+    <section class="settings-panel settings-tab-panel is-active" data-settings-panel="console" id="settings-panel-console" role="tabpanel" aria-labelledby="settings-tab-console">
       <div class="settings-panel-grid">
         <div class="settings-panel-aside">
           <h3>控制台权限</h3>
@@ -61,7 +61,7 @@
       </div>
     </section>
 
-    <section class="settings-panel settings-tab-panel hidden" data-settings-panel="tavily">
+    <section class="settings-panel settings-tab-panel hidden" data-settings-panel="tavily" id="settings-panel-tavily" role="tabpanel" aria-labelledby="settings-tab-tavily">
       <div class="settings-panel-grid">
         <div class="settings-panel-aside">
           <h3>Tavily 路由</h3>
@@ -151,7 +151,7 @@
       </div>
     </section>
 
-    <section class="settings-panel settings-tab-panel hidden" data-settings-panel="social">
+    <section class="settings-panel settings-tab-panel hidden" data-settings-panel="social" id="settings-panel-social" role="tabpanel" aria-labelledby="settings-tab-social">
       <div class="settings-panel-grid">
         <div class="settings-panel-aside">
           <h3>Social / X / grok2api</h3>

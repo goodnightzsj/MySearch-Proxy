@@ -389,6 +389,55 @@ or:
 uvicorn mysearch.social_gateway:app --host 127.0.0.1 --port 9875
 ```
 
+## Runtime tuning (v0.1.5+)
+
+The MCP exposes a few runtime knobs that proved useful in production:
+
+```env
+MYSEARCH_MAX_PARALLEL_WORKERS=4
+MYSEARCH_SEARCH_CACHE_TTL_SECONDS=120
+MYSEARCH_EXTRACT_CACHE_TTL_SECONDS=300
+MYSEARCH_LOG_LEVEL=INFO
+```
+
+- `MAX_PARALLEL_WORKERS` caps the thread pool used by `_execute_parallel`
+  (provider live probes, blended search branches). Default 4 — fine for
+  most deployments.
+- TTLs apply to in-memory caches for `search` / `extract_url` results.
+  Long-running servers benefit; single-CLI calls don't reuse the cache
+  across processes.
+- `LOG_LEVEL` controls the stdlib `logging` root level. Set to `DEBUG`
+  during incident investigation; production should keep `INFO`.
+
+The `mysearch_health` tool now returns `runtime`, `routing_defaults`,
+`cache`, plus `known_grok_models`. Use these to introspect the active
+configuration without restarting:
+
+- `runtime.max_parallel_workers` / `runtime.cache_ttl_seconds`
+- `cache.search.hits/misses/entries` and same for `extract` namespace
+- `known_grok_models`: `[{id, tier, source}, ...]` — the active Grok
+  model registry (see "Grok model registry" below)
+
+## Grok model registry
+
+Defaults align with `chenyme/grok2api` basic tier (free-account
+compatible): `grok-4.20-fast`, `grok-4.20-0309-non-reasoning`,
+`grok-4.3-beta`.
+
+Overlay env vars (live-resolved by `social_gateway`):
+
+- `MYSEARCH_GROK_MODELS` — comma-separated; **replaces** the built-in
+  list entirely
+- `MYSEARCH_GROK_EXTRA_MODELS` — comma-separated; **appends** to the
+  built-in list with dedup
+- `MYSEARCH_XAI_MODEL` — explicit override for `xai_model` (Responses
+  API)
+- `SOCIAL_GATEWAY_MODEL` / `SOCIAL_GATEWAY_FALLBACK_MODEL` — explicit
+  overrides for the gateway's primary / fallback
+
+Per-request `model` in `/social/search` body is always passed through
+verbatim — registry is informational and discovery-only.
+
 ## Quick verification
 
 Check MCP registration:

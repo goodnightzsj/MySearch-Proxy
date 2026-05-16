@@ -264,6 +264,32 @@ remain available.
 
 Use `/data` consistently for both the standalone `mysearch-proxy` container and the single-container `mysearch-stack`. Do not mix `/app/data` and `/app/proxy/data`, or an upgrade/recreate will appear to "lose" data while actually switching to a different empty SQLite file.
 
+## Console refresh performance (optimized)
+
+A few env knobs control how aggressively the dashboard re-fetches state:
+
+```env
+STATS_CACHE_TTL_SECONDS=8
+DASHBOARD_AUTO_SYNC_ON_STATS=0
+DASHBOARD_BACKGROUND_SYNC_ON_STATS=1
+DASHBOARD_BACKGROUND_SYNC_MIN_INTERVAL_SECONDS=45
+```
+
+- `STATS_CACHE_TTL_SECONDS=8` — short cache for aggregated stats; 8s
+  is the default sweet spot between freshness and SQLite load.
+- `DASHBOARD_AUTO_SYNC_ON_STATS=0` — don't synchronously call upstream
+  Tavily admin on every dashboard render (the old behavior blocked
+  the UI for several seconds when upstream was slow).
+- `DASHBOARD_BACKGROUND_SYNC_ON_STATS=1` — schedule a background
+  upstream sync after each stats request instead. UI stays snappy.
+- `DASHBOARD_BACKGROUND_SYNC_MIN_INTERVAL_SECONDS=45` — minimum gap
+  between background syncs. Prevents thundering-herd on hot dashboards.
+
+When troubleshooting "console shows stale numbers", first verify these
+defaults are in effect; if you need stricter freshness, set
+`DASHBOARD_AUTO_SYNC_ON_STATS=1` for a single hard re-fetch (accept
+the UI latency).
+
 ## Configuration
 
 Baseline console config:

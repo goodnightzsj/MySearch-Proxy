@@ -209,6 +209,37 @@ For the full behavior rules, see:
 
 - [SKILL.md](./SKILL.md)
 
+## Release notes (v0.1.11)
+
+- Provider health upgraded from "has key?" to "is key alive?" — each
+  provider in `mysearch_health` now returns `live_status`, `live_error`,
+  and `last_checked_at`. Docs / resource / balanced routes
+  automatically skip `auth_error` providers.
+- Configuration entry-point consolidation: MySearch runtime now reads
+  `~/.codex/config.toml` (Codex) or `openclaw.json` skill env first;
+  `.env` is fallback only. Python 3.10 compat path retained (`tomllib`
+  graceful fallback).
+- Grok default models migrated to `grok-4.20-fast` /
+  `grok-4.20-0309-non-reasoning` (aligned with `chenyme/grok2api`
+  basic tier, free-account compatible). The retired
+  `grok-3-mini` / `grok-4.1-fast` are no longer used anywhere in the
+  bundle.
+- New Grok model registry: `MYSEARCH_GROK_MODELS` /
+  `MYSEARCH_GROK_EXTRA_MODELS` env let you override or extend the
+  built-in list without source changes. The active registry is
+  exposed via `mysearch_health.known_grok_models`.
+- Runtime tunables: `MYSEARCH_MAX_PARALLEL_WORKERS=4`,
+  `MYSEARCH_SEARCH_CACHE_TTL_SECONDS=120`,
+  `MYSEARCH_EXTRACT_CACHE_TTL_SECONDS=300`,
+  `MYSEARCH_LOG_LEVEL=INFO`.
+- Cache-key correctness fix: `_build_search_cache_key` now includes
+  date window + X handle parameters; same-query with different dates
+  no longer returns stale cached results.
+- Social fallback budget: `_search_exa_social_fallback` accepts
+  `timeout_seconds` and splits across the two internal `_search_exa`
+  calls; eliminates the worst-case 165s chain exceeding the 120s
+  total budget.
+
 ## Related docs
 
 - Repository overview:
