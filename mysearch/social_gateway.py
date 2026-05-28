@@ -817,6 +817,7 @@ def build_upstream_payload(body: dict[str, Any], model: str | None = None) -> tu
             "tools": tools,
             "temperature": 0,
             "store": False,
+            "stream": False,
         },
         max_results,
     )

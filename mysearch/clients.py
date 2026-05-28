@@ -9591,6 +9591,7 @@ class MySearchClient:
             ],
             "tools": tools,
             "store": False,
+            "stream": False,
         }
 
     def _normalize_social_gateway_response(

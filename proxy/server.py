@@ -2309,6 +2309,7 @@ def build_social_search_upstream_payload(body, model):
         "tools": tools,
         "temperature": 0,
         "store": False,
+        "stream": False,
     }
 
 
