@@ -846,6 +846,8 @@ class MySearchClient:
                 include_answer=effective_include_answer,
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
+                from_date=from_date,
+                to_date=to_date,
             )
         elif decision.provider in {"tavily", "firecrawl", "exa"}:
             result, fallback_info = self._search_with_fallback(
@@ -861,6 +863,7 @@ class MySearchClient:
                 exclude_domains=exclude_domains,
                 strategy=resolved_strategy,
                 from_date=from_date,
+                to_date=to_date,
             )
             if fallback_info:
                 result["fallback"] = fallback_info
@@ -5966,6 +5969,7 @@ class MySearchClient:
         exclude_domains: list[str] | None,
         strategy: str = "fast",
         from_date: str | None = None,
+        to_date: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         chain = [primary_provider, *(decision.fallback_chain or [])]
         last_error: Exception | None = None
@@ -5984,6 +5988,7 @@ class MySearchClient:
                     exclude_domains=exclude_domains,
                     strategy=strategy,
                     from_date=from_date,
+                    to_date=to_date,
                 )
                 fallback_info = None
                 if provider_name != primary_provider:
@@ -6034,6 +6039,7 @@ class MySearchClient:
         exclude_domains: list[str] | None,
         strategy: str = "fast",
         from_date: str | None = None,
+        to_date: str | None = None,
     ) -> dict[str, Any]:
         result_event_query = self._looks_like_result_event_query(query.lower())
         if provider_name == "tavily":
@@ -6066,6 +6072,8 @@ class MySearchClient:
                 exclude_domains=exclude_domains,
                 strategy=tavily_strategy,
                 days=self._infer_tavily_days(intent, from_date),
+                from_date=from_date,
+                to_date=to_date,
             )
         if provider_name == "firecrawl":
             return self._search_firecrawl(
@@ -6080,6 +6088,8 @@ class MySearchClient:
                 ),
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
+                from_date=from_date,
+                to_date=to_date,
             )
         if provider_name == "exa":
             return self._search_exa(
@@ -7806,6 +7816,8 @@ class MySearchClient:
         include_answer: bool,
         include_domains: list[str] | None,
         exclude_domains: list[str] | None,
+        from_date: str | None = None,
+        to_date: str | None = None,
     ) -> dict[str, Any]:
         if decision.provider == "tavily":
             tasks = {
@@ -7817,6 +7829,8 @@ class MySearchClient:
                     include_content=include_content,
                     include_domains=include_domains,
                     exclude_domains=exclude_domains,
+                    from_date=from_date,
+                    to_date=to_date,
                 ),
                 "secondary": lambda: self._search_firecrawl(
                     query=query,
@@ -7825,6 +7839,8 @@ class MySearchClient:
                     include_content=include_content or strategy in {"verify", "deep"},
                     include_domains=include_domains,
                     exclude_domains=exclude_domains,
+                    from_date=from_date,
+                    to_date=to_date,
                 ),
             }
         else:
@@ -7836,6 +7852,8 @@ class MySearchClient:
                     include_content=include_content or strategy in {"verify", "deep"},
                     include_domains=include_domains,
                     exclude_domains=exclude_domains,
+                    from_date=from_date,
+                    to_date=to_date,
                 ),
                 "secondary": lambda: self._search_tavily(
                     query=query,
@@ -7977,6 +7995,8 @@ class MySearchClient:
         exclude_domains: list[str] | None,
         strategy: str = "fast",
         days: int | None = None,
+        from_date: str | None = None,
+        to_date: str | None = None,
         _skip_domain_fallback: bool = False,
     ) -> dict[str, Any]:
         include_domains = [item.strip() for item in (include_domains or []) if item and item.strip()]
@@ -7992,6 +8012,8 @@ class MySearchClient:
             exclude_domains=exclude_domains,
             strategy=strategy,
             days=days,
+            from_date=from_date,
+            to_date=to_date,
         )
         if response.get("results") or not include_domains:
             return response
@@ -8033,6 +8055,8 @@ class MySearchClient:
         exclude_domains: list[str] | None,
         strategy: str = "fast",
         days: int | None = None,
+        from_date: str | None = None,
+        to_date: str | None = None,
         timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         provider = self.config.tavily
@@ -8052,6 +8076,10 @@ class MySearchClient:
         }
         if days and days > 0:
             payload["days"] = days
+        if from_date:
+            payload["start_date"] = from_date
+        if to_date:
+            payload["end_date"] = to_date
         if include_domains:
             payload["include_domains"] = include_domains
         if exclude_domains:
@@ -8271,6 +8299,8 @@ class MySearchClient:
         include_content: bool,
         include_domains: list[str] | None,
         exclude_domains: list[str] | None,
+        from_date: str | None = None,
+        to_date: str | None = None,
     ) -> dict[str, Any]:
         include_domains = [item.strip() for item in (include_domains or []) if item and item.strip()]
         exclude_domains = [item.strip() for item in (exclude_domains or []) if item and item.strip()]
@@ -8290,6 +8320,8 @@ class MySearchClient:
                     max_results=max_results,
                     categories=categories,
                     include_content=include_content,
+                    from_date=from_date,
+                    to_date=to_date,
                 )
                 if not domain_result.get("results"):
                     retry_result = self._search_firecrawl_domain_retry(
@@ -8299,6 +8331,8 @@ class MySearchClient:
                         include_content=include_content,
                         include_domain=domain,
                         exclude_domains=exclude_domains,
+                        from_date=from_date,
+                        to_date=to_date,
                     )
                     if retry_result is not None:
                         domain_result = retry_result
@@ -8349,6 +8383,8 @@ class MySearchClient:
             max_results=max_results,
             categories=categories,
             include_content=include_content,
+            from_date=from_date,
+            to_date=to_date,
         )
 
     def _search_firecrawl_domain_fallback(
@@ -8413,6 +8449,8 @@ class MySearchClient:
         include_content: bool,
         include_domain: str,
         exclude_domains: list[str] | None,
+        from_date: str | None = None,
+        to_date: str | None = None,
     ) -> dict[str, Any] | None:
         retry_result = self._search_firecrawl_once(
             query=self._build_firecrawl_domain_query(
@@ -8423,6 +8461,8 @@ class MySearchClient:
             max_results=max_results,
             categories=categories,
             include_content=include_content,
+            from_date=from_date,
+            to_date=to_date,
         )
         filtered_results = self._filter_results_by_domains(
             retry_result.get("results", []),
@@ -8456,6 +8496,8 @@ class MySearchClient:
         max_results: int,
         categories: list[str],
         include_content: bool,
+        from_date: str | None = None,
+        to_date: str | None = None,
     ) -> dict[str, Any]:
         provider = self.config.firecrawl
         key = self._get_key_or_raise(provider)
@@ -8467,6 +8509,9 @@ class MySearchClient:
         }
         if search_categories:
             payload["categories"] = [{"type": item} for item in search_categories]
+        tbs = self._build_firecrawl_tbs(from_date, to_date)
+        if tbs:
+            payload["tbs"] = tbs
         if include_content:
             if not requested_news and "news" not in search_categories:
                 payload["scrapeOptions"] = {
@@ -8515,6 +8560,16 @@ class MySearchClient:
                 if item.get("url")
             ],
         }
+
+    @staticmethod
+    def _build_firecrawl_tbs(from_date: str | None, to_date: str | None) -> str:
+        if not from_date and not to_date:
+            return ""
+        if from_date and to_date:
+            return f"cdr:1,cd_min:{from_date},cd_max:{to_date}"
+        if from_date:
+            return f"cdr:1,cd_min:{from_date}"
+        return f"cdr:1,cd_max:{to_date}"
 
     def _build_firecrawl_domain_query(
         self,
@@ -8641,11 +8696,13 @@ class MySearchClient:
             "type": search_type,
             "numResults": max_results,
         }
+        if search_type == "neural":
+            payload["useAutoprompt"] = True
         exa_category = self._exa_category(mode, intent)
         if exa_category:
             payload["category"] = exa_category
         if include_content:
-            payload["text"] = True
+            payload["text"] = {"maxCharacters": 8000}
         payload["highlights"] = True
         if from_date:
             payload["startPublishedDate"] = from_date
