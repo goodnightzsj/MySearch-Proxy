@@ -27,14 +27,26 @@ class ServiceKeyPool:
         service = normalize_service(service)
         with self._lock:
             if service not in self._initialized:
-                self._keys[service] = [dict(row) for row in get_active_keys(service)]
-                self._initialized.add(service)
-            keys = self._keys[service]
-            if not keys:
+                needs_load = True
+            else:
+                needs_load = False
+                keys = self._keys[service]
+                if not keys:
+                    return None
+                index = self._indexes[service]
+                key = keys[index]
+                self._indexes[service] = (index + 1) % len(keys)
+                return dict(key)
+        # DB I/O outside the lock
+        fresh_keys = [dict(row) for row in get_active_keys(service)]
+        with self._lock:
+            self._keys[service] = fresh_keys
+            self._initialized.add(service)
+            if not fresh_keys:
                 return None
-            index = self._indexes[service]
-            key = keys[index]
-            self._indexes[service] = (index + 1) % len(keys)
+            index = self._indexes.get(service, 0) % len(fresh_keys)
+            key = fresh_keys[index]
+            self._indexes[service] = (index + 1) % len(fresh_keys)
             return dict(key)
 
     def report_result(self, service, key_id, success):
