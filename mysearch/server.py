@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 from dataclasses import replace
 from typing import Literal
 
@@ -22,6 +23,7 @@ def _ensure_list(value: str | list | None) -> list | None:
 
 def build_mcp(config: MySearchConfig) -> tuple[MySearchClient, FastMCP]:
     client = MySearchClient(config)
+    atexit.register(client.close)
     mcp = FastMCP(
         config.server_name,
         json_response=True,

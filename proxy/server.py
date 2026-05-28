@@ -908,6 +908,8 @@ async def probe_tavily_connection(config, active_keys):
             effective_mode=resolved["effective_mode"],
         )
     except Exception as exc:
+        logger.exception("tavily probe failed")
+        safe_reason = f"{type(exc).__name__}: connection failed"
         return {
             "ok": False,
             "configured_mode": resolved["configured_mode"],
@@ -915,8 +917,8 @@ async def probe_tavily_connection(config, active_keys):
             "mode_source": resolved["mode_source"],
             "local_key_count": len(active_keys),
             "summary": build_tavily_routing_meta(config, active_keys)["summary"],
-            "detail": str(exc),
-            "failure_reason": str(exc),
+            "detail": safe_reason,
+            "failure_reason": safe_reason,
             "probe_url": test_url,
             "request_target": test_url,
             "auth_source": auth_source if resolved["effective_mode"] == "upstream" else f"{auth_source}（活跃 {len(active_keys)}）",
@@ -1572,8 +1574,10 @@ async def sync_usage_for_key_row(key_row):
         db.update_key_remote_usage_error(key_row["id"], exc.detail)
         return {"key_id": key_row["id"], "status": "error", "detail": exc.detail}
     except Exception as exc:
-        db.update_key_remote_usage_error(key_row["id"], str(exc))
-        return {"key_id": key_row["id"], "status": "error", "detail": str(exc)}
+        logger.warning("usage sync failed for key %s: %s", key_row["id"], exc)
+        safe_detail = f"sync failed: {type(exc).__name__}"
+        db.update_key_remote_usage_error(key_row["id"], safe_detail[:200])
+        return {"key_id": key_row["id"], "status": "error", "detail": safe_detail}
 
 
 async def sync_usage_cache(force=False, key_id=None, service=None):
@@ -2494,10 +2498,11 @@ async def execute_social_search_attempt(query, body, state, model, max_results):
         )
     except Exception as exc:
         latency_ms = int((time.monotonic() - start) * 1000)
+        logger.exception("social search upstream error")
         return build_social_attempt_summary(
             model,
             False,
-            error=str(exc),
+            error="upstream request failed",
             status_code=502,
             latency_ms=latency_ms,
         )
@@ -3270,10 +3275,14 @@ async def toggle_key(key_id: int, request: Request, _=Depends(verify_admin)):
     key_row = db.get_key_by_id(key_id)
     if not key_row:
         raise HTTPException(status_code=404, detail="Key not found")
-    try:
-        active = 1 if int(body.get("active", 1)) else 0
-    except (TypeError, ValueError):
-        active = 1
+    raw = body.get("active", 1)
+    if isinstance(raw, str):
+        active = 0 if raw.strip().lower() in {"false", "0", "no", "off"} else 1
+    else:
+        try:
+            active = 1 if int(raw) else 0
+        except (TypeError, ValueError):
+            active = 1
     db.toggle_key(key_id, active)
     pool.reload(key_row["service"])
     reset_stats_cache()
