@@ -186,6 +186,8 @@ def _service_where(service, normalizer=normalize_service):
 
 
 def _query_all(conn, table_name, service=None):
+    if table_name not in _VALID_TABLES:
+        raise ValueError(f"invalid table name: {table_name}")
     where_sql, params = _service_where(service)
     return conn.execute(f"SELECT * FROM {table_name}{where_sql} ORDER BY id", params).fetchall()
 

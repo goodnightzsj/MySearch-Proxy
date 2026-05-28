@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import logging
 import os
 import re
 import time
@@ -15,6 +16,8 @@ from urllib.parse import urlparse
 import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
+
+logger = logging.getLogger(__name__)
 
 # r7 A1: 改从 grok_registry 子模块导入，避免触发 config 顶层 bootstrap 副作用。
 from .grok_registry import _BUILTIN_GROK_MODELS, _resolve_grok_models
@@ -1023,10 +1026,11 @@ async def execute_social_search_attempt(
         )
     except Exception as exc:
         latency_ms = int((time.monotonic() - start) * 1000)
+        logger.warning("social search upstream error: %s", exc)
         return build_social_attempt_summary(
             model,
             False,
-            error=str(exc),
+            error="upstream request failed",
             status_code=502,
             latency_ms=latency_ms,
         )
