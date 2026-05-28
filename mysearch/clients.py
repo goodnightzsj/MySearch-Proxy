@@ -10432,9 +10432,11 @@ class MySearchClient:
             for part in hostname.split(".")
             if part
         )
+        # 子域名品牌匹配：如 fastapi.tiangolo.com，品牌在子域名中
+        brand_in_subdomain = host_brand_match and not registered_domain_label_match
         return registered_domain_label_match or (host_brand_match and official_host_surface) or (
             title_brand_match and official_host_surface
-        )
+        ) or (brand_in_subdomain and title_brand_match)
 
     def _align_citations_with_results(
         self,
