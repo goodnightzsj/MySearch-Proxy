@@ -1958,6 +1958,7 @@ def build_forward_headers(request, real_key):
     skip_headers = {
         "authorization",
         "content-length",
+        "transfer-encoding",
         "host",
         "x-admin-password",
         "x-api-key",
@@ -2980,6 +2981,7 @@ async def login_session(request: Request):
         raise HTTPException(status_code=400, detail="Expected JSON request body")
     password = str(body.get("password") or "").strip()
     if not password or not hmac.compare_digest(password, get_admin_password()):
+        await asyncio.sleep(1)
         raise HTTPException(status_code=401, detail="Unauthorized")
     response = JSONResponse({"ok": True})
     apply_admin_session_cookie(response, request, password)

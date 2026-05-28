@@ -7878,6 +7878,8 @@ class MySearchClient:
                 include_content=False,
                 mode=mode,
                 intent=intent,
+                from_date=from_date,
+                to_date=to_date,
             )
 
         blended_results, blended_errors = self._execute_parallel(tasks, max_workers=len(tasks))
