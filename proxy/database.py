@@ -1,6 +1,7 @@
 """
 SQLite 数据库管理
 """
+import atexit
 import os
 import re
 import secrets
@@ -73,6 +74,19 @@ def get_conn():
     return conn
 
 
+def close_conn():
+    conn = getattr(_thread_local, "conn", None)
+    if conn is not None:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
+        _thread_local.conn = None
+
+
+atexit.register(close_conn)
+
+
 def init_db():
     conn = get_conn()
     conn.executescript("""
@@ -136,7 +150,12 @@ def init_db():
     pass  # connection reused via thread-local
 
 
+_VALID_TABLES = frozenset({"api_keys", "tokens", "usage_logs", "settings"})
+
+
 def _table_columns(conn, table_name):
+    if table_name not in _VALID_TABLES:
+        raise ValueError(f"invalid table name: {table_name}")
     rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
     return {row["name"] for row in rows}
 

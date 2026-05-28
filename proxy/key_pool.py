@@ -35,7 +35,7 @@ class ServiceKeyPool:
             index = self._indexes[service]
             key = keys[index]
             self._indexes[service] = (index + 1) % len(keys)
-            return key
+            return dict(key)
 
     def report_result(self, service, key_id, success):
         """记录使用结果，失败 3 次自动禁用并从对应池中移除。"""

@@ -1146,8 +1146,10 @@ def normalize_social_search_response(
     query: str,
     payload: dict[str, Any],
     max_results: int,
+    *,
+    model: str | None = None,
 ) -> dict[str, Any]:
-    return normalize_search_response(query, payload, max_results)
+    return normalize_search_response(query, payload, max_results, model=model)
 
 
 async def _build_health_payload() -> dict[str, Any]:

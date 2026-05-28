@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import time
@@ -20,6 +21,8 @@ from fastapi.templating import Jinja2Templates
 
 import database as db
 from key_pool import pool
+
+logger = logging.getLogger(__name__)
 
 # 模型默认值统一从 mysearch 侧的 registry 派生，避免 retired 模型再次出现时
 # proxy 与 mysearch 双源漂移。运行时若用户设置了 SOCIAL_GATEWAY_MODEL /
@@ -2681,7 +2684,8 @@ async def proxy_tavily(request: Request):
             latency,
             service="tavily",
         )
-        raise HTTPException(status_code=502, detail=str(exc))
+        logger.exception("tavily proxy error")
+        raise HTTPException(status_code=502, detail="upstream request failed")
 
 
 # ═══ Firecrawl 代理端点 ═══
@@ -2725,7 +2729,8 @@ async def proxy_firecrawl(path: str, request: Request):
         latency = int((time.monotonic() - start) * 1000)
         pool.report_result("firecrawl", key_info["id"], False)
         db.log_usage(token_row["id"], key_info["id"], path, 0, latency, service="firecrawl")
-        raise HTTPException(status_code=502, detail=str(exc))
+        logger.exception("firecrawl proxy error")
+        raise HTTPException(status_code=502, detail="upstream request failed")
 
 
 @app.post("/exa/search")
@@ -2769,7 +2774,8 @@ async def proxy_exa_search(request: Request):
         latency = int((time.monotonic() - start) * 1000)
         pool.report_result("exa", key_info["id"], False)
         db.log_usage(token_row["id"], key_info["id"], "search", 0, latency, service="exa")
-        raise HTTPException(status_code=502, detail=str(exc))
+        logger.exception("exa proxy error")
+        raise HTTPException(status_code=502, detail="upstream request failed")
 
 
 # ═══ Social / X 代理端点 ═══
