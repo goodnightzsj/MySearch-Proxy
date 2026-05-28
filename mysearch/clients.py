@@ -8361,6 +8361,8 @@ class MySearchClient:
                     include_content=include_content,
                     include_domains=include_domains,
                     exclude_domains=exclude_domains,
+                    from_date=from_date,
+                    to_date=to_date,
                 )
                 if fallback_result is not None:
                     return fallback_result
@@ -8400,6 +8402,8 @@ class MySearchClient:
         include_content: bool,
         include_domains: list[str],
         exclude_domains: list[str] | None,
+        from_date: str | None = None,
+        to_date: str | None = None,
     ) -> dict[str, Any] | None:
         if not self._provider_can_serve(self.config.tavily):
             return None
@@ -8412,6 +8416,8 @@ class MySearchClient:
             include_content=include_content,
             include_domains=include_domains,
             exclude_domains=exclude_domains,
+            from_date=from_date,
+            to_date=to_date,
             _skip_domain_fallback=True,
         )
         if not fallback_result.get("results"):

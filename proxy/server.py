@@ -371,7 +371,7 @@ async def fetch_tavily_upstream_summary(config):
                 }
             )
     except Exception as exc:
-        payload["detail"] = str(exc)
+        payload["detail"] = f"{type(exc).__name__}: upstream summary request failed"
 
     if admin_attempted:
         try:
@@ -412,7 +412,7 @@ async def fetch_tavily_upstream_summary(config):
                     }
                 )
         except Exception as exc:
-            payload["admin_detail"] = str(exc)
+            payload["admin_detail"] = f"{type(exc).__name__}: admin summary request failed"
     elif payload["available"]:
         payload["detail"] = "已读取上游 Tavily Hikari 公共摘要；如需 Key 级额度细项，请补充上游 Admin 认证。"
 
@@ -1781,7 +1781,12 @@ def mask_key_rows(keys):
     # JSON 响应、log 泄漏 Response）就直接暴露上游凭证。改为追加 + 删除原文。
     for key in keys:
         raw = key.get("key", "") or ""
-        key["key_masked"] = raw[:8] + "***" + raw[-4:] if len(raw) > 12 else raw
+        if len(raw) <= 4:
+            key["key_masked"] = "***"
+        elif len(raw) <= 12:
+            key["key_masked"] = raw[:2] + "***" + raw[-2:]
+        else:
+            key["key_masked"] = raw[:8] + "***" + raw[-4:]
         # 显式删原文。如果调用方真的需要原文，请直接调 db.get_all_keys（不要经过 mask）。
         key.pop("key", None)
     return keys
@@ -2653,14 +2658,14 @@ async def proxy_tavily(request: Request):
             raise HTTPException(status_code=503, detail="No available API keys")
         upstream_key = key_info["key"]
 
-    body["api_key"] = upstream_key
+    upstream_body = {**body, "api_key": upstream_key}
     start = time.monotonic()
     try:
         resp, request_target, _fallback_used = await _post_tavily_with_gateway_fallback(
             base_url=upstream_base_url,
             path=upstream_path,
             api_key=upstream_key,
-            payload=body,
+            payload=upstream_body,
             effective_mode=tavily_resolved["effective_mode"],
         )
         latency = int((time.monotonic() - start) * 1000)

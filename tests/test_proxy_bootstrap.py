@@ -117,8 +117,8 @@ class ProxySecurityHardeningTests(unittest.TestCase):
         """C6 边界：极短 key 不挂掉，且仍删原文。"""
         masked = self.proxy_server.mask_key_rows([{"id": 2, "key": "short"}])
         self.assertNotIn("key", masked[0])
-        # 极短 key 全文显示（仍是脱敏，因为太短无法保留首尾）
-        self.assertEqual(masked[0]["key_masked"], "short")
+        # 极短 key 也脱敏：sh***rt
+        self.assertEqual(masked[0]["key_masked"], "sh***rt")
 
     def test_c4_verify_admin_uses_hmac_compare_digest(self) -> None:
         """C4: verify_admin 不能用 `==` 比较密码（侧信道风险）。"""
