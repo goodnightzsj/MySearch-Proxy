@@ -111,26 +111,31 @@ ADMIN_TOKENS_PATH = _normalize_path(
     "/admin/api/tokens",
 )
 ADMIN_APP_KEY = _env_str("SOCIAL_GATEWAY_ADMIN_APP_KEY")
-CACHE_TTL_SECONDS = max(5, int(_env_str("SOCIAL_GATEWAY_CACHE_TTL_SECONDS", "60")))
-SOCIAL_GATEWAY_TIMEOUT_SECONDS = max(
-    30,
-    int(_env_str("SOCIAL_GATEWAY_TIMEOUT_SECONDS", "120")),
-)
+try:
+    CACHE_TTL_SECONDS = max(5, int(_env_str("SOCIAL_GATEWAY_CACHE_TTL_SECONDS", "60")))
+except (TypeError, ValueError):
+    CACHE_TTL_SECONDS = 60
+try:
+    SOCIAL_GATEWAY_TIMEOUT_SECONDS = max(
+        30,
+        int(_env_str("SOCIAL_GATEWAY_TIMEOUT_SECONDS", "120")),
+    )
+except (TypeError, ValueError):
+    SOCIAL_GATEWAY_TIMEOUT_SECONDS = 120
 try:
     FALLBACK_MIN_RESULTS = max(1, int(_env_str("SOCIAL_GATEWAY_FALLBACK_MIN_RESULTS", "3")))
 except (TypeError, ValueError):
     FALLBACK_MIN_RESULTS = 3
-SOCIAL_SEARCH_MODEL = MODEL
 
-http_client = httpx.AsyncClient(timeout=SOCIAL_GATEWAY_TIMEOUT_SECONDS)
+http_client = httpx.AsyncClient(
+    timeout=SOCIAL_GATEWAY_TIMEOUT_SECONDS,
+    limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+)
 state_cache: dict[str, Any] = {"expires_at": 0.0, "value": None}
-state_lock: asyncio.Lock | None = None
+state_lock = asyncio.Lock()
 
 
 def get_state_lock() -> asyncio.Lock:
-    global state_lock
-    if state_lock is None:
-        state_lock = asyncio.Lock()
     return state_lock
 
 
@@ -148,7 +153,7 @@ app = FastAPI(title="MySearch Social Gateway", lifespan=lifespan)
 def extract_token(request: Request, body: dict[str, Any] | None) -> str | None:
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
-        return auth[7:]
+        return auth[7:].strip()
     if body and isinstance(body.get("api_key"), str):
         return body["api_key"]
     return None
@@ -386,13 +391,22 @@ def build_admin_path_candidates(path: str, *, kind: str) -> list[str]:
     return candidates
 
 
+def _safe_get(d: Any, key: str) -> Any:
+    if isinstance(d, dict):
+        return d.get(key)
+    return None
+
+
 def extract_admin_api_keys(admin_config: dict[str, Any]) -> list[str]:
+    app = _safe_get(admin_config, "app")
+    data = _safe_get(admin_config, "data")
+    config = _safe_get(admin_config, "config")
     candidates: list[Any] = [
-        (admin_config.get("app") or {}).get("api_key"),
-        admin_config.get("api_key"),
-        admin_config.get("app_key"),
-        ((admin_config.get("data") or {}).get("app") or {}).get("api_key"),
-        ((admin_config.get("config") or {}).get("app") or {}).get("api_key"),
+        _safe_get(app, "api_key"),
+        _safe_get(admin_config, "api_key"),
+        _safe_get(admin_config, "app_key"),
+        _safe_get(_safe_get(data, "app"), "api_key"),
+        _safe_get(_safe_get(config, "app"), "api_key"),
     ]
     resolved: list[str] = []
     for candidate in candidates:
@@ -486,7 +500,11 @@ def verify_gateway_token(token_value: str | None, accepted_tokens: list[str]) ->
         raise HTTPException(status_code=503, detail="Social gateway is not configured")
     if not token_value:
         raise HTTPException(status_code=401, detail="Missing API token")
-    if not any(hmac.compare_digest(token_value, expected) for expected in accepted_tokens):
+    matched = False
+    for expected in accepted_tokens:
+        if hmac.compare_digest(token_value, expected):
+            matched = True
+    if not matched:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 
@@ -761,8 +779,11 @@ def build_social_result(
 
 
 def build_upstream_payload(body: dict[str, Any], model: str | None = None) -> tuple[dict[str, Any], int]:
-    query = (body.get("query") or "").strip()
-    max_results = max(1, min(int(body.get("max_results") or 5), 10))
+    query = str(body.get("query") or "").strip()
+    try:
+        max_results = max(1, min(int(body.get("max_results") or 5), 10))
+    except (TypeError, ValueError):
+        max_results = 5
     tools: list[dict[str, Any]] = [{"type": "x_search"}]
     tool = tools[0]
     if body.get("allowed_x_handles"):
@@ -846,8 +867,14 @@ def has_social_fallback(primary_model: str, fallback_model: str) -> bool:
 
 
 def effective_social_fallback_threshold(min_results: int, max_results: int) -> int:
-    configured = max(1, int(min_results or 1))
-    requested = max(1, int(max_results or 1))
+    try:
+        configured = max(1, int(min_results or 1))
+    except (TypeError, ValueError):
+        configured = 1
+    try:
+        requested = max(1, int(max_results or 1))
+    except (TypeError, ValueError):
+        requested = 1
     return min(configured, requested)
 
 
@@ -1024,6 +1051,15 @@ async def execute_social_search_attempt(
             latency_ms=latency_ms,
         )
 
+    if not isinstance(upstream_body, dict):
+        return build_social_attempt_summary(
+            model,
+            False,
+            error="Upstream returned non-dict JSON response",
+            status_code=502,
+            latency_ms=latency_ms,
+        )
+
     normalized = normalize_search_response(
         query,
         upstream_body,
@@ -1151,11 +1187,14 @@ async def social_health() -> dict[str, Any]:
 
 @app.post("/social/search")
 async def social_search(request: Request) -> dict[str, Any]:
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Expected JSON request body")
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Expected JSON request body")
 
-    query = (body.get("query") or "").strip()
+    query = str(body.get("query") or "").strip()
     if not query:
         raise HTTPException(status_code=400, detail="Missing query")
 
@@ -1235,18 +1274,21 @@ async def social_search(request: Request) -> dict[str, Any]:
                 requested_max_results=max_results,
             )
         detail = fallback_attempt.get("error") or primary_attempt.get("error") or "Social search failed"
-        status_code = fallback_attempt.get("status_code") or primary_attempt.get("status_code") or 502
-        raise HTTPException(status_code=status_code, detail=detail)
+        status_code = int(fallback_attempt.get("status_code") or primary_attempt.get("status_code") or 502)
+        raise HTTPException(status_code=max(400, status_code), detail=detail)
 
     raise HTTPException(
-        status_code=primary_attempt.get("status_code") or 502,
+        status_code=max(400, int(primary_attempt.get("status_code") or 502)),
         detail=primary_attempt.get("error") or "Social search failed",
     )
 
 
 def main() -> None:
     host = _env_str("SOCIAL_GATEWAY_HOST", "127.0.0.1")
-    port = int(_env_str("SOCIAL_GATEWAY_PORT", "9875"))
+    try:
+        port = int(_env_str("SOCIAL_GATEWAY_PORT", "9875"))
+    except (TypeError, ValueError):
+        port = 9875
     uvicorn.run("mysearch.social_gateway:app", host=host, port=port, reload=False)
 
 

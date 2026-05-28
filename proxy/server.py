@@ -48,7 +48,10 @@ def _default_social_fallback_model(primary: str) -> str:
 
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin")
 ADMIN_SESSION_COOKIE = os.environ.get("ADMIN_SESSION_COOKIE", "mysearch_proxy_session")
-ADMIN_SESSION_MAX_AGE = max(300, int(os.environ.get("ADMIN_SESSION_MAX_AGE", "2592000")))
+try:
+    ADMIN_SESSION_MAX_AGE = max(300, int(os.environ.get("ADMIN_SESSION_MAX_AGE", "2592000")))
+except (TypeError, ValueError):
+    ADMIN_SESSION_MAX_AGE = 2592000
 MYSEARCH_PROXY_BOOTSTRAP_TOKEN = os.environ.get("MYSEARCH_PROXY_BOOTSTRAP_TOKEN", "").strip()
 
 # r6 C1 / C2: 弱默认值启动告警。默认 `admin` / `change-me` / `change-me-bootstrap-token`
@@ -277,12 +280,12 @@ def build_tavily_admin_keys_summary(payload):
         elif status not in {"disabled", "deleted", "inactive", "revoked"}:
             summary["active_keys"] += 1
 
-        summary["total_requests"] += parse_usage_number(item.get("total_requests")) or 0
-        summary["success_count"] += parse_usage_number(item.get("success_count")) or 0
-        summary["error_count"] += parse_usage_number(item.get("error_count")) or 0
-        summary["quota_exhausted_count"] += parse_usage_number(item.get("quota_exhausted_count")) or 0
-        summary["total_quota_limit"] += parse_usage_number(item.get("quota_limit")) or 0
-        summary["total_quota_remaining"] += parse_usage_number(item.get("quota_remaining")) or 0
+        summary["total_requests"] += max(0, parse_usage_number(item.get("total_requests")) or 0)
+        summary["success_count"] += max(0, parse_usage_number(item.get("success_count")) or 0)
+        summary["error_count"] += max(0, parse_usage_number(item.get("error_count")) or 0)
+        summary["quota_exhausted_count"] += max(0, parse_usage_number(item.get("quota_exhausted_count")) or 0)
+        summary["total_quota_limit"] += max(0, parse_usage_number(item.get("quota_limit")) or 0)
+        summary["total_quota_remaining"] += max(0, parse_usage_number(item.get("quota_remaining")) or 0)
 
     return summary
 
@@ -341,9 +344,9 @@ async def fetch_tavily_upstream_summary(config):
             payload["detail"] = "上游摘要返回了非 JSON 响应。"
         else:
             public_data = data
-            active_keys = int(data.get("active_keys") or 0)
-            exhausted_keys = int(data.get("exhausted_keys") or 0)
-            quarantined_keys = int(data.get("quarantined_keys") or 0)
+            active_keys = parse_usage_number(data.get("active_keys")) or 0
+            exhausted_keys = parse_usage_number(data.get("exhausted_keys")) or 0
+            quarantined_keys = parse_usage_number(data.get("quarantined_keys")) or 0
             payload.update(
                 {
                     "available": True,
@@ -355,12 +358,12 @@ async def fetch_tavily_upstream_summary(config):
                     "active_keys": active_keys,
                     "exhausted_keys": exhausted_keys,
                     "quarantined_keys": quarantined_keys,
-                    "total_requests": int(data.get("total_requests") or 0),
-                    "success_count": int(data.get("success_count") or 0),
-                    "error_count": int(data.get("error_count") or 0),
-                    "quota_exhausted_count": int(data.get("quota_exhausted_count") or 0),
-                    "total_quota_limit": int(data.get("total_quota_limit") or 0),
-                    "total_quota_remaining": int(data.get("total_quota_remaining") or 0),
+                    "total_requests": parse_usage_number(data.get("total_requests")) or 0,
+                    "success_count": parse_usage_number(data.get("success_count")) or 0,
+                    "error_count": parse_usage_number(data.get("error_count")) or 0,
+                    "quota_exhausted_count": parse_usage_number(data.get("quota_exhausted_count")) or 0,
+                    "total_quota_limit": parse_usage_number(data.get("total_quota_limit")) or 0,
+                    "total_quota_remaining": parse_usage_number(data.get("total_quota_remaining")) or 0,
                     "last_activity": data.get("last_activity"),
                 }
             )
@@ -455,31 +458,49 @@ SOCIAL_GATEWAY_ADMIN_TOKENS_PATH = _normalize_path(
     "/admin/api/tokens",
 )
 SOCIAL_GATEWAY_ADMIN_APP_KEY = os.environ.get("SOCIAL_GATEWAY_ADMIN_APP_KEY", "").strip()
-SOCIAL_GATEWAY_CACHE_TTL_SECONDS = max(
-    5,
-    int(os.environ.get("SOCIAL_GATEWAY_CACHE_TTL_SECONDS", "60")),
-)
-SOCIAL_GATEWAY_TIMEOUT_SECONDS = max(
-    30,
-    int(os.environ.get("SOCIAL_GATEWAY_TIMEOUT_SECONDS", "120")),
-)
-USAGE_SYNC_TTL_SECONDS = int(os.environ.get("USAGE_SYNC_TTL_SECONDS", "300"))
-USAGE_SYNC_CONCURRENCY = max(1, int(os.environ.get("USAGE_SYNC_CONCURRENCY", "4")))
+try:
+    SOCIAL_GATEWAY_CACHE_TTL_SECONDS = max(
+        5,
+        int(os.environ.get("SOCIAL_GATEWAY_CACHE_TTL_SECONDS", "60")),
+    )
+except (TypeError, ValueError):
+    SOCIAL_GATEWAY_CACHE_TTL_SECONDS = 60
+try:
+    SOCIAL_GATEWAY_TIMEOUT_SECONDS = max(
+        30,
+        int(os.environ.get("SOCIAL_GATEWAY_TIMEOUT_SECONDS", "120")),
+    )
+except (TypeError, ValueError):
+    SOCIAL_GATEWAY_TIMEOUT_SECONDS = 120
+try:
+    USAGE_SYNC_TTL_SECONDS = max(0, int(os.environ.get("USAGE_SYNC_TTL_SECONDS", "300")))
+except (TypeError, ValueError):
+    USAGE_SYNC_TTL_SECONDS = 300
+try:
+    USAGE_SYNC_CONCURRENCY = max(1, int(os.environ.get("USAGE_SYNC_CONCURRENCY", "4")))
+except (TypeError, ValueError):
+    USAGE_SYNC_CONCURRENCY = 4
 DASHBOARD_AUTO_SYNC_ON_STATS = os.environ.get("DASHBOARD_AUTO_SYNC_ON_STATS", "0").strip().lower() in {
     "1",
     "true",
     "yes",
     "on",
 }
-STATS_CACHE_TTL_SECONDS = max(0, int(os.environ.get("STATS_CACHE_TTL_SECONDS", "8")))
+try:
+    STATS_CACHE_TTL_SECONDS = max(0, int(os.environ.get("STATS_CACHE_TTL_SECONDS", "8")))
+except (TypeError, ValueError):
+    STATS_CACHE_TTL_SECONDS = 8
 DASHBOARD_BACKGROUND_SYNC_ON_STATS = os.environ.get(
     "DASHBOARD_BACKGROUND_SYNC_ON_STATS",
     "1",
 ).strip().lower() in {"1", "true", "yes", "on"}
-DASHBOARD_BACKGROUND_SYNC_MIN_INTERVAL_SECONDS = max(
-    10,
-    int(os.environ.get("DASHBOARD_BACKGROUND_SYNC_MIN_INTERVAL_SECONDS", "45")),
-)
+try:
+    DASHBOARD_BACKGROUND_SYNC_MIN_INTERVAL_SECONDS = max(
+        10,
+        int(os.environ.get("DASHBOARD_BACKGROUND_SYNC_MIN_INTERVAL_SECONDS", "45")),
+    )
+except (TypeError, ValueError):
+    DASHBOARD_BACKGROUND_SYNC_MIN_INTERVAL_SECONDS = 45
 SERVICE_LABELS = {
     "tavily": "Tavily",
     "firecrawl": "Firecrawl",
@@ -499,39 +520,30 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="MySearch Proxy", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
 templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
-http_client = httpx.AsyncClient(timeout=60)
+http_client = httpx.AsyncClient(timeout=max(120, SOCIAL_GATEWAY_TIMEOUT_SECONDS), limits=httpx.Limits(max_connections=20, max_keepalive_connections=10))
 social_gateway_state_cache = {"expires_at": 0.0, "value": None}
-social_gateway_state_lock = None
+social_gateway_state_lock = asyncio.Lock()
 stats_payload_cache = {"expires_at": 0.0, "value": None}
-stats_payload_lock = None
+stats_payload_lock = asyncio.Lock()
 background_sync_tasks = {}
 background_sync_last_started = {}
-background_sync_lock = None
+background_sync_lock = asyncio.Lock()
 
 
 def get_social_gateway_state_lock():
-    global social_gateway_state_lock
-    if social_gateway_state_lock is None:
-        social_gateway_state_lock = asyncio.Lock()
     return social_gateway_state_lock
 
 
 def get_stats_payload_lock():
-    global stats_payload_lock
-    if stats_payload_lock is None:
-        stats_payload_lock = asyncio.Lock()
     return stats_payload_lock
 
 
 def get_background_sync_lock():
-    global background_sync_lock
-    if background_sync_lock is None:
-        background_sync_lock = asyncio.Lock()
     return background_sync_lock
 
 
 def get_admin_password():
-    return db.get_setting("admin_password", ADMIN_PASSWORD)
+    return (db.get_setting("admin_password", ADMIN_PASSWORD) or "").strip()
 
 
 def build_admin_session_token(password):
@@ -958,6 +970,8 @@ def verify_admin(request: Request):
     auth = request.headers.get("Authorization", "")
     password = request.headers.get("X-Admin-Password", "")
     pwd = get_admin_password()
+    if not pwd:
+        raise HTTPException(status_code=500, detail="Admin password not configured")
     # r6 C4: 用 hmac.compare_digest 替代 `==`，恒定时间比较，防侧信道。
     bearer_expected = f"Bearer {pwd}"
     bearer_ok = bool(auth) and hmac.compare_digest(auth, bearer_expected)
@@ -986,11 +1000,11 @@ def extract_token(request: Request, body: dict = None):
     """从请求中提取代理 token。"""
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
-        return auth[7:]
+        return auth[7:].strip()
     x_api_key = request.headers.get("x-api-key", "")
     if x_api_key.strip():
         return x_api_key.strip()
-    if body and body.get("api_key"):
+    if body and isinstance(body.get("api_key"), str) and body["api_key"]:
         return body["api_key"]
     return None
 
@@ -1235,13 +1249,22 @@ def build_social_admin_path_candidates(path, *, kind):
     return candidates
 
 
+def _safe_get(d, key):
+    if isinstance(d, dict):
+        return d.get(key)
+    return None
+
+
 def extract_social_admin_api_keys(admin_config):
+    app = _safe_get(admin_config, "app")
+    data = _safe_get(admin_config, "data")
+    config = _safe_get(admin_config, "config")
     candidates = [
-        (admin_config.get("app") or {}).get("api_key"),
-        admin_config.get("api_key"),
-        admin_config.get("app_key"),
-        ((admin_config.get("data") or {}).get("app") or {}).get("api_key"),
-        ((admin_config.get("config") or {}).get("app") or {}).get("api_key"),
+        _safe_get(app, "api_key"),
+        _safe_get(admin_config, "api_key"),
+        _safe_get(admin_config, "app_key"),
+        _safe_get(_safe_get(data, "app"), "api_key"),
+        _safe_get(_safe_get(config, "app"), "api_key"),
     ]
     resolved = []
     for candidate in candidates:
@@ -1346,7 +1369,11 @@ def verify_social_gateway_token(token_value, accepted_tokens):
         raise HTTPException(status_code=503, detail="Social gateway is not configured")
     if not token_value:
         raise HTTPException(status_code=401, detail="Missing API token")
-    if not any(hmac.compare_digest(token_value, expected) for expected in accepted_tokens):
+    matched = False
+    for expected in accepted_tokens:
+        if hmac.compare_digest(token_value, expected):
+            matched = True
+    if not matched:
         raise HTTPException(status_code=401, detail="Invalid token")
     return None
 
@@ -1392,7 +1419,10 @@ def parse_sync_time(value):
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value)
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except ValueError:
         return None
 
@@ -1409,7 +1439,7 @@ async def fetch_remote_usage_tavily(key_value):
         f"{TAVILY_API_BASE}/usage",
         headers={"Authorization": f"Bearer {key_value}"},
     )
-    if resp.status_code != 200:
+    if resp.status_code >= 400:
         detail = ""
         try:
             payload = resp.json()
@@ -1418,7 +1448,13 @@ async def fetch_remote_usage_tavily(key_value):
             detail = resp.text.strip()
         detail = detail[:200] if detail else f"HTTP {resp.status_code}"
         raise HTTPException(status_code=resp.status_code, detail=detail)
-    return resp.json()
+    try:
+        result = resp.json()
+    except Exception:
+        raise HTTPException(status_code=502, detail="Tavily usage API returned non-JSON response")
+    if not isinstance(result, dict):
+        raise HTTPException(status_code=502, detail="Tavily usage API returned non-dict JSON response")
+    return result
 
 
 async def fetch_remote_usage_firecrawl(key_value):
@@ -1433,14 +1469,17 @@ async def fetch_remote_usage_firecrawl(key_value):
     )
 
     for resp in (current_resp, history_resp):
-        if resp.status_code != 200:
+        if resp.status_code >= 400:
             detail = resp.text.strip()[:200] or f"HTTP {resp.status_code}"
             raise HTTPException(status_code=resp.status_code, detail=detail)
 
-    return {
-        "current": current_resp.json(),
-        "historical": history_resp.json(),
-    }
+    try:
+        return {
+            "current": current_resp.json(),
+            "historical": history_resp.json(),
+        }
+    except Exception:
+        raise HTTPException(status_code=502, detail="Firecrawl usage API returned non-JSON response")
 
 
 def normalize_usage_payload(service, payload):
@@ -1463,8 +1502,13 @@ def normalize_usage_payload(service, payload):
             "account_remaining": compute_remaining(account_limit, account_used),
         }
 
-    current_data = (payload.get("current") or {}).get("data") or {}
-    history_periods = (payload.get("historical") or {}).get("periods") or []
+    current_raw = payload.get("current")
+    current_data = (current_raw.get("data") or {}) if isinstance(current_raw, dict) else {}
+    history_raw = payload.get("historical")
+    history_periods = [
+        item for item in ((history_raw.get("periods") or []) if isinstance(history_raw, dict) else [])
+        if isinstance(item, dict)
+    ]
     if history_periods:
         latest_period = max(
             history_periods,
@@ -1648,6 +1692,8 @@ async def schedule_background_usage_sync(service, active_keys):
         running = background_sync_tasks.get(service)
         if running and not running.done():
             return
+        if running and running.done():
+            del background_sync_tasks[service]
 
         last_started = background_sync_last_started.get(service, 0.0)
         if now - last_started < DASHBOARD_BACKGROUND_SYNC_MIN_INTERVAL_SECONDS:
@@ -1687,7 +1733,10 @@ def build_real_quota_summary(keys):
         if key_limit is not None and key_used is not None:
             total_limit += key_limit
             total_used += key_used
-            total_remaining += key.get("usage_key_remaining") or compute_remaining(key_limit, key_used) or 0
+            key_remaining = key.get("usage_key_remaining")
+            if key_remaining is None:
+                key_remaining = compute_remaining(key_limit, key_used) or 0
+            total_remaining += key_remaining
             key_level_count += 1
         elif account_limit is not None and account_used is not None:
             group_id = (key.get("email") or "").strip().lower() or f"key:{key.get('id')}"
@@ -1695,7 +1744,10 @@ def build_real_quota_summary(keys):
                 accounted_groups.add(group_id)
                 total_limit += account_limit
                 total_used += account_used
-                total_remaining += key.get("usage_account_remaining") or compute_remaining(account_limit, account_used) or 0
+                acct_remaining = key.get("usage_account_remaining")
+                if acct_remaining is None:
+                    acct_remaining = compute_remaining(account_limit, account_used) or 0
+                total_remaining += acct_remaining
                 account_fallback_count += 1
 
         synced_at = parse_sync_time(key.get("usage_synced_at"))
@@ -1816,7 +1868,6 @@ async def build_social_dashboard():
         "client_auth_configured": bool(state["accepted_tokens"]),
         "accepted_token_count": len(state["accepted_tokens"]),
         "upstream_api_key_count": len(state["upstream_api_keys"]),
-        "client_token": state["default_client_token"],
         "client_token_masked": mask_secret(state["default_client_token"]),
         "stats": state["stats"],
         "upstream_visibility": build_social_upstream_visibility(state),
@@ -1902,6 +1953,13 @@ def build_forward_headers(request, real_key):
         "content-length",
         "host",
         "x-admin-password",
+        "x-api-key",
+        "cookie",
+        "set-cookie",
+        "x-forwarded-for",
+        "x-real-ip",
+        "x-forwarded-host",
+        "x-forwarded-proto",
     }
     headers = {
         key: value
@@ -2215,8 +2273,12 @@ def build_social_result(citation=None, matched=None):
 
 
 def build_social_search_upstream_payload(body, model):
-    query = (body.get("query") or "").strip()
-    max_results = max(1, min(int(body.get("max_results") or 5), 10))
+    model = (model or "").strip() or SOCIAL_GATEWAY_MODEL
+    query = str(body.get("query") or "").strip()
+    try:
+        max_results = max(1, min(int(body.get("max_results") or 5), 10))
+    except (TypeError, ValueError):
+        max_results = 5
     tools = [{"type": "x_search"}]
     tool = tools[0]
     if body.get("allowed_x_handles"):
@@ -2290,8 +2352,14 @@ def has_social_fallback(primary_model, fallback_model):
 
 
 def effective_social_fallback_threshold(min_results, max_results):
-    configured = max(1, int(min_results or 1))
-    requested = max(1, int(max_results or 1))
+    try:
+        configured = max(1, int(min_results or 1))
+    except (TypeError, ValueError):
+        configured = 1
+    try:
+        requested = max(1, int(max_results or 1))
+    except (TypeError, ValueError):
+        requested = 1
     return min(configured, requested)
 
 
@@ -2451,6 +2519,15 @@ async def execute_social_search_attempt(query, body, state, model, max_results):
             latency_ms=latency_ms,
         )
 
+    if not isinstance(upstream_body, dict):
+        return build_social_attempt_summary(
+            model,
+            False,
+            error="Upstream returned non-dict JSON response",
+            status_code=502,
+            latency_ms=latency_ms,
+        )
+
     normalized = normalize_social_search_response(
         query,
         upstream_body,
@@ -2529,8 +2606,13 @@ def normalize_social_search_response(query, payload, max_results, *, model=None)
 @app.post("/api/search")
 @app.post("/api/extract")
 async def proxy_tavily(request: Request):
-    body = await request.json()
-    endpoint = request.url.path.replace("/api/", "")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Expected JSON request body")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected JSON request body")
+    endpoint = request.url.path.removeprefix("/api/")
 
     token_value = extract_token(request, body)
     token_row = get_token_row_or_401(token_value, "tavily")
@@ -2561,7 +2643,7 @@ async def proxy_tavily(request: Request):
         upstream_key = key_info["key"]
 
     body["api_key"] = upstream_key
-    start = time.time()
+    start = time.monotonic()
     try:
         resp, request_target, _fallback_used = await _post_tavily_with_gateway_fallback(
             base_url=upstream_base_url,
@@ -2570,8 +2652,8 @@ async def proxy_tavily(request: Request):
             payload=body,
             effective_mode=tavily_resolved["effective_mode"],
         )
-        latency = int((time.time() - start) * 1000)
-        success = resp.status_code == 200
+        latency = int((time.monotonic() - start) * 1000)
+        success = resp.status_code < 400
         if key_info is not None:
             pool.report_result("tavily", key_info["id"], success)
         db.log_usage(
@@ -2587,7 +2669,7 @@ async def proxy_tavily(request: Request):
         except Exception:
             return Response(content=resp.text, status_code=resp.status_code, media_type=resp.headers.get("content-type"))
     except Exception as exc:
-        latency = int((time.time() - start) * 1000)
+        latency = int((time.monotonic() - start) * 1000)
         if key_info is not None:
             pool.report_result("tavily", key_info["id"], False)
         db.log_usage(
@@ -2614,11 +2696,11 @@ async def proxy_firecrawl(path: str, request: Request):
         raise HTTPException(status_code=503, detail="No available API keys")
 
     forward_content = raw_body
-    if body_json is not None and "api_key" in body_json:
+    if body_json is not None and isinstance(body_json, dict) and "api_key" in body_json:
         body_json["api_key"] = key_info["key"]
         forward_content = json.dumps(body_json).encode("utf-8")
 
-    start = time.time()
+    start = time.monotonic()
     try:
         resp = await http_client.request(
             request.method,
@@ -2627,16 +2709,19 @@ async def proxy_firecrawl(path: str, request: Request):
             content=forward_content if request.method != "GET" else None,
             headers=build_forward_headers(request, key_info["key"]),
         )
-        latency = int((time.time() - start) * 1000)
+        latency = int((time.monotonic() - start) * 1000)
         success = resp.status_code < 400
         pool.report_result("firecrawl", key_info["id"], success)
         db.log_usage(token_row["id"], key_info["id"], path, int(success), latency, service="firecrawl")
         content_type = resp.headers.get("content-type", "").lower()
         if "application/json" in content_type:
-            return JSONResponse(content=resp.json(), status_code=resp.status_code)
+            try:
+                return JSONResponse(content=resp.json(), status_code=resp.status_code)
+            except Exception:
+                return Response(content=resp.content, status_code=resp.status_code, media_type=content_type)
         return forward_raw_response(resp)
     except Exception as exc:
-        latency = int((time.time() - start) * 1000)
+        latency = int((time.monotonic() - start) * 1000)
         pool.report_result("firecrawl", key_info["id"], False)
         db.log_usage(token_row["id"], key_info["id"], path, 0, latency, service="firecrawl")
         raise HTTPException(status_code=502, detail=str(exc))
@@ -2654,11 +2739,13 @@ async def proxy_exa_search(request: Request):
 
     forward_content = raw_body
     if body_json is not None:
+        if not isinstance(body_json, dict):
+            raise HTTPException(status_code=400, detail="Expected JSON object body")
         sanitized_body = dict(body_json)
         sanitized_body.pop("api_key", None)
         forward_content = json.dumps(sanitized_body).encode("utf-8")
 
-    start = time.time()
+    start = time.monotonic()
     try:
         resp = await http_client.post(
             f"{EXA_API_BASE}/search",
@@ -2666,16 +2753,19 @@ async def proxy_exa_search(request: Request):
             content=forward_content,
             headers=build_exa_forward_headers(request, key_info["key"]),
         )
-        latency = int((time.time() - start) * 1000)
+        latency = int((time.monotonic() - start) * 1000)
         success = resp.status_code < 400
         pool.report_result("exa", key_info["id"], success)
         db.log_usage(token_row["id"], key_info["id"], "search", int(success), latency, service="exa")
         content_type = resp.headers.get("content-type", "").lower()
         if "application/json" in content_type:
-            return JSONResponse(content=resp.json(), status_code=resp.status_code)
+            try:
+                return JSONResponse(content=resp.json(), status_code=resp.status_code)
+            except Exception:
+                return Response(content=resp.content, status_code=resp.status_code, media_type=content_type)
         return forward_raw_response(resp)
     except Exception as exc:
-        latency = int((time.time() - start) * 1000)
+        latency = int((time.monotonic() - start) * 1000)
         pool.report_result("exa", key_info["id"], False)
         db.log_usage(token_row["id"], key_info["id"], "search", 0, latency, service="exa")
         raise HTTPException(status_code=502, detail=str(exc))
@@ -2720,11 +2810,14 @@ async def health():
 
 @app.post("/social/search")
 async def proxy_social_search(request: Request):
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Expected JSON request body")
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Expected JSON request body")
 
-    query = (body.get("query") or "").strip()
+    query = str(body.get("query") or "").strip()
     if not query:
         raise HTTPException(status_code=400, detail="Missing query")
 
@@ -2734,11 +2827,14 @@ async def proxy_social_search(request: Request):
 
     state = await resolve_social_gateway_state(force=False)
     token_value = extract_token(request, body)
-    verify_social_gateway_token(token_value, state["accepted_tokens"])
+    social_token_row = verify_social_gateway_token(token_value, state["accepted_tokens"])
     if not state["resolved_upstream_api_key"]:
         raise HTTPException(status_code=503, detail="Missing social upstream API key")
 
-    max_results = max(1, min(int(body.get("max_results") or 5), 10))
+    try:
+        max_results = max(1, min(int(body.get("max_results") or 5), 10))
+    except (TypeError, ValueError):
+        max_results = 5
     attempts = []
     primary_model = str(body.get("model") or state["model"]).strip() or state["model"]
     primary_attempt = await execute_social_search_attempt(
@@ -2774,7 +2870,7 @@ async def proxy_social_search(request: Request):
             attempts.append(fallback_attempt)
             selected_attempt = choose_preferred_social_attempt(primary_attempt, fallback_attempt)
 
-        return attach_social_route_metadata(
+        result = attach_social_route_metadata(
             selected_attempt.get("response"),
             selected_attempt,
             attempts,
@@ -2783,6 +2879,10 @@ async def proxy_social_search(request: Request):
             fallback_min_results=fallback_min_results,
             requested_max_results=max_results,
         )
+        if social_token_row:
+            latency_ms = selected_attempt.get("latency_ms") or 0
+            db.log_usage(social_token_row["id"], None, "social/search", 1, latency_ms, service="mysearch")
+        return result
 
     if has_social_fallback(primary_model, fallback_model):
         fallback_reason = "upstream_error"
@@ -2795,7 +2895,7 @@ async def proxy_social_search(request: Request):
         )
         attempts.append(fallback_attempt)
         if fallback_attempt.get("ok"):
-            return attach_social_route_metadata(
+            result = attach_social_route_metadata(
                 fallback_attempt.get("response"),
                 fallback_attempt,
                 attempts,
@@ -2804,12 +2904,22 @@ async def proxy_social_search(request: Request):
                 fallback_min_results=fallback_min_results,
                 requested_max_results=max_results,
             )
+            if social_token_row:
+                latency_ms = fallback_attempt.get("latency_ms") or 0
+                db.log_usage(social_token_row["id"], None, "social/search", 1, latency_ms, service="mysearch")
+            return result
         detail = fallback_attempt.get("error") or primary_attempt.get("error") or "Social search failed"
-        status_code = fallback_attempt.get("status_code") or primary_attempt.get("status_code") or 502
-        raise HTTPException(status_code=status_code, detail=detail)
+        status_code = int(fallback_attempt.get("status_code") or primary_attempt.get("status_code") or 502)
+        fail_latency = fallback_attempt.get("latency_ms") or primary_attempt.get("latency_ms") or 0
+        if social_token_row:
+            db.log_usage(social_token_row["id"], None, "social/search", 0, fail_latency, service="mysearch")
+        raise HTTPException(status_code=max(400, status_code), detail=detail)
 
+    fail_latency = primary_attempt.get("latency_ms") or 0
+    if social_token_row:
+        db.log_usage(social_token_row["id"], None, "social/search", 0, fail_latency, service="mysearch")
     raise HTTPException(
-        status_code=primary_attempt.get("status_code") or 502,
+        status_code=max(400, int(primary_attempt.get("status_code") or 502)),
         detail=primary_attempt.get("error") or "Social search failed",
     )
 
@@ -2849,8 +2959,13 @@ async def get_session(request: Request, _=Depends(verify_admin)):
 
 @app.post("/api/session/login")
 async def login_session(request: Request):
-    body = await request.json()
-    password = str((body or {}).get("password") or "").strip()
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Expected JSON request body")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected JSON request body")
+    password = str(body.get("password") or "").strip()
     if not password or not hmac.compare_digest(password, get_admin_password()):
         raise HTTPException(status_code=401, detail="Unauthorized")
     response = JSONResponse({"ok": True})
@@ -2894,7 +3009,10 @@ async def get_settings(request: Request, _=Depends(verify_admin)):
 
 @app.post("/api/settings/test/tavily")
 async def test_tavily_settings(request: Request, _=Depends(verify_admin)):
-    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    try:
+        body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    except Exception:
+        body = {}
     config = build_candidate_tavily_config(body)
     active_keys = [dict(row) for row in db.get_all_keys("tavily") if row["active"]]
     return await probe_tavily_connection(config, active_keys)
@@ -2902,7 +3020,10 @@ async def test_tavily_settings(request: Request, _=Depends(verify_admin)):
 
 @app.post("/api/settings/test/social")
 async def test_social_settings(request: Request, _=Depends(verify_admin)):
-    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    try:
+        body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    except Exception:
+        body = {}
     config = build_candidate_social_config(body)
     state = await resolve_social_gateway_state_for_config(config)
     request_target = f"{state['upstream_base_url']}{state['upstream_responses_path']}"
@@ -2949,7 +3070,10 @@ async def test_social_settings(request: Request, _=Depends(verify_admin)):
 
 @app.put("/api/settings/tavily")
 async def update_tavily_settings(request: Request, _=Depends(verify_admin)):
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Expected JSON request body")
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Expected JSON request body")
 
@@ -2999,7 +3123,10 @@ async def update_tavily_settings(request: Request, _=Depends(verify_admin)):
 
 @app.put("/api/settings/social")
 async def update_social_settings(request: Request, _=Depends(verify_admin)):
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Expected JSON request body")
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Expected JSON request body")
 
@@ -3053,6 +3180,7 @@ async def update_social_settings(request: Request, _=Depends(verify_admin)):
             db.set_setting(setting_key, value)
 
     reset_social_gateway_cache()
+    reset_stats_cache()
     return {
         "ok": True,
         **(await build_settings_payload()),
@@ -3061,14 +3189,18 @@ async def update_social_settings(request: Request, _=Depends(verify_admin)):
 
 @app.get("/api/keys")
 async def list_keys(request: Request, _=Depends(verify_admin)):
-    service = request.query_params.get("service")
+    raw_service = request.query_params.get("service")
+    service = get_service(raw_service) if raw_service else None
     keys = mask_key_rows([dict(key) for key in db.get_all_keys(service)])
     return {"keys": keys}
 
 
 @app.post("/api/usage/sync")
 async def sync_usage(request: Request, _=Depends(verify_admin)):
-    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    try:
+        body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    except Exception:
+        body = {}
     service = get_service(body.get("service"), default="tavily")
     force = bool(body.get("force", True))
     key_id = body.get("key_id")
@@ -3086,10 +3218,18 @@ async def sync_usage(request: Request, _=Depends(verify_admin)):
 
 @app.post("/api/keys")
 async def add_keys(request: Request, _=Depends(verify_admin)):
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Expected JSON request body")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected JSON request body")
     service = get_service(body.get("service"), default="tavily")
     if "file" in body:
-        count = db.import_keys_from_text(body["file"], service=service)
+        file_content = body["file"]
+        if not isinstance(file_content, str):
+            raise HTTPException(status_code=400, detail="'file' must be a string")
+        count = db.import_keys_from_text(file_content, service=service)
         pool.reload(service)
         reset_stats_cache()
         return {"imported": count, "service": service}
@@ -3104,27 +3244,39 @@ async def add_keys(request: Request, _=Depends(verify_admin)):
 @app.delete("/api/keys/{key_id}")
 async def remove_key(key_id: int, _=Depends(verify_admin)):
     key_row = db.get_key_by_id(key_id)
+    if not key_row:
+        raise HTTPException(status_code=404, detail="Key not found")
     db.delete_key(key_id)
-    if key_row:
-        pool.reload(key_row["service"])
+    pool.reload(key_row["service"])
     reset_stats_cache()
     return {"ok": True}
 
 
 @app.put("/api/keys/{key_id}/toggle")
 async def toggle_key(key_id: int, request: Request, _=Depends(verify_admin)):
-    body = await request.json()
-    db.toggle_key(key_id, body.get("active", 1))
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Expected JSON request body")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected JSON request body")
     key_row = db.get_key_by_id(key_id)
-    if key_row:
-        pool.reload(key_row["service"])
+    if not key_row:
+        raise HTTPException(status_code=404, detail="Key not found")
+    try:
+        active = 1 if int(body.get("active", 1)) else 0
+    except (TypeError, ValueError):
+        active = 1
+    db.toggle_key(key_id, active)
+    pool.reload(key_row["service"])
     reset_stats_cache()
     return {"ok": True}
 
 
 @app.get("/api/tokens")
 async def list_tokens(request: Request, _=Depends(verify_admin)):
-    service = request.query_params.get("service")
+    raw_service = request.query_params.get("service")
+    service = get_token_service(raw_service) if raw_service else None
     tokens = [dict(token) for token in db.get_all_tokens(service)]
     for token in tokens:
         token["stats"] = db.get_usage_stats(token_id=token["id"], service=token["service"])
@@ -3151,7 +3303,12 @@ async def bootstrap_mysearch_token(request: Request, _=Depends(verify_mysearch_b
 
 @app.post("/api/tokens")
 async def create_token(request: Request, _=Depends(verify_admin)):
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Expected JSON request body")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected JSON request body")
     service = get_token_service(body.get("service"), default="tavily")
     token = db.create_token(body.get("name", ""), service=service)
     reset_stats_cache()
@@ -3160,6 +3317,9 @@ async def create_token(request: Request, _=Depends(verify_admin)):
 
 @app.delete("/api/tokens/{token_id}")
 async def remove_token(token_id: int, _=Depends(verify_admin)):
+    token_row = db.get_token_by_id(token_id)
+    if not token_row:
+        raise HTTPException(status_code=404, detail="Token not found")
     db.delete_token(token_id)
     reset_stats_cache()
     return {"ok": True}
@@ -3167,8 +3327,13 @@ async def remove_token(token_id: int, _=Depends(verify_admin)):
 
 @app.put("/api/password")
 async def change_password(request: Request, _=Depends(verify_admin)):
-    body = await request.json()
-    new_pwd = body.get("password", "").strip()
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Expected JSON request body")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected JSON request body")
+    new_pwd = str(body.get("password") or "").strip()
     if not new_pwd or len(new_pwd) < 4:
         raise HTTPException(status_code=400, detail="Password too short (min 4)")
     db.set_setting("admin_password", new_pwd)

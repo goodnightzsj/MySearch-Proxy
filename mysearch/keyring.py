@@ -112,10 +112,16 @@ class MySearchKeyRing:
 
     def _load_from_file(self, provider: ProviderConfig) -> list[KeyRecord]:
         records: list[KeyRecord] = []
-        assert provider.keys_file is not None
+        if provider.keys_file is None:
+            return records
+
+        try:
+            file_content = provider.keys_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return records
 
         for line_no, raw_line in enumerate(
-            provider.keys_file.read_text(encoding="utf-8").splitlines(),
+            file_content.splitlines(),
             start=1,
         ):
             line = raw_line.strip()
