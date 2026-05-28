@@ -25,10 +25,10 @@ class ServiceKeyPool:
     def get_next_key(self, service="tavily"):
         """Round-robin 返回某个服务下一个可用 key。"""
         service = normalize_service(service)
-        if service not in self._initialized:
-            self.reload(service)
-
         with self._lock:
+            if service not in self._initialized:
+                self._keys[service] = [dict(row) for row in get_active_keys(service)]
+                self._initialized.add(service)
             keys = self._keys[service]
             if not keys:
                 return None

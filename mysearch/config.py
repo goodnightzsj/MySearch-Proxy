@@ -320,7 +320,7 @@ class MySearchConfig:
         )
         return cls(
             server_name=_get_str("MYSEARCH_NAME", "MYSEARCH_SERVER_NAME", default="MySearch"),
-            timeout_seconds=_get_int("MYSEARCH_TIMEOUT_SECONDS", 45),
+            timeout_seconds=max(5, _get_int("MYSEARCH_TIMEOUT_SECONDS", 45)),
             xai_social_timeout_seconds=max(30, _get_int("MYSEARCH_XAI_SOCIAL_TIMEOUT_SECONDS", 120)),
             xai_model=_get_str(
                 "MYSEARCH_XAI_MODEL",

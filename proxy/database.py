@@ -2,10 +2,9 @@
 SQLite 数据库管理
 """
 import os
-import random
 import re
+import secrets
 import sqlite3
-import string
 import threading
 from datetime import datetime, timezone
 
@@ -63,7 +62,7 @@ def get_conn():
         try:
             conn.execute("SELECT 1")
             return conn
-        except sqlite3.ProgrammingError:
+        except sqlite3.Error:
             _thread_local.conn = None
     db_path = get_db_path()
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
@@ -224,6 +223,14 @@ def get_key_by_id(key_id):
         pass  # connection reused via thread-local
 
 
+def get_token_by_id(token_id):
+    conn = get_conn()
+    try:
+        return conn.execute("SELECT * FROM tokens WHERE id = ?", (token_id,)).fetchone()
+    finally:
+        pass  # connection reused via thread-local
+
+
 def get_active_keys(service=None):
     conn = get_conn()
     try:
@@ -253,9 +260,10 @@ def update_key_usage(key_id, success):
                 "UPDATE api_keys SET total_failed = total_failed + 1, consecutive_fails = consecutive_fails + 1, last_used_at = ? WHERE id = ?",
                 (now, key_id),
             )
-            row = conn.execute("SELECT consecutive_fails FROM api_keys WHERE id = ?", (key_id,)).fetchone()
-            if row and row["consecutive_fails"] >= 3:
-                conn.execute("UPDATE api_keys SET active = 0 WHERE id = ?", (key_id,))
+            conn.execute(
+                "UPDATE api_keys SET active = 0 WHERE id = ? AND consecutive_fails >= 3",
+                (key_id,),
+            )
         conn.commit()
     finally:
         pass  # connection reused via thread-local
@@ -298,12 +306,13 @@ def import_keys_from_text(text, service="tavily"):
     if not rows:
         return 0
     conn = get_conn()
+    before = conn.total_changes
     conn.executemany(
         "INSERT OR IGNORE INTO api_keys (service, key, email) VALUES (?, ?, ?)",
         rows,
     )
     conn.commit()
-    return len(rows)
+    return conn.total_changes - before
 
 
 def update_key_remote_usage(
@@ -367,7 +376,7 @@ def update_key_remote_usage_error(key_id, error_message):
 
 def create_token(name="", service="tavily"):
     service = normalize_token_service(service)
-    token = TOKEN_PREFIX[service] + "".join(random.choices(string.ascii_letters + string.digits, k=32))
+    token = TOKEN_PREFIX[service] + secrets.token_urlsafe(24)
     conn = get_conn()
     try:
         conn.execute(
@@ -421,7 +430,7 @@ def delete_token(token_id):
 # ═══ Usage Logs ═══
 
 def log_usage(token_id, api_key_id, endpoint, success, latency_ms, service="tavily"):
-    service = normalize_service(service)
+    service = normalize_token_service(service)
     conn = get_conn()
     try:
         conn.execute(
@@ -443,7 +452,7 @@ def get_usage_stats(token_id=None, service=None):
         now = datetime.now(timezone.utc)
         today = now.strftime("%Y-%m-%d")
         month = now.strftime("%Y-%m")
-        hour_ago = now.replace(minute=0, second=0, microsecond=0).isoformat()
+        hour_ago = now.replace(minute=0, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
 
         filters = []
         filter_params = []

@@ -279,6 +279,14 @@ class MySearchClient:
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
             headers={"User-Agent": "MySearch/0.2"},
         )
+        self._executor = ThreadPoolExecutor(
+            max_workers=self.config.max_parallel_workers,
+            thread_name_prefix="mysearch",
+        )
+
+    def close(self) -> None:
+        self._executor.shutdown(wait=False)
+        self._http.close()
 
     def health(self) -> dict[str, Any]:
         keyring_info = self.keyring.describe()
@@ -401,7 +409,7 @@ class MySearchClient:
                 return None
 
             self._cache_stats[namespace]["hits"] += 1
-            return json.loads(json.dumps(payload["value"]))
+            return copy.deepcopy(payload["value"])
 
     def _cache_set(self, namespace: str, cache_key: str, value: dict[str, Any]) -> None:
         ttl_seconds = self._cache_ttls.get(namespace, 0)
@@ -414,11 +422,12 @@ class MySearchClient:
             if len(store) >= self._cache_max_entries:
                 self._prune_expired_cache_entries_locked(namespace, now)
             if len(store) >= self._cache_max_entries:
-                oldest_key = min(store, key=lambda k: store[k].get("expires_at", 0.0))
+                oldest_key = min(store, key=lambda k: store[k].get("inserted_at", 0.0))
                 store.pop(oldest_key, None)
             store[cache_key] = {
                 "expires_at": now + ttl_seconds,
-                "value": json.loads(json.dumps(value)),
+                "inserted_at": now,
+                "value": copy.deepcopy(value),
             }
 
     def _cache_delete(self, namespace: str, cache_key: str) -> None:
@@ -455,19 +464,17 @@ class MySearchClient:
             except Exception as exc:  # pragma: no cover - defensive
                 return {}, {name: exc}
 
-        worker_count = min(max_workers or self.config.max_parallel_workers, len(tasks))
         results: dict[str, Any] = {}
         errors: dict[str, Exception] = {}
-        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="mysearch") as executor:
-            future_map: dict[Future[Any], str] = {
-                executor.submit(task): name
-                for name, task in tasks.items()
-            }
-            for future, name in future_map.items():
-                try:
-                    results[name] = future.result(timeout=self.config.timeout_seconds + 5)
-                except Exception as exc:  # pragma: no cover - network/runtime dependent
-                    errors[name] = exc
+        future_map: dict[Future[Any], str] = {
+            self._executor.submit(task): name
+            for name, task in tasks.items()
+        }
+        for future, name in future_map.items():
+            try:
+                results[name] = future.result(timeout=self.config.timeout_seconds + 5)
+            except Exception as exc:  # pragma: no cover - network/runtime dependent
+                errors[name] = exc
         return results, errors
 
     def _raise_parallel_error(self, errors: dict[str, Exception], task_name: str) -> None:
@@ -977,6 +984,10 @@ class MySearchClient:
         social_route = social_result.get("provider", "xai")
         web_results = list(web_result.get("results") or [])
         social_results = list(social_result.get("results") or [])
+        merged_citations = self._dedupe_citations(
+            web_result.get("citations") or [],
+            social_result.get("citations") or [],
+        )
         return {
             "provider": "hybrid",
             "intent": resolved_intent,
@@ -988,20 +999,12 @@ class MySearchClient:
             "query": query,
             "answer": web_result.get("answer") or social_result.get("answer") or "",
             "results": [*web_results, *social_results],
-            "citations": self._dedupe_citations(
-                web_result.get("citations") or [],
-                social_result.get("citations") or [],
-            ),
+            "citations": merged_citations,
             "evidence": {
                 "providers_consulted": [web_result.get("provider"), social_result.get("provider")],
                 "web_result_count": len(web_results),
                 "social_result_count": len(social_results),
-                "citation_count": len(
-                    self._dedupe_citations(
-                        web_result.get("citations") or [],
-                        social_result.get("citations") or [],
-                    )
-                ),
+                "citation_count": len(merged_citations),
                 "verification": "cross-provider",
             },
             "web": web_result,
@@ -4471,30 +4474,6 @@ class MySearchClient:
         max_results: int,
     ) -> dict[str, Any]:
         finalized = dict(result)
-        if self._should_rerank_resource_results(mode=mode, intent=intent):
-            reranked_results = self._rerank_resource_results(
-                query=query,
-                mode=mode,
-                results=list(finalized.get("results") or []),
-                include_domains=include_domains,
-            )
-            finalized["results"] = reranked_results
-            finalized["citations"] = self._align_citations_with_results(
-                results=reranked_results,
-                citations=list(finalized.get("citations") or []),
-            )
-        elif self._should_rerank_general_results(result_profile=result_profile):
-            reranked_results = self._rerank_general_results(
-                query=query,
-                result_profile=result_profile,
-                results=list(finalized.get("results") or []),
-                include_domains=include_domains,
-            )
-            finalized["results"] = reranked_results
-            finalized["citations"] = self._align_citations_with_results(
-                results=reranked_results,
-                citations=list(finalized.get("citations") or []),
-            )
 
         finalized = self._apply_status_result_policy(
             query=query,
@@ -4509,6 +4488,7 @@ class MySearchClient:
             result=finalized,
             include_domains=include_domains,
         )
+
         final_official_mode = str(
             (
                 (finalized.get("evidence") or {})
@@ -5734,8 +5714,6 @@ class MySearchClient:
             return "news"
         if self._looks_like_comparison_query(query_lower):
             return "comparison"
-        if self._looks_like_tutorial_query(query_lower):
-            return "tutorial"
         if self._looks_like_docs_query(query_lower):
             return "resource"
         if self._looks_like_exploratory_query(query_lower):
@@ -7046,7 +7024,7 @@ class MySearchClient:
         result_profile: Literal["web", "news"],
         item: dict[str, Any],
         include_domains: list[str] | None,
-    ) -> tuple[int, int, int, int, int, int, int, int]:
+    ) -> tuple[int, ...]:
         if result_profile == "news":
             return self._news_result_rank(
                 query=query,
@@ -7065,7 +7043,7 @@ class MySearchClient:
         query: str,
         item: dict[str, Any],
         include_domains: list[str] | None,
-    ) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int]:
+    ) -> tuple[int, ...]:
         hostname = self._result_hostname(item)
         registered_domain = self._registered_domain(hostname)
         path = urlparse(item.get("url", "")).path.lower()
@@ -7149,7 +7127,6 @@ class MySearchClient:
         gossip_domain_match = int(
             gossip_query and self._is_entertainment_gossip_domain(registered_domain)
         )
-        status_query = self._looks_like_status_query(query_lower)
         include_match = int(
             (
                 bool(include_domains)
@@ -7241,7 +7218,7 @@ class MySearchClient:
         query: str,
         item: dict[str, Any],
         include_domains: list[str] | None,
-    ) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int, int, int]:
+    ) -> tuple[int, ...]:
         hostname = self._result_hostname(item)
         registered_domain = self._registered_domain(hostname)
         url = item.get("url", "")
@@ -8000,6 +7977,7 @@ class MySearchClient:
         exclude_domains: list[str] | None,
         strategy: str = "fast",
         days: int | None = None,
+        _skip_domain_fallback: bool = False,
     ) -> dict[str, Any]:
         include_domains = [item.strip() for item in (include_domains or []) if item and item.strip()]
         exclude_domains = [item.strip() for item in (exclude_domains or []) if item and item.strip()]
@@ -8018,26 +7996,28 @@ class MySearchClient:
         if response.get("results") or not include_domains:
             return response
 
-        retry_response = self._search_tavily_domain_retry(
-            query=query,
-            max_results=max_results,
-            topic=topic,
-            include_content=include_content,
-            include_domains=include_domains,
-            exclude_domains=exclude_domains,
-        )
-        if retry_response is not None:
-            return retry_response
+        if not _skip_domain_fallback:
+            retry_response = self._search_tavily_domain_retry(
+                query=query,
+                max_results=max_results,
+                topic=topic,
+                include_content=include_content,
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+            )
+            if retry_response is not None:
+                return retry_response
 
-        fallback_response = self._search_tavily_domain_fallback(
-            query=query,
-            max_results=max_results,
-            include_content=include_content,
-            include_domains=include_domains,
-            exclude_domains=exclude_domains,
-        )
-        if fallback_response is not None:
-            return fallback_response
+        if not _skip_domain_fallback:
+            fallback_response = self._search_tavily_domain_fallback(
+                query=query,
+                max_results=max_results,
+                include_content=include_content,
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+            )
+            if fallback_response is not None:
+                return fallback_response
 
         return response
 
@@ -8391,6 +8371,7 @@ class MySearchClient:
             include_content=include_content,
             include_domains=include_domains,
             exclude_domains=exclude_domains,
+            _skip_domain_fallback=True,
         )
         if not fallback_result.get("results"):
             return None
@@ -8501,6 +8482,8 @@ class MySearchClient:
             key=key.key,
         )
         data = response.get("data") or {}
+        if not isinstance(data, dict):
+            data = {}
         results = []
         source_order = ("news", "web") if requested_news else ("web", "news")
         for source_name in source_order:
@@ -8682,6 +8665,8 @@ class MySearchClient:
             timeout_seconds=timeout_seconds,
         )
         raw_results = response.get("results") or response.get("data") or []
+        if not isinstance(raw_results, list):
+            raw_results = []
         results = []
         for item in raw_results:
             if not isinstance(item, dict):
@@ -9066,16 +9051,6 @@ class MySearchClient:
                 namespace="social",
                 hit=False,
             )
-            social_unavailable_result = self._build_social_unavailable_result(
-                query=query,
-                fallback_reason=f"{fallback_reason} | tavily_social_fallback failed: {fallback_exc}",
-            )
-            self._cache_set("social_unavailable", social_cache_key, social_unavailable_result)
-            return self._annotate_cache(
-                social_unavailable_result,
-                namespace="social_unavailable",
-                hit=False,
-            )
         if tavily_fallback_result.get("results"):
             self._cache_delete("social_unavailable", social_cache_key)
             self._cache_set("social", social_cache_key, tavily_fallback_result)
@@ -9091,7 +9066,16 @@ class MySearchClient:
                     hit=True,
                 )
             return result
-        return tavily_fallback_result
+        social_unavailable_result = self._build_social_unavailable_result(
+            query=query,
+            fallback_reason=f"{fallback_reason} | tavily_social_fallback returned no results",
+        )
+        self._cache_set("social_unavailable", social_cache_key, social_unavailable_result)
+        return self._annotate_cache(
+            social_unavailable_result,
+            namespace="social_unavailable",
+            hit=False,
+        )
 
     def _search_exa_social_fallback(
         self,
@@ -9377,15 +9361,20 @@ class MySearchClient:
             key=key.key,
         )
         data = response.get("data") or {}
+        if not isinstance(data, dict):
+            data = {}
+        metadata = data.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
         content = data.get("markdown", "")
         if not content and "json" in data:
             content = json.dumps(data["json"], ensure_ascii=False, indent=2)
         return {
             "provider": "firecrawl",
             "transport": key.source,
-            "url": data.get("metadata", {}).get("sourceURL") or data.get("metadata", {}).get("url") or url,
+            "url": metadata.get("sourceURL") or metadata.get("url") or url,
             "content": content,
-            "metadata": data.get("metadata") or {},
+            "metadata": metadata,
         }
 
     def _extract_tavily(self, *, url: str) -> dict[str, Any]:
@@ -9399,6 +9388,8 @@ class MySearchClient:
             key=key.key,
         )
         results = response.get("results") or []
+        if not isinstance(results, list):
+            results = []
         first = results[0] if results else {}
         content = first.get("raw_content") or first.get("content") or ""
         return {
@@ -9741,6 +9732,7 @@ class MySearchClient:
         for item in results:
             created_at = self._parse_result_timestamp(item.get("created_at"))
             if created_at is None:
+                filtered.append(item)
                 continue
             if start is not None and created_at < start:
                 continue
@@ -11478,7 +11470,8 @@ class MySearchClient:
             raise MySearchError(f"unsupported auth mode for {provider.name}: {provider.auth_mode}")
 
         url = f"{(base_url or provider.base_url)}{path}"
-        headers.setdefault("Content-Type", "application/json")
+        if method.upper() != "GET":
+            headers.setdefault("Content-Type", "application/json")
         effective_timeout = timeout_seconds or self.config.timeout_seconds
 
         prefer_urlopen = "unittest.mock" in type(urlopen).__module__
@@ -11536,6 +11529,8 @@ class MySearchClient:
                 detail=detail,
                 url=url,
             )
+        if not isinstance(data, dict):
+            raise MySearchError(f"non-dict JSON response from {provider.name}: {response_text[:200]}")
         return data
 
     def _request_text(
@@ -11637,7 +11632,7 @@ class MySearchClient:
                 model=self._xai_probe_model(),
             ),
             key=key,
-            timeout_seconds=max(timeout_seconds, fallback_timeout_seconds),
+            timeout_seconds=min(timeout_seconds, fallback_timeout_seconds),
         )
 
     def _probe_provider_status(
@@ -11698,6 +11693,7 @@ class MySearchClient:
     def _probe_xai_compatible_gateway(self, provider: ProviderConfig, key: str, timeout_seconds: int) -> None:
         health_path = "/health"
         health_base_url = self._derive_root_health_base_url(provider)
+        payload = None
         try:
             payload = self._request_json(
                 provider=provider,
@@ -11708,7 +11704,15 @@ class MySearchClient:
                 base_url=health_base_url,
                 timeout_seconds=timeout_seconds,
             )
-            if isinstance(payload, dict) and payload.get("ok") is False:
+        except MySearchHTTPError as exc:
+            if exc.is_auth_error:
+                raise
+        except MySearchError:
+            pass
+        if payload is not None:
+            if not isinstance(payload, dict):
+                raise MySearchError("social/X gateway health probe returned unexpected response type")
+            if payload.get("ok") is False:
                 detail = (
                     payload.get("error")
                     or payload.get("detail")
@@ -11716,10 +11720,8 @@ class MySearchClient:
                 )
                 raise MySearchError(str(detail))
             return
-        except (MySearchHTTPError, MySearchError):
-            pass
 
-        fallback_timeout_seconds = min(self.config.timeout_seconds, 20)
+        fallback_timeout_seconds = min(timeout_seconds, min(self.config.timeout_seconds, 20))
         self._request_json(
             provider=provider,
             method="POST",
@@ -11786,15 +11788,15 @@ class MySearchClient:
                 return
             try:
                 self._probe_xai_official_status_page(timeout_seconds=timeout_seconds)
-            except MySearchError as exc:
-                if "not fully available" in str(exc):
-                    raise
+            except MySearchHTTPError:
                 self._probe_xai_official_via_responses(
                     provider=provider,
                     key=key,
                     timeout_seconds=timeout_seconds,
                 )
-            except MySearchHTTPError as exc:
+            except MySearchError as exc:
+                if "not fully available" in str(exc):
+                    raise
                 self._probe_xai_official_via_responses(
                     provider=provider,
                     key=key,
