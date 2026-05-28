@@ -1961,6 +1961,7 @@ def build_forward_headers(request, real_key):
         "host",
         "x-admin-password",
         "x-api-key",
+        "x-bootstrap-token",
         "cookie",
         "set-cookie",
         "x-forwarded-for",
