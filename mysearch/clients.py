@@ -6101,6 +6101,7 @@ class MySearchClient:
                 mode=mode,
                 intent=intent,
                 from_date=from_date,
+                to_date=to_date,
             )
         raise MySearchError(f"Unknown provider: {provider_name}")
 
@@ -8031,6 +8032,9 @@ class MySearchClient:
                 include_content=include_content,
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
+                from_date=from_date,
+                to_date=to_date,
+                days=days,
             )
             if retry_response is not None:
                 return retry_response
@@ -8042,6 +8046,8 @@ class MySearchClient:
                 include_content=include_content,
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
+                from_date=from_date,
+                to_date=to_date,
             )
             if fallback_response is not None:
                 return fallback_response
@@ -8144,6 +8150,9 @@ class MySearchClient:
         include_content: bool,
         include_domains: list[str],
         exclude_domains: list[str] | None,
+        from_date: str | None = None,
+        to_date: str | None = None,
+        days: int | None = None,
     ) -> dict[str, Any] | None:
         per_domain_results = []
         retried_domains: list[str] = []
@@ -8160,6 +8169,9 @@ class MySearchClient:
                 include_content=include_content,
                 include_domains=None,
                 exclude_domains=exclude_domains,
+                from_date=from_date,
+                to_date=to_date,
+                days=days,
             )
             filtered_results = self._filter_results_by_domains(
                 domain_result.get("results", []),
@@ -8213,6 +8225,8 @@ class MySearchClient:
         include_content: bool,
         include_domains: list[str],
         exclude_domains: list[str] | None,
+        from_date: str | None = None,
+        to_date: str | None = None,
     ) -> dict[str, Any] | None:
         if not self._provider_can_serve(self.config.firecrawl):
             return None
@@ -8235,6 +8249,8 @@ class MySearchClient:
                 max_results=max_results,
                 categories=categories,
                 include_content=include_content,
+                from_date=from_date,
+                to_date=to_date,
             )
             if not domain_result.get("results"):
                 retry_result = self._search_firecrawl_domain_retry(
@@ -8244,6 +8260,8 @@ class MySearchClient:
                     include_content=include_content,
                     include_domain=domain,
                     exclude_domains=exclude_domains,
+                    from_date=from_date,
+                    to_date=to_date,
                 )
                 if retry_result is not None:
                     domain_result = retry_result
