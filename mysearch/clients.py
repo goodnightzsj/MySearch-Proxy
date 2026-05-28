@@ -11166,17 +11166,21 @@ class MySearchClient:
         path = parsed.path.lower()
         hostname_labels = [item for item in hostname.split(".") if item]
         docs_keywords = (
+            "/advanced/",
             "/api",
             "/changelog",
             "/docs",
             "/documentation",
+            "/getting-started/",
             "/guide",
             "/guides",
+            "/learn",
             "/manual",
             "/pricing",
             "/readme",
             "/reference",
             "/references",
+            "/tutorial",
         )
         title_keywords = (
             "api reference",
