@@ -7863,6 +7863,9 @@ class MySearchClient:
                     include_content=False,
                     include_domains=include_domains,
                     exclude_domains=exclude_domains,
+                    days=self._infer_tavily_days(intent, from_date),
+                    from_date=from_date,
+                    to_date=to_date,
                 ),
             }
 
