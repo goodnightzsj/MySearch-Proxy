@@ -1667,6 +1667,8 @@ class MySearchClient:
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
                 authoritative_research=authoritative_research,
+                from_date=from_date,
+                to_date=to_date,
             )
         }
         if (
@@ -1686,6 +1688,8 @@ class MySearchClient:
                 include_answer=False,
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
+                from_date=from_date,
+                to_date=to_date,
             )
         if (
             authoritative_research
@@ -1700,6 +1704,8 @@ class MySearchClient:
                 max_results=max(4, min(research_plan["web_max_results"], 6)),
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
+                from_date=from_date,
+                to_date=to_date,
             )
         if include_social:
             research_tasks["social"] = lambda: self.search(
@@ -2637,6 +2643,8 @@ class MySearchClient:
         max_results: int,
         include_domains: list[str] | None,
         exclude_domains: list[str] | None,
+        from_date: str | None = None,
+        to_date: str | None = None,
     ) -> dict[str, Any]:
         merged_result: dict[str, Any] | None = None
         primary_vendor_brand = self._research_primary_vendor_brand(query)
@@ -2654,6 +2662,8 @@ class MySearchClient:
                     include_answer=False,
                     include_domains=include_domains,
                     exclude_domains=exclude_domains,
+                    from_date=from_date,
+                    to_date=to_date,
                 )
             except MySearchError:
                 if primary_vendor_brand:
@@ -2668,6 +2678,8 @@ class MySearchClient:
                             include_answer=False,
                             include_domains=include_domains,
                             exclude_domains=exclude_domains,
+                            from_date=from_date,
+                            to_date=to_date,
                         )
                     except MySearchError:
                         continue
@@ -2713,6 +2725,8 @@ class MySearchClient:
         include_domains: list[str] | None,
         exclude_domains: list[str] | None,
         authoritative_research: bool,
+        from_date: str | None = None,
+        to_date: str | None = None,
     ) -> dict[str, Any]:
         prefers_tavily = self._research_prefers_tavily_discovery(
             query=query,
@@ -2733,6 +2747,8 @@ class MySearchClient:
                 include_answer=True,
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
+                from_date=from_date,
+                to_date=to_date,
             )
 
         try:
@@ -2748,6 +2764,8 @@ class MySearchClient:
                 include_answer=True,
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
+                from_date=from_date,
+                to_date=to_date,
             )
         except MySearchError:
             return self._run_research_tavily_discovery(
@@ -2774,6 +2792,8 @@ class MySearchClient:
         include_answer: bool,
         include_domains: list[str] | None,
         exclude_domains: list[str] | None,
+        from_date: str | None = None,
+        to_date: str | None = None,
     ) -> dict[str, Any]:
         tavily_result = self._search_tavily(
             query=query,
@@ -2782,6 +2802,8 @@ class MySearchClient:
             include_answer=include_answer,
             include_content=include_content,
             include_domains=include_domains,
+            from_date=from_date,
+            to_date=to_date,
             exclude_domains=exclude_domains,
             strategy="advanced" if strategy in {"verify", "deep"} else "fast",
         )
