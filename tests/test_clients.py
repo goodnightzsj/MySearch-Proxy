@@ -477,6 +477,31 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["answer"], "Top opening-weekend title: Project Hail Mary")
         self.assertEqual(result["evidence"]["answer_source"], "result-event-extraction")
 
+    def test_apply_result_event_answer_override_extracts_unquoted_box_office_title(self) -> None:
+        client = MySearchClient()
+
+        result = client._apply_result_event_answer_override(
+            query="2026 highest grossing movie opening weekend",
+            mode="news",
+            intent="news",
+            strategy="verify",
+            result={
+                "answer": "",
+                "results": [
+                    {
+                        "title": "Project Hail Mary becomes the biggest opening weekend box office story of 2026",
+                        "url": "https://example.com/project-hail-mary-opening-weekend",
+                        "snippet": "",
+                        "content": "",
+                    }
+                ],
+                "evidence": {},
+            },
+        )
+
+        self.assertEqual(result["answer"], "Top opening-weekend title: Project Hail Mary")
+        self.assertEqual(result["evidence"]["answer_source"], "result-event-extraction")
+
     def test_firecrawl_news_search_omits_unsupported_news_category(self) -> None:
         client = MySearchClient()
         captured: dict[str, object] = {}
