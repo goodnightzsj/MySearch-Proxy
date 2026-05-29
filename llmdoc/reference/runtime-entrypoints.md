@@ -5,7 +5,7 @@
 | 文件 | 角色 | 关键点 |
 | --- | --- | --- |
 | `install.sh` | 本地安装与注册入口 | 安装 `mysearch/requirements.txt`，继承宿主 `MYSEARCH_*`，再向 `claude` / `codex` 注册 `mysearch` MCP。来源：install.sh:13, install.sh:74, install.sh:174 |
-| `docker-compose.yml` | 一套部署入口 | 在仓库根目录同时编排 `proxy` 与 `mysearch` 两个服务：`proxy` 继续监听 `9874` 并落盘 SQLite，`mysearch` 继续以 `streamable-http` 形式监听 `8000/mcp`，并通过 `MYSEARCH_PROXY_BASE_URL=http://proxy:9874` 反向接入同 stack 内的 Proxy。现在 compose 会同时把 `MYSEARCH_PROXY_BOOTSTRAP_TOKEN` 注入两边，并把 `MYSEARCH_PROXY_DB_PATH` 固定到 `/data/proxy.db`；`mysearch` 启动时会自动请求 `proxy` 的内部 bootstrap 接口来创建或复用自己的 `mysp-` token，不再要求你手工先创建 MySearch 通用 token 才能拉起远程 MCP。来源：docker-compose.yml:1 |
+| `docker-compose.yml` | 一套部署入口 | 在仓库根目录同时编排 `proxy` 与 `mysearch` 两个服务：`proxy` 继续监听 `9874` 并落盘 SQLite，`mysearch` 继续以 `streamable-http` 形式监听 `8000/mcp`，并通过 `MYSEARCH_PROXY_BASE_URL=http://proxy:9874` 反向接入同 stack 内的 Proxy。compose 现在要求 `ADMIN_PASSWORD` 显式提供，不再给 `change-me` 默认值；`MYSEARCH_PROXY_BOOTSTRAP_TOKEN` 仍默认空，空值代表 bootstrap endpoint disabled。需要启用自动签发 `mysp-` token 时，必须显式设置随机 bootstrap token。来源：docker-compose.yml:1 |
 | `mysearch/__main__.py` | MySearch CLI 入口 | 解析 `stdio`、`sse`、`streamable-http` transport 及 host/port/path 参数，然后调用 `mysearch.server.main`。来源：mysearch/__main__.py:8 |
 | `mysearch/server.py` | MCP tool 暴露层 | 用 `FastMCP` 注册 `search`、`extract_url`、`research`、`mysearch_health`，并根据 transport 启动服务。来源：mysearch/server.py:34, mysearch/server.py:47, mysearch/server.py:168 |
 | `mysearch/Dockerfile` | MySearch MCP 容器入口 | 基于 `python:3.11-slim` 安装 `mysearch/requirements.txt`，只复制 `mysearch/` 目录到镜像内部，并默认以 `python -m mysearch --transport streamable-http --host 0.0.0.0 --port 8000` 暴露远程 MCP。来源：mysearch/Dockerfile:1 |
@@ -29,6 +29,8 @@
 | `proxy/database.py` | Proxy 持久化入口 | 管理 SQLite、key/token/usage/settings 表，以及 `mysp-` token 前缀。来源：proxy/database.py:11, proxy/database.py:61 |
 | `skill/README.md` | AI 安装入口 | 告诉 Codex / Claude Code 如何从源码仓或远程 MCP 入口安装与验收 MySearch。来源：skill/README.md:40 |
 | `openclaw/README.md` | OpenClaw 安装入口 | 告诉 OpenClaw/ClawHub 如何安装 bundle、注入 env、执行健康检查。来源：openclaw/README.md:53 |
+
+Provider 路由补充：`mysearch/clients.py` 当前把 `news`、`award_result`、`status` 的 fallback 收成 `Tavily -> Exa -> Firecrawl`，并且 `verify/deep` 下允许 Tavily 与 Firecrawl 做 news/status blended。`web + x` hybrid 任一分支失败时会保留另一分支结果；`extract_url` 的 Exa fallback 只接受目标 URL 或同注册域候选。来源：mysearch/clients.py:143, mysearch/clients.py:910, mysearch/clients.py:6000, mysearch/clients.py:10704
 
 ## 关键配置族
 

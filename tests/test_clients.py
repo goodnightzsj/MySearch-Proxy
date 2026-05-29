@@ -143,10 +143,10 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(policy.key, "award_result")
         self.assertEqual(policy.provider, "tavily")
-        self.assertEqual(policy.fallback_chain, ("exa",))
+        self.assertEqual(policy.fallback_chain, ("exa", "firecrawl"))
         self.assertTrue(policy.allow_exa_rescue)
 
-    def test_news_verify_does_not_enable_tavily_firecrawl_blend(self) -> None:
+    def test_news_verify_enables_tavily_firecrawl_blend(self) -> None:
         client = MySearchClient()
         client._provider_is_live_ok = lambda provider: True  # type: ignore[method-assign]
 
@@ -161,7 +161,7 @@ class MySearchClientTests(unittest.TestCase):
             include_domains=None,
         )
 
-        self.assertFalse(should_blend)
+        self.assertTrue(should_blend)
 
     def test_dispatch_single_provider_for_news_result_query_keeps_tavily_in_discovery_mode(self) -> None:
         client = MySearchClient()
@@ -501,8 +501,99 @@ class MySearchClientTests(unittest.TestCase):
 
         payload = captured["payload"]
         assert isinstance(payload, dict)
+        self.assertEqual(payload["sources"], ["news", "web"])
         self.assertNotIn("categories", payload)
         self.assertNotIn("scrapeOptions", payload)
+
+    def test_hybrid_search_preserves_web_results_when_social_branch_fails(self) -> None:
+        client = MySearchClient()
+
+        def fake_search(**kwargs):  # type: ignore[no-untyped-def]
+            self.assertEqual(kwargs["sources"], ["web"])
+            return {
+                "provider": "tavily",
+                "route": {"selected": "tavily"},
+                "answer": "web answer",
+                "results": [
+                    {
+                        "title": "Web result",
+                        "url": "https://example.com/web",
+                        "snippet": "web",
+                        "content": "",
+                    }
+                ],
+                "citations": [{"title": "Web result", "url": "https://example.com/web"}],
+            }
+
+        client.search = fake_search  # type: ignore[method-assign]
+        client._search_xai = lambda **kwargs: (_ for _ in ()).throw(MySearchError("social timeout"))  # type: ignore[method-assign]
+
+        result = client._search_hybrid(
+            query="latest AI launch reaction",
+            mode="auto",
+            resolved_intent="factual",
+            resolved_strategy="balanced",
+            decision=RouteDecision(provider="hybrid", reason="web+x"),
+            max_results=3,
+            include_content=False,
+            effective_include_answer=True,
+            include_domains=None,
+            exclude_domains=None,
+            allowed_x_handles=None,
+            excluded_x_handles=None,
+            from_date=None,
+            to_date=None,
+            include_x_images=False,
+            include_x_videos=False,
+        )
+
+        self.assertEqual(result["provider"], "hybrid")
+        self.assertEqual(result["web"]["provider"], "tavily")
+        self.assertEqual(result["social"]["provider"], "social_unavailable")
+        self.assertEqual(len(result["results"]), 1)
+        self.assertIn("social-search-unavailable", result["evidence"]["conflicts"])
+
+    def test_hybrid_search_preserves_social_results_when_web_branch_fails(self) -> None:
+        client = MySearchClient()
+        client.search = lambda **kwargs: (_ for _ in ()).throw(MySearchError("web timeout"))  # type: ignore[method-assign]
+        client._search_xai = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "xai",
+            "answer": "social answer",
+            "results": [
+                {
+                    "title": "Social result",
+                    "url": "https://x.com/example/status/1",
+                    "snippet": "",
+                    "content": "",
+                }
+            ],
+            "citations": [{"title": "Social result", "url": "https://x.com/example/status/1"}],
+        }
+
+        result = client._search_hybrid(
+            query="latest AI launch reaction",
+            mode="auto",
+            resolved_intent="factual",
+            resolved_strategy="balanced",
+            decision=RouteDecision(provider="hybrid", reason="web+x"),
+            max_results=3,
+            include_content=False,
+            effective_include_answer=True,
+            include_domains=None,
+            exclude_domains=None,
+            allowed_x_handles=None,
+            excluded_x_handles=None,
+            from_date=None,
+            to_date=None,
+            include_x_images=False,
+            include_x_videos=False,
+        )
+
+        self.assertEqual(result["provider"], "hybrid")
+        self.assertEqual(result["web"]["provider"], "web_unavailable")
+        self.assertEqual(result["social"]["provider"], "xai")
+        self.assertEqual(len(result["results"]), 1)
+        self.assertIn("web-search-unavailable", result["evidence"]["conflicts"])
 
     def test_apply_result_event_answer_override_extracts_album_of_the_year_from_page_content(self) -> None:
         client = MySearchClient()
@@ -3903,6 +3994,51 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["provider"], "firecrawl")
         self.assertFalse(result["cache"]["extract"]["hit"])
 
+    def test_extract_url_exa_fallback_rejects_different_domain_content(self) -> None:
+        client = MySearchClient()
+        client._scrape_firecrawl = lambda **kwargs: (_ for _ in ()).throw(MySearchError("firecrawl failed"))  # type: ignore[method-assign]
+        client._extract_tavily = lambda **kwargs: (_ for _ in ()).throw(MySearchError("tavily failed"))  # type: ignore[method-assign]
+        client._provider_can_serve = lambda provider: provider.name == "exa"  # type: ignore[method-assign]
+        client._search_exa = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "exa",
+            "transport": "env",
+            "results": [
+                {
+                    "title": "Different domain",
+                    "url": "https://other.example.net/article",
+                    "content": "Different domain content. " * 20,
+                }
+            ],
+        }
+
+        with self.assertRaises(MySearchError) as ctx:
+            client.extract_url(url="https://docs.example.com/target", provider="auto")
+
+        self.assertIn("same-domain", str(ctx.exception))
+
+    def test_extract_url_exa_fallback_reports_actual_same_domain_url(self) -> None:
+        client = MySearchClient()
+        client._scrape_firecrawl = lambda **kwargs: (_ for _ in ()).throw(MySearchError("firecrawl failed"))  # type: ignore[method-assign]
+        client._extract_tavily = lambda **kwargs: (_ for _ in ()).throw(MySearchError("tavily failed"))  # type: ignore[method-assign]
+        client._provider_can_serve = lambda provider: provider.name == "exa"  # type: ignore[method-assign]
+        client._search_exa = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "exa",
+            "transport": "env",
+            "results": [
+                {
+                    "title": "Same domain",
+                    "url": "https://docs.example.com/target?ref=exa",
+                    "content": "Same domain content. " * 20,
+                }
+            ],
+        }
+
+        result = client.extract_url(url="https://docs.example.com/target", provider="auto")
+
+        self.assertEqual(result["provider"], "exa")
+        self.assertEqual(result["url"], "https://docs.example.com/target?ref=exa")
+        self.assertEqual(result["metadata"]["requested_url"], "https://docs.example.com/target")
+
     def test_firecrawl_domain_filtered_search_falls_back_to_tavily(self) -> None:
         client = MySearchClient()
         client.keyring.has_provider = lambda provider: provider == "tavily"  # type: ignore[method-assign]
@@ -4572,7 +4708,7 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertEqual(decision.provider, "tavily")
-        self.assertEqual(decision.fallback_chain, ["exa"])
+        self.assertEqual(decision.fallback_chain, ["exa", "firecrawl"])
 
     def test_blended_search_requires_live_ok_providers(self) -> None:
         client = MySearchClient()

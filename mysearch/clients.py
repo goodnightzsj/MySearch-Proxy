@@ -151,7 +151,7 @@ _MODE_PROVIDER_POLICY: dict[str, SearchRoutePolicy] = {
     "news": SearchRoutePolicy(
         key="news",
         provider="tavily",
-        fallback_chain=("exa",),
+        fallback_chain=("exa", "firecrawl"),
         tavily_topic="news",
         result_profile="news",
         allow_exa_rescue=True,
@@ -159,7 +159,7 @@ _MODE_PROVIDER_POLICY: dict[str, SearchRoutePolicy] = {
     "award_result": SearchRoutePolicy(
         key="award_result",
         provider="tavily",
-        fallback_chain=("exa",),
+        fallback_chain=("exa", "firecrawl"),
         tavily_topic="news",
         result_profile="news",
         allow_exa_rescue=True,
@@ -167,7 +167,7 @@ _MODE_PROVIDER_POLICY: dict[str, SearchRoutePolicy] = {
     "status": SearchRoutePolicy(
         key="status",
         provider="tavily",
-        fallback_chain=("exa",),
+        fallback_chain=("exa", "firecrawl"),
         tavily_topic="general",
         result_profile="web",
         allow_exa_rescue=True,
@@ -981,10 +981,35 @@ class MySearchClient:
                 },
                 max_workers=2,
             )
-            self._raise_parallel_error(parallel_errors, "web")
-            self._raise_parallel_error(parallel_errors, "social")
-            web_result = parallel_results["web"]
-            social_result = parallel_results["social"]
+            if "web" in parallel_errors and "social" in parallel_errors:
+                self._raise_parallel_error(parallel_errors, "web")
+                self._raise_parallel_error(parallel_errors, "social")
+            web_result = parallel_results.get("web")
+            social_result = parallel_results.get("social")
+            if web_result is None:
+                social_result = cast(dict[str, Any], social_result or {})
+                web_error = str(parallel_errors.get("web") or "web search unavailable")
+                social_result.setdefault("evidence", {})["web_error"] = web_error[:200]
+                web_result = {
+                    "provider": "web_unavailable",
+                    "query": query,
+                    "answer": "",
+                    "results": [],
+                    "citations": [],
+                    "summary": f"Web search unavailable: {web_error[:200]}",
+                }
+            if social_result is None:
+                web_result = cast(dict[str, Any], web_result or {})
+                social_error = str(parallel_errors.get("social") or "social search unavailable")
+                web_result.setdefault("evidence", {})["social_error"] = social_error[:200]
+                social_result = {
+                    "provider": "social_unavailable",
+                    "query": query,
+                    "answer": "",
+                    "results": [],
+                    "citations": [],
+                    "summary": f"Social/X search unavailable: {social_error[:200]}",
+                }
         web_route = web_result.get("route", {}).get("selected", web_result.get("provider", "tavily"))
         social_route = social_result.get("provider", "xai")
         web_results = list(web_result.get("results") or [])
@@ -993,6 +1018,26 @@ class MySearchClient:
             web_result.get("citations") or [],
             social_result.get("citations") or [],
         )
+        evidence = {
+            "providers_consulted": [web_result.get("provider"), social_result.get("provider")],
+            "web_result_count": len(web_results),
+            "social_result_count": len(social_results),
+            "citation_count": len(merged_citations),
+            "verification": "cross-provider",
+        }
+        web_error = ""
+        if web_result.get("provider") == "web_unavailable":
+            web_error = web_result.get("summary") or "web search unavailable"
+        elif isinstance(social_result.get("evidence"), dict):
+            web_error = (social_result.get("evidence") or {}).get("web_error") or ""
+        social_error = (web_result.get("evidence") or {}).get("social_error") if isinstance(web_result.get("evidence"), dict) else ""
+        if web_error:
+            evidence.setdefault("conflicts", []).append("web-search-unavailable")
+            evidence["web_error"] = web_error
+        if social_error or social_result.get("provider") == "social_unavailable":
+            evidence.setdefault("conflicts", []).append("social-search-unavailable")
+            evidence["social_error"] = social_error or (social_result.get("summary") or "")
+
         return {
             "provider": "hybrid",
             "intent": resolved_intent,
@@ -1005,13 +1050,7 @@ class MySearchClient:
             "answer": web_result.get("answer") or social_result.get("answer") or "",
             "results": [*web_results, *social_results],
             "citations": merged_citations,
-            "evidence": {
-                "providers_consulted": [web_result.get("provider"), social_result.get("provider")],
-                "web_result_count": len(web_results),
-                "social_result_count": len(social_results),
-                "citation_count": len(merged_citations),
-                "verification": "cross-provider",
-            },
+            "evidence": evidence,
             "web": web_result,
             "social": social_result,
         }
@@ -1556,15 +1595,30 @@ class MySearchClient:
                 )
                 exa_results = exa_extract.get("results") or []
                 if exa_results:
-                    best = max(exa_results, key=lambda r: len(r.get("content") or ""))
+                    matching_results = [
+                        item
+                        for item in exa_results
+                        if self._extract_candidate_matches_requested_url(
+                            requested_url=url,
+                            candidate_url=str(item.get("url") or ""),
+                        )
+                    ]
+                    if not matching_results:
+                        errors.append("exa extract returned no same-domain URL match")
+                        raise MySearchError("exa extract returned no same-domain URL match")
+                    best = max(matching_results, key=lambda r: len(r.get("content") or ""))
                     content = (best.get("content") or "").strip()
                     if content and len(content) >= 100:
+                        actual_url = str(best.get("url") or "").strip() or url
                         exa_result = {
                             "provider": "exa",
                             "transport": exa_extract.get("transport", ""),
-                            "url": url,
+                            "url": actual_url,
                             "content": content,
-                            "metadata": {"exa_url": best.get("url", "")},
+                            "metadata": {
+                                "requested_url": url,
+                                "exa_url": actual_url,
+                            },
                         }
                         issue = self._extract_quality_issue(exa_result)
                         if issue is None:
@@ -1962,6 +2016,13 @@ class MySearchClient:
             social_exc = research_errors.get("social")
             if social_exc is not None:
                 social_error = str(social_exc)
+            elif self._is_social_unavailable_result(social):
+                social_error = str(
+                    (social or {}).get("summary")
+                    or ((social or {}).get("fallback") or {}).get("reason")
+                    or "social search unavailable"
+                )
+                social = None
 
         web_provider = web_search.get("provider", "")
         social_provider = social.get("provider", "") if social else ""
@@ -5957,7 +6018,9 @@ class MySearchClient:
         if "x" in sources:
             return False
         if mode == "news" or intent in {"news", "status"}:
-            return False
+            return strategy in {"verify", "deep"} and self._provider_is_live_ok(
+                self.config.tavily
+            ) and self._provider_is_live_ok(self.config.firecrawl)
         if mode == "pdf":
             return strategy in {"verify", "deep"} and self._provider_is_live_ok(
                 self.config.tavily
@@ -8562,6 +8625,8 @@ class MySearchClient:
             "query": query,
             "limit": max_results,
         }
+        if requested_news:
+            payload["sources"] = ["news", "web"]
         if search_categories:
             payload["categories"] = [{"type": item} for item in search_categories]
         tbs = self._build_firecrawl_tbs(from_date, to_date)
@@ -10636,6 +10701,39 @@ class MySearchClient:
         normalized["url"] = self._canonical_result_url(str(item.get("url") or ""))
         return normalized
 
+    def _extract_candidate_matches_requested_url(
+        self,
+        *,
+        requested_url: str,
+        candidate_url: str,
+    ) -> bool:
+        requested = self._canonical_result_url(requested_url)
+        candidate = self._canonical_result_url(candidate_url)
+        if not requested or not candidate:
+            return False
+        if requested.rstrip("/") == candidate.rstrip("/"):
+            return True
+        requested_host = self._clean_hostname(urlparse(requested).netloc)
+        candidate_host = self._clean_hostname(urlparse(candidate).netloc)
+        if not requested_host or not candidate_host:
+            return False
+        return self._registered_domain(requested_host) == self._registered_domain(candidate_host)
+
+    @staticmethod
+    def _is_social_unavailable_result(result: dict[str, Any] | None) -> bool:
+        if not result:
+            return False
+        provider = str(result.get("provider") or "")
+        if provider in {"social_unavailable", "social_gateway_unavailable"}:
+            return True
+        fallback = result.get("fallback") or {}
+        if isinstance(fallback, dict) and str(fallback.get("to") or "") in {
+            "social_unavailable",
+            "social_gateway_unavailable",
+        }:
+            return True
+        return False
+
     def _canonical_result_url(self, url: str) -> str:
         raw = (url or "").strip()
         if not raw:
@@ -12065,7 +12163,7 @@ class MySearchClient:
         if mode == "pdf":
             return ["pdf"]
         if mode == "news" or intent in {"news", "status"}:
-            return []
+            return ["news"]
         if intent == "tutorial":
             return []
         if mode in {"docs", "research"} or intent in {"resource", "tutorial"}:

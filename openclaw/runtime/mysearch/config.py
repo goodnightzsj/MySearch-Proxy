@@ -148,9 +148,10 @@ def _get_list(*names: str) -> list[str]:
     return []
 
 
-# r7 A1: registry 已抽到独立子模块 mysearch/grok_registry.py（openclaw 镜像
-# 也复制了一份），避免独立部署的 social_gateway / proxy 通过 from .config import
-# 触发 _bootstrap_runtime_env 副作用。本文件保留 re-export 以维持向后兼容。
+# r7 A1: registry 已抽到独立子模块 mysearch/grok_registry.py，避免独立部署的
+# social_gateway / proxy 通过 from .config import 触发 _bootstrap_runtime_env
+# 副作用（读 ~/.codex/config.toml + .env）。
+# 本文件保留 re-export 以维持向后兼容（tests、historical 调用方）。
 from mysearch.grok_registry import (
     GrokModelSpec,
     _BUILTIN_GROK_MODELS,
@@ -319,7 +320,7 @@ class MySearchConfig:
         )
         return cls(
             server_name=_get_str("MYSEARCH_NAME", "MYSEARCH_SERVER_NAME", default="MySearch"),
-            timeout_seconds=_get_int("MYSEARCH_TIMEOUT_SECONDS", 45),
+            timeout_seconds=max(5, _get_int("MYSEARCH_TIMEOUT_SECONDS", 45)),
             xai_social_timeout_seconds=max(30, _get_int("MYSEARCH_XAI_SOCIAL_TIMEOUT_SECONDS", 120)),
             xai_model=_get_str(
                 "MYSEARCH_XAI_MODEL",
@@ -327,7 +328,7 @@ class MySearchConfig:
             ),
             xai_models=_resolve_grok_models(),
             max_parallel_workers=max(1, _get_int("MYSEARCH_MAX_PARALLEL_WORKERS", 4)),
-            search_cache_ttl_seconds=max(0, _get_int("MYSEARCH_SEARCH_CACHE_TTL_SECONDS", 30)),
+            search_cache_ttl_seconds=max(0, _get_int("MYSEARCH_SEARCH_CACHE_TTL_SECONDS", 120)),
             extract_cache_ttl_seconds=max(0, _get_int("MYSEARCH_EXTRACT_CACHE_TTL_SECONDS", 300)),
             mcp_host=_get_str("MYSEARCH_MCP_HOST", default="127.0.0.1"),
             mcp_port=_get_int("MYSEARCH_MCP_PORT", 8000),

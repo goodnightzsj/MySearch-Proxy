@@ -6,8 +6,7 @@ services:
     ports:
       - "${MYSEARCH_PROXY_PORT:-9874}:9874"
     environment:
-      # r6 C2: 默认 change-me 会被启动告警拦截；生产请显式设置 ADMIN_PASSWORD。
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-change-me}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD to a strong value}
       MYSEARCH_PROXY_DB_PATH: ${MYSEARCH_PROXY_DB_PATH:-/data/proxy.db}
       # r6 C1: 默认空——bootstrap 接口默认 disabled。要启用单容器/双容器自动签发
       # mysearch token，请在 .env 显式设置 MYSEARCH_PROXY_BOOTSTRAP_TOKEN=<32+ 字节随机值>。
@@ -43,7 +42,7 @@ services:
       MYSEARCH_MCP_SSE_PATH: ${MYSEARCH_MCP_SSE_PATH:-/sse}
       MYSEARCH_MCP_STATELESS_HTTP: ${MYSEARCH_MCP_STATELESS_HTTP:-false}
       MYSEARCH_MAX_PARALLEL_WORKERS: ${MYSEARCH_MAX_PARALLEL_WORKERS:-4}
-      MYSEARCH_SEARCH_CACHE_TTL_SECONDS: ${MYSEARCH_SEARCH_CACHE_TTL_SECONDS:-30}
+      MYSEARCH_SEARCH_CACHE_TTL_SECONDS: ${MYSEARCH_SEARCH_CACHE_TTL_SECONDS:-120}
       MYSEARCH_EXTRACT_CACHE_TTL_SECONDS: ${MYSEARCH_EXTRACT_CACHE_TTL_SECONDS:-300}
     entrypoint: ["/app/mysearch/docker-entrypoint.sh"]
     command: ["python", "-m", "mysearch", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8000"]

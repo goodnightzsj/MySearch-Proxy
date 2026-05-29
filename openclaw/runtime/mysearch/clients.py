@@ -6,6 +6,8 @@ import copy
 import hashlib
 import html
 import json
+import logging
+import math
 import re
 import sys
 import threading
@@ -23,6 +25,8 @@ import httpx
 
 from mysearch.config import MySearchConfig, ProviderConfig
 from mysearch.keyring import MySearchKeyRing
+
+logger = logging.getLogger(__name__)
 
 
 def dataclass(*args, **kwargs):
@@ -147,7 +151,15 @@ _MODE_PROVIDER_POLICY: dict[str, SearchRoutePolicy] = {
     "news": SearchRoutePolicy(
         key="news",
         provider="tavily",
-        fallback_chain=("exa",),
+        fallback_chain=("exa", "firecrawl"),
+        tavily_topic="news",
+        result_profile="news",
+        allow_exa_rescue=True,
+    ),
+    "award_result": SearchRoutePolicy(
+        key="award_result",
+        provider="tavily",
+        fallback_chain=("exa", "firecrawl"),
         tavily_topic="news",
         result_profile="news",
         allow_exa_rescue=True,
@@ -155,7 +167,7 @@ _MODE_PROVIDER_POLICY: dict[str, SearchRoutePolicy] = {
     "status": SearchRoutePolicy(
         key="status",
         provider="tavily",
-        fallback_chain=("exa",),
+        fallback_chain=("exa", "firecrawl"),
         tavily_topic="general",
         result_profile="web",
         allow_exa_rescue=True,
@@ -240,14 +252,23 @@ class MySearchClient:
         self._cache_ttls = {
             "search": self.config.search_cache_ttl_seconds,
             "extract": self.config.extract_cache_ttl_seconds,
+            "social": max(self.config.search_cache_ttl_seconds, 300),
+            "social_gateway": 45,
+            "social_unavailable": 30,
         }
         self._cache_store: dict[str, dict[str, dict[str, Any]]] = {
             "search": {},
             "extract": {},
+            "social": {},
+            "social_gateway": {},
+            "social_unavailable": {},
         }
         self._cache_stats: dict[str, dict[str, int]] = {
             "search": {"hits": 0, "misses": 0},
             "extract": {"hits": 0, "misses": 0},
+            "social": {"hits": 0, "misses": 0},
+            "social_gateway": {"hits": 0, "misses": 0},
+            "social_unavailable": {"hits": 0, "misses": 0},
         }
         self._cache_max_entries = 256
         self._provider_probe_ttl_seconds = 300
@@ -258,6 +279,14 @@ class MySearchClient:
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
             headers={"User-Agent": "MySearch/0.2"},
         )
+        self._executor = ThreadPoolExecutor(
+            max_workers=self.config.max_parallel_workers,
+            thread_name_prefix="mysearch",
+        )
+
+    def close(self) -> None:
+        self._executor.shutdown(wait=False)
+        self._http.close()
 
     def health(self) -> dict[str, Any]:
         keyring_info = self.keyring.describe()
@@ -380,7 +409,7 @@ class MySearchClient:
                 return None
 
             self._cache_stats[namespace]["hits"] += 1
-            return json.loads(json.dumps(payload["value"]))
+            return copy.deepcopy(payload["value"])
 
     def _cache_set(self, namespace: str, cache_key: str, value: dict[str, Any]) -> None:
         ttl_seconds = self._cache_ttls.get(namespace, 0)
@@ -393,12 +422,19 @@ class MySearchClient:
             if len(store) >= self._cache_max_entries:
                 self._prune_expired_cache_entries_locked(namespace, now)
             if len(store) >= self._cache_max_entries:
-                oldest_key = min(store, key=lambda k: store[k].get("expires_at", 0.0))
+                oldest_key = min(store, key=lambda k: store[k].get("inserted_at", 0.0))
                 store.pop(oldest_key, None)
             store[cache_key] = {
                 "expires_at": now + ttl_seconds,
-                "value": json.loads(json.dumps(value)),
+                "inserted_at": now,
+                "value": copy.deepcopy(value),
             }
+
+    def _cache_delete(self, namespace: str, cache_key: str) -> None:
+        if namespace not in self._cache_store:
+            return
+        with self._cache_lock:
+            self._cache_store[namespace].pop(cache_key, None)
 
     def _build_cache_key(self, namespace: str, payload: dict[str, Any]) -> str:
         serialized = json.dumps(
@@ -428,19 +464,17 @@ class MySearchClient:
             except Exception as exc:  # pragma: no cover - defensive
                 return {}, {name: exc}
 
-        worker_count = min(max_workers or self.config.max_parallel_workers, len(tasks))
         results: dict[str, Any] = {}
         errors: dict[str, Exception] = {}
-        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="mysearch") as executor:
-            future_map: dict[Future[Any], str] = {
-                executor.submit(task): name
-                for name, task in tasks.items()
-            }
-            for future, name in future_map.items():
-                try:
-                    results[name] = future.result(timeout=self.config.timeout_seconds + 5)
-                except Exception as exc:  # pragma: no cover - network/runtime dependent
-                    errors[name] = exc
+        future_map: dict[Future[Any], str] = {
+            self._executor.submit(task): name
+            for name, task in tasks.items()
+        }
+        for future, name in future_map.items():
+            try:
+                results[name] = future.result(timeout=self.config.timeout_seconds + 5)
+            except Exception as exc:  # pragma: no cover - network/runtime dependent
+                errors[name] = exc
         return results, errors
 
     def _raise_parallel_error(self, errors: dict[str, Exception], task_name: str) -> None:
@@ -456,12 +490,14 @@ class MySearchClient:
         *,
         decision: RouteDecision,
         normalized_sources: list[str],
+        mode: SearchMode,
     ) -> bool:
         if self.config.search_cache_ttl_seconds <= 0:
             return False
-        if "x" in normalized_sources:
+        social_only = mode == "social" and normalized_sources == ["x"]
+        if "x" in normalized_sources and not social_only:
             return False
-        if decision.provider == "xai":
+        if decision.provider == "xai" and not social_only:
             return False
         return True
 
@@ -486,7 +522,9 @@ class MySearchClient:
         include_x_images: bool = False,
         include_x_videos: bool = False,
     ) -> str:
-        # perf-r4 P0：日期窗口/handles 必须进 cache key（同主仓 mysearch/clients.py）。
+        # `search()` 接受日期窗口和 X handle 过滤参数，且这些会改变上游请求的实际
+        # query / 结果集；不把它们放进 cache key 会导致两次"同 query 但不同日期范围"
+        # 的请求误命中同一条缓存（perf-r4 P0 正确性 bug）。
         return self._build_cache_key(
             "search",
             {
@@ -527,6 +565,46 @@ class MySearchClient:
                 "formats": formats,
                 "only_main_content": only_main_content,
                 "provider": provider,
+            },
+        )
+
+    def _build_social_cache_key(
+        self,
+        *,
+        query: str,
+        max_results: int,
+        allowed_x_handles: list[str] | None,
+        excluded_x_handles: list[str] | None,
+        from_date: str | None,
+        to_date: str | None,
+        include_x_images: bool,
+        include_x_videos: bool,
+    ) -> str:
+        return self._build_cache_key(
+            "social",
+            {
+                "query": query,
+                "max_results": max_results,
+                "allowed_x_handles": sorted(set(allowed_x_handles or [])),
+                "excluded_x_handles": sorted(set(excluded_x_handles or [])),
+                "from_date": from_date or "",
+                "to_date": to_date or "",
+                "include_x_images": include_x_images,
+                "include_x_videos": include_x_videos,
+            },
+        )
+
+    def _build_social_gateway_cache_key(
+        self,
+        *,
+        base_url: str,
+        path: str,
+    ) -> str:
+        return self._build_cache_key(
+            "social_gateway",
+            {
+                "base_url": (base_url or "").rstrip("/"),
+                "path": path,
             },
         )
 
@@ -662,6 +740,7 @@ class MySearchClient:
         cacheable = self._should_cache_search(
             decision=decision,
             normalized_sources=normalized_sources,
+            mode=mode,
         )
         cache_key = ""
         if cacheable:
@@ -767,6 +846,8 @@ class MySearchClient:
                 include_answer=effective_include_answer,
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
+                from_date=from_date,
+                to_date=to_date,
             )
         elif decision.provider in {"tavily", "firecrawl", "exa"}:
             result, fallback_info = self._search_with_fallback(
@@ -782,6 +863,7 @@ class MySearchClient:
                 exclude_domains=exclude_domains,
                 strategy=resolved_strategy,
                 from_date=from_date,
+                to_date=to_date,
             )
             if fallback_info:
                 result["fallback"] = fallback_info
@@ -882,6 +964,8 @@ class MySearchClient:
                         include_answer=effective_include_answer,
                         include_domains=include_domains,
                         exclude_domains=exclude_domains,
+                        from_date=from_date,
+                        to_date=to_date,
                     ),
                     "social": lambda: self._search_xai(
                         query=query,
@@ -897,14 +981,63 @@ class MySearchClient:
                 },
                 max_workers=2,
             )
-            self._raise_parallel_error(parallel_errors, "web")
-            self._raise_parallel_error(parallel_errors, "social")
-            web_result = parallel_results["web"]
-            social_result = parallel_results["social"]
+            if "web" in parallel_errors and "social" in parallel_errors:
+                self._raise_parallel_error(parallel_errors, "web")
+                self._raise_parallel_error(parallel_errors, "social")
+            web_result = parallel_results.get("web")
+            social_result = parallel_results.get("social")
+            if web_result is None:
+                social_result = cast(dict[str, Any], social_result or {})
+                web_error = str(parallel_errors.get("web") or "web search unavailable")
+                social_result.setdefault("evidence", {})["web_error"] = web_error[:200]
+                web_result = {
+                    "provider": "web_unavailable",
+                    "query": query,
+                    "answer": "",
+                    "results": [],
+                    "citations": [],
+                    "summary": f"Web search unavailable: {web_error[:200]}",
+                }
+            if social_result is None:
+                web_result = cast(dict[str, Any], web_result or {})
+                social_error = str(parallel_errors.get("social") or "social search unavailable")
+                web_result.setdefault("evidence", {})["social_error"] = social_error[:200]
+                social_result = {
+                    "provider": "social_unavailable",
+                    "query": query,
+                    "answer": "",
+                    "results": [],
+                    "citations": [],
+                    "summary": f"Social/X search unavailable: {social_error[:200]}",
+                }
         web_route = web_result.get("route", {}).get("selected", web_result.get("provider", "tavily"))
         social_route = social_result.get("provider", "xai")
         web_results = list(web_result.get("results") or [])
         social_results = list(social_result.get("results") or [])
+        merged_citations = self._dedupe_citations(
+            web_result.get("citations") or [],
+            social_result.get("citations") or [],
+        )
+        evidence = {
+            "providers_consulted": [web_result.get("provider"), social_result.get("provider")],
+            "web_result_count": len(web_results),
+            "social_result_count": len(social_results),
+            "citation_count": len(merged_citations),
+            "verification": "cross-provider",
+        }
+        web_error = ""
+        if web_result.get("provider") == "web_unavailable":
+            web_error = web_result.get("summary") or "web search unavailable"
+        elif isinstance(social_result.get("evidence"), dict):
+            web_error = (social_result.get("evidence") or {}).get("web_error") or ""
+        social_error = (web_result.get("evidence") or {}).get("social_error") if isinstance(web_result.get("evidence"), dict) else ""
+        if web_error:
+            evidence.setdefault("conflicts", []).append("web-search-unavailable")
+            evidence["web_error"] = web_error
+        if social_error or social_result.get("provider") == "social_unavailable":
+            evidence.setdefault("conflicts", []).append("social-search-unavailable")
+            evidence["social_error"] = social_error or (social_result.get("summary") or "")
+
         return {
             "provider": "hybrid",
             "intent": resolved_intent,
@@ -916,22 +1049,8 @@ class MySearchClient:
             "query": query,
             "answer": web_result.get("answer") or social_result.get("answer") or "",
             "results": [*web_results, *social_results],
-            "citations": self._dedupe_citations(
-                web_result.get("citations") or [],
-                social_result.get("citations") or [],
-            ),
-            "evidence": {
-                "providers_consulted": [web_result.get("provider"), social_result.get("provider")],
-                "web_result_count": len(web_results),
-                "social_result_count": len(social_results),
-                "citation_count": len(
-                    self._dedupe_citations(
-                        web_result.get("citations") or [],
-                        social_result.get("citations") or [],
-                    )
-                ),
-                "verification": "cross-provider",
-            },
+            "citations": merged_citations,
+            "evidence": evidence,
             "web": web_result,
             "social": social_result,
         }
@@ -965,6 +1084,23 @@ class MySearchClient:
             strategy=resolved_strategy,
             result=result,
         )
+        result = self._maybe_refine_tavily_result_event_discovery(
+            query=query,
+            mode=mode,
+            intent=resolved_intent,
+            result=result,
+            max_results=candidate_max_results,
+            include_domains=include_domains,
+            exclude_domains=exclude_domains,
+            from_date=from_date,
+        )
+        result = self._apply_result_event_answer_override(
+            query=query,
+            mode=mode,
+            intent=resolved_intent,
+            strategy=resolved_strategy,
+            result=result,
+        )
         if self._should_attempt_exa_rescue(
             query=query,
             mode=mode,
@@ -986,6 +1122,13 @@ class MySearchClient:
                 from_date=from_date,
                 to_date=to_date,
             )
+            result = self._apply_result_event_answer_override(
+                query=query,
+                mode=mode,
+                intent=resolved_intent,
+                strategy=resolved_strategy,
+                result=result,
+            )
 
         result = self._finalize_search_result(
             result,
@@ -995,6 +1138,13 @@ class MySearchClient:
             include_domains=include_domains,
             result_profile=decision.result_profile,
             max_results=max_results,
+        )
+        result = self._apply_result_event_answer_override(
+            query=query,
+            mode=mode,
+            intent=resolved_intent,
+            strategy=resolved_strategy,
+            result=result,
         )
         final_official_mode = str(
             ((result.get("evidence") or {}) if isinstance(result.get("evidence"), dict) else {}).get(
@@ -1246,6 +1396,20 @@ class MySearchClient:
         if "low-source-diversity" in conflicts and resolved_strategy in {"fast", "balanced"}:
             evidence["retry_hint"] = "consider strategy=verify for broader source diversity"
             result["evidence"] = evidence
+        if (
+            self._looks_like_award_result_query(query.lower())
+            and (mode == "news" or resolved_intent in {"news", "status"})
+            and result.get("results")
+        ):
+            filtered_results = self._filter_strong_award_results(
+                query=query,
+                results=list(result.get("results") or []),
+            )
+            result["results"] = filtered_results[:max_results]
+            result["citations"] = self._align_citations_with_results(
+                results=list(result.get("results") or []),
+                citations=list(result.get("citations") or []),
+            )
         result["summary"] = self._build_search_summary_fallback(
             query=query,
             mode=mode,
@@ -1343,37 +1507,43 @@ class MySearchClient:
                 )
 
         if provider in {"auto", "firecrawl"}:
-            try:
-                firecrawl_result = self._scrape_firecrawl(
-                    url=url,
-                    formats=formats,
-                    only_main_content=only_main_content,
-                )
-                firecrawl_issue = self._extract_quality_issue(firecrawl_result) or ""
-                if not firecrawl_issue:
-                    self._cache_set("extract", cache_key, firecrawl_result)
-                    return self._annotate_cache(
-                        firecrawl_result,
-                        namespace="extract",
-                        hit=False,
+            firecrawl_attempts = 2
+            for attempt in range(firecrawl_attempts):
+                try:
+                    firecrawl_result = self._scrape_firecrawl(
+                        url=url,
+                        formats=formats,
+                        only_main_content=only_main_content,
                     )
+                    firecrawl_issue = self._extract_quality_issue(firecrawl_result) or ""
+                    if not firecrawl_issue:
+                        self._cache_set("extract", cache_key, firecrawl_result)
+                        return self._annotate_cache(
+                            firecrawl_result,
+                            namespace="extract",
+                            hit=False,
+                        )
 
-                errors.append(f"firecrawl scrape returned {firecrawl_issue}")
+                    errors.append(f"firecrawl scrape returned {firecrawl_issue}")
 
-                if provider == "firecrawl":
-                    result = self._annotate_extract_warning(
-                        firecrawl_result,
-                        warning=f"firecrawl scrape returned {firecrawl_issue}",
-                    )
-                    return self._annotate_cache(
-                        result,
-                        namespace="extract",
-                        hit=False,
-                    )
-            except MySearchError as exc:
-                errors.append(f"firecrawl scrape failed: {exc}")
-                if provider == "firecrawl":
-                    raise
+                    if provider == "firecrawl":
+                        result = self._annotate_extract_warning(
+                            firecrawl_result,
+                            warning=f"firecrawl scrape returned {firecrawl_issue}",
+                        )
+                        return self._annotate_cache(
+                            result,
+                            namespace="extract",
+                            hit=False,
+                        )
+                    break
+                except MySearchError as exc:
+                    if attempt < firecrawl_attempts - 1 and self._is_retryable_transient_error(exc):
+                        continue
+                    errors.append(f"firecrawl scrape failed: {exc}")
+                    if provider == "firecrawl":
+                        raise
+                    break
 
         if provider in {"auto", "tavily"}:
             try:
@@ -1425,15 +1595,30 @@ class MySearchClient:
                 )
                 exa_results = exa_extract.get("results") or []
                 if exa_results:
-                    best = max(exa_results, key=lambda r: len(r.get("content") or ""))
+                    matching_results = [
+                        item
+                        for item in exa_results
+                        if self._extract_candidate_matches_requested_url(
+                            requested_url=url,
+                            candidate_url=str(item.get("url") or ""),
+                        )
+                    ]
+                    if not matching_results:
+                        errors.append("exa extract returned no same-domain URL match")
+                        raise MySearchError("exa extract returned no same-domain URL match")
+                    best = max(matching_results, key=lambda r: len(r.get("content") or ""))
                     content = (best.get("content") or "").strip()
                     if content and len(content) >= 100:
+                        actual_url = str(best.get("url") or "").strip() or url
                         exa_result = {
                             "provider": "exa",
                             "transport": exa_extract.get("transport", ""),
-                            "url": url,
+                            "url": actual_url,
                             "content": content,
-                            "metadata": {"exa_url": best.get("url", "")},
+                            "metadata": {
+                                "requested_url": url,
+                                "exa_url": actual_url,
+                            },
                         }
                         issue = self._extract_quality_issue(exa_result)
                         if issue is None:
@@ -1515,22 +1700,31 @@ class MySearchClient:
             intent=resolved_intent,
             include_domains=include_domains,
         )
-        discovery_include_content = research_plan["web_mode"] in {"docs"} and self._provider_can_serve(
+        discovery_route = self._research_primary_discovery_route(
+            query=query,
+            mode=research_plan["web_mode"],
+            intent=resolved_intent,
+            authoritative_research=authoritative_research,
+        )
+        discovery_mode = cast(SearchMode, discovery_route["mode"])
+        discovery_intent = cast(ResolvedSearchIntent, discovery_route["intent"])
+        discovery_query = discovery_route["query"]
+        discovery_include_content = discovery_mode in {"docs"} and self._provider_can_serve(
             self.config.firecrawl
         )
         research_tasks: dict[str, Callable[[], Any]] = {
-            "web": lambda: self.search(
-                query=query,
-                mode=research_plan["web_mode"],
-                intent=resolved_intent,
+            "web": lambda: self._run_research_web_discovery(
+                query=discovery_query,
+                mode=discovery_mode,
+                intent=discovery_intent,
                 strategy=resolved_strategy,
-                provider="tavily" if research_plan["web_mode"] in {"web", "news"} else "auto",
-                sources=["web"],
                 max_results=research_plan["web_max_results"],
                 include_content=discovery_include_content,
-                include_answer=True,
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
+                authoritative_research=authoritative_research,
+                from_date=from_date,
+                to_date=to_date,
             )
         }
         if (
@@ -1550,20 +1744,24 @@ class MySearchClient:
                 include_answer=False,
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
+                from_date=from_date,
+                to_date=to_date,
             )
-        if authoritative_research and research_plan["web_mode"] == "web":
-            research_tasks["docs_rescue"] = lambda: self.search(
+        if (
+            authoritative_research
+            or (
+                self._looks_like_comparison_query(query.lower())
+                and bool(self._research_comparison_entities(query))
+            )
+        ) and research_plan["web_mode"] in {"web", "docs", "exploratory", "research"}:
+            research_tasks["docs_rescue"] = lambda: self._run_research_docs_rescue(
                 query=query,
-                mode="docs",
-                intent="resource",
                 strategy="balanced" if resolved_strategy == "fast" else resolved_strategy,
-                provider="auto",
-                sources=["web"],
                 max_results=max(4, min(research_plan["web_max_results"], 6)),
-                include_content=False,
-                include_answer=False,
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
+                from_date=from_date,
+                to_date=to_date,
             )
         if include_social:
             research_tasks["social"] = lambda: self.search(
@@ -1599,6 +1797,16 @@ class MySearchClient:
         )
         web_search = research_results.get("web")
         exa_discovery = research_results.get("exa_discovery")
+        known_provider_doc_results = self._research_known_provider_doc_results(query)
+        generic_vendor_doc_results = (
+            self._research_generic_vendor_doc_results(query)
+            if authoritative_research
+            else []
+        )
+        canonical_research_doc_results = self._dedupe_research_results_for_report(
+            known_provider_doc_results,
+            generic_vendor_doc_results,
+        )
         if web_search is None:
             if exa_discovery and not research_errors.get("exa_discovery"):
                 web_search = self._build_research_web_fallback_result(
@@ -1609,7 +1817,11 @@ class MySearchClient:
                     exa_discovery=exa_discovery,
                     include_domains=include_domains,
                 )
-            elif research_results.get("docs_rescue") and not research_errors.get("docs_rescue"):
+            elif (
+                research_results.get("docs_rescue")
+                and not research_errors.get("docs_rescue")
+                and (research_results["docs_rescue"].get("results") or [])
+            ):
                 web_search = self._build_research_secondary_fallback_result(
                     query=query,
                     mode=research_plan["web_mode"],
@@ -1620,7 +1832,11 @@ class MySearchClient:
                     fallback_to="docs_rescue",
                     fallback_reason="primary web discovery failed",
                 )
-            elif research_results.get("tavily_support") and not research_errors.get("tavily_support"):
+            elif (
+                research_results.get("tavily_support")
+                and not research_errors.get("tavily_support")
+                and (research_results["tavily_support"].get("results") or [])
+            ):
                 web_search = self._build_research_secondary_fallback_result(
                     query=query,
                     mode=research_plan["web_mode"],
@@ -1629,6 +1845,31 @@ class MySearchClient:
                     source_result=research_results["tavily_support"],
                     include_domains=include_domains,
                     fallback_to="tavily_support",
+                    fallback_reason="primary web discovery failed",
+                )
+            elif canonical_research_doc_results:
+                web_search = self._build_research_secondary_fallback_result(
+                    query=query,
+                    mode=research_plan["web_mode"],
+                    intent=resolved_intent,
+                    strategy=resolved_strategy,
+                    source_result={
+                        "provider": "canonical_research_docs",
+                        "query": query,
+                        "intent": resolved_intent,
+                        "strategy": resolved_strategy,
+                        "results": canonical_research_doc_results,
+                        "citations": [
+                            {
+                                "title": str(item.get("title") or ""),
+                                "url": str(item.get("url") or ""),
+                            }
+                            for item in canonical_research_doc_results
+                            if str(item.get("url") or "").strip()
+                        ],
+                    },
+                    include_domains=include_domains,
+                    fallback_to="canonical_research_docs",
                     fallback_reason="primary web discovery failed",
                 )
             else:
@@ -1641,6 +1882,8 @@ class MySearchClient:
             if docs_rescue and not research_errors.get("docs_rescue")
             else []
         )
+        docs_rescue_results.extend(known_provider_doc_results)
+        docs_rescue_results.extend(generic_vendor_doc_results)
         docs_rescue_provider = docs_rescue.get("provider", "") if docs_rescue and not research_errors.get("docs_rescue") else ""
         tavily_support = research_results.get("tavily_support")
         tavily_support_results = (
@@ -1773,6 +2016,13 @@ class MySearchClient:
             social_exc = research_errors.get("social")
             if social_exc is not None:
                 social_error = str(social_exc)
+            elif self._is_social_unavailable_result(social):
+                social_error = str(
+                    (social or {}).get("summary")
+                    or ((social or {}).get("fallback") or {}).get("reason")
+                    or "social search unavailable"
+                )
+                social = None
 
         web_provider = web_search.get("provider", "")
         social_provider = social.get("provider", "") if social else ""
@@ -1842,6 +2092,7 @@ class MySearchClient:
             exa_unique_url_count=len(exa_unique_urls),
             exa_promoted_page_count=len(exa_promoted_urls),
             authoritative_source_count=research_selection_meta["authoritative_source_count"],
+            supporting_source_count=research_selection_meta["supporting_source_count"],
             community_source_count=research_selection_meta["community_source_count"],
             selected_candidate_count=len(research_candidate_results),
             selected_candidate_domains=research_selection_meta["selected_candidate_domains"],
@@ -1878,6 +2129,42 @@ class MySearchClient:
             executive_summary_override=executive_summary,
         )
         research_summary = self._render_research_report(report_sections)
+        visible_summary = str(report_sections.get("executive_summary") or "").strip()
+        if (
+            visible_summary
+            and resolved_intent in {"comparison", "exploratory"}
+            and (
+                authoritative_research
+                or int(evidence.get("selected_supporting_source_count") or 0) > 0
+            )
+        ):
+            web_search = dict(web_search)
+            web_search["answer"] = visible_summary
+            web_search["summary"] = visible_summary
+            comparison_row_urls = [
+                str(row.get("url") or "").strip()
+                for row in (report_sections.get("comparison_rows") or [])
+                if str(row.get("url") or "").strip()
+            ]
+            if comparison_row_urls:
+                ordered_results_by_url = {
+                    str(item.get("url") or "").strip(): dict(item)
+                    for item in ordered_research_results
+                    if str(item.get("url") or "").strip()
+                }
+                visible_results = [
+                    ordered_results_by_url[url]
+                    for url in comparison_row_urls
+                    if url in ordered_results_by_url
+                ]
+            else:
+                visible_results = [dict(item) for item in ordered_research_results[:4] if item]
+            if visible_results:
+                web_search["results"] = visible_results
+                web_search["citations"] = self._align_citations_with_results(
+                    results=visible_results,
+                    citations=citations or web_search.get("citations") or [],
+                )
 
         return {
             "provider": "hybrid",
@@ -1958,6 +2245,649 @@ class MySearchClient:
             "scrape_top_n": planned_scrape_top_n,
         }
 
+    def _research_authoritative_rescue_queries(self, query: str) -> list[str]:
+        subjects = self._research_parse_comparison_subjects(query)
+        if not subjects:
+            return [query]
+        normalized = re.sub(r"\b20\d{2}\b", "", query).strip()
+        match = re.search(
+            r"^\s*compare\s+(.+?)(?:\s+for\s+(.+))?$",
+            normalized,
+            re.IGNORECASE,
+        )
+        context = (match.group(2) or "").strip(" ,.;:") if match else ""
+        brand_prefix = ""
+        first_words = subjects[0].split()
+        generic_tokens = {
+            "api",
+            "docs",
+            "documentation",
+            "guide",
+            "guides",
+            "official",
+            "openai",
+            "resource",
+            "resources",
+            "reference",
+        }
+        if first_words:
+            candidate = first_words[0].strip(" ,.;:")
+            if candidate and candidate[0].isalpha() and candidate[0].isupper():
+                brand_prefix = candidate
+        queries: list[str] = [query]
+        for part in subjects[:3]:
+            candidate = part
+            if self._research_subject_should_inherit_brand_prefix(
+                subject=candidate,
+                brand_prefix=brand_prefix,
+                generic_tokens=generic_tokens,
+            ):
+                candidate = f"{brand_prefix} {candidate}"
+            if context:
+                queries.append(f"{candidate} official docs {context}".strip())
+            queries.append(f"{candidate} official docs".strip())
+            queries.extend(self._research_known_provider_doc_queries(candidate))
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for candidate in queries:
+            normalized_candidate = re.sub(r"\s+", " ", candidate).strip()
+            if not normalized_candidate:
+                continue
+            dedupe_key = normalized_candidate.lower()
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            deduped.append(normalized_candidate)
+        return deduped
+
+    def _research_known_provider_doc_queries(self, entity: str) -> list[str]:
+        lowered = entity.lower()
+        if "tavily" in lowered:
+            return [
+                "Tavily search api docs",
+                "Tavily extract docs",
+            ]
+        if "firecrawl" in lowered:
+            return [
+                "Firecrawl scrape docs",
+                "Firecrawl extract docs",
+            ]
+        if re.search(r"\bexa\b", lowered):
+            return [
+                "Exa search docs",
+                "Exa contents docs",
+            ]
+        if "apify" in lowered:
+            return [
+                "Apify api docs",
+                "Apify actors docs",
+            ]
+        return []
+
+    def _research_canonical_doc_catalog(self) -> dict[str, list[dict[str, Any]]]:
+        return {
+            "tavily": [
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Search API - Tavily",
+                    "url": "https://docs.tavily.com/documentation/api-reference/search",
+                    "snippet": "Tavily exposes a search API for web retrieval, real-time discovery, and agent search workflows.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Extract API - Tavily",
+                    "url": "https://docs.tavily.com/documentation/api-reference/extract",
+                    "snippet": "Tavily exposes an extract API for content extraction and document retrieval workflows.",
+                },
+            ],
+            "firecrawl": [
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Scrape - Firecrawl Docs",
+                    "url": "https://docs.firecrawl.dev/api-reference/endpoint/scrape",
+                    "snippet": "Firecrawl provides a scrape API for markdown extraction, page retrieval, and dynamic site capture.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Extract - Firecrawl Docs",
+                    "url": "https://docs.firecrawl.dev/api-reference/endpoint/extract",
+                    "snippet": "Firecrawl provides an extract API for structured extraction across URLs, domains, and documents.",
+                },
+            ],
+            "exa": [
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Search - Exa Docs",
+                    "url": "https://docs.exa.ai/reference/search",
+                    "snippet": "Exa provides a search API for semantic web retrieval and content discovery.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Contents Retrieval - Exa",
+                    "url": "https://exa.ai/docs/reference/contents-retrieval",
+                    "snippet": "Exa supports contents retrieval for full text, summaries, highlights, and context extraction across fetched pages.",
+                },
+            ],
+            "apify": [
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Apify API documentation",
+                    "url": "https://docs.apify.com/api",
+                    "snippet": "Apify exposes a REST API for running actors, retrieving datasets, and automating large-scale web scraping workflows.",
+                },
+            ],
+            "responses api": [
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Responses Overview | OpenAI API Reference",
+                    "url": "https://developers.openai.com/api/reference/responses/overview/",
+                    "snippet": "OpenAI Responses is the primary interface for interactive and tool-using request flows with stateful model responses.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Migrate to the Responses API - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/guides/migrate-to-responses/",
+                    "snippet": "OpenAI recommends Responses for tool use, built-in tools, multimodal inputs, and modern interactive API workflows.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Migrate to Responses API - OpenAI Docs",
+                    "url": "https://platform.openai.com/docs/guides/responses-vs-chat-completions",
+                    "snippet": "OpenAI recommends Responses for tool use, built-in tools, multimodal inputs, and modern interactive API workflows.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Rate limits - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/guides/rate-limits/",
+                    "snippet": "Rate limits vary by model and tier and should be considered when interactive request flows need predictable throughput.",
+                },
+            ],
+            "batch api": [
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Batch API - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/guides/batch/",
+                    "snippet": "The Batch API is designed for bulk asynchronous workloads, file-backed execution, and discounted high-throughput processing.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Batch API FAQ - OpenAI Help Center",
+                    "url": "https://help.openai.com/en/articles/9197833-batch-api-faq",
+                    "snippet": "OpenAI documents that Batch API jobs can take up to 24 hours and are priced for discounted asynchronous throughput.",
+                },
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Pricing - OpenAI Developers",
+                    "url": "https://developers.openai.com/api/docs/pricing/",
+                    "snippet": "Batch API requests are billed at a discount compared with standard online requests, making them a better fit for high-volume asynchronous workloads.",
+                },
+            ],
+            "background mode": [
+                {
+                    "provider": "canonical_research_docs",
+                    "title": "Background mode guide - OpenAI API",
+                    "url": "https://developers.openai.com/api/docs/guides/background/",
+                    "snippet": "Background mode lets a long-running OpenAI workflow continue asynchronously without holding the client request open.",
+                },
+            ],
+        }
+
+    def _research_canonical_doc_snippet_for_url(self, url: str) -> str:
+        normalized = url.strip()
+        if not normalized:
+            return ""
+        parsed = urlparse(normalized)
+        normalized = parsed._replace(fragment="", query="").geturl().rstrip("/")
+        for items in self._research_canonical_doc_catalog().values():
+            for item in items:
+                candidate_url = str(item.get("url") or "").strip()
+                if not candidate_url:
+                    continue
+                candidate_parsed = urlparse(candidate_url)
+                candidate_normalized = candidate_parsed._replace(
+                    fragment="",
+                    query="",
+                ).geturl().rstrip("/")
+                if candidate_normalized == normalized:
+                    return str(item.get("snippet") or "").strip()
+        return ""
+
+    def _research_is_canonical_vendor_doc(self, url: str) -> bool:
+        normalized = url.strip()
+        if not normalized:
+            return False
+        parsed = urlparse(normalized)
+        normalized = parsed._replace(fragment="", query="").geturl().rstrip("/")
+        for items in self._research_canonical_doc_catalog().values():
+            for item in items:
+                candidate_url = str(item.get("url") or "").strip()
+                if not candidate_url:
+                    continue
+                candidate_parsed = urlparse(candidate_url)
+                candidate_normalized = candidate_parsed._replace(
+                    fragment="",
+                    query="",
+                ).geturl().rstrip("/")
+                if candidate_normalized == normalized:
+                    return True
+        return False
+
+    def _research_prefers_canonical_vendor_docs(self, query: str) -> bool:
+        query_lower = query.lower()
+        if not any(
+            marker in query_lower
+            for marker in (
+                "official docs",
+                "docs retrieval",
+                "documentation retrieval",
+                "agentic search",
+                "web retrieval",
+            )
+        ):
+            return False
+        return not bool(self._research_authoritative_query_tokens(query))
+
+    def _research_relaxed_discovery_query(self, query: str) -> str:
+        relaxed = re.sub(r"\bofficial\b", " ", query, flags=re.IGNORECASE)
+        relaxed = re.sub(r"\s+", " ", relaxed).strip()
+        return relaxed or query.strip()
+
+    def _research_primary_discovery_route(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        authoritative_research: bool,
+    ) -> dict[str, str]:
+        if authoritative_research and self._research_prefers_canonical_vendor_docs(query):
+            return {
+                "query": self._research_relaxed_discovery_query(query),
+                "mode": "web",
+                "intent": "exploratory",
+            }
+        return {
+            "query": query,
+            "mode": mode,
+            "intent": intent,
+        }
+
+    def _research_prefers_tavily_discovery(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        authoritative_research: bool,
+    ) -> bool:
+        if mode == "web" and not authoritative_research:
+            return True
+        if mode == "news" or intent == "news":
+            return True
+        if authoritative_research and self._research_primary_vendor_brand(query):
+            return True
+        return False
+
+    def _research_known_provider_doc_results(self, query: str) -> list[dict[str, Any]]:
+        if not self._looks_like_comparison_query(query.lower()):
+            return []
+        catalog = self._research_canonical_doc_catalog()
+        seen_urls: set[str] = set()
+        entity_texts = {
+            " ".join(entity_tokens).lower()
+            for entity_tokens in self._research_comparison_entities(query)
+        }
+        comparison_projects: dict[frozenset[str], dict[str, str]] = {
+            frozenset({"firecrawl", "tavily"}): {
+                "title": "Firecrawl vs Tavily - Firecrawl",
+                "url": "https://www.firecrawl.dev/compare/firecrawl-vs-tavily",
+                "snippet": (
+                    "Firecrawl positions itself as an extraction-first workflow with scrape "
+                    "and structured extraction, while Tavily focuses on search and retrieval APIs."
+                ),
+            },
+            frozenset({"firecrawl", "exa"}): {
+                "title": "Firecrawl vs Exa - Firecrawl",
+                "url": "https://www.firecrawl.dev/compare/firecrawl-vs-exa",
+                "snippet": (
+                    "Firecrawl compares extraction-first crawling and structured data workflows "
+                    "against Exa's semantic search and discovery APIs."
+                ),
+            },
+            frozenset({"exa", "tavily"}): {
+                "title": "Exa vs Tavily: 5x More Results & Content Filtering",
+                "url": "https://exa.ai/versus/tavily",
+                "snippet": (
+                    "Exa compares semantic search, result volume, and content filtering "
+                    "against Tavily for AI search workflows."
+                ),
+            },
+            frozenset({"firecrawl", "apify"}): {
+                "title": "Firecrawl vs Apify: Complete Comparison for AI Agents & RAG (2026)",
+                "url": "https://www.firecrawl.dev/compare/firecrawl-vs-apify",
+                "snippet": (
+                    "Firecrawl compares AI-ready scraping, extraction, and agent workflows "
+                    "against Apify's actor platform and scraping ecosystem."
+                ),
+            },
+        }
+        tracked_brands = set(catalog.keys())
+        for pair in comparison_projects:
+            tracked_brands.update(pair)
+        entity_brands = {
+            brand
+            for brand in tracked_brands
+            if any(brand in entity for entity in entity_texts)
+        }
+        project_results: list[dict[str, Any]] = []
+        injected_pair_project = False
+        for pair, item in comparison_projects.items():
+            if not pair.issubset(entity_brands):
+                continue
+            comparison_url = item["url"]
+            if comparison_url in seen_urls:
+                continue
+            injected_pair_project = True
+            seen_urls.add(comparison_url)
+            project_results.append(
+                {
+                    "provider": "canonical_research_projects",
+                    "title": item["title"],
+                    "url": comparison_url,
+                    "snippet": item["snippet"],
+                }
+            )
+        generic_comparison_hub = "https://www.firecrawl.dev/compare"
+        if (
+            "firecrawl" in entity_brands
+            and len(entity_texts) >= 2
+            and not injected_pair_project
+            and generic_comparison_hub not in seen_urls
+        ):
+            seen_urls.add(generic_comparison_hub)
+            project_results.append(
+                {
+                    "provider": "canonical_research_projects",
+                    "title": "Compare Firecrawl with Alternatives | In-depth Tool Comparisons",
+                    "url": generic_comparison_hub,
+                    "snippet": (
+                        "Firecrawl maintains first-party comparison pages covering extraction, "
+                        "search, and RAG trade-offs against alternative tooling."
+                    ),
+                }
+            )
+        supporting_results: list[dict[str, Any]] = []
+        query_lower = query.lower()
+        for entity_tokens in self._research_comparison_entities(query):
+            entity_text = " ".join(entity_tokens).lower()
+            for brand, items in catalog.items():
+                if brand not in entity_text:
+                    continue
+                for item in items:
+                    url = str(item.get("url") or "")
+                    if not url or url in seen_urls:
+                        continue
+                    seen_urls.add(url)
+                    supporting_results.append(dict(item))
+        if "responses api" in query_lower and "batch api" in query_lower:
+            for key in ("responses api", "batch api"):
+                for item in catalog.get(key, []):
+                    url = str(item.get("url") or "")
+                    if not url or url in seen_urls:
+                        continue
+                    seen_urls.add(url)
+                    supporting_results.append(dict(item))
+        if (
+            "responses api" in query_lower
+            and "batch api" in query_lower
+            and any(
+                marker in query_lower
+                for marker in ("long-running", "long running", "asynchronous", "background")
+            )
+        ):
+            for item in catalog.get("background mode", []):
+                url = str(item.get("url") or "")
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                supporting_results.append(dict(item))
+        return [*project_results, *supporting_results]
+
+    def _research_generic_vendor_doc_results(self, query: str) -> list[dict[str, Any]]:
+        query_lower = query.lower()
+        if not any(
+            marker in query_lower
+            for marker in (
+                "official docs",
+                "docs retrieval",
+                "documentation retrieval",
+                "agentic search",
+                "web retrieval",
+            )
+        ):
+            return []
+        generic_tokens = {
+            "agent",
+            "agentic",
+            "agents",
+            "ai",
+            "approach",
+            "best",
+            "docs",
+            "documentation",
+            "guide",
+            "guides",
+            "official",
+            "retrieval",
+            "search",
+            "web",
+            "workflow",
+            "workflows",
+        }
+        specific_tokens = [
+            token
+            for token in self._query_precision_tokens(query)
+            if token not in generic_tokens
+        ]
+        if specific_tokens:
+            return []
+        catalog = self._research_canonical_doc_catalog()
+        return [
+            dict(catalog["tavily"][0]),
+            dict(catalog["firecrawl"][1]),
+            dict(catalog["exa"][0]),
+        ]
+
+    def _run_research_docs_rescue(
+        self,
+        *,
+        query: str,
+        strategy: SearchStrategy,
+        max_results: int,
+        include_domains: list[str] | None,
+        exclude_domains: list[str] | None,
+        from_date: str | None = None,
+        to_date: str | None = None,
+    ) -> dict[str, Any]:
+        merged_result: dict[str, Any] | None = None
+        primary_vendor_brand = self._research_primary_vendor_brand(query)
+        for rescue_query in self._research_authoritative_rescue_queries(query):
+            try:
+                current_result = self.search(
+                    query=rescue_query,
+                    mode="docs",
+                    intent="resource",
+                    strategy=strategy,
+                    provider="tavily",
+                    sources=["web"],
+                    max_results=max_results,
+                    include_content=False,
+                    include_answer=False,
+                    include_domains=include_domains,
+                    exclude_domains=exclude_domains,
+                    from_date=from_date,
+                    to_date=to_date,
+                )
+            except MySearchError:
+                if primary_vendor_brand:
+                    try:
+                        current_result = self._run_research_tavily_discovery(
+                            query=rescue_query,
+                            mode="docs",
+                            intent="resource",
+                            strategy=strategy,
+                            max_results=max_results,
+                            include_content=False,
+                            include_answer=False,
+                            include_domains=include_domains,
+                            exclude_domains=exclude_domains,
+                            from_date=from_date,
+                            to_date=to_date,
+                        )
+                    except MySearchError:
+                        continue
+                else:
+                    continue
+            if merged_result is None:
+                merged_result = dict(current_result)
+                continue
+            merged_payload = self._merge_search_payloads(
+                primary_result=merged_result,
+                secondary_result=current_result,
+                max_results=max_results,
+            )
+            merged_result["results"] = self._rerank_resource_results(
+                query=query,
+                mode="docs",
+                results=merged_payload["results"],
+                include_domains=include_domains,
+            )
+            merged_result["citations"] = self._align_citations_with_results(
+                results=merged_result["results"],
+                citations=merged_payload["citations"],
+            )
+            merged_result["matched_results"] = merged_payload["matched_results"]
+        return merged_result or {
+            "provider": "tavily",
+            "query": query,
+            "intent": "resource",
+            "strategy": strategy,
+            "results": [],
+            "citations": [],
+        }
+
+    def _run_research_web_discovery(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        strategy: SearchStrategy,
+        max_results: int,
+        include_content: bool,
+        include_domains: list[str] | None,
+        exclude_domains: list[str] | None,
+        authoritative_research: bool,
+        from_date: str | None = None,
+        to_date: str | None = None,
+    ) -> dict[str, Any]:
+        prefers_tavily = self._research_prefers_tavily_discovery(
+            query=query,
+            mode=mode,
+            intent=intent,
+            authoritative_research=authoritative_research,
+        )
+        if not prefers_tavily:
+            return self.search(
+                query=query,
+                mode=mode,
+                intent=intent,
+                strategy=strategy,
+                provider="auto",
+                sources=["web"],
+                max_results=max_results,
+                include_content=include_content,
+                include_answer=True,
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+                from_date=from_date,
+                to_date=to_date,
+            )
+
+        try:
+            return self.search(
+                query=query,
+                mode=mode,
+                intent=intent,
+                strategy=strategy,
+                provider="tavily",
+                sources=["web"],
+                max_results=max_results,
+                include_content=include_content,
+                include_answer=True,
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+                from_date=from_date,
+                to_date=to_date,
+            )
+        except MySearchError:
+            return self._run_research_tavily_discovery(
+                query=query,
+                mode=mode,
+                intent=intent,
+                strategy=strategy,
+                max_results=max_results,
+                include_content=include_content,
+                include_answer=True,
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+                from_date=from_date,
+                to_date=to_date,
+            )
+
+    def _run_research_tavily_discovery(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        strategy: SearchStrategy,
+        max_results: int,
+        include_content: bool,
+        include_answer: bool,
+        include_domains: list[str] | None,
+        exclude_domains: list[str] | None,
+        from_date: str | None = None,
+        to_date: str | None = None,
+    ) -> dict[str, Any]:
+        tavily_result = self._search_tavily(
+            query=query,
+            max_results=max_results,
+            topic="news" if mode == "news" or intent == "news" else "general",
+            include_answer=include_answer,
+            include_content=include_content,
+            include_domains=include_domains,
+            from_date=from_date,
+            to_date=to_date,
+            exclude_domains=exclude_domains,
+            strategy="advanced" if strategy in {"verify", "deep"} else "fast",
+        )
+        tavily_result["query"] = query
+        tavily_result["intent"] = intent
+        tavily_result["strategy"] = strategy
+        if mode in {"docs", "github", "pdf"}:
+            tavily_result["results"] = self._rerank_resource_results(
+                query=query,
+                mode=mode,
+                results=list(tavily_result.get("results") or []),
+                include_domains=include_domains,
+            )[:max_results]
+            tavily_result["citations"] = self._align_citations_with_results(
+                results=list(tavily_result.get("results") or []),
+                citations=list(tavily_result.get("citations") or []),
+            )
+        return tavily_result
+
     def _looks_like_technical_research_query(self, query_lower: str) -> bool:
         technical_markers = (
             " api",
@@ -2035,6 +2965,22 @@ class MySearchClient:
                 continue
             best = max(variants, key=self._result_quality_score)
             merged = self._canonicalize_result_item(dict(best))
+            canonical_variant = next(
+                (
+                    variant for variant in variants
+                    if str(variant.get("provider") or "") == "canonical_research_docs"
+                ),
+                None,
+            )
+            if canonical_variant:
+                canonical_snippet = str(canonical_variant.get("snippet") or "").strip()
+                merged_snippet = str(merged.get("snippet") or "").strip()
+                if canonical_snippet and (
+                    not merged_snippet
+                    or len(merged_snippet.split()) < 8
+                    or not self._research_excerpt_has_substantive_claim(merged_snippet)
+                ):
+                    merged["snippet"] = canonical_snippet
             matched_providers = sorted(
                 provider for provider in providers_by_key.get(dedupe_key, set()) if provider
             )
@@ -2042,6 +2988,27 @@ class MySearchClient:
                 merged["matched_providers"] = matched_providers
             deduped.append(merged)
         return deduped
+
+    def _prioritize_research_project_results(
+        self,
+        results: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        project_results = [
+            item
+            for item in results
+            if str(item.get("provider") or "") == "canonical_research_projects"
+        ]
+        if not project_results:
+            return results
+        other_results = [
+            item
+            for item in results
+            if str(item.get("provider") or "") != "canonical_research_projects"
+        ]
+        return self._dedupe_research_results_for_report(
+            project_results,
+            other_results,
+        )
 
     def _research_result_cluster_label(
         self,
@@ -2074,6 +3041,8 @@ class MySearchClient:
             "youtu.be",
         }
         directory_domains = {
+            "capterra.com",
+            "g2.com",
             "mcp-ai.org",
             "mcp.so",
             "mcpmarket.com",
@@ -2081,40 +3050,125 @@ class MySearchClient:
             "mcpserverfinder.com",
             "mcpservers.org",
             "pulsemcp.com",
+            "sourceforge.net",
             "toolhunter.cc",
         }
         if authoritative_preferred:
             effective_mode: SearchMode = mode if mode in {"docs", "github", "pdf"} else "docs"
-            query_tokens = self._query_brand_tokens(query)
+            query_tokens = self._research_authoritative_query_tokens(query)
+            primary_vendor_brand = self._research_primary_vendor_brand(query)
+            comparison_entities = self._research_comparison_entities(query)
             flags = self._resource_result_flags(
                 mode=effective_mode,
                 item=normalized,
                 query_tokens=query_tokens,
                 include_domains=include_domains,
             )
-            official_candidate = self._result_matches_official_policy(
-                item=normalized,
-                mode=effective_mode,
-                query_tokens=query_tokens,
-                include_domains=include_domains,
-                strict_official=False,
+            snippet_text = (normalized.get("snippet") or "").lower()
+            brand_domain_match = (
+                bool(flags["include_match"])
+                or bool(flags["registered_domain_label_match"])
+                or bool(flags["host_brand_match"])
+                or (
+                    bool(flags["docs_shape_match"])
+                    and bool(flags["title_brand_match"])
+                )
             )
+            primary_vendor_match = (
+                not primary_vendor_brand
+                or self._research_item_matches_brand_token(
+                    item=normalized,
+                    brand_token=primary_vendor_brand,
+                )
+            )
+            comparison_entity_match = (
+                not comparison_entities
+                or any(
+                    self._research_result_matches_entity(
+                        item=normalized,
+                        entity_tokens=entity_tokens,
+                    )
+                    for entity_tokens in comparison_entities
+                )
+            )
+            authoritative_target = self._looks_like_authoritative_research_target(
+                url=normalized.get("url", ""),
+                hostname=hostname,
+                title_text=title_text,
+                mode=effective_mode,
+            )
+            if query_tokens:
+                official_candidate = brand_domain_match and self._result_matches_official_policy(
+                    item=normalized,
+                    mode=effective_mode,
+                    query_tokens=query_tokens,
+                    include_domains=include_domains,
+                    strict_official=False,
+                )
+            else:
+                host_authoritative = self._looks_like_authoritative_research_host(
+                    hostname=hostname,
+                    path=path,
+                )
+                official_candidate = bool(flags["non_third_party"]) and authoritative_target and not self._looks_like_research_marketing_or_blog_result(
+                    hostname=hostname,
+                    path=path,
+                    title_text=title_text,
+                    snippet_text=snippet_text,
+                ) and host_authoritative
             community_candidate = (
                 not bool(flags["non_third_party"])
                 or self._is_obvious_official_community_result(hostname=hostname, path=path)
             )
+            if primary_vendor_brand and not primary_vendor_match:
+                official_candidate = False
+            if comparison_entities and not comparison_entity_match:
+                official_candidate = False
             supportive_candidate = bool(flags["non_third_party"]) and (
-                bool(flags["docs_shape_match"])
-                or bool(flags["registered_domain_label_match"])
-                or bool(flags["host_brand_match"])
-                or bool(flags["title_brand_match"])
+                self._looks_like_supporting_research_target(
+                    url=normalized.get("url", ""),
+                    hostname=hostname,
+                    title_text=title_text,
+                    snippet_text=snippet_text,
+                    mode=effective_mode,
+                )
+                or (
+                    bool(query_tokens)
+                    and (
+                        bool(flags["include_match"])
+                        or bool(flags["registered_domain_label_match"])
+                        or bool(flags["host_brand_match"])
+                        or (
+                            bool(flags["docs_shape_match"])
+                            and bool(flags["title_brand_match"])
+                        )
+                    )
+                )
+                or (
+                    not bool(query_tokens)
+                    and self._looks_like_supporting_research_target(
+                        url=normalized.get("url", ""),
+                        hostname=hostname,
+                        title_text=title_text,
+                        snippet_text=snippet_text,
+                        mode=effective_mode,
+                    )
+                    and self._looks_like_authoritative_research_host(
+                        hostname=hostname,
+                        path=path,
+                    )
+                )
             )
-            if official_candidate:
-                return "official"
-            if supportive_candidate:
-                return "supporting"
+            if primary_vendor_brand and not primary_vendor_match:
+                supportive_candidate = False
+            if comparison_entities and not comparison_entity_match:
+                supportive_candidate = False
             if community_candidate:
                 return "community"
+            if official_candidate and authoritative_target:
+                return "official"
+            if official_candidate or supportive_candidate:
+                return "supporting"
             return "general"
 
         listicle_candidate = (
@@ -2129,6 +3183,70 @@ class MySearchClient:
             return "community"
         if registered_domain == "github.com":
             return "project"
+        comparison_like = self._looks_like_comparison_query(query.lower())
+        query_tokens = self._research_non_authoritative_query_tokens(query)
+        flags = self._resource_result_flags(
+            mode=mode,
+            item=normalized,
+            query_tokens=query_tokens,
+            include_domains=include_domains,
+        )
+        project_brand_match = (
+            bool(flags["include_match"])
+            or bool(flags["registered_domain_label_match"])
+            or bool(flags["host_brand_match"])
+        )
+        comparison_marker = (
+            " vs " in f" {title_text} "
+            or " versus " in f" {title_text} "
+            or " compare " in f" {title_text} "
+            or " comparison " in f" {title_text} "
+            or any(
+                marker in path
+                for marker in (
+                    "-vs-",
+                    "/compare",
+                    "/comparison",
+                    "/comparisons/",
+                    "/versus/",
+                )
+            )
+        )
+        branded_marketing_candidate = comparison_like and project_brand_match and any(
+            marker in title_text or marker in path
+            for marker in (
+                "alternatives",
+                "pricing",
+                "best ",
+                "top ",
+                "/pricing",
+                "/alternatives/",
+            )
+        )
+        supporting_candidate = (
+            comparison_like
+            and bool(flags["non_third_party"])
+            and project_brand_match
+            and bool(flags["docs_shape_match"])
+            and not comparison_marker
+            and not branded_marketing_candidate
+            and not self._looks_like_research_marketing_or_blog_result(
+                hostname=hostname,
+                path=path,
+                title_text=title_text,
+                snippet_text=snippet_text,
+            )
+        )
+        project_candidate = bool(flags["non_third_party"]) and project_brand_match and (
+            not comparison_like
+            or comparison_marker
+        )
+        if project_candidate:
+            return "project"
+        if supporting_candidate:
+            return "supporting"
+        if branded_marketing_candidate:
+            return "listicle"
         if registered_domain in directory_domains or (
             "mcp" in hostname and any(marker in path for marker in ("/server/", "/servers/"))
         ):
@@ -2161,6 +3279,7 @@ class MySearchClient:
         if not combined:
             return [], {
                 "authoritative_source_count": 0,
+                "supporting_source_count": 0,
                 "community_source_count": 0,
                 "selected_candidate_domains": [],
                 "selected_candidate_cluster_counts": {},
@@ -2168,6 +3287,7 @@ class MySearchClient:
 
         if not authoritative_preferred:
             project_candidates: list[dict[str, Any]] = []
+            supporting_candidates: list[dict[str, Any]] = []
             curated_candidates: list[dict[str, Any]] = []
             listicle_candidates: list[dict[str, Any]] = []
             directory_candidates: list[dict[str, Any]] = []
@@ -2184,6 +3304,8 @@ class MySearchClient:
                     community_candidates.append(item)
                 elif cluster_label == "project":
                     project_candidates.append(item)
+                elif cluster_label == "supporting":
+                    supporting_candidates.append(item)
                 elif cluster_label == "directory":
                     directory_candidates.append(item)
                 elif cluster_label == "listicle":
@@ -2197,12 +3319,53 @@ class MySearchClient:
                     results=project_candidates,
                     include_domains=include_domains,
                 )
+            if project_candidates:
+                indexed_project_candidates = list(enumerate(project_candidates))
+                project_candidates = [
+                    item
+                    for _, item in sorted(
+                        indexed_project_candidates,
+                        key=lambda pair: (
+                            self._research_project_candidate_kind_rank(pair[1]),
+                            pair[0],
+                        ),
+                    )
+                ]
             if len(curated_candidates) > 1:
                 curated_candidates = self._rerank_general_results(
                     query=query,
                     result_profile="web",
                     results=curated_candidates,
                     include_domains=include_domains,
+                )
+            if len(supporting_candidates) > 1:
+                supporting_candidates = self._rerank_resource_results(
+                    query=query,
+                    mode="docs",
+                    results=supporting_candidates,
+                    include_domains=include_domains,
+                )
+                supporting_candidates = self._diversify_research_supporting_candidates(
+                    query=query,
+                    candidates=supporting_candidates,
+                )
+            if supporting_candidates:
+                indexed_supporting_candidates = list(enumerate(supporting_candidates))
+                supporting_candidates = [
+                    item
+                    for _, item in sorted(
+                        indexed_supporting_candidates,
+                        key=lambda pair: (
+                            self._research_supporting_candidate_kind_rank(
+                                pair[1],
+                                query=query,
+                            ),
+                            pair[0],
+                        ),
+                    )
+                ]
+                supporting_candidates = self._diversify_results_by_registered_domain(
+                    supporting_candidates
                 )
             if len(community_candidates) > 1:
                 community_candidates = self._rerank_general_results(
@@ -2225,13 +3388,16 @@ class MySearchClient:
                     results=listicle_candidates,
                     include_domains=include_domains,
                 )
-            selected = [
-                *project_candidates,
-                *curated_candidates,
-                *listicle_candidates,
-                *directory_candidates,
-                *community_candidates,
-            ][:max_results]
+            selected = self._assemble_non_authoritative_research_candidates(
+                query=query,
+                project_candidates=project_candidates,
+                supporting_candidates=supporting_candidates,
+                curated_candidates=curated_candidates,
+                listicle_candidates=listicle_candidates,
+                directory_candidates=directory_candidates,
+                community_candidates=community_candidates,
+                max_results=max_results,
+            )
             selected_domains = self._collect_source_domains(results=selected, citations=[])
             cluster_counts: dict[str, int] = {}
             for item in selected:
@@ -2245,6 +3411,7 @@ class MySearchClient:
                 cluster_counts[cluster_label] = cluster_counts.get(cluster_label, 0) + 1
             return selected, {
                 "authoritative_source_count": 0,
+                "supporting_source_count": int(cluster_counts.get("supporting") or 0),
                 "community_source_count": sum(
                     1
                     for item in selected
@@ -2292,6 +3459,14 @@ class MySearchClient:
                 results=official_candidates,
                 include_domains=include_domains,
             )
+            official_candidates = self._diversify_research_official_candidates(
+                query=query,
+                candidates=official_candidates,
+            )
+            if self._research_prefers_canonical_vendor_docs(query):
+                official_candidates = self._diversify_results_by_registered_domain(
+                    official_candidates
+                )
         if len(supporting_candidates) > 1:
             supporting_candidates = self._rerank_resource_results(
                 query=query,
@@ -2299,6 +3474,10 @@ class MySearchClient:
                 results=supporting_candidates,
                 include_domains=include_domains,
             )
+            if self._research_prefers_canonical_vendor_docs(query):
+                supporting_candidates = self._diversify_results_by_registered_domain(
+                    supporting_candidates
+                )
         if len(general_candidates) > 1:
             general_candidates = self._rerank_general_results(
                 query=query,
@@ -2314,12 +3493,16 @@ class MySearchClient:
                 include_domains=include_domains,
             )
 
-        ordered = [
-            *official_candidates,
-            *supporting_candidates,
-            *general_candidates,
-            *community_candidates,
-        ][:max_results]
+        ordered = self._assemble_authoritative_research_candidates(
+            official_candidates=official_candidates,
+            supporting_candidates=supporting_candidates,
+            general_candidates=general_candidates,
+            community_candidates=community_candidates,
+            max_results=max_results,
+            prefer_canonical_vendor_docs=self._research_prefers_canonical_vendor_docs(
+                query
+            ),
+        )
         selected_domains = self._collect_source_domains(results=ordered, citations=[])
         cluster_counts: dict[str, int] = {}
         for item in ordered:
@@ -2332,14 +3515,914 @@ class MySearchClient:
             )
             cluster_counts[cluster_label] = cluster_counts.get(cluster_label, 0) + 1
         return ordered, {
-            "authoritative_source_count": min(
-                len(ordered),
-                len(official_candidates) + len(supporting_candidates),
-            ),
-            "community_source_count": min(len(ordered), len(community_candidates)),
+            "authoritative_source_count": int(cluster_counts.get("official") or 0),
+            "supporting_source_count": int(cluster_counts.get("supporting") or 0),
+            "community_source_count": int(cluster_counts.get("community") or 0),
             "selected_candidate_domains": selected_domains[:5],
             "selected_candidate_cluster_counts": cluster_counts,
         }
+
+    def _research_comparison_entities(self, query: str) -> list[tuple[str, ...]]:
+        subjects = self._research_parse_comparison_subjects(query)
+        if not subjects:
+            return []
+        brand_prefix = ""
+        first_words = subjects[0].split()
+        if first_words:
+            candidate = first_words[0].strip(" ,.;:")
+            if candidate and candidate[0].isalpha() and candidate[0].isupper():
+                brand_prefix = candidate
+        generic_tokens = {
+            "advice",
+            "api",
+            "community",
+            "docs",
+            "documentation",
+            "guidance",
+            "guide",
+            "guides",
+            "migration",
+            "migrations",
+            "official",
+            "resource",
+            "resources",
+            "reference",
+        }
+        ambiguous_product_tokens = self._research_ambiguous_product_tokens()
+        entities: list[tuple[str, ...]] = []
+        seen: set[tuple[str, ...]] = set()
+        for part in subjects[:4]:
+            if self._research_subject_is_generic_comparison_dimension(part):
+                continue
+            candidate = part
+            if self._research_subject_should_inherit_brand_prefix(
+                subject=candidate,
+                brand_prefix=brand_prefix,
+                generic_tokens=generic_tokens,
+            ):
+                candidate = f"{brand_prefix} {candidate}"
+            tokens_list = [
+                token
+                for token in self._query_precision_tokens(candidate)
+                if token not in generic_tokens
+            ]
+            if brand_prefix and brand_prefix.lower() in candidate.lower():
+                ambiguous_tokens = [
+                    token for token in tokens_list if token in ambiguous_product_tokens
+                ]
+                if ambiguous_tokens:
+                    tokens_list = [brand_prefix.lower(), *ambiguous_tokens]
+            tokens = tuple(dict.fromkeys(tokens_list))
+            if not tokens or tokens in seen:
+                continue
+            seen.add(tokens)
+            entities.append(tokens)
+        return entities
+
+    def _research_parse_comparison_subjects(self, query: str) -> list[str]:
+        normalized = re.sub(r"\b20\d{2}\b", "", query).strip()
+        query_lower = normalized.lower()
+        if not self._looks_like_comparison_query(query_lower):
+            return []
+        match = re.search(
+            r"^\s*compare\s+(.+?)(?:\s+for\s+(.+))?$",
+            normalized,
+            re.IGNORECASE,
+        )
+        if not match:
+            return []
+        subjects = match.group(1).strip()
+        return [
+            item.strip(" ,.;:")
+            for item in re.split(r"\s+(?:and|vs\.?|versus)\s+", subjects, flags=re.IGNORECASE)
+            if item.strip(" ,.;:")
+        ]
+
+    def _research_comparison_subject_phrase(self, query: str) -> str:
+        subjects = self._research_parse_comparison_subjects(query)
+        if len(subjects) < 2:
+            return ""
+        trimmed = [item.strip(" ,.;:") for item in subjects[:2] if item.strip(" ,.;:")]
+        if len(trimmed) < 2:
+            return ""
+        return f"{trimmed[0]} vs {trimmed[1]}"
+
+    def _research_ambiguous_product_tokens(self) -> set[str]:
+        return {
+            "assistants",
+            "audio",
+            "background",
+            "batch",
+            "chat",
+            "embeddings",
+            "files",
+            "images",
+            "realtime",
+            "responses",
+            "webhooks",
+        }
+
+    def _research_subject_is_generic_comparison_dimension(self, subject: str) -> bool:
+        tokens = self._query_precision_tokens(subject)
+        if not tokens:
+            return True
+        generic_dimension_tokens = {
+            "advice",
+            "approach",
+            "approaches",
+            "best",
+            "community",
+            "compare",
+            "comparison",
+            "docs",
+            "documentation",
+            "guidance",
+            "guide",
+            "guides",
+            "migration",
+            "migrations",
+            "official",
+            "opinion",
+            "opinions",
+            "strategy",
+            "strategies",
+            "tutorial",
+            "tutorials",
+            "usage",
+            "workflow",
+            "workflows",
+        }
+        return all(token in generic_dimension_tokens for token in tokens)
+
+    def _research_subject_should_inherit_brand_prefix(
+        self,
+        *,
+        subject: str,
+        brand_prefix: str,
+        generic_tokens: set[str],
+    ) -> bool:
+        if not brand_prefix or brand_prefix.lower() in subject.lower():
+            return False
+        meaningful_tokens = [
+            token
+            for token in self._query_precision_tokens(subject)
+            if token not in generic_tokens
+        ]
+        if not meaningful_tokens:
+            return True
+        ambiguous_product_tokens = self._research_ambiguous_product_tokens()
+        return all(token in ambiguous_product_tokens for token in meaningful_tokens)
+
+    def _research_primary_vendor_brand(self, query: str) -> str:
+        subjects = self._research_parse_comparison_subjects(query)
+        if len(subjects) < 2:
+            return ""
+        first_words = subjects[0].split()
+        if not first_words:
+            return ""
+        brand_prefix = first_words[0].strip(" ,.;:")
+        if not brand_prefix or not brand_prefix[0].isalpha() or not brand_prefix[0].isupper():
+            return ""
+        generic_tokens = {
+            "api",
+            "docs",
+            "documentation",
+            "guide",
+            "guides",
+            "official",
+            "resource",
+            "resources",
+            "reference",
+        }
+        inherited_subject_found = False
+        for subject in subjects[1:]:
+            if brand_prefix.lower() in subject.lower():
+                continue
+            if self._research_subject_should_inherit_brand_prefix(
+                subject=subject,
+                brand_prefix=brand_prefix,
+                generic_tokens=generic_tokens,
+            ):
+                inherited_subject_found = True
+                continue
+            return ""
+        return brand_prefix.lower() if inherited_subject_found else ""
+
+    def _research_item_matches_brand_token(
+        self,
+        *,
+        item: dict[str, Any],
+        brand_token: str,
+    ) -> bool:
+        text = " ".join(
+            [
+                self._result_hostname(item),
+                str(item.get("url") or ""),
+                str(item.get("title") or ""),
+                str(item.get("snippet") or ""),
+            ]
+        ).lower()
+        return brand_token in text
+
+    def _research_result_matches_entity(
+        self,
+        *,
+        item: dict[str, Any],
+        entity_tokens: tuple[str, ...],
+    ) -> bool:
+        tokens = [str(token).strip().lower() for token in entity_tokens if str(token).strip()]
+        if not tokens:
+            return False
+        text = " ".join(
+            [
+                (item.get("title") or "").lower(),
+                (item.get("url") or "").lower(),
+                (item.get("snippet") or "").lower(),
+            ]
+        )
+        return any(token in text for token in tokens)
+
+    def _research_result_matches_comparison_subject(
+        self,
+        *,
+        item: dict[str, Any],
+        entity_tokens: tuple[str, ...],
+    ) -> bool:
+        tokens = [str(token).strip().lower() for token in entity_tokens if str(token).strip()]
+        if not tokens:
+            return False
+        text = " ".join(
+            [
+                (item.get("title") or "").lower(),
+                (item.get("url") or "").lower(),
+                (item.get("snippet") or "").lower(),
+            ]
+        )
+        if len(tokens) == 1:
+            return tokens[0] in text
+        specific_tokens = tokens[1:] or tokens
+        specific_match_count = sum(1 for token in specific_tokens if token in text)
+        required_specific_matches = 1 if len(specific_tokens) == 1 else min(2, len(specific_tokens))
+        if specific_match_count >= required_specific_matches:
+            return True
+        return all(token in text for token in tokens)
+
+    def _research_official_candidate_kind_rank(self, item: dict[str, Any]) -> int:
+        url = str(item.get("url") or "")
+        title_text = str(item.get("title") or "").lower()
+        path = urlparse(url).path.lower()
+        if "migrate" in path or "migration" in title_text:
+            return 0
+        if any(marker in path for marker in ("/guide/", "/guides/", "/docs/guides/")) or "guide" in title_text:
+            return 1
+        if "/overview" in path or "overview" in title_text:
+            return 2
+        if (
+            "/methods/" in path
+            or title_text.startswith(("create ", "list ", "retrieve ", "delete ", "update "))
+            or " method " in f" {title_text} "
+        ):
+            return 5
+        if (
+            "/api-reference/" in path
+            or "/api/reference/" in path
+            or "api reference" in title_text
+            or "reference" in title_text
+        ):
+            return 3
+        return 4
+
+    def _diversify_research_official_candidates(
+        self,
+        *,
+        query: str,
+        candidates: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        entities = self._research_comparison_entities(query)
+        if len(entities) < 2 or len(candidates) < 2:
+            return candidates
+        indexed_remaining = list(enumerate(candidates))
+        selected: list[dict[str, Any]] = []
+        for entity_tokens in entities:
+            matches = [
+                (index, item)
+                for index, item in indexed_remaining
+                if self._research_result_matches_comparison_subject(
+                    item=item,
+                    entity_tokens=entity_tokens,
+                )
+            ]
+            if not matches:
+                continue
+            best_index, best_item = min(
+                matches,
+                key=lambda pair: (
+                    self._research_official_candidate_kind_rank(pair[1]),
+                    pair[0],
+                ),
+            )
+            selected.append(best_item)
+            indexed_remaining = [
+                pair for pair in indexed_remaining if pair[0] != best_index
+            ]
+        remaining = [
+            item
+            for _, item in sorted(
+                indexed_remaining,
+                key=lambda pair: (
+                    self._research_official_candidate_kind_rank(pair[1]),
+                    pair[0],
+                ),
+            )
+        ]
+        return [*selected, *remaining]
+
+    def _diversify_research_supporting_candidates(
+        self,
+        *,
+        query: str,
+        candidates: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        entities = self._research_comparison_entities(query)
+        if len(entities) < 2 or len(candidates) < 2:
+            return candidates
+        indexed_remaining = list(enumerate(candidates))
+        selected: list[dict[str, Any]] = []
+        for entity_tokens in entities:
+            matches = [
+                (index, item)
+                for index, item in indexed_remaining
+                if self._research_result_matches_comparison_subject(
+                    item=item,
+                    entity_tokens=entity_tokens,
+                )
+            ]
+            if not matches:
+                continue
+            best_index, best_item = min(
+                matches,
+                key=lambda pair: (
+                    self._research_supporting_candidate_kind_rank(
+                        pair[1],
+                        query=query,
+                    ),
+                    pair[0],
+                ),
+            )
+            selected.append(best_item)
+            indexed_remaining = [
+                pair for pair in indexed_remaining if pair[0] != best_index
+            ]
+        remaining = [
+            item
+            for _, item in sorted(
+                indexed_remaining,
+                key=lambda pair: (
+                    self._research_supporting_candidate_kind_rank(
+                        pair[1],
+                        query=query,
+                    ),
+                    pair[0],
+                ),
+            )
+        ]
+        return [*selected, *remaining]
+
+    def _assemble_non_authoritative_research_candidates(
+        self,
+        *,
+        query: str,
+        project_candidates: list[dict[str, Any]],
+        supporting_candidates: list[dict[str, Any]],
+        curated_candidates: list[dict[str, Any]],
+        listicle_candidates: list[dict[str, Any]],
+        directory_candidates: list[dict[str, Any]],
+        community_candidates: list[dict[str, Any]],
+        max_results: int,
+    ) -> list[dict[str, Any]]:
+        if max_results <= 0:
+            return []
+        if not self._looks_like_comparison_query(query.lower()):
+            return [
+                *project_candidates,
+                *curated_candidates,
+                *listicle_candidates,
+                *directory_candidates,
+                *community_candidates,
+            ][:max_results]
+
+        diversified_projects: list[dict[str, Any]] = []
+        seen_project_domains: set[str] = set()
+        for item in project_candidates:
+            registered_domain = self._registered_domain(
+                self._result_hostname(item)
+            )
+            domain_key = registered_domain or str(item.get("url") or "")
+            if domain_key in seen_project_domains:
+                continue
+            seen_project_domains.add(domain_key)
+            diversified_projects.append(item)
+
+        ordered = diversified_projects[:2]
+        remaining = max_results - len(ordered)
+        if remaining <= 0:
+            return ordered
+
+        ordered.extend(supporting_candidates[: min(2, remaining)])
+        remaining = max_results - len(ordered)
+        if remaining <= 0:
+            return ordered
+
+        ordered.extend(curated_candidates[:remaining])
+        remaining = max_results - len(ordered)
+        if remaining <= 0:
+            return ordered
+
+        ordered.extend(listicle_candidates[:remaining])
+        remaining = max_results - len(ordered)
+        if remaining <= 0:
+            return ordered
+
+        ordered.extend(directory_candidates[:remaining])
+        remaining = max_results - len(ordered)
+        if remaining <= 0:
+            return ordered
+
+        ordered.extend(community_candidates[:remaining])
+        return ordered[:max_results]
+
+    def _diversify_results_by_registered_domain(
+        self,
+        results: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        diversified: list[dict[str, Any]] = []
+        seen_domains: set[str] = set()
+        for item in results:
+            registered_domain = self._registered_domain(
+                self._result_hostname(item)
+            )
+            domain_key = registered_domain or str(item.get("url") or "")
+            if domain_key in seen_domains:
+                continue
+            seen_domains.add(domain_key)
+            diversified.append(item)
+        return diversified
+
+    def _research_project_candidate_kind_rank(self, item: dict[str, Any]) -> int:
+        url = str(item.get("url") or "")
+        title_text = str(item.get("title") or "").lower()
+        path = urlparse(url).path.lower()
+        if any(marker in path for marker in ("/alternatives/", "/compare", "/comparison")):
+            return 0
+        if any(marker in f" {title_text} " for marker in (" vs ", " versus ", " comparison ", " compare ")):
+            return 1
+        if "/blog/" in path:
+            return 3
+        return 2
+
+    def _research_supporting_candidate_kind_rank(
+        self,
+        item: dict[str, Any],
+        *,
+        query: str,
+    ) -> int:
+        url = str(item.get("url") or "")
+        title_text = str(item.get("title") or "").lower()
+        path = urlparse(url).path.lower()
+        comparison_like = self._looks_like_comparison_query(query.lower())
+        capability_markers = (
+            "search",
+            "extract",
+            "scrape",
+            "crawl",
+            "retrieval",
+            "api reference",
+        )
+        if any(marker in path for marker in ("/api-reference/", "/api-reference", "/reference/")) and any(
+            marker in title_text or marker in path for marker in capability_markers
+        ):
+            return 0
+        if any(marker in path for marker in ("/endpoint/scrape", "/endpoint/extract", "/features/scrape")):
+            return 0
+        if any(marker in title_text for marker in capability_markers):
+            return 1
+        if comparison_like and any(
+            marker in path or marker in title_text
+            for marker in ("agent-builder", "agent skills", "integrations")
+        ):
+            return 4
+        if "/blog/" in path:
+            return 5
+        return 2
+
+    def _assemble_authoritative_research_candidates(
+        self,
+        *,
+        official_candidates: list[dict[str, Any]],
+        supporting_candidates: list[dict[str, Any]],
+        general_candidates: list[dict[str, Any]],
+        community_candidates: list[dict[str, Any]],
+        max_results: int,
+        prefer_canonical_vendor_docs: bool = False,
+    ) -> list[dict[str, Any]]:
+        if prefer_canonical_vendor_docs:
+            vendor_official_candidates = [
+                item
+                for item in official_candidates
+                if self._research_is_canonical_vendor_doc(str(item.get("url") or ""))
+            ]
+            vendor_supporting_candidates = [
+                item
+                for item in supporting_candidates
+                if self._research_is_canonical_vendor_doc(str(item.get("url") or ""))
+            ]
+            other_official_candidates = [
+                item
+                for item in official_candidates
+                if item not in vendor_official_candidates
+            ]
+            other_supporting_candidates = [
+                item
+                for item in supporting_candidates
+                if item not in vendor_supporting_candidates
+            ]
+            anchor_candidates = [
+                *vendor_official_candidates,
+                *vendor_supporting_candidates,
+                *other_official_candidates,
+                *other_supporting_candidates,
+            ]
+        else:
+            anchor_candidates = [*official_candidates, *supporting_candidates]
+        if prefer_canonical_vendor_docs and len(general_candidates) > 1:
+            indexed_general_candidates = list(enumerate(general_candidates))
+            general_candidates = [
+                item
+                for _, item in sorted(
+                    indexed_general_candidates,
+                    key=lambda pair: (
+                        self._research_vendor_doc_general_candidate_kind_rank(pair[1]),
+                        pair[0],
+                    ),
+                )
+            ]
+        if max_results <= 0:
+            return []
+        if not anchor_candidates:
+            return [*general_candidates, *community_candidates][:max_results]
+
+        ordered = anchor_candidates[:max_results]
+        remaining = max_results - len(ordered)
+        if remaining <= 0:
+            return ordered
+
+        anchor_count = len(ordered)
+        if prefer_canonical_vendor_docs and anchor_count >= 2:
+            general_limit = min(1, remaining)
+        else:
+            general_limit = min(2 if anchor_count >= 2 else 3, remaining)
+        ordered.extend(general_candidates[:general_limit])
+        remaining = max_results - len(ordered)
+        if remaining > 0:
+            community_limit = min(1, remaining)
+            ordered.extend(community_candidates[:community_limit])
+            remaining = max_results - len(ordered)
+        if remaining > 0:
+            ordered.extend(general_candidates[general_limit : general_limit + remaining])
+            remaining = max_results - len(ordered)
+        if remaining > 0:
+            ordered.extend(community_candidates[1 : 1 + remaining])
+        return ordered[:max_results]
+
+    def _research_vendor_doc_general_candidate_kind_rank(
+        self,
+        item: dict[str, Any],
+    ) -> int:
+        url = str(item.get("url") or "")
+        hostname = self._result_hostname(item)
+        title_text = str(item.get("title") or "").lower()
+        snippet_text = str(item.get("snippet") or "").lower()
+        path = urlparse(url).path.lower()
+        docs_markers = (
+            "docs",
+            "documentation",
+            "guide",
+            "guides",
+            "retrieval",
+            "search api",
+            "api reference",
+            "reference",
+        )
+        if any(marker in title_text or marker in snippet_text for marker in docs_markers):
+            return 0
+        if any(marker in path for marker in ("/docs", "/documentation", "/guide", "/guides")):
+            return 0
+        if hostname == "arxiv.org" or "/abs/" in path or path.endswith(".pdf") or "/pdf/" in path:
+            return 4
+        if "/blog/" in path or any(
+            domain in hostname for domain in ("medium.com", "substack.com", "towardsai.net")
+        ):
+            return 3
+        return 2
+
+    def _research_report_anchor_tokens(
+        self,
+        *,
+        query: str,
+        mode: str,
+        ordered_results: list[dict[str, Any]],
+        authoritative_preferred: bool,
+    ) -> list[str]:
+        ignored_tokens = {
+            "ai",
+            "api",
+            "app",
+            "com",
+            "dev",
+            "developers",
+            "docs",
+            "guide",
+            "guides",
+            "io",
+            "net",
+            "org",
+            "platform",
+            "reference",
+            "www",
+        }
+        tokens: list[str] = []
+        seen: set[str] = set()
+        for item in ordered_results:
+            cluster_label = self._research_result_cluster_label(
+                query=query,
+                mode=mode,
+                item=item,
+                include_domains=None,
+                authoritative_preferred=authoritative_preferred,
+            )
+            if cluster_label not in {"official", "supporting"}:
+                continue
+            registered_domain = self._registered_domain(self._result_hostname(item))
+            if not registered_domain:
+                continue
+            for token in re.split(r"[^a-z0-9]+", registered_domain.lower()):
+                if not token or token in ignored_tokens or token in seen:
+                    continue
+                seen.add(token)
+                tokens.append(token)
+                if len(tokens) >= 6:
+                    return tokens
+        return tokens
+
+    def _research_summary_mentions_anchor_tokens(
+        self,
+        text: str,
+        anchor_tokens: list[str],
+    ) -> bool:
+        normalized = f" {re.sub(r'[^a-z0-9]+', ' ', text.lower()).strip()} "
+        return any(f" {token} " in normalized for token in anchor_tokens if token)
+
+    def _research_authoritative_query_tokens(self, query: str) -> list[str]:
+        generic_tokens = {
+            "agent",
+            "agentic",
+            "agents",
+            "approach",
+            "best",
+            "build",
+            "docs",
+            "documentation",
+            "guide",
+            "official",
+            "retrieval",
+            "search",
+            "workflow",
+            "workflows",
+        }
+        return [
+            token
+            for token in self._query_brand_tokens(query)
+            if token not in generic_tokens
+        ]
+
+    def _research_non_authoritative_query_tokens(self, query: str) -> list[str]:
+        generic_tokens = {
+            "agent",
+            "agentic",
+            "agents",
+            "ai",
+            "analysis",
+            "approach",
+            "best",
+            "build",
+            "code",
+            "compare",
+            "comparison",
+            "docs",
+            "documentation",
+            "guide",
+            "guides",
+            "latest",
+            "mcp",
+            "official",
+            "retrieval",
+            "search",
+            "server",
+            "servers",
+            "tool",
+            "tools",
+            "web",
+            "workflow",
+            "workflows",
+        }
+        return [
+            token
+            for token in self._query_brand_tokens(query)
+            if token not in generic_tokens
+        ]
+
+    def _looks_like_authoritative_research_target(
+        self,
+        *,
+        url: str,
+        hostname: str,
+        title_text: str,
+        mode: SearchMode,
+    ) -> bool:
+        path = urlparse(url).path.lower()
+        if mode == "github":
+            return hostname in {"github.com", "raw.githubusercontent.com"} and any(
+                marker in path
+                for marker in (
+                    "/blob/",
+                    "/discussions/",
+                    "/issues/",
+                    "/pull/",
+                    "/releases",
+                    "/tree/",
+                )
+            )
+        if mode == "pdf":
+            return self._looks_like_pdf_url(url) or (
+                hostname == "arxiv.org" and path.startswith("/abs/")
+            )
+        authoritative_path_markers = (
+            "/api/docs",
+            "/api/reference",
+            "/changelog",
+            "/docs",
+            "/documentation",
+            "/guide/",
+            "/guides/",
+            "/manual",
+            "/pricing",
+            "/readme",
+            "/reference/",
+            "/references/",
+        )
+        authoritative_title_markers = (
+            "api reference",
+            "changelog",
+            "documentation",
+            "guide",
+            "manual",
+            "pricing",
+            "readme",
+            "reference",
+        )
+        return any(marker in path for marker in authoritative_path_markers) or any(
+            marker in title_text for marker in authoritative_title_markers
+        )
+
+    def _looks_like_authoritative_research_host(
+        self,
+        *,
+        hostname: str,
+        path: str,
+    ) -> bool:
+        host = hostname.lower()
+        normalized_path = path.lower()
+        if any(
+            host.startswith(prefix)
+            for prefix in (
+                "api.",
+                "developer.",
+                "developers.",
+                "docs.",
+            )
+        ):
+            return True
+        if any(marker in host for marker in (".docs.", ".developer.", ".developers.")):
+            return True
+        return any(
+            marker in normalized_path
+            for marker in (
+                "/api/docs",
+                "/api/reference",
+                "/api-reference",
+                "/docs/",
+                "/documentation/",
+                "/guide/",
+                "/guides/",
+                "/manual",
+                "/reference/",
+                "/references/",
+            )
+        )
+
+    def _looks_like_research_marketing_or_blog_result(
+        self,
+        *,
+        hostname: str,
+        path: str,
+        title_text: str,
+        snippet_text: str,
+    ) -> bool:
+        normalized_path = path.rstrip("/")
+        marketing_path_markers = (
+            "/article/",
+            "/articles/",
+            "/blog/",
+            "/blogs/",
+            "/insights/",
+            "/learn/",
+            "/news/",
+            "/post/",
+            "/posts/",
+            "/resources/",
+        )
+        if any(marker in normalized_path for marker in marketing_path_markers):
+            return True
+        title_tokens = f" {title_text} "
+        snippet_tokens = f" {snippet_text} "
+        marketing_title_markers = (
+            " alternatives ",
+            " best ",
+            " comparison ",
+            " complete guide ",
+            " landscape ",
+            " seo ",
+            " top ",
+            " vs ",
+        )
+        if any(marker in title_tokens for marker in marketing_title_markers):
+            return True
+        if hostname.startswith("www.") and any(
+            marker in snippet_tokens
+            for marker in (" ai search ", " ai seo ", " better pricing ", " complete guide ")
+        ):
+            return True
+        return False
+
+    def _looks_like_supporting_research_target(
+        self,
+        *,
+        url: str,
+        hostname: str,
+        title_text: str,
+        snippet_text: str,
+        mode: SearchMode,
+    ) -> bool:
+        path = urlparse(url).path.lower()
+        if self._looks_like_research_marketing_or_blog_result(
+            hostname=hostname,
+            path=path,
+            title_text=title_text,
+            snippet_text=snippet_text,
+        ):
+            return False
+        if mode == "pdf":
+            return self._looks_like_pdf_url(url) or (
+                hostname == "arxiv.org" and path.startswith("/abs/")
+            )
+        hostname_labels = [item for item in hostname.split(".") if item]
+        docs_host = any(
+            label in {"api", "developer", "developers", "docs", "help", "platform", "reference", "support"}
+            for label in hostname_labels
+        )
+        docs_path_markers = (
+            "/api",
+            "/documentation",
+            "/docs",
+            "/guide",
+            "/guides",
+            "/manual",
+            "/reference",
+            "/references",
+        )
+        docs_title_markers = (
+            "api reference",
+            "developer documentation",
+            "documentation",
+            "docs",
+            "manual",
+            "reference",
+        )
+        return (
+            docs_host
+            or any(marker in path for marker in docs_path_markers)
+            or any(marker in title_text for marker in docs_title_markers)
+        )
 
     def _candidate_result_budget(
         self,
@@ -2416,6 +4499,14 @@ class MySearchClient:
         evidence.setdefault("official_filter_reduced", False)
 
         source_domains = self._collect_source_domains(results=results, citations=citations)
+        social_identities = self._collect_social_identities(results=results, citations=citations)
+        social_identity_diversity = len(social_identities)
+        social_identity_diversity_applies = self._should_use_social_identity_diversity(
+            mode=mode,
+            intent=intent,
+            source_domains=source_domains,
+            social_identity_count=social_identity_diversity,
+        )
         official_source_count = self._count_official_resource_results(
             query=query,
             mode=mode,
@@ -2432,9 +4523,17 @@ class MySearchClient:
             official_source_count=official_source_count,
             providers_consulted=providers_consulted,
             official_mode=str(evidence.get("official_mode") or official_mode),
+            social_identity_count=social_identity_diversity,
+            social_identity_diversity_applies=social_identity_diversity_applies,
         )
         evidence["source_diversity"] = len(source_domains)
         evidence["source_domains"] = source_domains[:5]
+        if social_identities or mode == "social" or intent == "social":
+            evidence["social_identity_diversity"] = social_identity_diversity
+            evidence["social_handles"] = social_identities[:5]
+            evidence["diversity_basis"] = (
+                "social_handles" if social_identity_diversity_applies else "domains"
+            )
         evidence["official_source_count"] = official_source_count
         evidence["third_party_source_count"] = max(len(results) - official_source_count, 0)
         evidence["confidence"] = self._estimate_search_confidence(
@@ -2446,6 +4545,8 @@ class MySearchClient:
             verification=str(evidence.get("verification") or "single-provider"),
             conflicts=conflicts,
             official_mode=str(evidence.get("official_mode") or official_mode),
+            social_identity_count=social_identity_diversity,
+            social_identity_diversity_applies=social_identity_diversity_applies,
         )
         evidence["conflicts"] = conflicts
         enriched["evidence"] = evidence
@@ -2463,30 +4564,6 @@ class MySearchClient:
         max_results: int,
     ) -> dict[str, Any]:
         finalized = dict(result)
-        if self._should_rerank_resource_results(mode=mode, intent=intent):
-            reranked_results = self._rerank_resource_results(
-                query=query,
-                mode=mode,
-                results=list(finalized.get("results") or []),
-                include_domains=include_domains,
-            )
-            finalized["results"] = reranked_results
-            finalized["citations"] = self._align_citations_with_results(
-                results=reranked_results,
-                citations=list(finalized.get("citations") or []),
-            )
-        elif self._should_rerank_general_results(result_profile=result_profile):
-            reranked_results = self._rerank_general_results(
-                query=query,
-                result_profile=result_profile,
-                results=list(finalized.get("results") or []),
-                include_domains=include_domains,
-            )
-            finalized["results"] = reranked_results
-            finalized["citations"] = self._align_citations_with_results(
-                results=reranked_results,
-                citations=list(finalized.get("citations") or []),
-            )
 
         finalized = self._apply_status_result_policy(
             query=query,
@@ -2501,6 +4578,7 @@ class MySearchClient:
             result=finalized,
             include_domains=include_domains,
         )
+
         final_official_mode = str(
             (
                 (finalized.get("evidence") or {})
@@ -2627,6 +4705,8 @@ class MySearchClient:
         intent: ResolvedSearchIntent,
         include_domains: list[str] | None,
     ) -> str:
+        if mode == "social":
+            return "off"
         if self._should_use_strict_resource_policy(
             query=query,
             mode=mode,
@@ -2646,8 +4726,12 @@ class MySearchClient:
         intent: ResolvedSearchIntent,
         include_domains: list[str] | None,
     ) -> bool:
+        if mode == "social":
+            return False
         query_lower = query.lower()
         explicit_resource_mode = mode in {"docs", "github", "pdf"}
+        if self._looks_like_github_release_query(query_lower):
+            return False
         if include_domains:
             return True
         if intent == "tutorial" and not explicit_resource_mode:
@@ -2696,6 +4780,8 @@ class MySearchClient:
     def _looks_like_changelog_query(self, query_lower: str) -> bool:
         keywords = [
             "changelog",
+            "latest release",
+            "latest releases",
             "release notes",
             "what's new",
             "whats new",
@@ -2705,6 +4791,14 @@ class MySearchClient:
             "版本更新",
         ]
         return any(keyword in query_lower for keyword in keywords)
+
+    def _looks_like_github_release_query(self, query_lower: str) -> bool:
+        if "github" not in query_lower:
+            return False
+        return any(
+            marker in query_lower
+            for marker in ("latest release", "latest releases", "release", "releases", "changelog")
+        )
 
     def _apply_official_resource_policy(
         self,
@@ -2742,7 +4836,7 @@ class MySearchClient:
             strict_official=official_mode == "strict",
         )
         official_rescue_candidate: dict[str, Any] | None = None
-        if official_mode == "strict":
+        if official_mode in {"strict", "standard"}:
             official_rescue_candidate = self._build_known_canonical_resource_rescue(
                 query=query,
                 mode=mode,
@@ -2765,6 +4859,25 @@ class MySearchClient:
                 ]
                 evidence["official_rescue_applied"] = True
                 evidence["official_rescue_source"] = "canonical-map"
+                if official_mode == "standard" and self._looks_like_github_release_query(query.lower()):
+                    promoted_results = [
+                        official_rescue_candidate,
+                        *[
+                            dict(item)
+                            for item in results
+                            if item.get("url") != official_rescue_candidate.get("url")
+                        ],
+                    ]
+                    enriched["results"] = self._rerank_resource_results(
+                        query=query,
+                        mode=mode,
+                        results=promoted_results,
+                        include_domains=include_domains,
+                    )
+                    enriched["citations"] = self._align_citations_with_results(
+                        results=enriched["results"],
+                        citations=[*citations, official_rescue_candidate],
+                    )
         evidence["official_candidate_count"] = len(official_candidates)
         if official_mode == "strict" and official_candidates:
             evidence["official_filter_applied"] = True
@@ -2784,6 +4897,8 @@ class MySearchClient:
         mode: SearchMode,
         intent: ResolvedSearchIntent,
     ) -> dict[str, Any] | None:
+        if mode == "social":
+            return None
         query_lower = query.lower()
         if (
             mode not in {"docs", "github", "pdf", "web", "news"}
@@ -2825,6 +4940,17 @@ class MySearchClient:
                 "provider": "canonical-rescue",
                 "matched_providers": ["canonical-rescue"],
             }
+        if self._looks_like_github_release_query(query_lower):
+            repo_slug = self._extract_explicit_github_repo_slug(query)
+            if repo_slug is not None:
+                owner, repo = repo_slug
+                return {
+                    "title": f"Releases · {owner}/{repo} - GitHub",
+                    "url": f"https://github.com/{owner}/{repo}/releases",
+                    "snippet": f"Official GitHub releases page for {owner}/{repo}.",
+                    "provider": "canonical-rescue",
+                    "matched_providers": ["canonical-rescue"],
+                }
         if "openai" in query_lower and "webhook" in query_lower:
             return {
                 "title": "Webhooks | OpenAI API",
@@ -2841,7 +4967,80 @@ class MySearchClient:
                 "provider": "canonical-rescue",
                 "matched_providers": ["canonical-rescue"],
             }
+        react_hook = self._extract_known_react_hook_reference(query)
+        if react_hook is not None:
+            react_locale = self._preferred_react_docs_locale(query)
+            locale_prefix = f"{react_locale}." if react_locale else ""
+            react_title = (
+                f"{react_hook} – React 中文文档"
+                if react_locale == "zh-hans"
+                else f"{react_hook} - React"
+            )
+            return {
+                "title": react_title,
+                "url": f"https://{locale_prefix}react.dev/reference/react/{react_hook}",
+                "snippet": f"Official React API reference for {react_hook}.",
+                "provider": "canonical-rescue",
+                "matched_providers": ["canonical-rescue"],
+            }
         return None
+
+    def _extract_known_react_hook_reference(self, query: str) -> str | None:
+        query_lower = query.lower()
+        if "react" not in query_lower:
+            return None
+        known_hooks = {
+            "useactionstate": "useActionState",
+            "useeffectevent": "useEffectEvent",
+            "useoptimistic": "useOptimistic",
+            "usetransition": "useTransition",
+            "usedeferredvalue": "useDeferredValue",
+        }
+        for raw_token in re.findall(r"\buse[A-Za-z0-9]+\b", query):
+            normalized = raw_token.lower()
+            if normalized in known_hooks:
+                return known_hooks[normalized]
+            if len(raw_token) > 3:
+                return raw_token
+        for token in self._query_precision_tokens(query):
+            if token in known_hooks:
+                return known_hooks[token]
+        return None
+
+    def _extract_explicit_github_repo_slug(self, query: str) -> tuple[str, str] | None:
+        match = re.search(
+            r"\b([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)\b",
+            query,
+        )
+        if not match:
+            return None
+        return match.group(1), match.group(2)
+
+    def _preferred_react_docs_locale(self, query: str) -> str | None:
+        query_lower = query.lower()
+        if "中文" in query or "简体" in query or "zh-hans" in query_lower:
+            return "zh-hans"
+        if "繁體" in query or "繁体" in query or "zh-hant" in query_lower:
+            return "zh-hant"
+        return None
+
+    def _query_prefers_versioned_react_docs(self, query: str, *, version: str) -> bool:
+        query_lower = query.lower()
+        return bool(
+            re.search(rf"\breact\s*v?{re.escape(version)}\b", query_lower)
+            or re.search(rf"\breact{re.escape(version)}\b", query_lower)
+        )
+
+    def _looks_like_noncanonical_react_docs_hostname(self, hostname: str, *, query: str = "") -> bool:
+        normalized = self._clean_hostname(hostname)
+        if normalized in {"beta.reactjs.org", "legacy.reactjs.org"}:
+            return True
+        match = re.fullmatch(r"(?P<version>\d+)\.react\.dev", normalized)
+        if not match:
+            return False
+        if query and self._query_prefers_versioned_react_docs(query, version=match.group("version")):
+            return False
+        return True
 
     def _should_apply_canonical_resource_rescue(
         self,
@@ -2871,6 +5070,34 @@ class MySearchClient:
                 return False
             return True
         if "openai" in query_lower and ("webhook" in query_lower or "background mode" in query_lower):
+            return True
+        if self._looks_like_github_release_query(query_lower):
+            repo_slug = self._extract_explicit_github_repo_slug(query)
+            if repo_slug is not None:
+                owner, repo = repo_slug
+                normalized_path = top_path.rstrip("/")
+                repo_prefix = f"/{owner.lower()}/{repo.lower()}"
+                if not normalized_path.startswith(f"{repo_prefix}/releases"):
+                    return True
+                if "/releases/tag/" in normalized_path:
+                    return True
+        if self._preferred_react_docs_locale(query):
+            return False
+        if (
+            mode == "docs"
+            or intent in {"resource", "tutorial"}
+        ) and self._looks_like_noncanonical_react_docs_hostname(
+            self._result_hostname(top_candidate),
+            query=query,
+        ):
+            return True
+        if (
+            mode == "docs"
+            or intent in {"resource", "tutorial"}
+        ) and (
+            self._looks_like_locale_prefixed_path(top_path)
+            or self._looks_like_locale_prefixed_hostname(self._result_hostname(top_candidate))
+        ):
             return True
         if self._looks_like_language_specific_sdk_reference_result(
             hostname=self._result_hostname(top_candidate),
@@ -3053,6 +5280,38 @@ class MySearchClient:
                 results=results,
                 include_domains=include_domains,
             )
+        if (
+            fallback_to == "canonical_research_docs"
+            and self._looks_like_comparison_query(query.lower())
+            and results
+        ):
+            project_results = [
+                item
+                for item in results
+                if str(item.get("provider") or "") == "canonical_research_projects"
+            ]
+            if project_results:
+                results = self._prioritize_research_project_results(results)
+            if not project_results:
+                selected_results, _ = self._select_research_candidate_results(
+                    query=query,
+                    mode=mode,
+                    intent=intent,
+                    max_results=len(results),
+                    web_results=results,
+                    docs_rescue_results=[],
+                    tavily_support_results=[],
+                    exa_results=[],
+                    include_domains=include_domains,
+                    authoritative_preferred=self._research_prefers_authoritative_sources(
+                        query=query,
+                        mode=mode,
+                        intent=intent,
+                        include_domains=include_domains,
+                    ),
+                )
+                if selected_results:
+                    results = selected_results
         fallback_result["results"] = results
         fallback_result["citations"] = self._align_citations_with_results(
             results=results,
@@ -3065,6 +5324,19 @@ class MySearchClient:
             result=fallback_result,
             include_domains=include_domains,
         )
+        if (
+            fallback_to == "canonical_research_docs"
+            and self._looks_like_comparison_query(query.lower())
+            and fallback_result.get("results")
+        ):
+            reprioritized_results = self._prioritize_research_project_results(
+                list(fallback_result.get("results") or [])
+            )
+            fallback_result["results"] = reprioritized_results
+            fallback_result["citations"] = self._align_citations_with_results(
+                results=reprioritized_results,
+                citations=list(fallback_result.get("citations") or []),
+            )
         fallback_result = self._trim_search_payload(fallback_result, max_results=len(results) or 5)
         fallback_result = self._augment_evidence_summary(
             fallback_result,
@@ -3099,6 +5371,7 @@ class MySearchClient:
         exa_unique_url_count: int,
         exa_promoted_page_count: int,
         authoritative_source_count: int,
+        supporting_source_count: int,
         community_source_count: int,
         selected_candidate_count: int,
         selected_candidate_domains: list[str],
@@ -3121,6 +5394,14 @@ class MySearchClient:
             citations=citations,
         )
         conflicts = list(web_evidence.get("conflicts") or [])
+        selected_authoritative_source_count = max(authoritative_source_count, 0)
+        selected_supporting_source_count = max(supporting_source_count, 0)
+        selected_community_source_count = max(community_source_count, 0)
+        search_authoritative_source_count = int(web_evidence.get("official_source_count") or 0)
+        effective_authoritative_source_count = max(
+            selected_authoritative_source_count,
+            search_authoritative_source_count,
+        )
         if requested_page_count and not successful_pages:
             conflicts.append("page-extraction-unavailable")
         elif requested_page_count and page_error_count > 0:
@@ -3144,7 +5425,7 @@ class MySearchClient:
             social_present=social is not None,
             social_error=bool(social_error),
             conflicts=conflicts,
-            authoritative_source_count=authoritative_source_count,
+            authoritative_source_count=effective_authoritative_source_count,
             cross_provider_candidate_count=cross_provider_candidate_count,
             source_cluster_count=len(selected_candidate_cluster_counts),
         )
@@ -3160,7 +5441,7 @@ class MySearchClient:
             else "single-provider",
             "source_diversity": len(source_domains),
             "source_domains": source_domains[:5],
-            "official_source_count": int(web_evidence.get("official_source_count") or 0),
+            "official_source_count": search_authoritative_source_count,
             "official_mode": official_mode,
             "search_confidence": str(web_evidence.get("confidence") or "low"),
             "confidence": confidence,
@@ -3169,8 +5450,13 @@ class MySearchClient:
             "exa_discovery_count": exa_discovery_count,
             "exa_unique_url_count": exa_unique_url_count,
             "exa_promoted_page_count": exa_promoted_page_count,
-            "authoritative_source_count": authoritative_source_count,
-            "community_source_count": community_source_count,
+            "authoritative_source_count": effective_authoritative_source_count,
+            "search_authoritative_source_count": search_authoritative_source_count,
+            "selected_authoritative_source_count": selected_authoritative_source_count,
+            "supporting_source_count": selected_supporting_source_count,
+            "selected_supporting_source_count": selected_supporting_source_count,
+            "community_source_count": selected_community_source_count,
+            "selected_community_source_count": selected_community_source_count,
             "selected_candidate_count": selected_candidate_count,
             "selected_candidate_domains": selected_candidate_domains[:5],
             "selected_candidate_cluster_counts": dict(selected_candidate_cluster_counts),
@@ -3429,7 +5715,7 @@ class MySearchClient:
         if prefer_tavily_official_discovery:
             return RouteDecision(
                 provider="tavily",
-                reason="严格官方 / 精确资源页优先用 Tavily 做发现，再由 Firecrawl 接正文验证",
+                reason="精确 docs / 官方资源页优先用 Tavily 做发现，再由 Firecrawl 接正文验证",
                 tavily_topic=policy.tavily_topic,
                 firecrawl_categories=list(policy.firecrawl_categories) or None,
                 fallback_chain=self._explicit_provider_fallback_chain(
@@ -3518,8 +5804,6 @@ class MySearchClient:
             return "news"
         if self._looks_like_comparison_query(query_lower):
             return "comparison"
-        if self._looks_like_tutorial_query(query_lower):
-            return "tutorial"
         if self._looks_like_docs_query(query_lower):
             return "resource"
         if self._looks_like_exploratory_query(query_lower):
@@ -3573,6 +5857,8 @@ class MySearchClient:
             intent=intent,
             include_domains=include_domains,
         )
+        if mode == "docs" and intent == "resource":
+            return True
         if include_content and not (
             exact_docs_topic
             or pricing_query
@@ -3606,14 +5892,19 @@ class MySearchClient:
             return _MODE_PROVIDER_POLICY["tutorial"]
         if self._looks_like_changelog_query(query_lower):
             return _MODE_PROVIDER_POLICY["changelog"]
+        if intent == "status" or self._looks_like_status_query(query_lower):
+            return _MODE_PROVIDER_POLICY["status"]
         if include_content:
             return _MODE_PROVIDER_POLICY["content"]
         if explicit_resource_mode:
             return _MODE_PROVIDER_POLICY[mode]
         if intent == "resource" or self._looks_like_docs_query(query_lower):
             return _MODE_PROVIDER_POLICY["resource"]
-        if intent == "status" or self._looks_like_status_query(query_lower):
-            return _MODE_PROVIDER_POLICY["status"]
+        if (
+            self._looks_like_award_result_query(query_lower)
+            and (intent == "news" or mode == "news")
+        ):
+            return _MODE_PROVIDER_POLICY["award_result"]
         if intent == "news" or mode == "news" or self._looks_like_news_query(query_lower):
             return _MODE_PROVIDER_POLICY["news"]
         if intent in {"exploratory", "comparison"} and self._provider_can_serve(self.config.exa):
@@ -3656,6 +5947,12 @@ class MySearchClient:
                 healthy.append(provider_name)
             else:
                 degraded.append(provider_name)
+        if self._should_keep_tavily_primary_when_degraded(policy=policy):
+            selected = "tavily"
+            remaining = [
+                item for item in [*healthy, *degraded] if item != selected
+            ]
+            return selected, remaining or None
         if healthy:
             selected = healthy[0]
             remaining = [
@@ -3667,6 +5964,18 @@ class MySearchClient:
         if not healthy and not degraded:
             return policy.provider, list(policy.fallback_chain) or None
         return policy.provider, list(policy.fallback_chain) or None
+
+    def _should_keep_tavily_primary_when_degraded(
+        self,
+        *,
+        policy: SearchRoutePolicy,
+    ) -> bool:
+        if policy.provider != "tavily":
+            return False
+        if policy.key not in {"news", "award_result", "status"}:
+            return False
+        tavily_status = self._provider_live_status(self.config.tavily)
+        return tavily_status not in {None, "auth_error", "ok"}
 
     def _provider_config_for_name(self, provider_name: ProviderName) -> ProviderConfig:
         if provider_name == "tavily":
@@ -3709,7 +6018,9 @@ class MySearchClient:
         if "x" in sources:
             return False
         if mode == "news" or intent in {"news", "status"}:
-            return False
+            return strategy in {"verify", "deep"} and self._provider_is_live_ok(
+                self.config.tavily
+            ) and self._provider_is_live_ok(self.config.firecrawl)
         if mode == "pdf":
             return strategy in {"verify", "deep"} and self._provider_is_live_ok(
                 self.config.tavily
@@ -3747,6 +6058,7 @@ class MySearchClient:
         exclude_domains: list[str] | None,
         strategy: str = "fast",
         from_date: str | None = None,
+        to_date: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         chain = [primary_provider, *(decision.fallback_chain or [])]
         last_error: Exception | None = None
@@ -3765,6 +6077,7 @@ class MySearchClient:
                     exclude_domains=exclude_domains,
                     strategy=strategy,
                     from_date=from_date,
+                    to_date=to_date,
                 )
                 fallback_info = None
                 if provider_name != primary_provider:
@@ -3815,17 +6128,28 @@ class MySearchClient:
         exclude_domains: list[str] | None,
         strategy: str = "fast",
         from_date: str | None = None,
+        to_date: str | None = None,
     ) -> dict[str, Any]:
         result_event_query = self._looks_like_result_event_query(query.lower())
         if provider_name == "tavily":
+            prefer_tavily_official_discovery = self._should_prefer_tavily_official_discovery(
+                query=query,
+                mode=mode,
+                intent=intent,
+                include_domains=include_domains,
+                include_content=include_content,
+            )
             tavily_include_content = (
                 include_content
                 and intent != "tutorial"
                 and not self._looks_like_changelog_query(query.lower())
-            ) or (
-                result_event_query
-                and mode == "news"
-                and strategy in {"verify", "deep"}
+                and not (result_event_query and mode == "news")
+                and not prefer_tavily_official_discovery
+            )
+            tavily_strategy = (
+                "fast"
+                if prefer_tavily_official_discovery and strategy in {"verify", "deep"}
+                else strategy
             )
             return self._search_tavily(
                 query=query,
@@ -3835,8 +6159,10 @@ class MySearchClient:
                 include_content=tavily_include_content,
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
-                strategy=strategy,
+                strategy=tavily_strategy,
                 days=self._infer_tavily_days(intent, from_date),
+                from_date=from_date,
+                to_date=to_date,
             )
         if provider_name == "firecrawl":
             return self._search_firecrawl(
@@ -3851,6 +6177,8 @@ class MySearchClient:
                 ),
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
+                from_date=from_date,
+                to_date=to_date,
             )
         if provider_name == "exa":
             return self._search_exa(
@@ -3862,6 +6190,7 @@ class MySearchClient:
                 mode=mode,
                 intent=intent,
                 from_date=from_date,
+                to_date=to_date,
             )
         raise MySearchError(f"Unknown provider: {provider_name}")
 
@@ -3899,6 +6228,11 @@ class MySearchClient:
         if (include_domains or strict_official) and not rescue_sensitive_query:
             return False
         results = list(result.get("results") or [])
+        if self._looks_like_award_result_query(query_lower) and self._has_strong_award_result(
+            query=query,
+            results=results,
+        ):
+            return False
         sparse_results = len(results) < min(max_results, 3)
         weak_results = self._result_set_looks_weak_for_exa_rescue(
             query=query,
@@ -3923,6 +6257,189 @@ class MySearchClient:
             return True
         return sparse_results and (weak_result_signal or long_tail_signal)
 
+    def _maybe_refine_tavily_result_event_discovery(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        result: dict[str, Any],
+        max_results: int,
+        include_domains: list[str] | None,
+        exclude_domains: list[str] | None,
+        from_date: str | None,
+    ) -> dict[str, Any]:
+        query_lower = query.lower()
+        if result.get("provider") != "tavily":
+            return result
+        if include_domains:
+            return result
+        if not (
+            self._looks_like_award_result_query(query_lower)
+            and (mode == "news" or intent in {"news", "status"})
+        ):
+            return result
+        initial_strong_result = self._has_strong_award_result(
+            query=query,
+            results=list(result.get("results") or []),
+        )
+        refined_query = self._refined_award_result_query(query)
+        days = self._infer_tavily_days(intent=intent, from_date=from_date)
+        search_query = refined_query or query
+        merged = dict(result)
+        refinement_tags: list[str] = []
+        original_best_priority = max(
+            (self._result_event_page_priority(query=query, item=item) for item in list(result.get("results") or [])),
+            default=-1,
+        )
+        if not initial_strong_result and refined_query and refined_query != query:
+            refined = self._search_tavily(
+                query=refined_query,
+                max_results=max_results,
+                topic="news",
+                include_answer=False,
+                include_content=False,
+                include_domains=None,
+                exclude_domains=exclude_domains,
+                strategy="verify",
+                days=days,
+            )
+            if refined.get("results"):
+                merged = self._merge_search_payloads(
+                    primary_result=merged,
+                    secondary_result=refined,
+                    max_results=max_results,
+                )
+                refinement_tags.append("award-result-tavily-refinement")
+        merged_results = list(merged.get("results") or [])
+        if not self._has_strong_award_result(query=query, results=merged_results):
+            trusted_domain_groups = self._award_result_trusted_domain_groups(query)
+            for group_index, trusted_domains in enumerate(trusted_domain_groups):
+                focused = self._search_tavily(
+                    query=search_query,
+                    max_results=max_results,
+                    topic="news",
+                    include_answer=False,
+                    include_content=False,
+                    include_domains=trusted_domains,
+                    exclude_domains=exclude_domains,
+                    strategy="verify",
+                    days=days,
+                )
+                if not focused.get("results"):
+                    continue
+                merged = self._merge_search_payloads(
+                    primary_result=merged,
+                    secondary_result=focused,
+                    max_results=max_results,
+                )
+                merged_results = list(merged.get("results") or [])
+                refinement_tags.append("award-result-trusted-domain-refinement")
+                if self._has_strong_award_result(query=query, results=merged_results):
+                    if (
+                        group_index == 0
+                        and len(trusted_domain_groups) > 1
+                    ):
+                        continue
+                    break
+        merged_results = list(merged.get("results") or [])
+        if merged_results:
+            merged_results = self._filter_strong_award_results(
+                query=query,
+                results=merged_results,
+            )
+            merged_results = sorted(
+                merged_results,
+                key=lambda item: self._news_result_rank(
+                    query=query,
+                    item=item,
+                    include_domains=None,
+                ),
+                reverse=True,
+            )[:max_results]
+            merged["results"] = merged_results
+        merged_best_priority = max(
+            (self._result_event_page_priority(query=query, item=item) for item in merged_results),
+            default=-1,
+        )
+        if (
+            not self._has_strong_award_result(query=query, results=merged_results)
+            and merged_best_priority <= original_best_priority
+        ):
+            return result
+        refined_result = dict(result)
+        refined_result["provider"] = "tavily"
+        refined_result["results"] = merged_results
+        refined_result["citations"] = merged.get("citations") or list(result.get("citations") or [])
+        if merged.get("matched_results") is not None:
+            refined_result["matched_results"] = merged.get("matched_results")
+        refined_result["route_debug"] = dict(refined_result.get("route_debug") or {})
+        if refinement_tags:
+            refined_result["route_debug"]["query_refinement"] = ",".join(refinement_tags)
+        return refined_result
+
+    def _refined_award_result_query(self, query: str) -> str:
+        query_lower = query.lower()
+        if not self._looks_like_award_result_query(query_lower):
+            return query
+        year_match = re.search(r"\b(20\d{2})\b", query)
+        year = year_match.group(1) if year_match else ""
+        award_name = ""
+        if "grammy" in query_lower:
+            award_name = "Grammy"
+        elif "oscar" in query_lower or "academy awards" in query_lower:
+            award_name = "Oscars"
+        elif "golden globe" in query_lower:
+            award_name = "Golden Globes"
+        elif "bafta" in query_lower:
+            award_name = "BAFTA"
+        category = ""
+        category_markers = self._award_query_category_markers(query_lower)
+        if category_markers:
+            category = category_markers[0]
+
+        refined_parts = [part for part in [year, award_name, "winners list", category, "full results"] if part]
+        refined_query = " ".join(refined_parts).strip()
+        if refined_query:
+            return refined_query
+
+        extra_terms = []
+        if "winner" not in query_lower and "winners" not in query_lower:
+            extra_terms.append("winners")
+        if "full results" not in query_lower:
+            extra_terms.append("full results")
+        if "winners list" not in query_lower:
+            extra_terms.append("winners list")
+        if not extra_terms:
+            return query
+        return f"{query} {' '.join(extra_terms)}".strip()
+
+    def _award_result_trusted_domain_groups(self, query: str) -> list[list[str]]:
+        query_lower = query.lower()
+        if "grammy" in query_lower:
+            return [
+                ["grammy.com"],
+                ["npr.org", "pbs.org", "reuters.com", "billboard.com", "abcnews.go.com"],
+            ]
+        if "oscar" in query_lower or "academy awards" in query_lower:
+            return [
+                ["oscars.org", "theacademy.com"],
+                ["apnews.com", "npr.org", "reuters.com", "nytimes.com", "abcnews.go.com"],
+            ]
+        if "golden globe" in query_lower:
+            return [
+                ["goldenglobes.com"],
+                ["reuters.com", "variety.com", "nytimes.com", "apnews.com"],
+            ]
+        if "bafta" in query_lower:
+            return [
+                ["bafta.org"],
+                ["reuters.com", "bbc.com", "apnews.com", "theguardian.com"],
+            ]
+        return [
+            ["reuters.com", "apnews.com", "npr.org", "nytimes.com"],
+        ]
+
     def _should_skip_exa_rescue_for_result_event(
         self,
         *,
@@ -3937,10 +6454,15 @@ class MySearchClient:
             and (mode == "news" or intent in {"news", "status"})
         ):
             return False
+        results = list(result.get("results") or [])
+        if self._looks_like_award_result_query(query_lower):
+            return self._has_strong_award_result(query=query, results=results)
         evidence = result.get("evidence") or {}
-        return bool(str(result.get("answer") or "").strip()) and (
+        if bool(str(result.get("answer") or "").strip()) and (
             str(evidence.get("answer_source") or "") == "result-event-extraction"
-        )
+        ):
+            return True
+        return False
 
     def _result_set_looks_weak_for_exa_rescue(
         self,
@@ -3972,6 +6494,27 @@ class MySearchClient:
         results: list[dict[str, Any]],
     ) -> bool:
         query_lower = query.lower()
+        trusted_result_domains = {
+            "abcnews.com",
+            "apnews.com",
+            "bbc.com",
+            "cnn.com",
+            "grammy.com",
+            "latimes.com",
+            "npr.org",
+            "nytimes.com",
+            "oscars.org",
+            "pbs.org",
+            "reuters.com",
+            "theacademy.com",
+            "washingtonpost.com",
+        }
+        official_award_domains = {
+            "grammy.com",
+            "grammys.com",
+            "oscars.org",
+            "theacademy.com",
+        }
         for item in results[:5]:
             hostname = self._result_hostname(item)
             registered_domain = self._registered_domain(hostname)
@@ -3979,15 +6522,59 @@ class MySearchClient:
             title_text = (item.get("title") or "").lower()
             snippet_text = (item.get("snippet") or "").lower()
             content_text = (item.get("content") or "").lower()
+            winner_page = self._looks_like_award_winner_result(
+                title_text=title_text,
+                snippet_text=snippet_text,
+                path=path,
+            )
+            weak_official_feature = (
+                registered_domain in official_award_domains
+                and self._looks_like_weak_official_award_feature_result(
+                    title_text=title_text,
+                    snippet_text=snippet_text,
+                    path=path,
+                )
+            )
             if self._looks_like_award_prediction_result(
                 title_text=title_text,
                 snippet_text=snippet_text,
                 path=path,
             ):
                 continue
+            if weak_official_feature:
+                continue
+            if (
+                not winner_page
+                and self._looks_like_award_recap_or_gallery_result(
+                    title_text=title_text,
+                    snippet_text=snippet_text,
+                    path=path,
+                )
+            ):
+                continue
             if self._looks_like_query_year_mismatch(
                 query=query_lower,
                 text=f"{title_text} {snippet_text} {content_text} {path}",
+            ):
+                continue
+            if self._looks_like_award_category_conflict(
+                query_lower=query_lower,
+                title_text=title_text,
+                snippet_text=snippet_text,
+                content_text=content_text,
+            ):
+                continue
+            if self._looks_like_award_brand_conflict(
+                query_lower=query_lower,
+                title_text=title_text,
+                snippet_text=snippet_text,
+                content_text=content_text,
+                path=path,
+            ):
+                continue
+            if self._looks_like_generic_award_archive_result(
+                title_text=title_text,
+                path=path,
             ):
                 continue
             if registered_domain in {"facebook.com", "instagram.com", "tiktok.com", "youtube.com"}:
@@ -4006,14 +6593,190 @@ class MySearchClient:
                 content_text=content_text,
                 path=path,
             )
+            award_coverage_page = self._looks_like_award_coverage_page(
+                query_lower=query_lower,
+                title_text=title_text,
+                path=path,
+            )
+            prioritized_winner_page = winner_page and (
+                category_match
+                or self._result_event_page_priority(query=query, item=item) >= 8
+            )
+            trusted_full_results_page = (
+                category_match
+                and award_coverage_page
+                and registered_domain in trusted_result_domains
+                and self._result_event_page_priority(query=query, item=item) >= 8
+            )
+            official_award_page = (
+                registered_domain in official_award_domains
+                and not self._looks_like_award_nomination_result(
+                    title_text=title_text,
+                    snippet_text=snippet_text,
+                    path=path,
+                )
+                and not self._looks_like_query_year_mismatch(
+                    query=query_lower,
+                    text=f"{title_text} {snippet_text} {content_text} {path}",
+                )
+                and self._result_event_page_priority(query=query, item=item) >= 8
+            )
+            if (
+                prioritized_winner_page
+                or (fact_match and award_coverage_page)
+                or trusted_full_results_page
+                or official_award_page
+            ):
+                return True
+        return False
+
+    def _can_attempt_award_page_extraction(
+        self,
+        *,
+        query: str,
+        results: list[dict[str, Any]],
+    ) -> bool:
+        for item in results[:5]:
+            title_text = (item.get("title") or "").lower()
+            snippet_text = (item.get("snippet") or "").lower()
+            path = urlparse(item.get("url", "")).path.lower()
+            if self._looks_like_award_winner_result(
+                title_text=title_text,
+                snippet_text=snippet_text,
+                path=path,
+            ):
+                return True
+            if self._result_event_page_priority(query=query, item=item) >= 8:
+                return True
+        return False
+
+    def _filter_strong_award_results(
+        self,
+        *,
+        query: str,
+        results: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not results or not self._has_strong_award_result(query=query, results=results):
+            return results
+        query_lower = query.lower()
+        trusted_result_domains = {
+            "abcnews.com",
+            "apnews.com",
+            "bbc.com",
+            "cnn.com",
+            "grammy.com",
+            "grammys.com",
+            "latimes.com",
+            "npr.org",
+            "nytimes.com",
+            "oscars.org",
+            "pbs.org",
+            "reuters.com",
+            "theacademy.com",
+            "washingtonpost.com",
+        }
+        filtered_results: list[dict[str, Any]] = []
+        for item in results:
+            url = str(item.get("url") or "")
+            registered_domain = self._registered_domain(self._result_hostname(item))
+            path = urlparse(url).path.lower()
+            title_text = str(item.get("title") or "").lower()
+            snippet_text = str(item.get("snippet") or "").lower()
+            content_text = str(item.get("content") or "").lower()
+            if self._looks_like_query_year_mismatch(
+                query=query_lower,
+                text=f"{title_text} {snippet_text} {content_text} {path}",
+            ):
+                continue
+            if self._looks_like_award_category_conflict(
+                query_lower=query_lower,
+                title_text=title_text,
+                snippet_text=snippet_text,
+                content_text=content_text,
+            ):
+                continue
+            if self._looks_like_award_brand_conflict(
+                query_lower=query_lower,
+                title_text=title_text,
+                snippet_text=snippet_text,
+                content_text=content_text,
+                path=path,
+            ):
+                continue
+            if self._looks_like_generic_award_archive_result(
+                title_text=title_text,
+                path=path,
+            ):
+                continue
             winner_page = self._looks_like_award_winner_result(
                 title_text=title_text,
                 snippet_text=snippet_text,
                 path=path,
             )
-            if winner_page or fact_match:
-                return True
-        return False
+            weak_official_feature = (
+                registered_domain in {"grammy.com", "grammys.com", "oscars.org", "theacademy.com"}
+                and self._looks_like_weak_official_award_feature_result(
+                    title_text=title_text,
+                    snippet_text=snippet_text,
+                    path=path,
+                )
+            )
+            if weak_official_feature:
+                continue
+            if (
+                not winner_page
+                and self._looks_like_award_recap_or_gallery_result(
+                    title_text=title_text,
+                    snippet_text=snippet_text,
+                    path=path,
+                )
+            ):
+                continue
+            category_match = self._looks_like_award_category_match(
+                query_lower=query_lower,
+                title_text=title_text,
+                snippet_text=snippet_text,
+                content_text=content_text,
+                path=path,
+            )
+            fact_match = self._looks_like_award_fact_match(
+                query_lower=query_lower,
+                title_text=title_text,
+                snippet_text=snippet_text,
+                content_text=content_text,
+                path=path,
+            )
+            award_coverage_page = self._looks_like_award_coverage_page(
+                query_lower=query_lower,
+                title_text=title_text,
+                path=path,
+            )
+            official_award_page = registered_domain in {
+                "grammy.com",
+                "grammys.com",
+                "oscars.org",
+                "theacademy.com",
+            }
+            prioritized_winner_page = winner_page and (
+                category_match
+                or award_coverage_page
+                or registered_domain in trusted_result_domains
+                or official_award_page
+            )
+            trusted_media_page = (
+                registered_domain in trusted_result_domains
+                and award_coverage_page
+                and category_match
+            )
+            if not (
+                official_award_page
+                or prioritized_winner_page
+                or (fact_match and award_coverage_page)
+                or trusted_media_page
+            ):
+                continue
+            filtered_results.append(item)
+        return filtered_results or results
 
     def _has_strong_pdf_match(
         self,
@@ -4029,9 +6792,11 @@ class MySearchClient:
             precision_tokens=precision_tokens,
         )
         compound_tokens = self._paper_query_compound_tokens(query)
+        exact_base_report_query = self._looks_like_exact_base_paper_query(query)
         for item in results[:3]:
             url = item.get("url", "")
             hostname = self._result_hostname(item)
+            registered_domain = self._registered_domain(hostname)
             path = urlparse(url).path.lower()
             title_text = (item.get("title") or "").lower()
             path_hits, total_hits = self._query_precision_hit_counts(
@@ -4052,6 +6817,18 @@ class MySearchClient:
             paper_shape = self._looks_like_pdf_url(url) or any(
                 marker in path for marker in ("/abs/", "/html/")
             )
+            mirror_or_aggregator = self._is_obvious_pdf_mirror_or_aggregator_result(
+                hostname=hostname,
+                registered_domain=registered_domain,
+                path=path,
+            )
+            if mirror_or_aggregator:
+                continue
+            if exact_base_report_query and self._looks_like_variant_base_paper_result(
+                query=query,
+                title_text=title_text,
+            ):
+                continue
             if (
                 compound_tokens
                 and compound_match
@@ -4089,6 +6866,56 @@ class MySearchClient:
             "tutorial",
         )
         return any(marker in title_text for marker in derivative_markers)
+
+    def _looks_like_exact_base_paper_query(self, query: str) -> bool:
+        query_lower = (query or "").lower()
+        return "technical report" in query_lower and bool(self._base_report_subject_token(query))
+
+    def _base_report_subject_token(self, query: str) -> str:
+        compound_tokens = self._paper_query_compound_tokens(query)
+        if len(compound_tokens) == 1:
+            return compound_tokens[0]
+        for token in self._query_brand_tokens(query):
+            if token not in {"technical", "report"}:
+                return token
+        return ""
+
+    def _looks_like_variant_base_paper_result(self, *, query: str, title_text: str) -> bool:
+        if not self._looks_like_exact_base_paper_query(query):
+            return False
+        base_token = self._base_report_subject_token(query)
+        if not base_token:
+            return False
+        base = re.escape(base_token)
+        normalized_title = re.sub(r"\s+", " ", (title_text or "").strip().lower())
+        if re.match(rf"^\s*(?:\[[^\]]+\]\s*)?{base}\s+technical report\b", normalized_title):
+            return False
+        return re.match(
+            rf"^\s*(?:\[[^\]]+\]\s*)?{base}(?:[-\s][a-z0-9]+)+\s+technical report\b",
+            normalized_title,
+        ) is not None
+
+    def _is_obvious_pdf_mirror_or_aggregator_result(
+        self,
+        *,
+        hostname: str,
+        registered_domain: str,
+        path: str,
+    ) -> bool:
+        mirror_domains = {
+            "docdroid.net",
+            "issuu.com",
+            "jsdelivr.net",
+            "researchgate.net",
+            "scribd.com",
+            "slideshare.net",
+        }
+        if registered_domain in mirror_domains:
+            return True
+        if hostname == "cdn.jsdelivr.net":
+            return True
+        normalized_path = (path or "").lower()
+        return "/npm/" in normalized_path and ".pdf" in normalized_path
 
     def _has_canonical_pricing_result(self, results: list[dict[str, Any]]) -> bool:
         for item in results[:5]:
@@ -4297,7 +7124,7 @@ class MySearchClient:
         result_profile: Literal["web", "news"],
         item: dict[str, Any],
         include_domains: list[str] | None,
-    ) -> tuple[int, int, int, int, int, int, int, int]:
+    ) -> tuple[int, ...]:
         if result_profile == "news":
             return self._news_result_rank(
                 query=query,
@@ -4316,7 +7143,7 @@ class MySearchClient:
         query: str,
         item: dict[str, Any],
         include_domains: list[str] | None,
-    ) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int]:
+    ) -> tuple[int, ...]:
         hostname = self._result_hostname(item)
         registered_domain = self._registered_domain(hostname)
         path = urlparse(item.get("url", "")).path.lower()
@@ -4328,6 +7155,7 @@ class MySearchClient:
         gossip_query = self._looks_like_gossip_query(query_lower)
         status_query = self._looks_like_status_query(query_lower)
         award_query = self._looks_like_award_result_query(query_lower)
+        result_event_query = self._looks_like_result_event_query(query_lower)
         precision_tokens = self._query_precision_tokens(query)
         path_precision_hits, total_precision_hits = self._query_precision_hit_counts(
             hostname=hostname,
@@ -4399,13 +7227,17 @@ class MySearchClient:
         gossip_domain_match = int(
             gossip_query and self._is_entertainment_gossip_domain(registered_domain)
         )
-        status_query = self._looks_like_status_query(query_lower)
         include_match = int(
             (
                 bool(include_domains)
                 and any(self._domain_matches(hostname, domain) for domain in include_domains or [])
             )
             or (status_query and self._looks_like_brand_status_domain(hostname))
+        )
+        result_event_priority = (
+            self._result_event_page_priority(query=query, item=item)
+            if result_event_query
+            else 0
         )
         non_community_official = int(
             not (
@@ -4454,6 +7286,7 @@ class MySearchClient:
         content_score, snippet_score, title_score = self._result_quality_score(item)
         return (
             include_match,
+            result_event_priority,
             award_winner_page_match,
             award_category_match,
             non_award_prediction_page,
@@ -4485,7 +7318,7 @@ class MySearchClient:
         query: str,
         item: dict[str, Any],
         include_domains: list[str] | None,
-    ) -> tuple[int, int, int, int, int, int, int, int, int, int, int, int, int, int]:
+    ) -> tuple[int, ...]:
         hostname = self._result_hostname(item)
         registered_domain = self._registered_domain(hostname)
         url = item.get("url", "")
@@ -4617,6 +7450,7 @@ class MySearchClient:
             )
         )
         local_life_query = self._looks_like_local_life_query(query_lower)
+        non_social_query = not self._query_prefers_web_social_sources(query_lower)
         canonical_local_guide_match = int(
             local_life_query
             and self._looks_like_canonical_local_life_guide_result(
@@ -4639,6 +7473,22 @@ class MySearchClient:
                 and self._is_obvious_local_life_repost_domain(registered_domain)
             )
         )
+        non_low_signal_social_repost = int(
+            not (
+                non_social_query
+                and registered_domain in {
+                    "facebook.com",
+                    "instagram.com",
+                    "threads.com",
+                    "tiktok.com",
+                    "twitter.com",
+                    "weibo.com",
+                    "x.com",
+                    "youtube.com",
+                    "youtu.be",
+                }
+            )
+        )
         non_aggregator = int(not self._is_obvious_web_aggregator(registered_domain))
         matched_provider_count = len(item.get("matched_providers") or [])
         cross_provider_boost = min(matched_provider_count, 3)
@@ -4659,6 +7509,7 @@ class MySearchClient:
             canonical_local_guide_match,
             local_guide_match,
             non_local_life_repost,
+            non_low_signal_social_repost,
             exact_path_hits,
             exact_total_hits,
             path_precision_hits,
@@ -4672,6 +7523,27 @@ class MySearchClient:
             content_score,
             max(snippet_score, title_score),
         )
+
+    def _query_prefers_web_social_sources(self, query_lower: str) -> bool:
+        social_markers = (
+            "community",
+            "facebook",
+            "forum",
+            "forums",
+            "instagram",
+            "reddit",
+            "reactions",
+            "rumor",
+            "rumors",
+            "social",
+            "threads",
+            "tiktok",
+            "twitter",
+            "weibo",
+            "x.com",
+            "youtube",
+        )
+        return any(marker in query_lower for marker in social_markers)
 
     def _result_published_timestamp(self, item: dict[str, Any]) -> float | None:
         for field in ("published_date", "publishedDate", "created_at"):
@@ -4732,6 +7604,74 @@ class MySearchClient:
         category_markers = self._award_query_category_markers(query_lower)
         return bool(category_markers) and any(marker in text for marker in category_markers)
 
+    def _looks_like_award_coverage_page(
+        self,
+        *,
+        query_lower: str,
+        title_text: str,
+        path: str,
+    ) -> bool:
+        title_path = f"{title_text} {path}"
+        brand_markers = self._award_query_brand_markers(query_lower)
+        brand_match = bool(brand_markers) and any(marker in title_path for marker in brand_markers)
+        winner_markers = [
+            "complete winners",
+            "full list",
+            "full results",
+            "winner list",
+            "winners list",
+        ]
+        if any(marker in title_path for marker in winner_markers):
+            return True
+        category_markers = self._award_query_category_markers(query_lower)
+        if bool(category_markers) and any(marker in title_path for marker in category_markers):
+            return True
+        official_context_markers = [
+            "academy awards",
+            "grammy awards",
+            "golden globes",
+            "/award/",
+            "/awards/",
+            "/ceremonies/",
+            "/ceremony/",
+        ]
+        return brand_match and any(marker in title_path for marker in official_context_markers)
+
+    def _looks_like_generic_award_archive_result(
+        self,
+        *,
+        title_text: str,
+        path: str,
+    ) -> bool:
+        text = f"{title_text} {path}"
+        archive_markers = [
+            "academy awards search",
+            "awards database",
+            "awards search",
+            "/awardsdatabase",
+        ]
+        return any(marker in text for marker in archive_markers)
+
+    def _looks_like_weak_official_award_feature_result(
+        self,
+        *,
+        title_text: str,
+        snippet_text: str,
+        path: str,
+    ) -> bool:
+        text = f"{title_text} {snippet_text} {path}"
+        weak_markers = [
+            "flashback",
+            "1-minute roundup",
+            "minute roundup",
+            "roundup",
+            "throughout the decades",
+            "must-watch moments",
+            "artist |",
+            "/artists/",
+        ]
+        return any(marker in text for marker in weak_markers)
+
     def _looks_like_award_fact_match(
         self,
         *,
@@ -4746,10 +7686,12 @@ class MySearchClient:
             marker_pattern = re.escape(marker)
             patterns = [
                 rf"{marker_pattern}(?:\s+winner)?\s*[–—:]",
+                rf"{marker_pattern}\s*\.\s*winner\s*[\.\-–—: ]",
                 rf"{marker_pattern}(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)\b",
                 rf"[\"“'‘][^\"”’'\n]{{2,100}}[\"”’'‘]\s+is\s+the\s+(?:20\d{{2}}\s+)?{marker_pattern}\s+winner",
                 rf"[\"“'‘][^\"”’'\n]{{2,100}}[\"”’'‘]\s+(?:won|wins)\s+{marker_pattern}",
                 rf"[A-Z][A-Za-z0-9'’&.\- ]{{2,100}}\s+(?:won|wins)\s+{marker_pattern}",
+                rf"[A-Z][A-Za-z0-9'’&.\- ]{{2,100}}\s+(?:won|wins)[^\n]{{0,40}}\b{marker_pattern}\b",
             ]
             if any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns):
                 return True
@@ -4805,6 +7747,29 @@ class MySearchClient:
             "way too early",
         ]
         return any(marker in text for marker in prediction_markers)
+
+    def _looks_like_award_recap_or_gallery_result(
+        self,
+        *,
+        title_text: str,
+        snippet_text: str,
+        path: str,
+    ) -> bool:
+        text = f"{title_text} {snippet_text} {path}"
+        weak_page_markers = [
+            "gallery",
+            "live blog",
+            "live updates",
+            "live-news",
+            "live news",
+            "liveblog",
+            "photos",
+            "recap",
+            "red carpet",
+            "week in",
+            "winning streak",
+        ]
+        return any(marker in text for marker in weak_page_markers)
 
     def _looks_like_news_article_result(self, item: dict[str, Any]) -> bool:
         path = urlparse(item.get("url", "")).path.lower()
@@ -4941,6 +7906,8 @@ class MySearchClient:
         include_answer: bool,
         include_domains: list[str] | None,
         exclude_domains: list[str] | None,
+        from_date: str | None = None,
+        to_date: str | None = None,
     ) -> dict[str, Any]:
         if decision.provider == "tavily":
             tasks = {
@@ -4952,6 +7919,8 @@ class MySearchClient:
                     include_content=include_content,
                     include_domains=include_domains,
                     exclude_domains=exclude_domains,
+                    from_date=from_date,
+                    to_date=to_date,
                 ),
                 "secondary": lambda: self._search_firecrawl(
                     query=query,
@@ -4960,6 +7929,8 @@ class MySearchClient:
                     include_content=include_content or strategy in {"verify", "deep"},
                     include_domains=include_domains,
                     exclude_domains=exclude_domains,
+                    from_date=from_date,
+                    to_date=to_date,
                 ),
             }
         else:
@@ -4971,6 +7942,8 @@ class MySearchClient:
                     include_content=include_content or strategy in {"verify", "deep"},
                     include_domains=include_domains,
                     exclude_domains=exclude_domains,
+                    from_date=from_date,
+                    to_date=to_date,
                 ),
                 "secondary": lambda: self._search_tavily(
                     query=query,
@@ -4980,6 +7953,9 @@ class MySearchClient:
                     include_content=False,
                     include_domains=include_domains,
                     exclude_domains=exclude_domains,
+                    days=self._infer_tavily_days(intent, from_date),
+                    from_date=from_date,
+                    to_date=to_date,
                 ),
             }
 
@@ -4992,6 +7968,8 @@ class MySearchClient:
                 include_content=False,
                 mode=mode,
                 intent=intent,
+                from_date=from_date,
+                to_date=to_date,
             )
 
         blended_results, blended_errors = self._execute_parallel(tasks, max_workers=len(tasks))
@@ -5112,6 +8090,9 @@ class MySearchClient:
         exclude_domains: list[str] | None,
         strategy: str = "fast",
         days: int | None = None,
+        from_date: str | None = None,
+        to_date: str | None = None,
+        _skip_domain_fallback: bool = False,
     ) -> dict[str, Any]:
         include_domains = [item.strip() for item in (include_domains or []) if item and item.strip()]
         exclude_domains = [item.strip() for item in (exclude_domains or []) if item and item.strip()]
@@ -5126,30 +8107,39 @@ class MySearchClient:
             exclude_domains=exclude_domains,
             strategy=strategy,
             days=days,
+            from_date=from_date,
+            to_date=to_date,
         )
         if response.get("results") or not include_domains:
             return response
 
-        retry_response = self._search_tavily_domain_retry(
-            query=query,
-            max_results=max_results,
-            topic=topic,
-            include_content=include_content,
-            include_domains=include_domains,
-            exclude_domains=exclude_domains,
-        )
-        if retry_response is not None:
-            return retry_response
+        if not _skip_domain_fallback:
+            retry_response = self._search_tavily_domain_retry(
+                query=query,
+                max_results=max_results,
+                topic=topic,
+                include_content=include_content,
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+                from_date=from_date,
+                to_date=to_date,
+                days=days,
+            )
+            if retry_response is not None:
+                return retry_response
 
-        fallback_response = self._search_tavily_domain_fallback(
-            query=query,
-            max_results=max_results,
-            include_content=include_content,
-            include_domains=include_domains,
-            exclude_domains=exclude_domains,
-        )
-        if fallback_response is not None:
-            return fallback_response
+        if not _skip_domain_fallback:
+            fallback_response = self._search_tavily_domain_fallback(
+                query=query,
+                max_results=max_results,
+                include_content=include_content,
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+                from_date=from_date,
+                to_date=to_date,
+            )
+            if fallback_response is not None:
+                return fallback_response
 
         return response
 
@@ -5165,19 +8155,31 @@ class MySearchClient:
         exclude_domains: list[str] | None,
         strategy: str = "fast",
         days: int | None = None,
+        from_date: str | None = None,
+        to_date: str | None = None,
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         provider = self.config.tavily
         key = self._get_key_or_raise(provider)
+        effective_query = query
+        if topic == "news" and self._looks_like_award_result_query(query.lower()):
+            refined_query = self._refined_award_result_query(query)
+            if refined_query and refined_query != query:
+                effective_query = refined_query
         payload: dict[str, Any] = {
-            "query": query,
+            "query": effective_query,
             "max_results": max_results,
             "search_depth": "advanced" if include_content or strategy in {"verify", "deep"} else "basic",
             "topic": topic,
             "include_answer": include_answer,
             "include_raw_content": include_content,
         }
-        if days and days > 0:
+        if from_date:
+            payload["start_date"] = from_date
+        elif days and days > 0:
             payload["days"] = days
+        if to_date:
+            payload["end_date"] = to_date
         if include_domains:
             payload["include_domains"] = include_domains
         if exclude_domains:
@@ -5189,6 +8191,7 @@ class MySearchClient:
             path=provider.path("search"),
             payload=payload,
             key=key.key,
+            timeout_seconds=timeout_seconds,
         )
         results = [
             {
@@ -5215,7 +8218,7 @@ class MySearchClient:
         return {
             "provider": "tavily",
             "transport": key.source,
-            "query": response.get("query", query),
+            "query": response.get("query", effective_query),
             "answer": response.get("answer", ""),
             "request_id": response.get("request_id", ""),
             "response_time": response.get("response_time"),
@@ -5236,6 +8239,9 @@ class MySearchClient:
         include_content: bool,
         include_domains: list[str],
         exclude_domains: list[str] | None,
+        from_date: str | None = None,
+        to_date: str | None = None,
+        days: int | None = None,
     ) -> dict[str, Any] | None:
         per_domain_results = []
         retried_domains: list[str] = []
@@ -5252,6 +8258,9 @@ class MySearchClient:
                 include_content=include_content,
                 include_domains=None,
                 exclude_domains=exclude_domains,
+                from_date=from_date,
+                to_date=to_date,
+                days=days,
             )
             filtered_results = self._filter_results_by_domains(
                 domain_result.get("results", []),
@@ -5305,6 +8314,8 @@ class MySearchClient:
         include_content: bool,
         include_domains: list[str],
         exclude_domains: list[str] | None,
+        from_date: str | None = None,
+        to_date: str | None = None,
     ) -> dict[str, Any] | None:
         if not self._provider_can_serve(self.config.firecrawl):
             return None
@@ -5327,6 +8338,8 @@ class MySearchClient:
                 max_results=max_results,
                 categories=categories,
                 include_content=include_content,
+                from_date=from_date,
+                to_date=to_date,
             )
             if not domain_result.get("results"):
                 retry_result = self._search_firecrawl_domain_retry(
@@ -5336,6 +8349,8 @@ class MySearchClient:
                     include_content=include_content,
                     include_domain=domain,
                     exclude_domains=exclude_domains,
+                    from_date=from_date,
+                    to_date=to_date,
                 )
                 if retry_result is not None:
                     domain_result = retry_result
@@ -5396,6 +8411,8 @@ class MySearchClient:
         include_content: bool,
         include_domains: list[str] | None,
         exclude_domains: list[str] | None,
+        from_date: str | None = None,
+        to_date: str | None = None,
     ) -> dict[str, Any]:
         include_domains = [item.strip() for item in (include_domains or []) if item and item.strip()]
         exclude_domains = [item.strip() for item in (exclude_domains or []) if item and item.strip()]
@@ -5415,6 +8432,8 @@ class MySearchClient:
                     max_results=max_results,
                     categories=categories,
                     include_content=include_content,
+                    from_date=from_date,
+                    to_date=to_date,
                 )
                 if not domain_result.get("results"):
                     retry_result = self._search_firecrawl_domain_retry(
@@ -5424,6 +8443,8 @@ class MySearchClient:
                         include_content=include_content,
                         include_domain=domain,
                         exclude_domains=exclude_domains,
+                        from_date=from_date,
+                        to_date=to_date,
                     )
                     if retry_result is not None:
                         domain_result = retry_result
@@ -5447,6 +8468,8 @@ class MySearchClient:
                     include_content=include_content,
                     include_domains=include_domains,
                     exclude_domains=exclude_domains,
+                    from_date=from_date,
+                    to_date=to_date,
                 )
                 if fallback_result is not None:
                     return fallback_result
@@ -5474,6 +8497,8 @@ class MySearchClient:
             max_results=max_results,
             categories=categories,
             include_content=include_content,
+            from_date=from_date,
+            to_date=to_date,
         )
 
     def _search_firecrawl_domain_fallback(
@@ -5484,6 +8509,8 @@ class MySearchClient:
         include_content: bool,
         include_domains: list[str],
         exclude_domains: list[str] | None,
+        from_date: str | None = None,
+        to_date: str | None = None,
     ) -> dict[str, Any] | None:
         if not self._provider_can_serve(self.config.tavily):
             return None
@@ -5496,6 +8523,9 @@ class MySearchClient:
             include_content=include_content,
             include_domains=include_domains,
             exclude_domains=exclude_domains,
+            from_date=from_date,
+            to_date=to_date,
+            _skip_domain_fallback=True,
         )
         if not fallback_result.get("results"):
             return None
@@ -5537,6 +8567,8 @@ class MySearchClient:
         include_content: bool,
         include_domain: str,
         exclude_domains: list[str] | None,
+        from_date: str | None = None,
+        to_date: str | None = None,
     ) -> dict[str, Any] | None:
         retry_result = self._search_firecrawl_once(
             query=self._build_firecrawl_domain_query(
@@ -5547,6 +8579,8 @@ class MySearchClient:
             max_results=max_results,
             categories=categories,
             include_content=include_content,
+            from_date=from_date,
+            to_date=to_date,
         )
         filtered_results = self._filter_results_by_domains(
             retry_result.get("results", []),
@@ -5580,6 +8614,8 @@ class MySearchClient:
         max_results: int,
         categories: list[str],
         include_content: bool,
+        from_date: str | None = None,
+        to_date: str | None = None,
     ) -> dict[str, Any]:
         provider = self.config.firecrawl
         key = self._get_key_or_raise(provider)
@@ -5589,8 +8625,13 @@ class MySearchClient:
             "query": query,
             "limit": max_results,
         }
+        if requested_news:
+            payload["sources"] = ["news", "web"]
         if search_categories:
             payload["categories"] = [{"type": item} for item in search_categories]
+        tbs = self._build_firecrawl_tbs(from_date, to_date)
+        if tbs:
+            payload["tbs"] = tbs
         if include_content:
             if not requested_news and "news" not in search_categories:
                 payload["scrapeOptions"] = {
@@ -5606,6 +8647,8 @@ class MySearchClient:
             key=key.key,
         )
         data = response.get("data") or {}
+        if not isinstance(data, dict):
+            data = {}
         results = []
         source_order = ("news", "web") if requested_news else ("web", "news")
         for source_name in source_order:
@@ -5637,6 +8680,16 @@ class MySearchClient:
                 if item.get("url")
             ],
         }
+
+    @staticmethod
+    def _build_firecrawl_tbs(from_date: str | None, to_date: str | None) -> str:
+        if not from_date and not to_date:
+            return ""
+        if from_date and to_date:
+            return f"cdr:1,cd_min:{from_date},cd_max:{to_date}"
+        if from_date:
+            return f"cdr:1,cd_min:{from_date}"
+        return f"cdr:1,cd_max:{to_date}"
 
     def _build_firecrawl_domain_query(
         self,
@@ -5748,6 +8801,7 @@ class MySearchClient:
         intent: str = "",
         from_date: str | None = None,
         to_date: str | None = None,
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         provider = self.config.exa
         key = self._get_key_or_raise(provider)
@@ -5762,12 +8816,14 @@ class MySearchClient:
             "type": search_type,
             "numResults": max_results,
         }
+        if search_type == "neural":
+            payload["useAutoprompt"] = True
         exa_category = self._exa_category(mode, intent)
         if exa_category:
             payload["category"] = exa_category
         if include_content:
-            payload["text"] = True
-        payload["highlights"] = True
+            payload["text"] = {"maxCharacters": 8000}
+            payload["highlights"] = True
         if from_date:
             payload["startPublishedDate"] = from_date
         if to_date:
@@ -5783,8 +8839,11 @@ class MySearchClient:
             path=provider.path("search"),
             payload=payload,
             key=key.key,
+            timeout_seconds=timeout_seconds,
         )
         raw_results = response.get("results") or response.get("data") or []
+        if not isinstance(raw_results, list):
+            raw_results = []
         results = []
         for item in raw_results:
             if not isinstance(item, dict):
@@ -5810,6 +8869,11 @@ class MySearchClient:
                     "score": item.get("score"),
                     "published_date": item.get("publishedDate") or item.get("published_date") or "",
                 }
+            )
+
+        if include_domains or exclude_domains:
+            results = self._filter_results_by_domains(
+                results, include_domains=include_domains, exclude_domains=exclude_domains
             )
 
         return {
@@ -5938,45 +9002,403 @@ class MySearchClient:
             payload["include_x_images"] = True
         if include_x_videos:
             payload["include_x_videos"] = True
+        social_cache_key = self._build_social_cache_key(
+            query=query,
+            max_results=max_results,
+            allowed_x_handles=allowed_x_handles,
+            excluded_x_handles=excluded_x_handles,
+            from_date=from_date,
+            to_date=to_date,
+            include_x_images=include_x_images,
+            include_x_videos=include_x_videos,
+        )
+        social_gateway_cache_key = self._build_social_gateway_cache_key(
+            base_url=provider.base_url_for("social_search"),
+            path=search_path,
+        )
+        cached_social_result = self._cache_get("social", social_cache_key)
+        cached_social_unavailable = None
+        cached_social_gateway_unavailable = None
+        if (
+            cached_social_result
+            and cached_social_result.get("results")
+            and str(cached_social_result.get("provider") or "") == "tavily_social_fallback"
+        ):
+            return self._annotate_cache(
+                cached_social_result,
+                namespace="social",
+                hit=True,
+            )
+        if not (cached_social_result and cached_social_result.get("results")):
+            cached_social_unavailable = self._cache_get("social_unavailable", social_cache_key)
+            if not cached_social_unavailable:
+                cached_social_gateway_unavailable = self._cache_get(
+                    "social_gateway",
+                    social_gateway_cache_key,
+                )
+        if cached_social_unavailable:
+            return self._annotate_cache(
+                cached_social_unavailable,
+                namespace="social_unavailable",
+                hit=True,
+            )
 
+        retry_attempts = 3
+        total_social_timeout = max(
+            30,
+            int(getattr(self.config, "xai_social_timeout_seconds", 120) or 120),
+        )
+        social_start = time.monotonic()
+        social_fallback_reserve = max(15, min(30, total_social_timeout // 4 or 15))
+        social_primary_budget = min(
+            45,
+            max(15, total_social_timeout - social_fallback_reserve),
+        )
+        social_deadline = social_start + social_primary_budget
+        last_error: MySearchError | None = None
+        if cached_social_gateway_unavailable:
+            last_error = MySearchError(
+                str(
+                    cached_social_gateway_unavailable.get("fallback", {}).get("reason")
+                    or cached_social_gateway_unavailable.get("summary")
+                    or "social gateway unavailable"
+                )
+            )
+        else:
+            for attempt in range(retry_attempts):
+                remaining_budget = social_deadline - time.monotonic()
+                if remaining_budget <= 0:
+                    break
+                remaining_timeout = max(1, math.ceil(remaining_budget))
+                try:
+                    response = self._request_json(
+                        provider=provider,
+                        method="POST",
+                        path=search_path,
+                        payload=payload,
+                        key=key.key,
+                        base_url=provider.base_url_for("social_search"),
+                        timeout_seconds=remaining_timeout,
+                    )
+                    normalized = self._normalize_social_gateway_response(
+                        response=response,
+                        query=query,
+                        transport=key.source,
+                        from_date=from_date,
+                        to_date=to_date,
+                    )
+                    if normalized.get("results"):
+                        self._cache_delete("social_gateway", social_gateway_cache_key)
+                        self._cache_delete("social_unavailable", social_cache_key)
+                        self._cache_set("social", social_cache_key, normalized)
+                        return self._annotate_cache(
+                            normalized,
+                            namespace="social",
+                            hit=False,
+                        )
+                    last_error = MySearchError(
+                        "xai compatible returned no x.com/twitter.com results"
+                    )
+                    break
+                except MySearchHTTPError as exc:
+                    if exc.is_auth_error:
+                        raise
+                    last_error = exc
+                    if cached_social_result and self._is_retryable_social_gateway_error(exc):
+                        cached_social_result = self._annotate_cache(
+                            cached_social_result,
+                            namespace="social",
+                            hit=True,
+                        )
+                        cached_social_result["fallback"] = {
+                            "from": "xai_compatible",
+                            "to": "social_last_good_cache",
+                            "reason": str(exc)[:200],
+                        }
+                        return cached_social_result
+                    if attempt < retry_attempts - 1 and self._is_retryable_social_gateway_error(exc):
+                        continue
+                    break
+                except MySearchError as exc:
+                    last_error = exc
+                    if cached_social_result and self._is_retryable_social_gateway_error(exc):
+                        cached_social_result = self._annotate_cache(
+                            cached_social_result,
+                            namespace="social",
+                            hit=True,
+                        )
+                        cached_social_result["fallback"] = {
+                            "from": "xai_compatible",
+                            "to": "social_last_good_cache",
+                            "reason": str(exc)[:200],
+                        }
+                        return cached_social_result
+                    if attempt < retry_attempts - 1 and self._is_retryable_social_gateway_error(exc):
+                        continue
+                    break
+            if last_error and self._is_retryable_social_gateway_error(last_error):
+                self._cache_set(
+                    "social_gateway",
+                    social_gateway_cache_key,
+                    self._build_social_gateway_unavailable_result(
+                        base_url=provider.base_url_for("social_search"),
+                        fallback_reason=str(last_error),
+                    ),
+                )
+
+        if cached_social_result and cached_social_result.get("results"):
+            cached_social_result = self._annotate_cache(
+                cached_social_result,
+                namespace="social",
+                hit=True,
+            )
+            cached_social_result["fallback"] = {
+                "from": "xai_compatible",
+                "to": "social_last_good_cache",
+                "reason": str(last_error or "xai compatible search failed")[:200],
+            }
+            return cached_social_result
+
+        fallback_reason = str(last_error or "xai compatible search failed")
+        elapsed_seconds = max(0.0, time.monotonic() - social_start)
+        remaining_social_budget = max(0, int(math.ceil(total_social_timeout - elapsed_seconds)))
+        if remaining_social_budget < 5:
+            logger.warning(
+                "event=social_budget_exhausted reason=%s elapsed=%.2fs total=%ss",
+                fallback_reason,
+                elapsed_seconds,
+                total_social_timeout,
+            )
+            social_unavailable_result = self._build_social_unavailable_result(
+                query=query,
+                fallback_reason=f"{fallback_reason} | social budget exhausted before tavily_social_fallback",
+            )
+            self._cache_set("social_unavailable", social_cache_key, social_unavailable_result)
+            return self._annotate_cache(
+                social_unavailable_result,
+                namespace="social_unavailable",
+                hit=False,
+            )
+        logger.warning(
+            "event=tavily_social_fallback_trigger reason=%s remaining_budget=%ss",
+            fallback_reason,
+            remaining_social_budget,
+        )
         try:
-            response = self._request_json(
-                provider=provider,
-                method="POST",
-                path=search_path,
-                payload=payload,
-                key=key.key,
-                base_url=provider.base_url_for("social_search"),
-            timeout_seconds=max(
-                30,
-                int(getattr(self.config, "xai_social_timeout_seconds", 120) or 120),
-            ),
-            )
-            return self._normalize_social_gateway_response(
-                response=response,
-                query=query,
-                transport=key.source,
-                from_date=from_date,
-                to_date=to_date,
-            )
-        except MySearchHTTPError as exc:
-            if exc.is_auth_error:
-                raise
-            return self._search_tavily_social_fallback(
+            tavily_fallback_result = self._search_tavily_social_fallback(
                 query=query,
                 max_results=max_results,
                 from_date=from_date,
                 to_date=to_date,
-                fallback_reason=str(exc),
+                fallback_reason=fallback_reason,
+                timeout_seconds=min(remaining_social_budget, social_fallback_reserve),
             )
-        except MySearchError as exc:
-            return self._search_tavily_social_fallback(
-                query=query,
-                max_results=max_results,
+        except MySearchError as fallback_exc:
+            elapsed_after_tavily = max(0.0, time.monotonic() - social_start)
+            remaining_for_exa = max(
+                0, int(math.ceil(total_social_timeout - elapsed_after_tavily))
+            )
+            logger.warning(
+                "event=exa_social_fallback_trigger reason=%s remaining_budget=%ss",
+                fallback_exc,
+                remaining_for_exa,
+            )
+            try:
+                exa_fallback_result = self._search_exa_social_fallback(
+                    query=query,
+                    max_results=max_results,
+                    fallback_reason=f"{fallback_reason} | tavily_social_fallback failed: {fallback_exc}",
+                    from_date=from_date,
+                    to_date=to_date,
+                    timeout_seconds=remaining_for_exa,
+                )
+            except MySearchError as exa_exc:
+                social_unavailable_result = self._build_social_unavailable_result(
+                    query=query,
+                    fallback_reason=(
+                        f"{fallback_reason} | tavily_social_fallback failed: {fallback_exc}"
+                        f" | exa_social_fallback failed: {exa_exc}"
+                    ),
+                )
+                self._cache_set("social_unavailable", social_cache_key, social_unavailable_result)
+                return self._annotate_cache(
+                    social_unavailable_result,
+                    namespace="social_unavailable",
+                    hit=False,
+                )
+            self._cache_delete("social_unavailable", social_cache_key)
+            self._cache_set("social", social_cache_key, exa_fallback_result)
+            return self._annotate_cache(
+                exa_fallback_result,
+                namespace="social",
+                hit=False,
+            )
+        if tavily_fallback_result.get("results"):
+            self._cache_delete("social_unavailable", social_cache_key)
+            self._cache_set("social", social_cache_key, tavily_fallback_result)
+            result = self._annotate_cache(
+                tavily_fallback_result,
+                namespace="social",
+                hit=False,
+            )
+            if cached_social_gateway_unavailable:
+                result = self._annotate_cache(
+                    result,
+                    namespace="social_gateway",
+                    hit=True,
+                )
+            return result
+        social_unavailable_result = self._build_social_unavailable_result(
+            query=query,
+            fallback_reason=f"{fallback_reason} | tavily_social_fallback returned no results",
+        )
+        self._cache_set("social_unavailable", social_cache_key, social_unavailable_result)
+        return self._annotate_cache(
+            social_unavailable_result,
+            namespace="social_unavailable",
+            hit=False,
+        )
+
+    def _search_exa_social_fallback(
+        self,
+        *,
+        query: str,
+        max_results: int,
+        fallback_reason: str,
+        from_date: str | None,
+        to_date: str | None,
+        timeout_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        # perf-r4 P0：内部最多两次 _search_exa，必须把外部传入的剩余 social budget 拆分，
+        # 避免 worst-case `45s + 45s` 超出 xai_social_timeout_seconds（默认 120s）总预算。
+        # `timeout_seconds=None` 表示沿用 _request_json 的 config.timeout_seconds 兜底。
+        per_call_timeout: int | None
+        if timeout_seconds is not None and timeout_seconds > 0:
+            per_call_timeout = max(5, timeout_seconds // 2)
+        else:
+            per_call_timeout = None
+        filtered_results: list[dict[str, Any]] = []
+        exa_result = self._search_exa(
+            query=query,
+            max_results=max(max_results * 3, 8),
+            include_domains=["x.com", "twitter.com"],
+            exclude_domains=None,
+            include_content=False,
+            mode="social",
+            intent="status",
+            from_date=from_date,
+            to_date=to_date,
+            timeout_seconds=per_call_timeout,
+        )
+        filtered_results.extend(self._normalize_exa_social_fallback_results(exa_result.get("results", [])))
+        if not filtered_results:
+            exa_result = self._search_exa(
+                query=f"{query} site:x.com OR site:twitter.com",
+                max_results=max(max_results * 3, 8),
+                include_domains=None,
+                exclude_domains=None,
+                include_content=False,
+                mode="web",
+                intent="factual",
                 from_date=from_date,
                 to_date=to_date,
-                fallback_reason=str(exc),
+                timeout_seconds=per_call_timeout,
             )
+            filtered_results.extend(self._normalize_exa_social_fallback_results(exa_result.get("results", [])))
+        if not filtered_results:
+            raise MySearchError("exa social fallback returned no X-adjacent results")
+        filtered_results = self._diversify_social_results(
+            filtered_results,
+            max_results=max_results,
+            max_per_identity=1,
+        )
+        if not filtered_results:
+            raise MySearchError("exa social fallback returned no X-adjacent results after diversification")
+        return {
+            "provider": "exa_social_fallback",
+            "transport": exa_result.get("transport", ""),
+            "query": query,
+            "answer": "",
+            "results": filtered_results,
+            "citations": [
+                {"title": item.get("title", ""), "url": item.get("url", "")}
+                for item in filtered_results
+                if item.get("url")
+            ],
+            "fallback": {
+                "from": "xai_compatible",
+                "to": "exa_social_fallback",
+                "reason": fallback_reason,
+            },
+        }
+
+    def _normalize_exa_social_fallback_results(
+        self,
+        results: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for item in results:
+            if not self._is_exa_social_candidate(item):
+                continue
+            url = str(item.get("url") or "")
+            normalized.append(
+                {
+                    "provider": "exa_social_fallback",
+                    "source": "x",
+                    "title": item.get("title", ""),
+                    "url": url,
+                    "snippet": item.get("snippet", ""),
+                    "content": item.get("content", ""),
+                    "author": self._social_result_identity(item),
+                }
+            )
+        return normalized
+
+    def _is_exa_social_candidate(self, item: dict[str, Any]) -> bool:
+        hostname = self._result_hostname(item)
+        if hostname in {"x.com", "twitter.com"}:
+            return True
+        if hostname in {
+            "xcancel.com",
+            "threadreaderapp.com",
+            "nitter.net",
+            "fxtwitter.com",
+            "fixupx.com",
+            "vxtwitter.com",
+            "techtwitter.com",
+            "getdaytrends.com",
+        }:
+            return True
+        combined = " ".join(
+            [
+                str(item.get("title") or ""),
+                str(item.get("snippet") or ""),
+                str(item.get("content") or ""),
+                str(item.get("url") or ""),
+            ]
+        ).lower()
+        return "twitter.com/" in combined or "x.com/" in combined
+
+    def _is_retryable_social_gateway_error(self, exc: Exception) -> bool:
+        if self._is_retryable_transient_error(exc):
+            return True
+        detail_text = str(exc).lower()
+        return any(
+            marker in detail_text
+            for marker in (
+                "timed out",
+                "timeout",
+                "tls connect error",
+                "curl: (35)",
+                "connection reset",
+                "temporarily unavailable",
+                "bad gateway",
+                "eof",
+            )
+        )
+
+    def _is_retryable_transient_error(self, exc: Exception) -> bool:
+        return isinstance(exc, MySearchHTTPError) and exc.status_code in {429, 502, 503, 504}
 
     def _search_tavily_social_fallback(
         self,
@@ -5986,18 +9408,42 @@ class MySearchClient:
         from_date: str | None,
         to_date: str | None,
         fallback_reason: str,
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
-        tavily_result = self._search_tavily(
-            query=query,
-            max_results=max_results,
-            topic="news",
-            include_answer=True,
-            include_content=False,
-            include_domains=["x.com"],
-            exclude_domains=None,
-            strategy="fast",
-            days=self._infer_tavily_days("status", from_date),
-        )
+        tavily_timeout_budget = max(3, int(timeout_seconds or 15))
+        tavily_deadline = time.monotonic() + tavily_timeout_budget
+        last_error: MySearchError | None = None
+        tavily_result: dict[str, Any] | None = None
+        for attempt in range(2):
+            remaining_budget = tavily_deadline - time.monotonic()
+            if remaining_budget <= 0:
+                break
+            attempt_timeout = max(3, math.ceil(remaining_budget))
+            if attempt == 0:
+                attempt_timeout = min(attempt_timeout, 10)
+            try:
+                tavily_result = self._search_tavily_once(
+                    query=query,
+                    max_results=max_results,
+                    topic="news",
+                    include_answer=True,
+                    include_content=False,
+                    include_domains=["x.com"],
+                    exclude_domains=None,
+                    strategy="fast",
+                    days=self._infer_tavily_days("status", from_date),
+                    from_date=from_date,
+                    to_date=to_date,
+                    timeout_seconds=attempt_timeout,
+                )
+                break
+            except MySearchError as exc:
+                last_error = exc
+                if not self._is_retryable_social_gateway_error(exc) or attempt > 0:
+                    raise
+                continue
+        if tavily_result is None:
+            raise last_error or MySearchError(fallback_reason)
         fallback_results = [
             {
                 "provider": "tavily_social_fallback",
@@ -6006,9 +9452,15 @@ class MySearchClient:
                 "url": item.get("url", ""),
                 "snippet": item.get("snippet", ""),
                 "content": item.get("content", ""),
+                "author": self._social_result_identity(item),
             }
             for item in tavily_result.get("results", [])
         ]
+        fallback_results = self._diversify_social_results(
+            fallback_results,
+            max_results=max_results,
+            max_per_identity=1,
+        )
         if not fallback_results:
             raise MySearchError(fallback_reason)
         return {
@@ -6020,12 +9472,55 @@ class MySearchClient:
             "citations": self._align_citations_with_results(
                 results=fallback_results,
                 citations=list(tavily_result.get("citations") or []),
-            ),
+            )[: len(fallback_results)],
             "fallback": {
                 "from": "xai_compatible",
                 "to": "tavily_social_fallback",
                 "reason": fallback_reason[:200],
             },
+        }
+
+    def _build_social_unavailable_result(
+        self,
+        *,
+        query: str,
+        fallback_reason: str,
+    ) -> dict[str, Any]:
+        reason = fallback_reason[:200]
+        return {
+            "provider": "social_unavailable",
+            "transport": "",
+            "query": query,
+            "answer": "",
+            "results": [],
+            "citations": [],
+            "fallback": {
+                "from": "xai_compatible",
+                "to": "social_unavailable",
+                "reason": reason,
+            },
+            "summary": f"Social/X search unavailable: {reason}",
+        }
+
+    def _build_social_gateway_unavailable_result(
+        self,
+        *,
+        base_url: str,
+        fallback_reason: str,
+    ) -> dict[str, Any]:
+        reason = fallback_reason[:200]
+        return {
+            "provider": "social_gateway_unavailable",
+            "transport": "",
+            "base_url": base_url,
+            "results": [],
+            "citations": [],
+            "fallback": {
+                "from": "xai_compatible",
+                "to": "social_gateway_unavailable",
+                "reason": reason,
+            },
+            "summary": f"Social/X gateway unavailable: {reason}",
         }
 
     def _scrape_firecrawl(
@@ -6050,15 +9545,20 @@ class MySearchClient:
             key=key.key,
         )
         data = response.get("data") or {}
+        if not isinstance(data, dict):
+            data = {}
+        metadata = data.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
         content = data.get("markdown", "")
         if not content and "json" in data:
             content = json.dumps(data["json"], ensure_ascii=False, indent=2)
         return {
             "provider": "firecrawl",
             "transport": key.source,
-            "url": data.get("metadata", {}).get("sourceURL") or data.get("metadata", {}).get("url") or url,
+            "url": metadata.get("sourceURL") or metadata.get("url") or url,
             "content": content,
-            "metadata": data.get("metadata") or {},
+            "metadata": metadata,
         }
 
     def _extract_tavily(self, *, url: str) -> dict[str, Any]:
@@ -6072,6 +9572,8 @@ class MySearchClient:
             key=key.key,
         )
         results = response.get("results") or []
+        if not isinstance(results, list):
+            results = []
         first = results[0] if results else {}
         content = first.get("raw_content") or first.get("content") or ""
         return {
@@ -6273,6 +9775,7 @@ class MySearchClient:
             ],
             "tools": tools,
             "store": False,
+            "stream": False,
         }
 
     def _normalize_social_gateway_response(
@@ -6290,6 +9793,9 @@ class MySearchClient:
             if not isinstance(item, dict):
                 continue
             url = item.get("url") or item.get("link") or ""
+            hostname = self._clean_hostname(urlparse(url).netloc)
+            if hostname and not hostname.endswith(("x.com", "twitter.com")):
+                continue
             content = (
                 item.get("content")
                 or item.get("full_text")
@@ -6323,6 +9829,11 @@ class MySearchClient:
             from_date=from_date,
             to_date=to_date,
         )
+        results = self._diversify_social_results(
+            results,
+            max_results=10,
+            max_per_identity=1,
+        )
         citations = self._extract_social_gateway_citations(response, results)
         answer = (
             response.get("answer")
@@ -6349,6 +9860,47 @@ class MySearchClient:
             normalized["warning"] = warning
         return normalized
 
+    def _social_result_identity(self, item: dict[str, Any]) -> str:
+        explicit_handle = str(item.get("handle") or item.get("username") or "").strip()
+        if explicit_handle:
+            return explicit_handle.lstrip("@").strip().lower()
+        title = str(item.get("title") or "").strip()
+        handle_match = re.search(r"\(@?([A-Za-z0-9_]{1,32})\)", title)
+        if handle_match:
+            return handle_match.group(1).strip().lower()
+        url = str(item.get("url") or "").strip()
+        parsed = urlparse(url)
+        if parsed.netloc.lower().endswith(("x.com", "twitter.com")):
+            path_parts = [part for part in parsed.path.split("/") if part]
+            if path_parts:
+                candidate = path_parts[0].strip().lstrip("@")
+                if candidate and candidate.lower() not in {"i", "search", "home", "explore", "status"}:
+                    return candidate.lower()
+        author = str(item.get("author") or "").strip()
+        if author:
+            return author.lstrip("@").strip().lower()
+        return ""
+
+    def _diversify_social_results(
+        self,
+        results: list[dict[str, Any]],
+        *,
+        max_results: int,
+        max_per_identity: int = 2,
+    ) -> list[dict[str, Any]]:
+        diversified: list[dict[str, Any]] = []
+        counts: dict[str, int] = {}
+        for item in results:
+            identity = self._social_result_identity(item)
+            if identity and counts.get(identity, 0) >= max_per_identity:
+                continue
+            diversified.append(item)
+            if identity:
+                counts[identity] = counts.get(identity, 0) + 1
+            if len(diversified) >= max_results:
+                break
+        return diversified
+
     def _filter_social_results_by_date(
         self,
         results: list[dict[str, Any]],
@@ -6365,6 +9917,7 @@ class MySearchClient:
         for item in results:
             created_at = self._parse_result_timestamp(item.get("created_at"))
             if created_at is None:
+                filtered.append(item)
                 continue
             if start is not None and created_at < start:
                 continue
@@ -6557,7 +10110,15 @@ class MySearchClient:
         precision_tokens = self._query_precision_tokens(query)
         exact_identifier_tokens = self._query_exact_identifier_tokens(query)
         topic_specific_tokens = self._query_topic_specific_tokens(query)
-        strict_official = bool(include_domains) or self._looks_like_official_query(query)
+        strict_official = bool(include_domains) or (
+            self._resolve_official_result_mode(
+                query=query,
+                mode=mode,
+                intent="resource",
+                include_domains=include_domains,
+            )
+            == "strict"
+        )
         ranked = sorted(
             enumerate(results),
             key=lambda pair: (
@@ -6607,6 +10168,12 @@ class MySearchClient:
         github_bonus = int(
             mode == "github"
             and flags["hostname"] in {"github.com", "raw.githubusercontent.com"}
+        )
+        github_release_query = self._looks_like_github_release_query(query.lower())
+        canonical_github_release_page_match = int(
+            github_release_query
+            and hostname == "github.com"
+            and path.rstrip("/").endswith("/releases")
         )
         pdf_bonus = int(mode == "pdf" and self._looks_like_pdf_url(item.get("url", "")))
         non_derivative_paper_bonus = int(
@@ -6796,6 +10363,43 @@ class MySearchClient:
                 query_tokens=paper_subject_tokens,
             )
         )
+        exact_base_report_title_match = int(
+            mode == "pdf"
+            and self._looks_like_exact_base_paper_query(query)
+            and not self._looks_like_variant_base_paper_result(
+                query=query,
+                title_text=(item.get("title") or "").lower(),
+            )
+            and bool(
+                re.match(
+                    rf"^\s*(?:\[[^\]]+\]\s*)?{re.escape(self._base_report_subject_token(query))}\s+technical report\b",
+                    (item.get("title") or "").lower(),
+                )
+            )
+        )
+        canonical_paper_source = int(
+            mode == "pdf"
+            and (
+                (
+                    hostname == "arxiv.org"
+                    and any(marker in path for marker in ("/abs/", "/html/", "/pdf/"))
+                )
+                or (
+                    hostname == "openreview.net"
+                    and "/forum" in path
+                )
+            )
+        )
+        non_pdf_mirror_aggregator = int(
+            not (
+                mode == "pdf"
+                and self._is_obvious_pdf_mirror_or_aggregator_result(
+                    hostname=hostname,
+                    registered_domain=self._registered_domain(hostname),
+                    path=path,
+                )
+            )
+        )
         non_paper_compound_mismatch = int(
             not (
                 mode == "pdf"
@@ -6848,19 +10452,32 @@ class MySearchClient:
         non_locale_variant = int(
             not (
                 strict_official
-                and self._looks_like_locale_prefixed_path(path)
+                and (
+                    self._looks_like_locale_prefixed_path(path)
+                    or self._looks_like_locale_prefixed_hostname(hostname)
+                )
+            )
+        )
+        non_preview_react_variant = int(
+            not (
+                strict_official
+                and self._looks_like_noncanonical_react_docs_hostname(hostname, query=query)
             )
         )
         matched_provider_count = len(item.get("matched_providers") or [])
         content_score, snippet_score, title_score = self._result_quality_score(item)
         return (
             include_match,
+            canonical_github_release_page_match,
             non_community_official,
             official_resource_match,
             official_topic_exact_match,
             canonical_status_page_match,
             status_page_match,
             non_status_api_endpoint,
+            exact_base_report_title_match,
+            canonical_paper_source,
+            non_pdf_mirror_aggregator,
             paper_subject_exact_match,
             primary_named_paper_bonus,
             non_derivative_paper_bonus,
@@ -6882,6 +10499,7 @@ class MySearchClient:
             pricing_page_match,
             exact_path_hits,
             exact_total_hits,
+            non_preview_react_variant,
             non_locale_variant,
             path_precision_hits,
             total_precision_hits,
@@ -6999,9 +10617,11 @@ class MySearchClient:
             for part in hostname.split(".")
             if part
         )
+        # 子域名品牌匹配：如 fastapi.tiangolo.com，品牌在子域名中
+        brand_in_subdomain = host_brand_match and not registered_domain_label_match
         return registered_domain_label_match or (host_brand_match and official_host_surface) or (
             title_brand_match and official_host_surface
-        )
+        ) or (brand_in_subdomain and title_brand_match)
 
     def _align_citations_with_results(
         self,
@@ -7081,6 +10701,39 @@ class MySearchClient:
         normalized["url"] = self._canonical_result_url(str(item.get("url") or ""))
         return normalized
 
+    def _extract_candidate_matches_requested_url(
+        self,
+        *,
+        requested_url: str,
+        candidate_url: str,
+    ) -> bool:
+        requested = self._canonical_result_url(requested_url)
+        candidate = self._canonical_result_url(candidate_url)
+        if not requested or not candidate:
+            return False
+        if requested.rstrip("/") == candidate.rstrip("/"):
+            return True
+        requested_host = self._clean_hostname(urlparse(requested).netloc)
+        candidate_host = self._clean_hostname(urlparse(candidate).netloc)
+        if not requested_host or not candidate_host:
+            return False
+        return self._registered_domain(requested_host) == self._registered_domain(candidate_host)
+
+    @staticmethod
+    def _is_social_unavailable_result(result: dict[str, Any] | None) -> bool:
+        if not result:
+            return False
+        provider = str(result.get("provider") or "")
+        if provider in {"social_unavailable", "social_gateway_unavailable"}:
+            return True
+        fallback = result.get("fallback") or {}
+        if isinstance(fallback, dict) and str(fallback.get("to") or "") in {
+            "social_unavailable",
+            "social_gateway_unavailable",
+        }:
+            return True
+        return False
+
     def _canonical_result_url(self, url: str) -> str:
         raw = (url or "").strip()
         if not raw:
@@ -7105,11 +10758,26 @@ class MySearchClient:
         first = parts[0].strip().lower()
         return bool(re.fullmatch(r"[a-z]{2}(?:-[a-z0-9]{2,8}){0,2}", first))
 
+    def _looks_like_locale_prefixed_hostname(self, hostname: str) -> bool:
+        labels = [item for item in (hostname or "").split(".") if item]
+        if len(labels) < 3:
+            return False
+        first = labels[0].strip().lower()
+        return bool(re.fullmatch(r"[a-z]{2}(?:-[a-z0-9]{2,8}){0,2}", first))
+
     def _looks_like_generic_arxiv_subject_title(self, title_text: str) -> bool:
         cleaned = re.sub(r"\s+", " ", (title_text or "").strip())
         if not cleaned:
             return True
-        return bool(re.fullmatch(r"[A-Za-z][A-Za-z &]+ > [A-Za-z][A-Za-z ,&()/-]+", cleaned))
+        if re.fullmatch(r"[A-Za-z][A-Za-z &]+ > [A-Za-z][A-Za-z ,&()/-]+", cleaned):
+            return True
+        lowered = cleaned.lower()
+        return bool(
+            re.fullmatch(
+                r"arxiv:\d{4}\.\d{4,5}(?:v\d+)?(?: \[[a-z.\-]+\])?(?: \d{1,2} [a-z]{3} \d{4})?",
+                lowered,
+            )
+        )
 
     def _fetch_arxiv_title(self, url: str) -> str:
         canonical_url = self._canonical_result_url(url)
@@ -7716,17 +11384,21 @@ class MySearchClient:
         path = parsed.path.lower()
         hostname_labels = [item for item in hostname.split(".") if item]
         docs_keywords = (
+            "/advanced/",
             "/api",
             "/changelog",
             "/docs",
             "/documentation",
+            "/getting-started/",
             "/guide",
             "/guides",
+            "/learn",
             "/manual",
             "/pricing",
             "/readme",
             "/reference",
             "/references",
+            "/tutorial",
         )
         title_keywords = (
             "api reference",
@@ -7777,6 +11449,7 @@ class MySearchClient:
             "facebook.com",
             "hashnode.dev",
             "hashnode.com",
+            "inference.net",
             "linkedin.com",
             "medium.com",
             "news.ycombinator.com",
@@ -7812,6 +11485,43 @@ class MySearchClient:
             seen.add(registered_domain)
             domains.append(registered_domain)
         return domains
+
+    def _collect_social_identities(
+        self,
+        *,
+        results: list[dict[str, Any]],
+        citations: list[dict[str, Any]],
+    ) -> list[str]:
+        identities: list[str] = []
+        seen: set[str] = set()
+        for item in [*results, *citations]:
+            if not isinstance(item, dict):
+                continue
+            hostname = self._result_hostname(item)
+            if hostname and not hostname.endswith(("x.com", "twitter.com")):
+                continue
+            identity = self._social_result_identity(item)
+            if not identity or identity in seen:
+                continue
+            seen.add(identity)
+            identities.append(identity)
+        return identities
+
+    def _should_use_social_identity_diversity(
+        self,
+        *,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        source_domains: list[str],
+        social_identity_count: int,
+    ) -> bool:
+        if social_identity_count < 2:
+            return False
+        if mode != "social" and intent != "social":
+            return False
+        if not source_domains:
+            return True
+        return all(domain in {"x.com", "twitter.com"} for domain in source_domains)
 
     def _count_official_resource_results(
         self,
@@ -7855,11 +11565,16 @@ class MySearchClient:
         official_source_count: int,
         providers_consulted: list[str],
         official_mode: str,
+        social_identity_count: int,
+        social_identity_diversity_applies: bool,
     ) -> list[str]:
         conflicts: list[str] = []
-        if len(source_domains) <= 1 and len(results) > 1:
+        effective_diversity = (
+            social_identity_count if social_identity_diversity_applies else len(source_domains)
+        )
+        if effective_diversity <= 1 and len(results) > 1:
             conflicts.append("low-source-diversity")
-        if len(set(providers_consulted)) <= 1 and len(source_domains) <= 1 and results:
+        if len(set(providers_consulted)) <= 1 and effective_diversity <= 1 and results:
             conflicts.append("single-provider-single-domain")
         if self._should_rerank_resource_results(mode=mode, intent=intent):
             if results and official_source_count <= 0:
@@ -7883,7 +11598,12 @@ class MySearchClient:
         verification: str,
         conflicts: list[str],
         official_mode: str,
+        social_identity_count: int,
+        social_identity_diversity_applies: bool,
     ) -> str:
+        effective_diversity = (
+            social_identity_count if social_identity_diversity_applies else source_domain_count
+        )
         if result_count <= 0:
             return "low"
         if official_mode == "strict" and official_source_count <= 0:
@@ -7892,14 +11612,14 @@ class MySearchClient:
             if official_source_count > 0 and "official-source-not-confirmed" not in conflicts:
                 if (
                     verification == "cross-provider"
-                    or (source_domain_count >= 2 and "mixed-official-and-third-party" not in conflicts)
+                    or (effective_diversity >= 2 and "mixed-official-and-third-party" not in conflicts)
                 ):
                     return "high"
                 return "medium"
-            return "medium" if source_domain_count >= 2 else "low"
-        if verification == "cross-provider" and source_domain_count >= 2:
+            return "medium" if effective_diversity >= 2 else "low"
+        if verification == "cross-provider" and effective_diversity >= 2:
             return "high"
-        if source_domain_count >= 2:
+        if effective_diversity >= 2:
             return "medium"
         return "low" if conflicts else "medium"
 
@@ -7974,7 +11694,8 @@ class MySearchClient:
             raise MySearchError(f"unsupported auth mode for {provider.name}: {provider.auth_mode}")
 
         url = f"{(base_url or provider.base_url)}{path}"
-        headers.setdefault("Content-Type", "application/json")
+        if method.upper() != "GET":
+            headers.setdefault("Content-Type", "application/json")
         effective_timeout = timeout_seconds or self.config.timeout_seconds
 
         prefer_urlopen = "unittest.mock" in type(urlopen).__module__
@@ -8032,6 +11753,8 @@ class MySearchClient:
                 detail=detail,
                 url=url,
             )
+        if not isinstance(data, dict):
+            raise MySearchError(f"non-dict JSON response from {provider.name}: {response_text[:200]}")
         return data
 
     def _request_text(
@@ -8055,6 +11778,7 @@ class MySearchClient:
 
     def _xai_probe_model(self) -> str:
         # Probe 取当前 registry 首项，跟随 MYSEARCH_GROK_MODELS / EXTRA_MODELS 自定义。
+        # 极端测试场景下 xai_models 可能为空 tuple，回退到内置 basic 层首项。
         models = self.config.xai_models
         if models:
             return models[0].id
@@ -8132,7 +11856,7 @@ class MySearchClient:
                 model=self._xai_probe_model(),
             ),
             key=key,
-            timeout_seconds=max(timeout_seconds, fallback_timeout_seconds),
+            timeout_seconds=min(timeout_seconds, fallback_timeout_seconds),
         )
 
     def _probe_provider_status(
@@ -8193,6 +11917,7 @@ class MySearchClient:
     def _probe_xai_compatible_gateway(self, provider: ProviderConfig, key: str, timeout_seconds: int) -> None:
         health_path = "/health"
         health_base_url = self._derive_root_health_base_url(provider)
+        payload = None
         try:
             payload = self._request_json(
                 provider=provider,
@@ -8203,7 +11928,15 @@ class MySearchClient:
                 base_url=health_base_url,
                 timeout_seconds=timeout_seconds,
             )
-            if isinstance(payload, dict) and payload.get("ok") is False:
+        except MySearchHTTPError as exc:
+            if exc.is_auth_error:
+                raise
+        except MySearchError:
+            pass
+        if payload is not None:
+            if not isinstance(payload, dict):
+                raise MySearchError("social/X gateway health probe returned unexpected response type")
+            if payload.get("ok") is False:
                 detail = (
                     payload.get("error")
                     or payload.get("detail")
@@ -8211,10 +11944,8 @@ class MySearchClient:
                 )
                 raise MySearchError(str(detail))
             return
-        except (MySearchHTTPError, MySearchError):
-            pass
 
-        fallback_timeout_seconds = min(self.config.timeout_seconds, 20)
+        fallback_timeout_seconds = min(timeout_seconds, min(self.config.timeout_seconds, 20))
         self._request_json(
             provider=provider,
             method="POST",
@@ -8281,15 +12012,15 @@ class MySearchClient:
                 return
             try:
                 self._probe_xai_official_status_page(timeout_seconds=timeout_seconds)
-            except MySearchError as exc:
-                if "not fully available" in str(exc):
-                    raise
+            except MySearchHTTPError:
                 self._probe_xai_official_via_responses(
                     provider=provider,
                     key=key,
                     timeout_seconds=timeout_seconds,
                 )
-            except MySearchHTTPError as exc:
+            except MySearchError as exc:
+                if "not fully available" in str(exc):
+                    raise
                 self._probe_xai_official_via_responses(
                     provider=provider,
                     key=key,
@@ -8432,7 +12163,7 @@ class MySearchClient:
         if mode == "pdf":
             return ["pdf"]
         if mode == "news" or intent in {"news", "status"}:
-            return []
+            return ["news"]
         if intent == "tutorial":
             return []
         if mode in {"docs", "research"} or intent in {"resource", "tutorial"}:
@@ -8521,6 +12252,115 @@ class MySearchClient:
             markers.extend(["record of the year", "最佳歌曲"])
         return markers
 
+    def _award_query_competing_category_markers(self, query_lower: str) -> list[str]:
+        markers: list[str] = []
+        if any(token in query_lower for token in ("album of the year", "aoty", "最佳专辑")):
+            markers.extend(["record of the year", "song of the year", "best new artist"])
+        if any(token in query_lower for token in ("record of the year", "最佳歌曲")):
+            markers.extend(["album of the year", "song of the year", "best new artist"])
+        if "best picture" in query_lower or "最佳影片" in query_lower or "最佳电影" in query_lower:
+            markers.extend(["best actor", "best actress", "supporting actor", "supporting actress"])
+        return markers
+
+    def _looks_like_award_category_conflict(
+        self,
+        *,
+        query_lower: str,
+        title_text: str,
+        snippet_text: str,
+        content_text: str,
+    ) -> bool:
+        category_markers = self._award_query_category_markers(query_lower)
+        if not category_markers:
+            return False
+        body_text = f"{snippet_text} {content_text}".lower()
+        if any(marker in body_text for marker in category_markers):
+            return False
+        if not any(marker in title_text.lower() for marker in category_markers):
+            return False
+        competing_markers = self._award_query_competing_category_markers(query_lower)
+        return any(marker in body_text for marker in competing_markers)
+
+    def _award_query_brand_markers(self, query_lower: str) -> list[str]:
+        if "grammy" in query_lower:
+            return ["grammy", "grammys", "grammy awards"]
+        if "oscar" in query_lower or "academy awards" in query_lower:
+            return ["oscar", "oscars", "academy awards", "academy award"]
+        if "golden globe" in query_lower:
+            return ["golden globe", "golden globes"]
+        if "bafta" in query_lower:
+            return ["bafta"]
+        return []
+
+    def _looks_like_award_brand_conflict(
+        self,
+        *,
+        query_lower: str,
+        title_text: str,
+        snippet_text: str,
+        content_text: str,
+        path: str,
+    ) -> bool:
+        brand_markers = self._award_query_brand_markers(query_lower)
+        if not brand_markers:
+            return False
+        text = f"{title_text} {snippet_text} {content_text} {path}"
+        if any(marker in text for marker in brand_markers):
+            return False
+        if "grammy" in query_lower:
+            competing_markers = [
+                "academy awards",
+                "american music awards",
+                "bafta",
+                "billboard music awards",
+                "brit awards",
+                "emmy",
+                "glaad",
+                "golden globe",
+                "golden globes",
+                "hall of fame gala",
+                "iheartradio",
+                "juno",
+                "mtv",
+                "oscars",
+                "platino",
+                "sxsw",
+                "vma",
+            ]
+        elif "oscar" in query_lower or "academy awards" in query_lower:
+            competing_markers = [
+                "bafta",
+                "emmy",
+                "glaad",
+                "golden globe",
+                "golden globes",
+                "grammy",
+                "grammys",
+                "iheartradio",
+                "mtv",
+                "platino",
+                "sxsw",
+                "vma",
+            ]
+        else:
+            competing_markers = [
+                "academy awards",
+                "bafta",
+                "emmy",
+                "glaad",
+                "golden globe",
+                "golden globes",
+                "grammy",
+                "grammys",
+                "iheartradio",
+                "mtv",
+                "oscars",
+                "platino",
+                "sxsw",
+                "vma",
+            ]
+        return any(marker in text for marker in competing_markers)
+
     def _looks_like_box_office_query(self, query_lower: str) -> bool:
         keywords = [
             "box office",
@@ -8589,15 +12429,14 @@ class MySearchClient:
         return any(keyword in text for keyword in keywords)
 
     def _looks_like_status_query(self, query_lower: str) -> bool:
+        if self._looks_like_changelog_query(query_lower):
+            return False
         keywords = [
             "status",
             "incident",
             "outage",
-            "release",
             "roadmap",
-            "version",
             "版本",
-            "发布",
             "进展",
             "现状",
         ]
@@ -8770,6 +12609,9 @@ class MySearchClient:
         return summary
 
     def _search_summary_excerpt(self, item: Mapping[str, Any], limit: int = 160) -> str:
+        github_release_excerpt = self._github_release_summary_excerpt(item)
+        if github_release_excerpt:
+            return self._build_excerpt(github_release_excerpt, limit=limit)
         snippet = re.sub(
             r"\s+",
             " ",
@@ -8778,7 +12620,86 @@ class MySearchClient:
         if not snippet:
             return ""
         snippet = re.sub(r"^[#>*`\-\s]+", "", snippet).strip()
+        if self._search_summary_excerpt_looks_like_noise(snippet):
+            return ""
         return self._build_excerpt(snippet, limit=limit)
+
+    def _github_release_summary_excerpt(self, item: Mapping[str, Any]) -> str:
+        url = str(item.get("url") or "").strip()
+        if not url:
+            return ""
+        parsed = urlparse(url)
+        hostname = self._registered_domain(parsed.hostname or "")
+        if hostname != "github.com" or not parsed.path.rstrip("/").endswith("/releases"):
+            return ""
+        text = re.sub(r"\s+", " ", str(item.get("snippet") or item.get("content") or "").strip()).strip()
+        matches = re.findall(
+            r"(?:##\s+)?(v?\d+\.\d+\.\d+(?:[-+._][a-z0-9]+)?)\s*\((\d{4}-\d{2}-\d{2})\)",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if not matches:
+            try:
+                extracted_page = self.extract_url(
+                    url=url,
+                    provider="auto",
+                    formats=["markdown"],
+                    only_main_content=True,
+                )
+            except MySearchError:
+                extracted_page = {}
+            extracted_text = re.sub(
+                r"\s+",
+                " ",
+                str(extracted_page.get("content") or "").strip(),
+            ).strip()
+            if extracted_text:
+                matches = re.findall(
+                    r"(?:##\s+)?(v?\d+\.\d+\.\d+(?:[-+._][a-z0-9]+)?)\s*\((\d{4}-\d{2}-\d{2})\)",
+                    extracted_text,
+                    flags=re.IGNORECASE,
+                )
+        if not matches:
+            return ""
+        version, date = max(matches, key=lambda item: item[1])
+        return f"Latest release {version} ({date})"
+
+    def _search_summary_excerpt_looks_like_noise(self, text: str) -> bool:
+        normalized = re.sub(r"\s+", " ", text).strip()
+        if not normalized:
+            return False
+        lowered = normalized.lower()
+        if normalized.count("](") >= 2:
+            return True
+        if normalized.startswith(("* [", "- [")):
+            return True
+        if normalized.startswith("# ") and (
+            "openai api" in lowered
+            or "openai developers" in lowered
+            or "api reference" in lowered
+            or "[![image" in lowered
+        ):
+            return True
+        return any(
+            marker in lowered
+            for marker in (
+                "guides and concepts for the openai api",
+                "api reference.",
+                "primary navigation",
+                "search docs",
+                "showcase demo apps",
+                "latest: gpt-5.4",
+                "import {",
+                "import openai",
+                "const client =",
+                "export default function",
+                "async function ",
+                "from \"openai\"",
+                "copy markdown",
+                "open in chatgpt",
+                "skip to content",
+            )
+        )
 
     def _apply_result_event_answer_override(
         self,
@@ -8803,19 +12724,29 @@ class MySearchClient:
             self._looks_like_award_result_query(query_lower)
             and not self._has_strong_award_result(query=query, results=result_items)
         )
+        allow_award_page_extraction = (
+            self._looks_like_award_result_query(query_lower)
+            and self._can_attempt_award_page_extraction(query=query, results=result_items)
+        )
         if weak_award_signal and current_answer and self._answer_looks_uncertain(current_answer):
             current_answer = ""
-        extracted_answer = self._extract_result_event_answer(
-            query=query,
-            results=result_items,
-        )
+        extracted_answer = ""
+        if not weak_award_signal:
+            extracted_answer = self._extract_result_event_answer(
+                query=query,
+                results=result_items,
+            )
         should_try_page_extraction = (
             strategy in {"verify", "deep"}
             or not current_answer
             or self._answer_looks_uncertain(current_answer)
             or result_event_query
         )
-        if not extracted_answer and should_try_page_extraction:
+        if (
+            not extracted_answer
+            and should_try_page_extraction
+            and (not weak_award_signal or allow_award_page_extraction)
+        ):
             extracted_answer = self._extract_result_event_answer_from_top_page(
                 query=query,
                 results=result_items,
@@ -8869,7 +12800,40 @@ class MySearchClient:
             )
             if extracted_answer:
                 return extracted_answer
+            extracted_answer = self._extract_result_event_answer_from_official_page_html(
+                query=query,
+                url=url,
+            )
+            if extracted_answer:
+                return extracted_answer
         return ""
+
+    def _extract_result_event_answer_from_official_page_html(
+        self,
+        *,
+        query: str,
+        url: str,
+    ) -> str:
+        hostname = self._registered_domain(self._result_hostname({"url": url}))
+        if hostname not in {"oscars.org", "theacademy.com", "grammy.com", "grammys.com"}:
+            return ""
+        try:
+            status_code, response_text = self._request_text(
+                url=url,
+                timeout_seconds=min(self.config.timeout_seconds, 20),
+            )
+        except MySearchError:
+            return ""
+        if status_code >= 400 or not response_text:
+            return ""
+        plain = html.unescape(re.sub(r"<[^>]+>", " ", response_text))
+        plain = re.sub(r"\s+", " ", plain).strip()
+        if not plain:
+            return ""
+        return self._extract_result_event_answer_from_text(
+            query_lower=query.lower(),
+            text=plain,
+        )
 
     def _result_event_candidates(
         self,
@@ -8902,9 +12866,27 @@ class MySearchClient:
         score = 0
         if hostname in {"nytimes.com", "npr.org", "pbs.org", "latimes.com", "washingtonpost.com", "apnews.com"}:
             score += 4
+        if (
+            hostname in {"grammy.com", "grammys.com", "oscars.org", "theacademy.com"}
+            and not self._looks_like_award_nomination_result(
+                title_text=title_text,
+                snippet_text=snippet_text,
+                path=urlparse(url).path.lower(),
+            )
+            and not self._looks_like_query_year_mismatch(
+                query=query_lower,
+                text=f"{title_text} {snippet_text} {content_text} {url}",
+            )
+        ):
+            score += 6
         if any(token in title_text or token in snippet_text for token in ("winner", "winners", "full results", "full list")):
             score += 3
         if self._looks_like_award_result_query(query_lower):
+            award_coverage_page = self._looks_like_award_coverage_page(
+                query_lower=query_lower,
+                title_text=title_text,
+                path=urlparse(url).path.lower(),
+            )
             if any(
                 token in title_text or token in snippet_text or token in content_text
                 for token in self._award_query_category_markers(query_lower)
@@ -8917,17 +12899,77 @@ class MySearchClient:
                 for token in ("oscar", "oscars", "academy awards")
             ):
                 score += 2
+            if award_coverage_page:
+                score += 2
+            elif not self._looks_like_award_winner_result(
+                title_text=title_text,
+                snippet_text=snippet_text,
+                path=urlparse(url).path.lower(),
+            ):
+                score -= 4
         if self._looks_like_box_office_query(query_lower):
             if any(token in title_text or token in snippet_text for token in ("box office", "opening weekend", "highest-grossing", "biggest opening")):
                 score += 4
         if self._looks_like_query_year_mismatch(query=query_lower, text=f"{title_text} {snippet_text} {content_text} {url}"):
             score -= 5
+        if (
+            self._looks_like_award_result_query(query_lower)
+            and self._looks_like_award_category_conflict(
+                query_lower=query_lower,
+                title_text=title_text,
+                snippet_text=snippet_text,
+                content_text=content_text,
+            )
+        ):
+            score -= 10
+        if (
+            self._looks_like_award_result_query(query_lower)
+            and self._looks_like_award_brand_conflict(
+                query_lower=query_lower,
+                title_text=title_text,
+                snippet_text=snippet_text,
+                content_text=content_text,
+                path=urlparse(url).path.lower(),
+            )
+        ):
+            score -= 12
+        if (
+            self._looks_like_award_result_query(query_lower)
+            and self._looks_like_weak_official_award_feature_result(
+                title_text=title_text,
+                snippet_text=snippet_text,
+                path=urlparse(url).path.lower(),
+            )
+        ):
+            score -= 6
+        if (
+            self._looks_like_award_result_query(query_lower)
+            and self._looks_like_generic_award_archive_result(
+                title_text=title_text,
+                path=urlparse(url).path.lower(),
+            )
+        ):
+            score -= 6
         if self._looks_like_award_prediction_result(
             title_text=title_text,
             snippet_text=snippet_text,
             path=urlparse(url).path.lower(),
         ):
             score -= 4
+        if (
+            self._looks_like_award_result_query(query_lower)
+            and self._looks_like_award_recap_or_gallery_result(
+                title_text=title_text,
+                snippet_text=snippet_text,
+                path=urlparse(url).path.lower(),
+            )
+            and not self._looks_like_award_winner_result(
+                title_text=title_text,
+                snippet_text=snippet_text,
+                path=urlparse(url).path.lower(),
+            )
+        ):
+            score -= 5
         return score
 
     def _answer_looks_uncertain(self, answer: str) -> bool:
@@ -8965,23 +13007,76 @@ class MySearchClient:
             return ""
 
         query_lower = query.lower()
+        award_query = self._looks_like_award_result_query(query_lower)
         signal_texts: list[str] = []
         for item in self._result_event_candidates(query=query, results=results, limit=5):
-            for key in ("title", "snippet", "content"):
-                value = str(item.get(key) or "").strip()
-                if value:
-                    signal_texts.append(value)
+            title_text = str(item.get("title") or "").strip()
+            snippet_text = str(item.get("snippet") or "").strip()
+            content_text = str(item.get("content") or "").strip()
+            path = urlparse(str(item.get("url") or "")).path.lower()
+            if (
+                award_query
+                and self._looks_like_award_category_conflict(
+                    query_lower=query_lower,
+                    title_text=title_text,
+                    snippet_text=snippet_text,
+                    content_text=content_text,
+                )
+            ):
+                continue
+            candidate_texts = [text for text in (content_text, snippet_text) if text]
+            title_only_allowed = (
+                not award_query
+                or self._looks_like_award_winner_result(
+                    title_text=title_text.lower(),
+                    snippet_text="",
+                    path=path,
+                )
+                or "winner" in title_text.lower()
+                or "winners" in title_text.lower()
+            )
+            if title_only_allowed and title_text:
+                candidate_texts.append(title_text)
+            for text in candidate_texts:
+                if not text:
+                    continue
+                answer = self._extract_result_event_answer_from_text(
+                    query_lower=query_lower,
+                    text=text,
+                )
+                if answer:
+                    return answer
+            combined_item_text = "\n".join(
+                value for value in (snippet_text, content_text, title_text) if value
+            )
+            if combined_item_text:
+                signal_texts.append(combined_item_text)
         if not signal_texts:
             return ""
 
         combined_text = "\n".join(signal_texts)
+        return self._extract_result_event_answer_from_text(
+            query_lower=query_lower,
+            text=combined_text,
+        )
+
+    def _extract_result_event_answer_from_text(
+        self,
+        *,
+        query_lower: str,
+        text: str,
+    ) -> str:
+        if not text:
+            return ""
 
         if "best picture" in query_lower or "最佳影片" in query_lower:
             entity = self._extract_named_fact_entity(
-                combined_text,
+                text,
                 patterns=[
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+won[^\n]{0,80}\bbest picture\b",
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+is\s+the\s+(?:20\d{2}\s+)?best picture winner",
+                    r"best picture\s+winner\s+([^\n.;]{2,100})",
+                    r"best picture\s*\.\s*winner\s*[\.\-–—: ]+\s*([^\n.;]{2,100})",
                     r"best picture\s*[–—:]\s*[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]",
                     r"best picture(?:\s+winner)?(?:\s*[–—:]|\s+was|\s+is|\s+goes to|\s+went to)\s+[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]",
                     r"best picture\s*[–—:]\s*([^\n.;]{2,100})",
@@ -8993,11 +13088,12 @@ class MySearchClient:
 
         if "best actor" in query_lower or "最佳男主角" in query_lower:
             entity = self._extract_named_fact_entity(
-                combined_text,
+                text,
                 patterns=[
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+won[^\n]{0,80}\bbest actor\b",
                     r"([A-Z][A-Za-z0-9'’&.\- ]{2,100})\s+wins\s+best actor",
                     r"([A-Z][A-Za-z0-9'’&.\- ]{2,100})\s+is\s+the\s+(?:20\d{2}\s+)?best actor winner",
+                    r"best actor\s+winner\s+([^\n.;]{2,100})",
                     r"best actor\s*[–—:]\s*([^\n.;]{2,100})",
                     r"best actor(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)?\s+([^\n.;]{2,100})",
                     r"([A-Z][A-Za-z0-9'’&.\- ]{2,100})\s+won\s+best actor",
@@ -9015,17 +13111,21 @@ class MySearchClient:
                 return f"Best Actor winner: {entity}"
 
         if any(token in query_lower for token in ("album of the year", "aoty", "最佳专辑")):
-            entity = self._extract_album_of_the_year_entity(combined_text)
+            entity = self._extract_album_of_the_year_entity(text)
             if entity:
                 return f"Album of the Year winner: {entity}"
             entity = self._extract_named_fact_entity(
-                combined_text,
+                text,
                 patterns=[
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+(?:won|wins)[^\n]{0,80}\balbum of the year\b",
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+[–—:]\s*album of the year",
+                    r"album of the year\s+winner\s+([^\n.;]{2,100})",
+                    r"album of the year\s*\.\s*winner\s*[\.\-–—: ]+\s*([^\n.;]{2,100})",
+                    r"album of the year\s*[·•]\s*([^\n.;]{2,100})",
                     r"album of the year\s*[–—:]\s*([^\n.;]{2,100})",
-                    r"album of the year(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)?\s+([^\n.;]{2,100})",
+                    r"album of the year(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)\s+([^\n.;]{2,100})",
                     r"([^\n.;]{2,100})\s+won\s+album of the year",
+                    r"([^\n.;]{2,100})\s+(?:won|wins)[^\n]{0,40}\balbum of the year\b",
                 ],
                 reject_substrings=[
                     "award",
@@ -9048,10 +13148,11 @@ class MySearchClient:
 
         if "record of the year" in query_lower or "最佳歌曲" in query_lower:
             entity = self._extract_named_fact_entity(
-                combined_text,
+                text,
                 patterns=[
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+(?:won|wins)[^\n]{0,80}\brecord of the year\b",
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+[–—:]\s*record of the year",
+                    r"record of the year\s+winner\s+([^\n.;]{2,100})",
                     r"record of the year\s*[–—:]\s*([^\n.;]{2,100})",
                     r"record of the year(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)?\s+([^\n.;]{2,100})",
                     r"([^\n.;]{2,100})\s+wins\s+record of the year",
@@ -9071,7 +13172,7 @@ class MySearchClient:
 
         if self._looks_like_box_office_query(query_lower):
             entity = self._extract_named_fact_entity(
-                combined_text,
+                text,
                 patterns=[
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+(?:becomes|become|became|scores|scored|tops|topped)[^\n]{0,80}(?:highest-grossing|biggest opening|opening weekend|box office)",
                     r"([A-Z][A-Za-z0-9:,'’&\\- ]{2,100})\s+(?:becomes|become|became|scores|scored|tops|topped)[^\n]{0,80}(?:highest-grossing|biggest opening|opening weekend|box office)",
@@ -9157,6 +13258,33 @@ class MySearchClient:
             )
             if album:
                 return album
+        artist_only_patterns = [
+            r"([A-Z][A-Za-z0-9&'’.\- ]{1,80})['’]s win for album of the year",
+            r"([A-Z][A-Za-z0-9&'’.\- ]{1,80})['’]s album of the year win",
+            r"([A-Z][A-Za-z0-9&'’.\- ]{1,80})\s+wins\s+the\s+grammy\s+for\s+album\s+of\s+the\s+year",
+            r"([A-Z][A-Za-z0-9&'’.\- ]{1,80})\s+won\s+the\s+grammy\s+for\s+album\s+of\s+the\s+year",
+        ]
+        for pattern in artist_only_patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            artist = self._clean_extracted_fact_entity(
+                match.group(1),
+                reject_substrings=[
+                    "award",
+                    "winner",
+                    "nominee",
+                    "nominees",
+                    "best new artist",
+                    "his album",
+                    "her album",
+                    "their album",
+                    "its album",
+                    "the album",
+                ],
+            )
+            if artist:
+                return artist
         return ""
 
     def _extract_named_fact_entity(
@@ -9185,13 +13313,16 @@ class MySearchClient:
         reject_substrings: list[str] | None = None,
     ) -> str:
         entity = re.sub(r"\s+", " ", value).strip(" \t\r\n-:;,.\"'“”‘’")
+        entity = re.sub(r"^[·•]+\s*", "", entity)
         entity = re.sub(r"^(?:winner|winners)\s*[:\-]\s*", "", entity, flags=re.IGNORECASE)
-        entity = re.split(r"\s+(?:with|which|that|after|during|for)\s+", entity, maxsplit=1)[0]
+        entity = re.sub(r"['’]s\s+win\b.*$", "", entity, flags=re.IGNORECASE)
+        entity = re.split(r"\s+(?:with|which|that|during|for)\s+", entity, maxsplit=1)[0]
+        entity = re.split(r"\s*\|\s*", entity, maxsplit=1)[0]
         entity = re.split(r",\s*(?:[\"“]|[A-Z][A-Za-z])", entity, maxsplit=1)[0]
         entity = re.split(r",\s*(?:marking|while|as|where|when)\b", entity, maxsplit=1, flags=re.IGNORECASE)[0]
         entity = re.split(r"\s{2,}", entity, maxsplit=1)[0]
         entity = re.sub(r"\s+\((?:winner|winners)\)$", "", entity, flags=re.IGNORECASE).strip()
-        entity = entity.strip(" \t\r\n-:;,.\"'“”‘’")
+        entity = entity.strip(" \t\r\n-:;,.\"'“”‘’·•")
         if len(entity) < 2:
             return ""
         if self._looks_like_publisher_fragment(entity):
@@ -9218,7 +13349,9 @@ class MySearchClient:
             "today",
             "usa today",
             "rolling stone",
+            "grammy",
             "grammy.com",
+            "grammys",
             "grammys.com",
         }
         if entity_lower in known_outlets:
@@ -9230,13 +13363,189 @@ class MySearchClient:
         return False
 
     def _looks_like_query_year_mismatch(self, *, query: str, text: str) -> bool:
-        query_years = {year for year in re.findall(r"\b20\d{2}\b", query)}
+        query_years = {year for year in re.findall(r"\b(?:19|20)\d{2}\b", query)}
         if not query_years:
             return False
-        result_years = {year for year in re.findall(r"\b20\d{2}\b", text)}
+        result_years = {year for year in re.findall(r"\b(?:19|20)\d{2}\b", text)}
         if not result_years:
             return False
         return query_years.isdisjoint(result_years)
+
+    def _build_research_report_source_lines(
+        self,
+        *,
+        query: str,
+        mode: str,
+        ordered_results: list[dict[str, Any]],
+        citations: list[dict[str, Any]],
+        include_domains: list[str] | None,
+        authoritative_preferred: bool,
+        comparison_like: bool,
+        max_items: int = 4,
+    ) -> list[str]:
+        mode_name = cast(SearchMode, mode if mode in SEARCH_MODES else "web")
+        source_entries: list[dict[str, str]] = []
+        seen_lines: set[str] = set()
+
+        def add_source_entry(item: dict[str, Any]) -> None:
+            title = (item.get("title") or "").strip()
+            if not title:
+                return
+            domain = self._registered_domain(self._result_hostname(item))
+            dedupe_key = self._research_source_topic_key(
+                title=title,
+                domain=domain or (item.get("url") or "").strip(),
+            )
+            if dedupe_key in seen_lines:
+                return
+            line = f"{title} ({domain})" if domain and domain not in title.lower() else title
+            if not line:
+                return
+            seen_lines.add(dedupe_key)
+            cluster_label = self._research_result_cluster_label(
+                query=query,
+                mode=mode_name,
+                item=item,
+                include_domains=include_domains,
+                authoritative_preferred=authoritative_preferred,
+            )
+            source_entries.append({"line": line, "cluster": cluster_label})
+
+        for item in ordered_results:
+            add_source_entry(item)
+        if not source_entries:
+            for citation in citations:
+                add_source_entry(
+                    {
+                        "title": (citation.get("title") or "").strip(),
+                        "url": (citation.get("url") or "").strip(),
+                        "snippet": "",
+                    }
+                )
+        if not source_entries:
+            return []
+
+        if authoritative_preferred:
+            official_count = sum(
+                1 for item in source_entries if item["cluster"] == "official"
+            )
+            supporting_count = sum(
+                1 for item in source_entries if item["cluster"] == "supporting"
+            )
+            anchor_count = sum(
+                1
+                for item in source_entries
+                if item["cluster"] in {"official", "supporting"}
+            )
+            if official_count >= 2 and supporting_count >= 1:
+                cluster_caps = {"official": max_items, "supporting": 1}
+            elif anchor_count >= 3:
+                cluster_caps = {"official": max_items, "supporting": max_items}
+            elif anchor_count >= 2:
+                cluster_caps = {
+                    "official": max_items,
+                    "supporting": max_items,
+                    "general": 1,
+                }
+            else:
+                cluster_caps = {
+                    "official": max_items,
+                    "supporting": max_items,
+                    "general": 2,
+                    "community": 1,
+                }
+        elif comparison_like:
+            anchor_count = sum(
+                1
+                for item in source_entries
+                if item["cluster"] in {"project", "supporting"}
+            )
+            if anchor_count >= 3:
+                cluster_caps = {"project": max_items, "supporting": max_items}
+            elif anchor_count >= 2:
+                cluster_caps = {
+                    "project": max_items,
+                    "supporting": max_items,
+                    "curated": 1,
+                }
+            else:
+                cluster_caps = {
+                    "project": max_items,
+                    "supporting": max_items,
+                    "curated": 2,
+                    "listicle": 1,
+                    "directory": 1,
+                    "community": 1,
+                }
+        else:
+            cluster_caps = {}
+
+        if not cluster_caps:
+            return [item["line"] for item in source_entries[:max_items]]
+
+        selected_lines: list[str] = []
+        cluster_counts: dict[str, int] = {}
+        for item in source_entries:
+            cluster_label = item["cluster"]
+            line = item["line"]
+            cap = cluster_caps.get(cluster_label, 0)
+            if cap and cluster_counts.get(cluster_label, 0) < cap and len(selected_lines) < max_items:
+                selected_lines.append(line)
+                cluster_counts[cluster_label] = cluster_counts.get(cluster_label, 0) + 1
+        return selected_lines[:max_items]
+
+    def _research_source_topic_key(self, *, title: str, domain: str) -> str:
+        head = re.split(r"\s[\-|:|]\s", title, maxsplit=1)[0].strip().lower() or title.lower()
+        tokens = re.findall(r"[a-z0-9]+", head)
+        stop_tokens = {
+            "a",
+            "an",
+            "and",
+            "api",
+            "app",
+            "apps",
+            "developer",
+            "developers",
+            "doc",
+            "docs",
+            "documentation",
+            "for",
+            "guide",
+            "guides",
+            "in",
+            "of",
+            "on",
+            "openai",
+            "platform",
+            "reference",
+            "the",
+            "to",
+        }
+        action_tokens = {
+            "create",
+            "delete",
+            "get",
+            "list",
+            "migrate",
+            "retrieve",
+            "update",
+            "use",
+            "using",
+        }
+        normalized_tokens: list[str] = []
+        for token in tokens:
+            if token in stop_tokens or token in action_tokens:
+                continue
+            if token.endswith("ies") and len(token) > 4:
+                token = f"{token[:-3]}y"
+            elif token.endswith(("ches", "shes", "sses", "xes", "zes")) and len(token) > 5:
+                token = token[:-2]
+            elif token.endswith("s") and len(token) > 4:
+                token = token[:-1]
+            normalized_tokens.append(token)
+        if not normalized_tokens:
+            normalized_tokens = tokens[:2] or [head]
+        return f"{domain}|{' '.join(normalized_tokens[:3])}"
 
     def _build_research_report_sections(
         self,
@@ -9295,6 +13604,18 @@ class MySearchClient:
                 citation_title_lines.append(line)
             if len(citation_title_lines) >= 4:
                 break
+        ordered_title_lines: list[str] = []
+        for item in ordered_results:
+            url = (item.get("url") or "").strip()
+            title = (item.get("title") or url_to_title.get(url) or "").strip()
+            if not title:
+                continue
+            domain = self._registered_domain(self._result_hostname(item))
+            line = f"{title} ({domain})" if domain and domain not in title.lower() else title
+            if line not in ordered_title_lines:
+                ordered_title_lines.append(line)
+            if len(ordered_title_lines) >= 4:
+                break
         query_lower = query.lower()
         comparison_like = (
             web_search.get("intent") in {"comparison", "exploratory"}
@@ -9302,19 +13623,111 @@ class MySearchClient:
             or self._looks_like_exploratory_query(query_lower)
             or any(token in query_lower for token in ("best ", "top ", "compare ", "comparison "))
         )
-        authoritative_source_count = int(evidence.get("authoritative_source_count") or 0)
-        community_source_count = int(evidence.get("community_source_count") or 0)
+        selected_cluster_counts = {
+            str(key): int(value or 0)
+            for key, value in dict(evidence.get("selected_candidate_cluster_counts") or {}).items()
+        }
+        explicit_selected_authoritative = int(evidence.get("selected_authoritative_source_count") or 0)
+        explicit_selected_supporting = int(evidence.get("selected_supporting_source_count") or 0)
+        explicit_selected_community = int(evidence.get("selected_community_source_count") or 0)
+        if (
+            explicit_selected_authoritative > 0
+            or explicit_selected_supporting > 0
+            or explicit_selected_community > 0
+        ):
+            authoritative_source_count = explicit_selected_authoritative
+            supporting_source_count = explicit_selected_supporting
+            community_source_count = explicit_selected_community
+        elif selected_cluster_counts:
+            authoritative_source_count = int(selected_cluster_counts.get("official") or 0)
+            supporting_source_count = int(selected_cluster_counts.get("supporting") or 0)
+            community_source_count = int(selected_cluster_counts.get("community") or 0)
+        else:
+            authoritative_source_count = int(evidence.get("authoritative_source_count") or 0)
+            supporting_source_count = int(evidence.get("supporting_source_count") or 0)
+            community_source_count = int(evidence.get("community_source_count") or 0)
+        report_mode = str(
+            (evidence.get("research_plan") or {}).get("web_mode")
+            or web_search.get("intent")
+            or "web"
+        )
+        authoritative_research = bool(evidence.get("authoritative_research"))
+        preferred_title_lines = self._build_research_report_source_lines(
+            query=query,
+            mode=report_mode,
+            ordered_results=ordered_results,
+            citations=citations,
+            include_domains=None,
+            authoritative_preferred=authoritative_research,
+            comparison_like=comparison_like,
+            max_items=4,
+        ) or (ordered_title_lines or citation_title_lines)
+        anchor_tokens = self._research_report_anchor_tokens(
+            query=query,
+            mode=report_mode,
+            ordered_results=ordered_results,
+            authoritative_preferred=authoritative_research,
+        )
+        if not anchor_tokens:
+            for domain in [str(item).strip() for item in (evidence.get("selected_candidate_domains") or [])]:
+                if not domain:
+                    continue
+                registered_domain = self._registered_domain(domain)
+                for token in re.split(r"[^a-z0-9]+", registered_domain.lower()):
+                    if token in {
+                        "",
+                        "ai",
+                        "api",
+                        "com",
+                        "dev",
+                        "developers",
+                        "docs",
+                        "guide",
+                        "guides",
+                        "io",
+                        "net",
+                        "org",
+                        "platform",
+                        "reference",
+                        "www",
+                    }:
+                        continue
+                    if token not in anchor_tokens:
+                        anchor_tokens.append(token)
+                    if len(anchor_tokens) >= 6:
+                        break
+                if len(anchor_tokens) >= 6:
+                    break
+        if (
+            web_answer
+            and comparison_like
+            and (authoritative_source_count > 0 or supporting_source_count > 0)
+        ):
+            web_answer = ""
+        elif (
+            web_answer
+            and authoritative_research
+            and (authoritative_source_count > 0 or supporting_source_count > 0)
+            and anchor_tokens
+            and not self._research_summary_mentions_anchor_tokens(web_answer, anchor_tokens)
+        ):
+            web_answer = ""
         primary_finding = executive_summary_override or web_answer or social_answer
         if not primary_finding and comparison_like:
-            if authoritative_source_count > 0 and citation_title_lines:
+            if authoritative_source_count > 0 and preferred_title_lines:
                 primary_finding = (
                     "Authoritative sources and corroborating analysis were found; "
-                    f"the strongest anchors include {', '.join(citation_title_lines[:3])}."
+                    f"the strongest anchors include {', '.join(preferred_title_lines[:3])}."
                 )
-            elif citation_title_lines:
+            elif supporting_source_count > 0 and preferred_title_lines:
+                primary_finding = (
+                    "Supporting sources and corroborating analysis were found; "
+                    f"the strongest anchors include {', '.join(preferred_title_lines[:3])}."
+                )
+            elif preferred_title_lines:
                 primary_finding = (
                     "The strongest available evidence is comparative rather than authoritative; "
-                    f"recurring source clusters include {', '.join(citation_title_lines[:3])}."
+                    f"recurring source clusters include {', '.join(preferred_title_lines[:3])}."
                 )
             else:
                 primary_finding = (
@@ -9327,13 +13740,13 @@ class MySearchClient:
         if not primary_finding:
             return {}
 
-        supporting = citation_title_lines[:] if comparison_like and citation_title_lines else highlights[:]
+        supporting = preferred_title_lines[:] if comparison_like and preferred_title_lines else highlights[:]
         if supporting and supporting[0] == primary_finding:
             supporting = supporting[1:]
 
         key_findings: list[str] = []
-        if comparison_like and citation_title_lines:
-            key_findings.extend(citation_title_lines[:3])
+        if comparison_like and preferred_title_lines:
+            key_findings.extend(preferred_title_lines[:3])
         else:
             for item in highlights[:3]:
                 if item not in key_findings:
@@ -9364,7 +13777,7 @@ class MySearchClient:
         docs_rescue_count = int(evidence.get("docs_rescue_result_count") or 0)
         if docs_rescue_count > 0:
             provider_roles.append(
-                f"Docs rescue surfaced {docs_rescue_count} authoritative or product-native candidate result(s)."
+                f"Docs rescue surfaced {docs_rescue_count} product-native or supporting candidate result(s)."
             )
         if social_answer:
             provider_roles.append("xAI added social or synthesis context to the research pass.")
@@ -9389,6 +13802,8 @@ class MySearchClient:
             coverage_bits.append(f"source_domains={source_diversity}")
         if authoritative_source_count > 0:
             coverage_bits.append(f"authoritative_sources={authoritative_source_count}")
+        if supporting_source_count > 0:
+            coverage_bits.append(f"supporting_sources={supporting_source_count}")
         if community_source_count > 0:
             coverage_bits.append(f"community_sources={community_source_count}")
         confidence = str(evidence.get("confidence") or "").strip()
@@ -9397,24 +13812,36 @@ class MySearchClient:
         social_signal = social_answer if social_answer and social_answer != primary_finding else ""
         source_clusters = self._build_research_source_clusters(
             query=query,
-            mode=str((evidence.get("research_plan") or {}).get("web_mode") or web_search.get("intent") or "web"),
+            mode=report_mode,
             ordered_results=ordered_results,
             include_domains=None,
-            authoritative_preferred=bool(evidence.get("authoritative_research")),
+            authoritative_preferred=authoritative_research,
         )
         claim_evidence = self._build_research_claim_evidence(
+            query=query,
+            mode=report_mode,
             ordered_results=ordered_results,
             pages=pages,
             citations=citations,
             comparison_like=comparison_like,
+            include_domains=None,
+            authoritative_preferred=authoritative_research,
         )
-
+        claim_by_url: dict[str, str] = {}
+        for item in claim_evidence:
+            claim_text = str(item.get("claim") or "").strip()
+            if not claim_text:
+                continue
+            for claim_url in item.get("urls") or []:
+                normalized_url = str(claim_url or "").strip()
+                if normalized_url and normalized_url not in claim_by_url:
+                    claim_by_url[normalized_url] = claim_text
         significant_conflicts = [
             str(item)
             for item in (evidence.get("conflicts") or [])
             if item and item != "social-search-unavailable"
         ]
-        top_sources = citation_title_lines[:4]
+        top_sources = preferred_title_lines[:4]
 
         comparison_lens: list[str] = []
         if comparison_like:
@@ -9439,7 +13866,17 @@ class MySearchClient:
 
         comparison_rows: list[dict[str, str]] = []
         decision_table: list[dict[str, str]] = []
+        decision_criteria: list[str] = []
+        comparison_matrix: list[dict[str, str]] = []
+        operational_tradeoffs: list[str] = []
+        decision_checklist: list[dict[str, str]] = []
         if comparison_like:
+            comparison_entities = self._research_comparison_entities(query)
+            ordered_result_by_url = {
+                (item.get("url") or "").strip(): item
+                for item in ordered_results
+                if (item.get("url") or "").strip()
+            }
             url_to_excerpt = {
                 (page.get("url") or "").strip(): self._build_excerpt(
                     (page.get("excerpt") or page.get("content") or "").strip(),
@@ -9459,6 +13896,46 @@ class MySearchClient:
                 for page in pages
                 if (page.get("url") or "").strip() and not page.get("error")
             )
+            if comparison_entities:
+                prioritized_shortlist_urls: list[str] = []
+                seen_prioritized_urls: set[str] = set()
+                project_url = next(
+                    (
+                        url
+                        for url in shortlist_urls
+                        if url
+                        and self._research_project_candidate_kind_rank(
+                            ordered_result_by_url.get(url) or {
+                                "url": url,
+                                "title": url_to_title.get(url, ""),
+                            }
+                        )
+                        == 0
+                    ),
+                    "",
+                )
+                if project_url:
+                    prioritized_shortlist_urls.append(project_url)
+                    seen_prioritized_urls.add(project_url)
+                for entity_tokens in comparison_entities[:4]:
+                    for url in shortlist_urls:
+                        if not url or url in seen_prioritized_urls:
+                            continue
+                        item = ordered_result_by_url.get(url) or {
+                            "url": url,
+                            "title": url_to_title.get(url, ""),
+                        }
+                        if not self._research_result_matches_comparison_subject(
+                            item=item,
+                            entity_tokens=entity_tokens,
+                        ):
+                            continue
+                        prioritized_shortlist_urls.append(url)
+                        seen_prioritized_urls.add(url)
+                        break
+                shortlist_urls = prioritized_shortlist_urls + [
+                    url for url in shortlist_urls if url and url not in seen_prioritized_urls
+                ]
             for url in shortlist_urls:
                 if not url or url in seen_shortlist_urls:
                     continue
@@ -9482,10 +13959,10 @@ class MySearchClient:
                 )
                 cluster_label = self._research_result_cluster_label(
                     query=query,
-                    mode=str((evidence.get("research_plan") or {}).get("web_mode") or "web"),
+                    mode=report_mode,
                     item=matching_item or {"url": url, "title": title},
                     include_domains=None,
-                    authoritative_preferred=bool(evidence.get("authoritative_research")),
+                    authoritative_preferred=authoritative_research,
                 )
                 providers = [
                     provider
@@ -9495,7 +13972,18 @@ class MySearchClient:
                     )
                     if provider
                 ]
-                evidence_note = url_to_excerpt.get(url, "").strip()
+                evidence_note = self._select_research_claim_excerpt(
+                    page_excerpt=(url_to_excerpt.get(url) or "").strip(),
+                    snippet=(matching_item.get("snippet") or "").strip(),
+                    content=(matching_item.get("content") or "").strip(),
+                )
+                canonical_doc_snippet = self._research_canonical_doc_snippet_for_url(url)
+                if canonical_doc_snippet and (
+                    not evidence_note
+                    or self._research_excerpt_looks_like_navigation_noise(evidence_note)
+                    or not self._research_excerpt_has_substantive_claim(evidence_note)
+                ):
+                    evidence_note = canonical_doc_snippet
                 evidence_note_lower = evidence_note.lower()
                 if any(
                     marker in evidence_note_lower
@@ -9509,11 +13997,65 @@ class MySearchClient:
                     )
                 ):
                     evidence_note = ""
+                normalized_note = self._normalize_research_claim_text(
+                    evidence_note,
+                    comparison_like=comparison_like,
+                ) if evidence_note else ""
+                note_is_link_index = bool(evidence_note) and self._research_excerpt_looks_like_link_index_noise(
+                    evidence_note
+                )
+                note_is_substantive = bool(normalized_note) and self._research_excerpt_has_substantive_claim(
+                    normalized_note
+                )
+                claim_note = claim_by_url.get(url, "").strip()
+                if (
+                    claim_note
+                    and comparison_like
+                    and cluster_label == "official"
+                    and not self._research_claim_is_generic(claim_note)
+                ):
+                    evidence_note = claim_note
+                    normalized_note = self._normalize_research_claim_text(
+                        evidence_note,
+                        comparison_like=comparison_like,
+                    )
+                    note_is_link_index = False
+                    note_is_substantive = bool(normalized_note) and self._research_excerpt_has_substantive_claim(
+                        normalized_note
+                    )
+                elif claim_note and (
+                    not evidence_note
+                    or self._research_excerpt_looks_like_navigation_noise(evidence_note)
+                    or note_is_link_index
+                    or not note_is_substantive
+                ):
+                    evidence_note = claim_note
+                    normalized_note = self._normalize_research_claim_text(
+                        evidence_note,
+                        comparison_like=comparison_like,
+                    )
+                    note_is_link_index = False
+                    note_is_substantive = bool(normalized_note) and self._research_excerpt_has_substantive_claim(
+                        normalized_note
+                    )
+                if not evidence_note or (
+                    cluster_label == "official" and (note_is_link_index or not note_is_substantive)
+                ):
+                    title_note = self._normalize_research_claim_text(
+                        candidate or title,
+                        comparison_like=comparison_like,
+                    )
+                    if title_note and (
+                        cluster_label == "official"
+                        or not self._research_claim_is_generic(title_note)
+                    ):
+                        evidence_note = title_note
                 if not evidence_note:
                     evidence_note = self._registered_domain(self._result_hostname({"url": url}))
                 comparison_rows.append(
                     {
                         "candidate": candidate[:80],
+                        "url": url,
                         "source": self._registered_domain(self._result_hostname({"url": url})) or url,
                         "cluster": cluster_label,
                         "provider_support": " + ".join(providers[:3]) if providers else "unknown",
@@ -9522,6 +14064,19 @@ class MySearchClient:
                 )
                 if len(comparison_rows) >= 4:
                     break
+            if comparison_entities and comparison_rows:
+                comparison_top_sources: list[str] = []
+                for row in comparison_rows[:4]:
+                    row_url = str(row.get("url") or "").strip()
+                    row_title = url_to_title.get(row_url, "").strip() or str(row.get("candidate") or "").strip()
+                    if not row_title:
+                        continue
+                    domain = self._registered_domain(self._result_hostname({"url": row_url}))
+                    line = f"{row_title} ({domain})" if domain and domain not in row_title.lower() else row_title
+                    if line not in comparison_top_sources:
+                        comparison_top_sources.append(line)
+                if len(comparison_top_sources) >= 2:
+                    top_sources = comparison_top_sources[:4]
             for row in comparison_rows[:4]:
                 cluster_label = str(row.get("cluster") or "").strip()
                 cluster_detail = next(
@@ -9548,27 +14103,443 @@ class MySearchClient:
                         ),
                     }
                 )
+            focus_rows = self._research_select_comparison_focus_rows(
+                comparison_rows=comparison_rows,
+                comparison_entities=comparison_entities,
+                selected_urls=list(ordered_result_by_url.keys()),
+            )
+            if focus_rows:
+                comparison_rows = [dict(row) for row in focus_rows[:4]]
+                visible_candidates = {
+                    str(row.get("candidate") or "").strip()
+                    for row in comparison_rows
+                    if str(row.get("candidate") or "").strip()
+                }
+                if visible_candidates and decision_table:
+                    filtered_decision_table: list[dict[str, str]] = []
+                    seen_decision_candidates: set[str] = set()
+                    for row in decision_table:
+                        candidate = str(row.get("candidate") or "").strip()
+                        if (
+                            not candidate
+                            or candidate in seen_decision_candidates
+                            or candidate not in visible_candidates
+                        ):
+                            continue
+                        filtered_decision_table.append(dict(row))
+                        seen_decision_candidates.add(candidate)
+                    if filtered_decision_table:
+                        decision_table = filtered_decision_table[:4]
+            decision_criteria = self._research_build_decision_criteria(
+                focus_rows=focus_rows,
+            )
+            comparison_matrix = self._research_build_comparison_matrix(
+                focus_rows=focus_rows,
+            )
+            operational_tradeoffs = self._research_build_operational_tradeoffs(
+                focus_rows=focus_rows,
+            )
+            decision_checklist = self._research_build_decision_checklist(
+                focus_rows=focus_rows,
+            )
+            if focus_rows:
+                comparison_visible_sources: list[str] = []
+                for row in focus_rows[:3]:
+                    row_url = str(row.get("url") or "").strip()
+                    row_title = url_to_title.get(row_url, "").strip() or str(row.get("candidate") or "").strip()
+                    if not row_title:
+                        continue
+                    domain = self._registered_domain(self._result_hostname({"url": row_url}))
+                    line = f"{row_title} ({domain})" if domain and domain not in row_title.lower() else row_title
+                    if line not in comparison_visible_sources:
+                        comparison_visible_sources.append(line)
+                if comparison_visible_sources:
+                    top_sources = comparison_visible_sources[:4]
+                if len(comparison_visible_sources) >= 2:
+                    top_sources = comparison_visible_sources[:4]
+                    key_findings = comparison_visible_sources[:3]
+                    if decision_criteria:
+                        evidence_highlights = decision_criteria[:2]
+            claim_evidence = self._align_research_claims_with_comparison_rows(
+                claim_evidence=claim_evidence,
+                comparison_rows=focus_rows or comparison_rows,
+                comparison_entities=comparison_entities,
+            )
+            if focus_rows and comparison_entities:
+                focused_claims: list[dict[str, Any]] = []
+                seen_claim_signatures: set[str] = set()
+                for entity_tokens in comparison_entities[: len(focus_rows)]:
+                    focus_row = next(
+                        (
+                            row
+                            for row in focus_rows
+                            if self._research_claim_comparison_subject_match_count(
+                                claim=" ".join(
+                                    bit
+                                    for bit in (
+                                        str(row.get("candidate") or "").strip(),
+                                        str(row.get("note") or "").strip(),
+                                    )
+                                    if bit
+                                ),
+                                sources=[
+                                    str(row.get("candidate") or "").strip(),
+                                    str(row.get("source") or "").strip(),
+                                ],
+                                entities=[entity_tokens],
+                            )
+                            > 0
+                        ),
+                        None,
+                    )
+                    matching_claim = self._research_claim_entry_from_focus_row(focus_row) if focus_row else None
+                    if not matching_claim:
+                        matching_claim = next(
+                            (
+                                item
+                                for item in claim_evidence
+                                if self._research_claim_comparison_subject_match_count(
+                                    claim=str(item.get("claim") or "").strip(),
+                                    sources=[
+                                        str(source).strip()
+                                        for source in (item.get("sources") or [])
+                                        if str(source).strip()
+                                    ],
+                                    entities=[entity_tokens],
+                                )
+                                > 0
+                            ),
+                            None,
+                        )
+                    if not matching_claim:
+                        continue
+                    signature = self._research_claim_signature(
+                        str(matching_claim.get("claim") or "").strip()
+                    )
+                    if not signature or signature in seen_claim_signatures:
+                        continue
+                    focused_claims.append(dict(matching_claim))
+                    seen_claim_signatures.add(signature)
+                if focused_claims:
+                    claim_evidence = focused_claims[:4]
+
+        top_claim = self._select_research_primary_claim(claim_evidence)
+        top_claim_text = str(top_claim.get("claim") or "").strip()
+        if (
+            top_claim_text
+            and str(top_claim.get("support_level") or "") != "single-source"
+            and not self._research_claim_is_generic(top_claim_text)
+        ):
+            support_phrase = self._research_claim_support_phrase(top_claim)
+            if comparison_like and decision_table:
+                primary_finding = (
+                    f"{decision_table[0]['candidate']} is the strongest current fit "
+                    f"for {decision_table[0]['fit']}."
+                )
+                if top_claim_text:
+                    primary_finding += f" {top_claim_text}."
+            else:
+                primary_finding = top_claim_text
+            if support_phrase:
+                primary_finding += f" {support_phrase.capitalize()}."
+
+        comparison_subject_phrase = self._research_comparison_subject_phrase(query)
+        if comparison_like and decision_criteria:
+            summary_bits: list[str] = []
+            if len(comparison_rows) == 1 and decision_table:
+                fit_sentence = (
+                    f"{decision_table[0]['candidate']} is the strongest current fit "
+                    f"for {decision_table[0]['fit']}."
+                )
+                summary_bits.append(fit_sentence)
+            else:
+                summary_bits.append(" ".join(item.strip() for item in decision_criteria[:2] if item.strip()))
+            summary_claim_text = ""
+            summary_claim_entry = next(
+                (
+                    item
+                    for item in claim_evidence
+                    if (
+                        str(item.get("claim") or "").strip()
+                        and not self._research_claim_is_generic(str(item.get("claim") or "").strip())
+                        and self._research_excerpt_has_substantive_claim(str(item.get("claim") or "").strip())
+                        and str(item.get("claim") or "").strip()
+                        != self._normalize_research_claim_text(
+                            str((item.get("sources") or [""])[0] or "").strip(),
+                            comparison_like=True,
+                        )
+                    )
+                ),
+                {},
+            )
+            if summary_claim_entry:
+                summary_claim_text = str(summary_claim_entry.get("claim") or "").strip()
+            top_claim_support = self._research_claim_support_phrase(
+                summary_claim_entry or top_claim
+            )
+            top_claim_sentence = ""
+            if summary_claim_text:
+                top_claim_sentence = summary_claim_text
+                if not top_claim_sentence.endswith("."):
+                    top_claim_sentence += "."
+                if top_claim_support:
+                    top_claim_sentence += f" {top_claim_support.capitalize()}."
+            if top_claim_sentence:
+                summary_bits.append(top_claim_sentence)
+            elif len(comparison_rows) == 1 and top_claim_support:
+                summary_bits.append(f"{top_claim_support.capitalize()}.")
+            support_summary = self._research_comparison_support_summary(
+                authoritative_source_count=authoritative_source_count,
+                supporting_source_count=supporting_source_count,
+            )
+            if support_summary:
+                summary_bits.append(support_summary)
+            if comparison_subject_phrase:
+                summary_bits.append(
+                    f"{comparison_subject_phrase} is the core comparison for this query."
+                )
+            visible_anchors = [str(item).strip() for item in top_sources[:2] if str(item).strip()]
+            if len(visible_anchors) >= 2:
+                summary_bits.append(
+                    f"The strongest anchors are {visible_anchors[0]}, {visible_anchors[1]}."
+                )
+            elif visible_anchors:
+                summary_bits.append(f"The strongest anchor is {visible_anchors[0]}.")
+            primary_finding = " ".join(bit for bit in summary_bits if bit).strip()
+        elif comparison_like and comparison_subject_phrase:
+            primary_finding_lower = primary_finding.lower()
+            if comparison_subject_phrase.lower() not in primary_finding_lower:
+                primary_finding = (
+                    f"{comparison_subject_phrase} is the core comparison for this query. "
+                    f"{primary_finding}"
+                ).strip()
+
+        consensus_snapshot: list[str] = []
+        for item in claim_evidence[:3]:
+            claim = str(item.get("claim") or "").strip()
+            if not claim:
+                continue
+            support_phrase = self._research_claim_support_phrase(item)
+            if support_phrase:
+                consensus_snapshot.append(f"{claim} ({support_phrase})")
+            else:
+                consensus_snapshot.append(claim)
 
         recommendation = ""
         if comparison_like:
-            if authoritative_source_count > 0 and decision_table:
+            primary_claim = self._select_research_primary_claim(claim_evidence)
+            primary_support_phrase = self._research_claim_support_phrase(primary_claim)
+            runner_up = decision_table[1] if len(decision_table) > 1 else {}
+            response_candidate = next(
+                (
+                    str(row.get("candidate") or "").strip()
+                    for row in comparison_rows
+                    if "response" in str(row.get("candidate") or "").lower()
+                ),
+                "",
+            )
+            batch_candidate = next(
+                (
+                    str(row.get("candidate") or "").strip()
+                    for row in comparison_rows
+                    if "batch" in str(row.get("candidate") or "").lower()
+                ),
+                "",
+            )
+            has_batch_faq_signal = any(
+                "batch api faq" in str(item.get("title") or "").lower()
+                or "9197833-batch-api-faq" in str(item.get("url") or "").lower()
+                for item in citations
+            )
+            has_background_signal = any(
+                "background mode" in str(item.get("title") or "").lower()
+                or "/background/" in str(item.get("url") or "").lower()
+                for item in citations
+            )
+            if response_candidate and batch_candidate:
+                recommendation = (
+                    f"Choose {response_candidate} for interactive or tool-using flows that need iterative request/response control. "
+                    f"Choose {batch_candidate} for bulk asynchronous workloads"
+                )
+                if has_batch_faq_signal:
+                    recommendation += " when you can tolerate up to 24 hours of turnaround and want discounted throughput."
+                else:
+                    recommendation += " when throughput matters more than immediate latency."
+                if has_background_signal:
+                    recommendation += (
+                        " Use Background mode when a single long-running workflow should continue asynchronously "
+                        "without holding the client request open."
+                    )
+            elif authoritative_source_count > 0 and decision_table:
                 recommendation = (
                     f"Start from {decision_table[0]['candidate']} as the primary anchor, "
                     "then use the remaining shortlisted sources to validate trade-offs and edge cases."
                 )
+                if primary_support_phrase:
+                    recommendation += f" {primary_support_phrase.capitalize()}."
+                if runner_up:
+                    recommendation += (
+                        f" Use {runner_up['candidate']} as the leading counterpoint when checking "
+                        f"{runner_up['fit']} trade-offs."
+                    )
             elif decision_table:
                 recommendation = (
                     f"Treat {decision_table[0]['candidate']} as the leading candidate for now, "
                     "but keep the next shortlisted sources in scope because the evidence is still comparative."
                 )
+                if primary_support_phrase:
+                    recommendation += f" {primary_support_phrase.capitalize()}."
+                if runner_up:
+                    recommendation += (
+                        f" {runner_up['candidate']} remains the strongest alternate angle for "
+                        f"{runner_up['fit']}."
+                    )
+            if recommendation and comparison_subject_phrase:
+                recommendation_lower = recommendation.lower()
+                if comparison_subject_phrase.lower() not in recommendation_lower:
+                    recommendation = (
+                        f"Keep {comparison_subject_phrase} as the explicit comparison frame. "
+                        f"{recommendation}"
+                    )
 
+        visible_source_domains = self._research_report_source_domains(top_sources)
+        supporting_context: list[str] = []
+        if comparison_like:
+            visible_urls = {
+                str(row.get("url") or "").strip()
+                for row in comparison_rows
+                if str(row.get("url") or "").strip()
+            }
+            seen_supporting_context: set[str] = set()
+            for item in ordered_results:
+                url = str(item.get("url") or "").strip()
+                if not url or url in visible_urls:
+                    continue
+                cluster_label = self._research_result_cluster_label(
+                    query=query,
+                    mode=report_mode,
+                    item=item,
+                    include_domains=None,
+                    authoritative_preferred=authoritative_research,
+                )
+                if cluster_label not in {"official", "supporting"}:
+                    continue
+                title = str(item.get("title") or url_to_title.get(url) or "").strip()
+                candidate = re.split(r"\s[\-|:|]\s", title, maxsplit=1)[0].strip() or title
+                note = claim_by_url.get(url, "").strip()
+                if not note:
+                    matching_page = next(
+                        (
+                            page
+                            for page in pages
+                            if (page.get("url") or "").strip() == url and not page.get("error")
+                        ),
+                        {},
+                    )
+                    note = self._select_research_claim_excerpt(
+                        page_excerpt=(matching_page.get("excerpt") or "").strip(),
+                        snippet=(item.get("snippet") or "").strip(),
+                        content=(matching_page.get("content") or item.get("content") or "").strip(),
+                    )
+                canonical_doc_snippet = self._research_canonical_doc_snippet_for_url(url)
+                title_lower = title.lower()
+                if canonical_doc_snippet and (
+                    str(item.get("provider") or "") != "canonical_research_docs"
+                    or any(
+                        marker in title_lower
+                        for marker in ("faq", "overview", "pricing", "rate limits", "background")
+                    )
+                ):
+                    note = canonical_doc_snippet
+                if canonical_doc_snippet and (
+                    not note
+                    or self._research_excerpt_looks_like_navigation_noise(note)
+                    or not self._research_excerpt_has_substantive_claim(note)
+                ):
+                    note = canonical_doc_snippet
+                note = self._normalize_research_claim_text(
+                    note,
+                    comparison_like=comparison_like,
+                ) if note else ""
+                if (
+                    not note
+                    or self._research_claim_is_generic(note)
+                    or not self._research_excerpt_has_substantive_claim(note)
+                ):
+                    continue
+                prefix = candidate or title
+                if prefix and prefix.lower() not in note.lower():
+                    if note[:1].islower():
+                        context_line = f"{prefix} {note}"
+                    else:
+                        context_line = f"{prefix}: {note}"
+                else:
+                    context_line = note
+                signature = self._research_claim_signature(context_line)
+                if not signature or signature in seen_supporting_context:
+                    continue
+                seen_supporting_context.add(signature)
+                supporting_context.append(context_line)
+                if len(supporting_context) >= 3:
+                    break
+            if len(supporting_context) < 3:
+                for citation in citations:
+                    url = str(citation.get("url") or "").strip()
+                    if not url or url in visible_urls or not self._research_is_canonical_vendor_doc(url):
+                        continue
+                    pseudo_item = {
+                        "provider": "canonical_research_docs",
+                        "title": str(citation.get("title") or "").strip(),
+                        "url": url,
+                        "matched_providers": ["canonical_research_docs"],
+                    }
+                    cluster_label = self._research_result_cluster_label(
+                        query=query,
+                        mode=report_mode,
+                        item=pseudo_item,
+                        include_domains=None,
+                        authoritative_preferred=authoritative_research,
+                    )
+                    if cluster_label not in {"official", "supporting"}:
+                        continue
+                    title = str(citation.get("title") or url_to_title.get(url) or "").strip()
+                    candidate = re.split(r"\s[\-|:|]\s", title, maxsplit=1)[0].strip() or title
+                    canonical_doc_snippet = self._research_canonical_doc_snippet_for_url(url)
+                    note = canonical_doc_snippet or claim_by_url.get(url, "").strip()
+                    note = self._normalize_research_claim_text(
+                        note,
+                        comparison_like=comparison_like,
+                    ) if note else ""
+                    if (
+                        not note
+                        or self._research_claim_is_generic(note)
+                        or not self._research_excerpt_has_substantive_claim(note)
+                    ):
+                        continue
+                    if candidate and candidate.lower() not in note.lower():
+                        if note[:1].islower():
+                            context_line = f"{candidate} {note}"
+                        else:
+                            context_line = f"{candidate}: {note}"
+                    else:
+                        context_line = note
+                    signature = self._research_claim_signature(context_line)
+                    if not signature or signature in seen_supporting_context:
+                        continue
+                    seen_supporting_context.add(signature)
+                    supporting_context.append(context_line)
+                    if len(supporting_context) >= 3:
+                        break
         return {
             "executive_summary": primary_finding,
             "key_findings": key_findings[:3],
             "evidence_highlights": evidence_highlights[:3],
+            "supporting_context": supporting_context[:3],
+            "consensus_snapshot": consensus_snapshot[:3],
             "provider_roles": provider_roles[:4],
             "coverage_bits": coverage_bits,
             "claim_evidence": claim_evidence[:4],
+            "claim_level_evidence": claim_evidence[:4],
             "source_clusters": source_clusters[:5],
             "social_signal": social_signal,
             "caveats": significant_conflicts[:4],
@@ -9577,16 +14548,27 @@ class MySearchClient:
                 bit
                 for bit in (
                     f"authoritative={authoritative_source_count}" if authoritative_source_count > 0 else "",
+                    f"supporting={supporting_source_count}" if supporting_source_count > 0 else "",
                     f"community={community_source_count}" if community_source_count > 0 else "",
-                    f"domains={', '.join(evidence.get('selected_candidate_domains') or [])}"
-                    if evidence.get("selected_candidate_domains")
-                    else "",
+                    (
+                        f"domains={', '.join(visible_source_domains)}"
+                        if visible_source_domains
+                        else (
+                            f"domains={', '.join(evidence.get('selected_candidate_domains') or [])}"
+                            if evidence.get("selected_candidate_domains")
+                            else ""
+                        )
+                    ),
                 )
                 if bit
             ],
             "comparison_lens": comparison_lens,
             "comparison_rows": comparison_rows,
             "decision_table": decision_table,
+            "decision_criteria": decision_criteria,
+            "comparison_matrix": comparison_matrix,
+            "operational_tradeoffs": operational_tradeoffs,
+            "decision_checklist": decision_checklist,
             "recommendation": recommendation,
         }
 
@@ -9612,6 +14594,26 @@ class MySearchClient:
             for item in evidence_highlights:
                 lines.append(f"- {item}")
 
+        supporting_context = [
+            str(item).strip()
+            for item in (sections.get("supporting_context") or [])
+            if str(item).strip()
+        ]
+        if supporting_context:
+            lines.extend(["", "## Supporting Context"])
+            for item in supporting_context[:3]:
+                lines.append(f"- {item}")
+
+        consensus_snapshot = [
+            str(item).strip()
+            for item in (sections.get("consensus_snapshot") or [])
+            if str(item).strip()
+        ]
+        if consensus_snapshot:
+            lines.extend(["", "## Consensus Snapshot"])
+            for item in consensus_snapshot:
+                lines.append(f"- {item}")
+
         claim_evidence = [
             item
             for item in (sections.get("claim_evidence") or [])
@@ -9631,9 +14633,19 @@ class MySearchClient:
                     for provider in (item.get("providers") or [])[:3]
                     if str(provider).strip()
                 )
+                clusters = ", ".join(
+                    str(cluster).strip()
+                    for cluster in (item.get("clusters") or [])[:3]
+                    if str(cluster).strip()
+                )
+                support_level = str(item.get("support_level") or "").strip()
+                support_basis = str(item.get("support_basis") or "").strip()
                 suffix_bits = [
+                    f"Support: {support_level}" if support_level else "",
+                    f"Basis: {support_basis}" if support_basis else "",
                     f"Sources: {sources}" if sources else "",
                     f"Providers: {providers}" if providers else "",
+                    f"Clusters: {clusters}" if clusters else "",
                 ]
                 suffix = "; ".join(bit for bit in suffix_bits if bit)
                 if suffix:
@@ -9692,6 +14704,69 @@ class MySearchClient:
                 strengths = str(row.get("strengths") or "").replace("|", "/").strip()
                 cautions = str(row.get("cautions") or "").replace("|", "/").strip()
                 lines.append(f"| {candidate} | {fit} | {strengths} | {cautions} |")
+
+        decision_criteria = [
+            str(item).strip()
+            for item in (sections.get("decision_criteria") or [])
+            if str(item).strip()
+        ]
+        if decision_criteria:
+            lines.extend(["", "## Decision Criteria"])
+            for item in decision_criteria[:4]:
+                lines.append(f"- {item}")
+
+        comparison_matrix = [
+            item
+            for item in (sections.get("comparison_matrix") or [])
+            if isinstance(item, dict) and item.get("candidate")
+        ]
+        if comparison_matrix:
+            lines.extend(
+                [
+                    "",
+                    "## Comparison Matrix",
+                    "| Candidate | Best For | Operational Model | Trade-off |",
+                    "|---|---|---|---|",
+                ]
+            )
+            for row in comparison_matrix[:4]:
+                candidate = str(row.get("candidate") or "").replace("|", "/").strip()
+                best_for = str(row.get("best_for") or "").replace("|", "/").strip()
+                operational_model = str(row.get("operational_model") or "").replace("|", "/").strip()
+                tradeoff = str(row.get("tradeoff") or "").replace("|", "/").strip()
+                lines.append(
+                    f"| {candidate} | {best_for} | {operational_model} | {tradeoff} |"
+                )
+
+        operational_tradeoffs = [
+            str(item).strip()
+            for item in (sections.get("operational_tradeoffs") or [])
+            if str(item).strip()
+        ]
+        if operational_tradeoffs:
+            lines.extend(["", "## Operational Trade-offs"])
+            for item in operational_tradeoffs[:4]:
+                lines.append(f"- {item}")
+
+        decision_checklist = [
+            item
+            for item in (sections.get("decision_checklist") or [])
+            if isinstance(item, dict) and item.get("factor")
+        ]
+        if decision_checklist:
+            lines.extend(
+                [
+                    "",
+                    "## Decision Checklist",
+                    "| Factor | Prefer | Why |",
+                    "|---|---|---|",
+                ]
+            )
+            for row in decision_checklist[:5]:
+                factor = str(row.get("factor") or "").replace("|", "/").strip()
+                prefer = str(row.get("prefer") or "").replace("|", "/").strip()
+                rationale = str(row.get("rationale") or "").replace("|", "/").strip()
+                lines.append(f"| {factor} | {prefer} | {rationale} |")
 
         provider_roles = [
             str(item).strip()
@@ -9770,6 +14845,23 @@ class MySearchClient:
                 lines.append(f"- {item}")
 
         return "\n".join(lines).strip()
+
+    def _research_report_source_domains(self, source_lines: Sequence[str]) -> list[str]:
+        domains: list[str] = []
+        seen: set[str] = set()
+        for line in source_lines:
+            text = str(line).strip()
+            if not text:
+                continue
+            match = re.search(r"\(([^()]+)\)\s*$", text)
+            if not match:
+                continue
+            domain = self._registered_domain(match.group(1).strip())
+            if not domain or domain in seen:
+                continue
+            seen.add(domain)
+            domains.append(domain)
+        return domains
 
     def _build_research_summary_fallback(
         self,
@@ -9863,7 +14955,7 @@ class MySearchClient:
         preferred_order = (
             ["official", "supporting", "general", "community"]
             if authoritative_preferred
-            else ["project", "curated", "listicle", "directory", "community"]
+            else ["project", "supporting", "curated", "listicle", "directory", "community"]
         )
         return sorted(
             cluster_buckets.values(),
@@ -9879,11 +14971,38 @@ class MySearchClient:
     def _build_research_claim_evidence(
         self,
         *,
+        query: str,
+        mode: str,
         ordered_results: list[dict[str, Any]],
         pages: list[dict[str, Any]],
         citations: list[dict[str, Any]],
         comparison_like: bool,
+        include_domains: list[str] | None,
+        authoritative_preferred: bool,
     ) -> list[dict[str, Any]]:
+        if not ordered_results and citations:
+            ordered_results = [
+                {
+                    "provider": (
+                        "canonical_research_docs"
+                        if self._research_is_canonical_vendor_doc(str(citation.get("url") or ""))
+                        else "citation"
+                    ),
+                    "matched_providers": [
+                        "canonical_research_docs"
+                        if self._research_is_canonical_vendor_doc(str(citation.get("url") or ""))
+                        else "citation"
+                    ],
+                    "title": (citation.get("title") or "").strip(),
+                    "url": (citation.get("url") or "").strip(),
+                    "snippet": self._research_canonical_doc_snippet_for_url(
+                        str(citation.get("url") or "")
+                    ),
+                    "content": "",
+                }
+                for citation in citations
+                if (citation.get("url") or "").strip()
+            ]
         if not ordered_results:
             return []
 
@@ -9901,11 +15020,27 @@ class MySearchClient:
             if (citation.get("url") or "").strip()
         }
         claims_by_key: dict[str, dict[str, Any]] = {}
+        fallback_claims_by_key: dict[str, dict[str, Any]] = {}
         claim_order: list[str] = []
+        fallback_claim_order: list[str] = []
         for item in ordered_results:
             url = (item.get("url") or "").strip()
             title = (item.get("title") or url_to_title.get(url) or "").strip()
-            excerpt = (url_to_excerpt.get(url) or item.get("snippet") or item.get("content") or "").strip()
+            excerpt = self._select_research_claim_excerpt(
+                page_excerpt=(url_to_excerpt.get(url) or "").strip(),
+                snippet=(item.get("snippet") or "").strip(),
+                content=(item.get("content") or "").strip(),
+            )
+            canonical_doc_snippet = self._research_canonical_doc_snippet_for_url(url)
+            if canonical_doc_snippet and (
+                not excerpt
+                or self._research_excerpt_looks_like_navigation_noise(excerpt)
+                or (
+                    comparison_like
+                    and not self._research_excerpt_has_substantive_claim(excerpt)
+                )
+            ):
+                excerpt = canonical_doc_snippet
             claim = self._research_claim_text(
                 title=title,
                 excerpt=excerpt,
@@ -9916,28 +15051,277 @@ class MySearchClient:
             claim_key = self._research_claim_signature(claim)
             if not claim_key:
                 continue
-            if claim_key not in claims_by_key:
-                claims_by_key[claim_key] = {
+            is_generic_claim = self._research_claim_is_generic(claim)
+            target_claims = fallback_claims_by_key if is_generic_claim else claims_by_key
+            target_order = fallback_claim_order if is_generic_claim else claim_order
+            if claim_key not in target_claims:
+                target_claims[claim_key] = {
                     "claim": claim,
                     "sources": [],
+                    "urls": [],
                     "providers": [],
+                    "clusters": [],
+                    "domains": [],
                 }
-                claim_order.append(claim_key)
-            entry = claims_by_key[claim_key]
+                target_order.append(claim_key)
+            entry = target_claims[claim_key]
             source_label = title or (self._registered_domain(self._result_hostname(item)) or url)
             if source_label and source_label not in entry["sources"]:
                 entry["sources"].append(source_label)
+            if url and url not in entry["urls"]:
+                entry["urls"].append(url)
+            domain = self._registered_domain(self._result_hostname(item))
+            if domain and domain not in entry["domains"]:
+                entry["domains"].append(domain)
             for provider in (
                 item.get("matched_providers")
                 or [item.get("provider", "")]
             ):
                 if provider and provider not in entry["providers"]:
                     entry["providers"].append(provider)
-            if len(claim_order) >= 4 and all(
-                len(claims_by_key[key]["sources"]) >= 1 for key in claim_order[:4]
+            cluster_label = self._research_result_cluster_label(
+                query=query,
+                mode=cast(SearchMode, mode if mode in SEARCH_MODES else "web"),
+                item=item,
+                include_domains=include_domains,
+                authoritative_preferred=authoritative_preferred,
+            )
+            if cluster_label and cluster_label not in entry["clusters"]:
+                entry["clusters"].append(cluster_label)
+            if len(claim_order) >= 8 and all(
+                len(claims_by_key[key]["sources"]) >= 1 for key in claim_order[:8]
             ):
                 continue
-        return [claims_by_key[key] for key in claim_order[:4]]
+        if not claim_order:
+            claims_by_key = fallback_claims_by_key
+            claim_order = fallback_claim_order
+        claims: list[dict[str, Any]] = []
+        comparison_entities = (
+            self._research_comparison_entities(query)
+            if comparison_like
+            else []
+        )
+        for order_index, key in enumerate(claim_order):
+            entry = claims_by_key[key]
+            entry["source_count"] = len(entry["sources"])
+            entry["provider_count"] = len(entry["providers"])
+            entry["cluster_count"] = len(entry["clusters"])
+            entry["comparison_subject_match_count"] = (
+                self._research_claim_comparison_subject_match_count(
+                    claim=str(entry.get("claim") or "").strip(),
+                    sources=[str(item) for item in (entry.get("sources") or []) if item],
+                    entities=comparison_entities,
+                )
+                if comparison_entities
+                else 0
+            )
+            entry["support_level"] = self._research_claim_support_level(
+                source_count=int(entry["source_count"] or 0),
+                provider_count=int(entry["provider_count"] or 0),
+                cluster_count=int(entry["cluster_count"] or 0),
+            )
+            entry["support_basis"] = self._research_claim_support_basis(entry)
+            entry["_order_index"] = order_index
+            claims.append(entry)
+        if authoritative_preferred and not any(
+            any(cluster in {"official", "supporting"} for cluster in (entry.get("clusters") or []))
+            for entry in claims
+        ):
+            fallback_entry = self._research_authoritative_claim_fallback(
+                query=query,
+                mode=mode,
+                ordered_results=ordered_results,
+                include_domains=include_domains,
+                authoritative_preferred=authoritative_preferred,
+            )
+            if fallback_entry:
+                claims.append(fallback_entry)
+        claims.sort(
+            key=lambda entry: (
+                -self._research_claim_best_cluster_rank(
+                    clusters=[str(item) for item in (entry.get("clusters") or []) if item],
+                    authoritative_preferred=authoritative_preferred,
+                ),
+                -self._research_claim_support_rank(str(entry.get("support_level") or "")),
+                -int(entry.get("comparison_subject_match_count") or 0),
+                -int(entry.get("source_count") or 0),
+                -int(entry.get("provider_count") or 0),
+                int(entry.get("_order_index") or 0),
+            )
+        )
+        for entry in claims:
+            entry.pop("_order_index", None)
+        claims = self._trim_research_claims_for_visibility(
+            claims=claims,
+            authoritative_preferred=authoritative_preferred,
+            comparison_like=comparison_like,
+            limit=4,
+        )
+        claims = self._dedupe_research_claims_by_source_topic(claims, limit=4)
+        claims = self._diversify_research_claims_by_domain(claims, limit=4)
+        return claims
+
+    def _diversify_research_claims_by_domain(
+        self,
+        claims: list[dict[str, Any]],
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        if len(claims) <= limit:
+            return claims
+
+        selected: list[dict[str, Any]] = []
+        deferred: list[dict[str, Any]] = []
+        used_domains: set[str] = set()
+        for entry in claims:
+            domains = [str(item) for item in (entry.get("domains") or []) if item]
+            if domains and all(domain in used_domains for domain in domains):
+                deferred.append(entry)
+                continue
+            selected.append(entry)
+            used_domains.update(domains)
+            if len(selected) >= limit:
+                return selected
+        for entry in deferred:
+            if len(selected) >= limit:
+                break
+            selected.append(entry)
+        return selected[:limit]
+
+    def _dedupe_research_claims_by_source_topic(
+        self,
+        claims: list[dict[str, Any]],
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        if not claims:
+            return []
+        deduped: list[dict[str, Any]] = []
+        seen_topics: set[str] = set()
+        best_entries: dict[str, dict[str, Any]] = {}
+        topic_order: list[str] = []
+        for entry in claims:
+            sources = [str(item).strip() for item in (entry.get("sources") or []) if str(item).strip()]
+            domains = [str(item).strip() for item in (entry.get("domains") or []) if str(item).strip()]
+            topic_key = self._research_source_topic_key(
+                title=sources[0] if sources else str(entry.get("claim") or "").strip(),
+                domain=domains[0] if domains else "unknown",
+            )
+            if topic_key not in seen_topics:
+                seen_topics.add(topic_key)
+                topic_order.append(topic_key)
+                best_entries[topic_key] = entry
+                continue
+            current_best = best_entries[topic_key]
+            if self._research_claim_source_kind_rank(entry) < self._research_claim_source_kind_rank(current_best):
+                best_entries[topic_key] = entry
+        for topic_key in topic_order:
+            deduped.append(best_entries[topic_key])
+            if len(deduped) >= limit:
+                break
+        return deduped[:limit]
+
+    def _research_claim_source_kind_rank(self, entry: dict[str, Any]) -> int:
+        sources = [str(item).strip() for item in (entry.get("sources") or []) if str(item).strip()]
+        urls = [str(item).strip() for item in (entry.get("urls") or []) if str(item).strip()]
+        title = sources[0] if sources else str(entry.get("claim") or "").strip()
+        url = urls[0] if urls else ""
+        return self._research_official_candidate_kind_rank({"title": title, "url": url})
+
+    def _research_claim_primary_cluster(
+        self,
+        *,
+        entry: dict[str, Any],
+        authoritative_preferred: bool,
+    ) -> str:
+        preferred_order = (
+            ["official", "supporting", "general", "community"]
+            if authoritative_preferred
+            else ["project", "supporting", "curated", "listicle", "directory", "community"]
+        )
+        clusters = [str(item) for item in (entry.get("clusters") or []) if item]
+        for label in preferred_order:
+            if label in clusters:
+                return label
+        return clusters[0] if clusters else ""
+
+    def _trim_research_claims_for_visibility(
+        self,
+        *,
+        claims: list[dict[str, Any]],
+        authoritative_preferred: bool,
+        comparison_like: bool,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        if not claims:
+            return []
+
+        if authoritative_preferred:
+            primary_clusters = [
+                self._research_claim_primary_cluster(
+                    entry=entry,
+                    authoritative_preferred=True,
+                )
+                for entry in claims
+            ]
+            official_count = sum(1 for label in primary_clusters if label == "official")
+            supporting_count = sum(1 for label in primary_clusters if label == "supporting")
+            anchor_count = official_count + supporting_count
+            if official_count >= 2 and supporting_count >= 1:
+                cluster_caps = {"official": limit, "supporting": 1}
+            elif anchor_count >= 3:
+                cluster_caps = {"official": limit, "supporting": limit}
+            elif anchor_count >= 2:
+                cluster_caps = {"official": limit, "supporting": limit, "general": 1}
+            else:
+                cluster_caps = {
+                    "official": limit,
+                    "supporting": limit,
+                    "general": 2,
+                    "community": 1,
+                }
+        elif comparison_like:
+            primary_clusters = [
+                self._research_claim_primary_cluster(
+                    entry=entry,
+                    authoritative_preferred=False,
+                )
+                for entry in claims
+            ]
+            anchor_count = sum(
+                1 for label in primary_clusters if label in {"project", "supporting"}
+            )
+            if anchor_count >= 3:
+                cluster_caps = {"project": limit, "supporting": limit}
+            elif anchor_count >= 2:
+                cluster_caps = {"project": limit, "supporting": limit, "curated": 1}
+            else:
+                cluster_caps = {
+                    "project": limit,
+                    "supporting": limit,
+                    "curated": 2,
+                    "listicle": 1,
+                    "directory": 1,
+                    "community": 1,
+                }
+        else:
+            return claims[:limit]
+
+        selected: list[dict[str, Any]] = []
+        cluster_counts: dict[str, int] = {}
+        for entry in claims:
+            cluster_label = self._research_claim_primary_cluster(
+                entry=entry,
+                authoritative_preferred=authoritative_preferred,
+            )
+            cap = cluster_caps.get(cluster_label, 0)
+            if not cap or cluster_counts.get(cluster_label, 0) >= cap:
+                continue
+            selected.append(entry)
+            cluster_counts[cluster_label] = cluster_counts.get(cluster_label, 0) + 1
+            if len(selected) >= limit:
+                break
+        return selected[:limit]
 
     def _research_claim_text(
         self,
@@ -9947,27 +15331,93 @@ class MySearchClient:
         comparison_like: bool,
     ) -> str:
         cleaned_title = self._normalize_research_claim_text(
-            re.split(r"\s[\-|:|]\s", title, maxsplit=1)[0].strip() or title,
+            re.split(r"\s(?:[-:|–—])\s", title, maxsplit=1)[0].strip() or title,
             comparison_like=comparison_like,
         )
         excerpt = re.sub(r"\s+", " ", excerpt).strip()
         if excerpt:
-            first_sentence = re.split(r"(?<=[.!?。！？])\s+", excerpt, maxsplit=1)[0].strip()
-            cleaned_excerpt = self._normalize_research_claim_text(
-                first_sentence,
-                comparison_like=comparison_like,
+            sentence_ready_excerpt = re.sub(r"\bvs\.\s+", "vs ", excerpt, flags=re.IGNORECASE)
+            raw_sentences = re.split(
+                r"(?<=[.!?。！？])\s+",
+                sentence_ready_excerpt,
             )
+            cleaned_sentences = [
+                cleaned
+                for sentence in raw_sentences[:3]
+                if (cleaned := self._normalize_research_claim_text(
+                    sentence.strip(),
+                    comparison_like=comparison_like,
+                ))
+            ]
+            cleaned_excerpt = cleaned_sentences[0] if cleaned_sentences else ""
+            if comparison_like and len(cleaned_sentences) > 1:
+                preferred_excerpt = ""
+                fallback_excerpt = cleaned_excerpt
+                for candidate in cleaned_sentences:
+                    if not self._research_excerpt_has_substantive_claim(candidate):
+                        continue
+                    if not self._research_claim_is_generic(candidate):
+                        preferred_excerpt = candidate
+                        break
+                    if not fallback_excerpt or not self._research_excerpt_has_substantive_claim(
+                        fallback_excerpt
+                    ):
+                        fallback_excerpt = candidate
+                cleaned_excerpt = preferred_excerpt or fallback_excerpt
             if cleaned_excerpt:
+                if cleaned_title:
+                    title_prefix = f"{cleaned_title} "
+                    if cleaned_excerpt.lower().startswith(title_prefix.lower()):
+                        trailing_excerpt = cleaned_excerpt[len(title_prefix):].strip(" -:;,.")
+                        if trailing_excerpt.lower().startswith(title_prefix.lower()):
+                            trailing_excerpt = trailing_excerpt[len(title_prefix):].strip(" -:;,.")
+                        if trailing_excerpt:
+                            leading_word = trailing_excerpt.split()[0].lower()
+                            if leading_word in {
+                                "is",
+                                "are",
+                                "can",
+                                "lets",
+                                "allows",
+                                "enables",
+                                "supports",
+                                "provides",
+                                "helps",
+                                "uses",
+                            }:
+                                trailing_excerpt = f"{cleaned_title} {trailing_excerpt}"
+                        if len(trailing_excerpt.split()) >= 3:
+                            return trailing_excerpt
                 if cleaned_title and self._research_excerpt_looks_like_navigation_noise(cleaned_excerpt):
+                    if comparison_like and self._research_claim_is_generic(cleaned_title):
+                        return ""
                     return cleaned_title
+                if cleaned_title and self._research_excerpt_looks_like_link_index_noise(cleaned_excerpt):
+                    if comparison_like and self._research_claim_is_generic(cleaned_title):
+                        return ""
+                    return cleaned_title
+                if self._research_excerpt_looks_like_schema_noise(cleaned_excerpt):
+                    if cleaned_title and not self._research_claim_is_generic(cleaned_title):
+                        return cleaned_title
+                    return ""
                 if not self._research_excerpt_looks_like_noise(cleaned_excerpt):
+                    if comparison_like and self._research_excerpt_has_substantive_claim(cleaned_excerpt):
+                        return cleaned_excerpt
                     excerpt_tokens = set(re.findall(r"[a-z0-9]+", cleaned_excerpt.lower()))
                     title_tokens = set(re.findall(r"[a-z0-9]+", cleaned_title.lower()))
                     if cleaned_title and title_tokens and excerpt_tokens and (
                         len(title_tokens & excerpt_tokens) >= max(2, min(len(title_tokens), 3))
                     ):
+                        if (
+                            comparison_like
+                            and self._research_claim_is_generic(cleaned_title)
+                            and self._research_excerpt_has_substantive_claim(cleaned_excerpt)
+                        ):
+                            return cleaned_excerpt
                         return cleaned_title
                     return cleaned_excerpt
+        if cleaned_title and comparison_like and self._research_claim_is_generic(cleaned_title):
+            return ""
         return cleaned_title
 
     def _normalize_research_claim_text(
@@ -9976,19 +15426,144 @@ class MySearchClient:
         *,
         comparison_like: bool,
     ) -> str:
-        compact = re.sub(r"\s+", " ", text).strip(" -|:;,.")
+        compact = re.sub(r"[\u200b\u200c\u200d\ufeff]", " ", text)
+        compact = compact.replace("**", " ").replace("__", " ").replace("`", " ")
+        compact = re.sub(r"!\[[^\]]*\]\([^)]+\)", " ", compact)
+        compact = re.sub(r"\[[^\]]+\]\([^)]+\)", " ", compact)
+        compact = re.sub(
+            r"(?i)\b(copy\s*pagecopy|copy\s+markdown|open\s+in\s+chatgpt|view\s+as\s+markdown|copy\s+page|view\s+page)\b",
+            " ",
+            compact,
+        )
+        compact = re.sub(r"(?i)^\s*(?:copy\s+pagecopy|copy\s+page|copy)\s+", "", compact).strip()
+        compact = re.sub(r"\s*#+\s*", " ", compact)
+        compact = compact.replace("*", " ")
+        compact = re.sub(
+            r"(?i)\b(master this essential documentation concept|quick definition|table of contents)\b",
+            " ",
+            compact,
+        )
+        compact = re.sub(r"\s+", " ", compact).strip(" -|:;,.")
+        if self._research_excerpt_looks_like_json_shell(compact):
+            return ""
+        heading_match = re.match(
+            r"^#\s*[A-Z][A-Za-z0-9'’&./() \-]{1,80}?\s+"
+            r"((?:create|use|build|manage|run|stream|process|compare|choose|support|supports|allow|allows|enable|enables|let|lets|track|learn|handle)\b.+)$",
+            compact,
+            flags=re.IGNORECASE,
+        )
+        if heading_match:
+            compact = heading_match.group(1).strip()
+        compact = re.sub(
+            r"(?i)^[A-Z][A-Za-z0-9'’&./() \-]{5,100}\s+"
+            r"[A-Z][a-z]+\s+\d{1,2}(?:st|nd|rd|th),\s+\d{4}\s+by\s+"
+            r"[A-Z][A-Za-z.'\-]+(?:\s+[A-Z][A-Za-z.'\-]+){0,3}\s+(?:abstract\s+)?",
+            "",
+            compact,
+        )
+        compact = re.sub(r"(?i)^comparison\s+", "", compact).strip()
+        compact = re.sub(r"(?i)^summary\s*:\s*", "", compact).strip()
+        compact = re.sub(r"(?i)^tl\s*;?\s*dr\s*:\s*", "", compact).strip()
+        compact = re.sub(r"(?i)^abstract\s+", "", compact).strip()
+        compact = re.sub(
+            r"(?i)^[A-Z][a-z]+\s+\d{1,2}(?:st|nd|rd|th),\s+\d{4}\s+by\s+"
+            r"[A-Z][A-Za-z.'\-]+(?:\s+[A-Z][A-Za-z.'\-]+){0,3}(?=\s+(?:abstract\b|$))\s*",
+            "",
+            compact,
+        )
+        compact = re.sub(r"(?i)^abstract\s+", "", compact).strip()
         compact = re.sub(r"^[#>*`\-\d\.\)\s]+", "", compact).strip()
-        compact = re.sub(r"\[[^\]]+\]\([^)]+\)", "", compact).strip()
         compact = re.sub(r"https?://\S+", "", compact).strip()
         compact = compact.replace("\\_", "_")
         if not compact:
             return ""
+        if self._research_excerpt_looks_like_json_shell(compact):
+            return ""
         if comparison_like:
-            compact = re.split(r"\s[\-|:|]\s", compact, maxsplit=1)[0].strip() or compact
+            compact = re.split(r"\s(?:[-:|–—])\s", compact, maxsplit=1)[0].strip() or compact
         compact = self._build_excerpt(compact, limit=160)
         if self._research_excerpt_looks_like_noise(compact):
             return ""
         return compact
+
+    def _select_research_claim_excerpt(
+        self,
+        *,
+        page_excerpt: str,
+        snippet: str,
+        content: str,
+    ) -> str:
+        for candidate in (page_excerpt, snippet, content):
+            cleaned = re.sub(r"\s+", " ", candidate).strip()
+            if not cleaned:
+                continue
+            if self._research_excerpt_looks_like_navigation_noise(cleaned):
+                continue
+            if self._research_excerpt_looks_like_link_index_noise(cleaned):
+                continue
+            if self._research_excerpt_looks_like_noise(cleaned):
+                continue
+            return cleaned
+        return ""
+
+    def _research_excerpt_looks_like_schema_noise(self, text: str) -> bool:
+        normalized = re.sub(r"\s+", " ", text.lower()).strip()
+        if not normalized:
+            return False
+        if self._research_excerpt_looks_like_json_shell(normalized):
+            return True
+        schema_markers = (
+            "keys are strings",
+            "maximum length",
+            "minimum length",
+            "defaults to",
+            "id: string",
+            "completion_window: string",
+            "metadata: object",
+            "must be one of",
+            "object containing",
+            "array of",
+            "the id of the",
+            "the type of the",
+            "a list of",
+        )
+        return any(marker in normalized for marker in schema_markers)
+
+    def _research_excerpt_looks_like_json_shell(self, text: str) -> bool:
+        normalized = re.sub(r"\s+", " ", text).strip()
+        if not normalized:
+            return False
+        lowered = normalized.lower()
+        if not (
+            normalized.startswith("{")
+            or normalized.startswith("{{")
+            or '"id"' in lowered
+            or '"completion_window"' in lowered
+            or '"created_at"' in lowered
+        ):
+            return False
+        json_field_count = len(
+            re.findall(
+                r'"[a-z0-9_]{2,40}"\s*:\s*(?:"[^"]*"|\d+|true|false|null|\{|\[)',
+                lowered,
+            )
+        )
+        if json_field_count >= 2:
+            return True
+        return any(
+            marker in lowered
+            for marker in (
+                '"id":',
+                '"completion_window":',
+                '"created_at":',
+                '"request_counts":',
+                '"input_file_id":',
+                '"output_file_id":',
+                '"error_file_id":',
+                '"status":',
+                '"endpoint":',
+            )
+        )
 
     def _research_claim_signature(self, claim: str) -> str:
         normalized = re.sub(r"[^a-z0-9]+", " ", claim.lower()).strip()
@@ -10023,26 +15598,652 @@ class MySearchClient:
         signature_tokens = tokens[:8] or normalized.split()[:8]
         return " ".join(signature_tokens)
 
+    def _research_claim_is_generic(self, claim: str) -> bool:
+        normalized = re.sub(r"[^a-z0-9]+", " ", claim.lower()).strip()
+        if not normalized:
+            return True
+        if normalized.startswith(("best ", "top ", "compare ", "comparison ")):
+            return True
+        if normalized.endswith((" for", " guide", " reference", " docs")):
+            return True
+        if any(
+            marker in normalized
+            for marker in (
+                "agent builder",
+                "agent skills",
+                "authoritative content for",
+                "api guide",
+                "api reference",
+                "best mcp servers",
+                "best practices",
+                "compare models",
+                "complete comparison",
+                "definition examples",
+                "integration docs",
+                "integrations",
+                "ultimate guide",
+            )
+        ):
+            return True
+        if "alternatives" in normalized:
+            return True
+        tokens = normalized.split()
+        generic_tokens = {
+            "api",
+            "authoritative",
+            "batch",
+            "batches",
+            "compare",
+            "comparison",
+            "content",
+            "docs",
+            "documentation",
+            "guide",
+            "guides",
+            "model",
+            "mcp",
+            "models",
+            "openai",
+            "reference",
+            "search",
+            "server",
+            "servers",
+            "tool",
+            "tools",
+        }
+        if ("vs" in tokens or "versus" in tokens) and any(
+            marker in normalized
+            for marker in ("comparison", "compare", "guide", "alternatives")
+        ):
+            return True
+        meaningful_tokens = [token for token in tokens if token not in generic_tokens]
+        if not meaningful_tokens and len(tokens) <= 4:
+            return True
+        return len(tokens) <= 3 and len(meaningful_tokens) <= 1
+
+    def _research_claim_comparison_subject_match_count(
+        self,
+        *,
+        claim: str,
+        sources: Sequence[str],
+        entities: Sequence[Sequence[str]],
+    ) -> int:
+        if not claim or not entities:
+            return 0
+        haystack = " ".join([claim, *sources]).lower()
+        match_count = 0
+        for entity_tokens in entities[:4]:
+            tokens = [str(token).strip().lower() for token in entity_tokens if str(token).strip()]
+            if tokens and all(token in haystack for token in tokens):
+                match_count += 1
+        return match_count
+
+    def _align_research_claims_with_comparison_rows(
+        self,
+        *,
+        claim_evidence: list[dict[str, Any]],
+        comparison_rows: Sequence[Mapping[str, Any]],
+        comparison_entities: Sequence[Sequence[str]],
+    ) -> list[dict[str, Any]]:
+        if not claim_evidence or not comparison_rows or not comparison_entities:
+            return claim_evidence[:4]
+
+        aligned: list[dict[str, Any]] = []
+        seen_signatures: set[str] = set()
+
+        def append_entry(entry: Mapping[str, Any]) -> None:
+            if len(aligned) >= 4:
+                return
+            claim_text = str(entry.get("claim") or "").strip()
+            signature = self._research_claim_signature(claim_text)
+            if not claim_text or not signature or signature in seen_signatures:
+                return
+            aligned.append(dict(entry))
+            seen_signatures.add(signature)
+
+        for entity_tokens in comparison_entities[:4]:
+            synthetic_claim = self._research_comparison_claim_from_row(
+                comparison_rows=comparison_rows,
+                entity_tokens=entity_tokens,
+            )
+            matching_claims = [
+                item
+                for item in claim_evidence
+                if self._research_claim_comparison_subject_match_count(
+                    claim=str(item.get("claim") or "").strip(),
+                    sources=[str(source) for source in (item.get("sources") or []) if source],
+                    entities=[entity_tokens],
+                )
+                > 0
+            ]
+            if synthetic_claim:
+                matching_claims.append(synthetic_claim)
+            if matching_claims:
+                def claim_rank(entry: Mapping[str, Any]) -> tuple[int, int, int, int]:
+                    claim = str(entry.get("claim") or "").strip()
+                    clusters = [
+                        str(cluster).strip()
+                        for cluster in (entry.get("clusters") or [])
+                        if str(cluster).strip()
+                    ]
+                    return (
+                        int(entry.get("comparison_subject_match_count") or 0),
+                        self._research_claim_best_cluster_rank(
+                            clusters=clusters,
+                            authoritative_preferred=True,
+                        ),
+                        self._research_claim_support_rank(str(entry.get("support_level") or "").strip()),
+                        len(claim),
+                    )
+
+                append_entry(max(matching_claims, key=claim_rank))
+
+        for entry in claim_evidence:
+            claim_text = str(entry.get("claim") or "").strip()
+            match_count = self._research_claim_comparison_subject_match_count(
+                claim=claim_text,
+                sources=[str(source) for source in (entry.get("sources") or []) if source],
+                entities=comparison_entities,
+            )
+            if match_count <= 0 and not self._research_claim_is_comparison_tail_relevant(claim_text):
+                continue
+            append_entry(entry)
+            if len(aligned) >= 4:
+                break
+        return aligned[:4]
+
+    def _research_claim_is_comparison_tail_relevant(self, claim: str) -> bool:
+        normalized = f" {claim.lower().strip()} "
+        if not normalized.strip():
+            return False
+        return any(
+            marker in normalized
+            for marker in (
+                " background ",
+                " async ",
+                " asynchronous ",
+                " latency ",
+                " streaming ",
+                " long running ",
+                " long-running ",
+                " bulk ",
+                " batch api ",
+                " responses api ",
+                " tool-using ",
+                " interactive ",
+            )
+        )
+
+    def _research_comparison_claim_from_row(
+        self,
+        *,
+        comparison_rows: Sequence[Mapping[str, Any]],
+        entity_tokens: Sequence[str],
+    ) -> dict[str, Any]:
+        for row in comparison_rows:
+            candidate = str(row.get("candidate") or "").strip()
+            note = str(row.get("note") or "").strip()
+            source = str(row.get("source") or "").strip()
+            url = str(row.get("url") or "").strip()
+            cluster = str(row.get("cluster") or "").strip()
+            claim_text = self._normalize_research_claim_text(
+                note or candidate,
+                comparison_like=True,
+            )
+            if not claim_text:
+                claim_text = self._normalize_research_claim_text(
+                    candidate,
+                    comparison_like=True,
+                )
+            if not claim_text:
+                continue
+            if self._research_claim_comparison_subject_match_count(
+                claim=claim_text,
+                sources=[candidate, source],
+                entities=[entity_tokens],
+            ) <= 0:
+                continue
+            providers = [
+                item.strip()
+                for item in str(row.get("provider_support") or "").split("+")
+                if item.strip()
+            ]
+            entry: dict[str, Any] = {
+                "claim": claim_text,
+                "sources": [candidate] if candidate else ([source] if source else []),
+                "urls": [url] if url else [],
+                "providers": providers,
+                "clusters": [cluster] if cluster else [],
+                "domains": [self._registered_domain(self._result_hostname({"url": url}))] if url else [],
+                "source_count": 1 if (candidate or source) else 0,
+                "provider_count": len(providers),
+                "cluster_count": 1 if cluster else 0,
+                "comparison_subject_match_count": 1,
+            }
+            entry["support_level"] = self._research_claim_support_level(
+                source_count=int(entry.get("source_count") or 0),
+                provider_count=int(entry.get("provider_count") or 0),
+                cluster_count=int(entry.get("cluster_count") or 0),
+            )
+            entry["support_basis"] = self._research_claim_support_basis(entry)
+            return entry
+        return {}
+
+    def _research_claim_entry_from_focus_row(
+        self,
+        row: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        if not row:
+            return {}
+        candidate = str(row.get("candidate") or "").strip()
+        note = str(row.get("note") or "").strip()
+        source = str(row.get("source") or "").strip()
+        url = str(row.get("url") or "").strip()
+        cluster = str(row.get("cluster") or "").strip()
+        normalized_note = self._normalize_research_claim_text(note, comparison_like=True)
+        normalized_candidate = self._normalize_research_claim_text(
+            candidate,
+            comparison_like=True,
+        )
+        claim_text = ""
+        if normalized_note and self._research_excerpt_has_substantive_claim(normalized_note):
+            claim_text = normalized_note
+        elif normalized_note and not self._research_claim_is_generic(normalized_note):
+            claim_text = normalized_note
+        else:
+            claim_text = normalized_candidate or normalized_note
+        if not claim_text:
+            return {}
+        providers = [
+            item.strip()
+            for item in str(row.get("provider_support") or "").split("+")
+            if item.strip()
+        ]
+        entry: dict[str, Any] = {
+            "claim": claim_text,
+            "sources": [candidate] if candidate else ([source] if source else []),
+            "urls": [url] if url else [],
+            "providers": providers,
+            "clusters": [cluster] if cluster else [],
+            "domains": [self._registered_domain(self._result_hostname({"url": url}))] if url else [],
+            "source_count": 1 if (candidate or source) else 0,
+            "provider_count": len(providers),
+            "cluster_count": 1 if cluster else 0,
+            "comparison_subject_match_count": 1,
+        }
+        entry["support_level"] = self._research_claim_support_level(
+            source_count=int(entry.get("source_count") or 0),
+            provider_count=int(entry.get("provider_count") or 0),
+            cluster_count=int(entry.get("cluster_count") or 0),
+        )
+        entry["support_basis"] = self._research_claim_support_basis(entry)
+        return entry
+
+    def _research_comparison_support_summary(
+        self,
+        *,
+        authoritative_source_count: int,
+        supporting_source_count: int,
+    ) -> str:
+        if authoritative_source_count > 0:
+            return "Authoritative sources and corroborating analysis were found."
+        if supporting_source_count > 0:
+            return "Supporting sources and corroborating analysis were found."
+        return "The strongest available evidence is comparative rather than authoritative."
+
+    def _select_research_primary_claim(
+        self, claim_evidence: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        for item in claim_evidence:
+            claim = str(item.get("claim") or "").strip()
+            if not claim:
+                continue
+            if str(item.get("support_level") or "") == "single-source":
+                continue
+            if self._research_claim_is_generic(claim):
+                continue
+            if not self._research_excerpt_has_substantive_claim(claim):
+                continue
+            return item
+        for item in claim_evidence:
+            claim = str(item.get("claim") or "").strip()
+            if claim and not self._research_claim_is_generic(claim):
+                return item
+        return claim_evidence[0] if claim_evidence else {}
+
+    def _research_claim_support_level(
+        self,
+        *,
+        source_count: int,
+        provider_count: int,
+        cluster_count: int,
+    ) -> str:
+        if provider_count >= 2 and source_count >= 1:
+            return "cross-provider"
+        if source_count >= 3 or cluster_count >= 2:
+            return "multi-source"
+        if source_count >= 2:
+            return "corroborated"
+        return "single-source"
+
+    def _research_claim_support_phrase(self, claim_entry: dict[str, Any]) -> str:
+        if not claim_entry:
+            return ""
+        support_level = str(claim_entry.get("support_level") or "").strip()
+        support_basis = str(claim_entry.get("support_basis") or "").strip()
+        if not support_basis:
+            support_basis = self._research_claim_support_basis(claim_entry)
+        source_count = int(claim_entry.get("source_count") or 0)
+        provider_count = int(claim_entry.get("provider_count") or 0)
+        cluster_count = int(claim_entry.get("cluster_count") or 0)
+        phrase = support_level.replace("-", " ").strip() if support_level else ""
+        detail_bits: list[str] = []
+        if provider_count > 0:
+            detail_bits.append(f"{provider_count} provider{'s' if provider_count != 1 else ''}")
+        if source_count > 0:
+            detail_bits.append(f"{source_count} source{'s' if source_count != 1 else ''}")
+        if cluster_count > 1:
+            detail_bits.append(f"{cluster_count} source clusters")
+        if support_basis:
+            if support_level == "single-source":
+                if detail_bits:
+                    return f"{phrase} support anchored by {support_basis} ({', '.join(detail_bits)})"
+                if phrase:
+                    return f"{phrase} support anchored by {support_basis}"
+            if phrase:
+                if detail_bits:
+                    return f"{phrase} support across {support_basis} ({', '.join(detail_bits)})"
+                return f"{phrase} support across {support_basis}"
+            if detail_bits:
+                return f"supported across {support_basis} ({', '.join(detail_bits)})"
+            return f"supported across {support_basis}"
+        if phrase and detail_bits:
+            return f"{phrase} support across {', '.join(detail_bits)}"
+        if phrase:
+            return f"{phrase} support"
+        if detail_bits:
+            return f"supported by {', '.join(detail_bits)}"
+        return ""
+
+    def _research_claim_support_basis(self, claim_entry: Mapping[str, Any]) -> str:
+        support_level = str(claim_entry.get("support_level") or "").strip()
+        providers = {
+            str(item).strip()
+            for item in (claim_entry.get("providers") or [])
+            if str(item).strip()
+        }
+        clusters = {
+            str(item).strip()
+            for item in (claim_entry.get("clusters") or [])
+            if str(item).strip()
+        }
+        has_project = "project" in clusters
+        has_vendor_docs = "canonical_research_docs" in providers and (
+            "official" in clusters or "supporting" in clusters
+        )
+        has_official = "official" in clusters
+
+        if has_project and has_vendor_docs:
+            return "shortlisted comparison page and vendor docs"
+        if has_project:
+            return "shortlisted comparison page"
+        if has_vendor_docs:
+            return (
+                "shortlisted vendor docs"
+                if support_level in {"cross-provider", "multi-source", "corroborated"}
+                else "shortlisted vendor doc"
+            )
+        if has_official:
+            return (
+                "shortlisted official docs"
+                if support_level in {"cross-provider", "multi-source", "corroborated"}
+                else "shortlisted official doc"
+            )
+        return ""
+
+    def _research_claim_support_rank(self, support_level: str) -> int:
+        return {
+            "cross-provider": 4,
+            "multi-source": 3,
+            "corroborated": 2,
+            "single-source": 1,
+        }.get(support_level, 0)
+
+    def _research_claim_best_cluster_rank(
+        self,
+        *,
+        clusters: list[str],
+        authoritative_preferred: bool,
+    ) -> int:
+        if not clusters:
+            return 0
+        if authoritative_preferred:
+            weights = {
+                "official": 5,
+                "supporting": 4,
+                "general": 3,
+                "project": 3,
+                "curated": 2,
+                "directory": 1,
+                "listicle": 1,
+                "community": 0,
+            }
+        else:
+            weights = {
+                "project": 5,
+                "supporting": 4,
+                "curated": 3,
+                "general": 3,
+                "official": 3,
+                "listicle": 2,
+                "directory": 1,
+                "community": 0,
+            }
+        return max(weights.get(cluster, 0) for cluster in clusters)
+
+    def _research_authoritative_claim_fallback(
+        self,
+        *,
+        query: str,
+        mode: str,
+        ordered_results: list[dict[str, Any]],
+        include_domains: list[str] | None,
+        authoritative_preferred: bool,
+    ) -> dict[str, Any]:
+        resolved_mode = cast(SearchMode, mode if mode in SEARCH_MODES else "web")
+        for item in ordered_results:
+            cluster_label = self._research_result_cluster_label(
+                query=query,
+                mode=resolved_mode,
+                item=item,
+                include_domains=include_domains,
+                authoritative_preferred=authoritative_preferred,
+            )
+            if cluster_label not in {"official", "supporting"}:
+                continue
+            title = (item.get("title") or "").strip()
+            claim = self._normalize_research_claim_text(title, comparison_like=True)
+            if not claim:
+                continue
+            source_label = title or (
+                self._registered_domain(self._result_hostname(item)) or (item.get("url") or "")
+            )
+            return {
+                "claim": claim,
+                "sources": [source_label] if source_label else [],
+                "providers": [
+                    provider
+                    for provider in (item.get("matched_providers") or [item.get("provider", "")])
+                    if provider
+                ],
+                "clusters": [cluster_label],
+                "source_count": 1 if source_label else 0,
+                "provider_count": len(
+                    [
+                        provider
+                        for provider in (item.get("matched_providers") or [item.get("provider", "")])
+                        if provider
+                    ]
+                ),
+                "cluster_count": 1,
+                "support_level": "single-source",
+                "_order_index": -1,
+            }
+        return {}
+
+    def _research_excerpt_has_substantive_claim(self, text: str) -> bool:
+        normalized = " " + re.sub(r"\s+", " ", text.lower()).strip() + " "
+        word_count = len(normalized.split())
+        if word_count < 5:
+            return False
+        markers = (
+            " is ",
+            " are ",
+            " can ",
+            " use ",
+            " vary by ",
+            " process ",
+            " processes ",
+            " handles ",
+            " supports ",
+            " allows ",
+            " enables ",
+            " helps ",
+            " uses ",
+            " provides ",
+            " delivers ",
+            " exposes ",
+            " integrates ",
+            " explores ",
+            " built for ",
+            " designed to ",
+            " suited to ",
+            " better suited ",
+            " should be considered ",
+            " unlike ",
+            " compared with ",
+            " compared to ",
+        )
+        if word_count < 7:
+            short_sentence_markers = (
+                " process ",
+                " processes ",
+                " use ",
+                " uses ",
+                " build ",
+                " builds ",
+                " run ",
+                " runs ",
+                " manage ",
+                " manages ",
+                " migrate ",
+                " migrates ",
+                " compare ",
+                " compares ",
+            )
+            return any(marker in normalized for marker in short_sentence_markers)
+        return any(
+            marker in normalized
+            for marker in markers
+        )
+
+    def _research_excerpt_looks_like_link_index_noise(self, text: str) -> bool:
+        normalized = re.sub(r"\s+", " ", text).strip()
+        if not normalized:
+            return False
+        lowered = normalized.lower()
+        markdown_link_count = normalized.count("](")
+        if markdown_link_count >= 2:
+            return True
+        if "![image" in lowered or "[![image" in lowered:
+            return True
+        if normalized.startswith(("* [", "- [")) and markdown_link_count >= 1:
+            return True
+        if normalized.startswith("# ") and (
+            markdown_link_count >= 1
+            or "openai developers" in lowered
+            or "api reference" in lowered
+        ):
+            return True
+        return False
+
     def _research_excerpt_looks_like_navigation_noise(self, text: str) -> bool:
         lowered = text.lower()
         return any(
             marker in lowered
             for marker in (
                 "primary navigation",
+                "copy markdown",
+                "open in chatgpt",
                 "search docs",
                 "skip to content",
+                "skip to main content",
                 "suggested",
                 "chatgpt actions",
                 "search the api docs",
                 "marketing copy",
+                "copy markdown",
+                "view as markdown",
+                "access to this page requires authorization",
+                "exit editor mode",
+                "focus mode note",
+                "ask learn",
+                "get api key",
+                "available skills",
+                "sign up at tavily.com",
+                "why use these skills",
             )
         )
 
     def _research_excerpt_looks_like_noise(self, text: str) -> bool:
+        if self._research_excerpt_looks_like_json_shell(text):
+            return True
         lowered = text.lower()
+        code_like_markers = (
+            "api_key=",
+            "schema = {",
+            "\"type\": \"object\"",
+            "\"properties\": {",
+            "\"required\": [",
+            "firecrawl = firecrawl(",
+            "from firecrawl import firecrawl",
+            "your-api-key",
+            "const exa = new exa(",
+            "await exa.getcontents(",
+            "highlights: {",
+            "maxcharacters:",
+        )
+        if sum(1 for marker in code_like_markers if marker in lowered) >= 2:
+            return True
         return any(
             marker in lowered
             for marker in (
+                "step 1: curl",
+                "curl -fssl",
+                "curl --request",
+                "authorization: bearer",
+                "content-type: application/json",
+                "x-api-key",
+                "generated using ai and may contain mistakes",
+                "api_key=",
+                "schema = {",
+                "your-api-key",
+                "const exa = new exa(",
+                "await exa.getcontents(",
+                "highlights: {",
+                "maxcharacters:",
+                "start getting web data for free",
+                "no credit card needed",
+                "scale seamlessly as your project expands",
+                "reasoning tokens pricing per 1m tokens",
+                "context window",
+                "knowledge cutoff",
+                "cached input",
+                "output tokens",
+                "endpoints v1/chat",
+                "ready to build",
+                "table of contents",
+                "back to all posts",
                 "you signed in with another tab",
                 "method not allowed",
                 "\"error\"",
@@ -10089,6 +16290,301 @@ class MySearchClient:
             "listicle": "broad scan",
             "directory": "directory-style inventory",
         }.get(cluster_label, "general coverage")
+
+    def _research_select_comparison_focus_rows(
+        self,
+        *,
+        comparison_rows: Sequence[Mapping[str, Any]],
+        comparison_entities: Sequence[Sequence[str]],
+        selected_urls: Sequence[str] | None = None,
+    ) -> list[dict[str, str]]:
+        if not comparison_rows:
+            return []
+
+        focus_rows: list[dict[str, str]] = []
+        seen_urls: set[str] = set()
+        selected_url_set = {
+            str(url).strip()
+            for url in (selected_urls or [])
+            if str(url).strip()
+        }
+
+        def append_row(row: Mapping[str, Any]) -> None:
+            if len(focus_rows) >= 4:
+                return
+            url = str(row.get("url") or "").strip()
+            if url and url in seen_urls:
+                return
+            focus_rows.append(dict(row))
+            if url:
+                seen_urls.add(url)
+
+        if not comparison_entities and selected_url_set:
+            for row in comparison_rows:
+                if str(row.get("url") or "").strip() in selected_url_set:
+                    append_row(row)
+            if focus_rows:
+                return focus_rows[:4]
+
+        for entity_tokens in comparison_entities[:4]:
+            matching_row = next(
+                (
+                    row
+                    for row in comparison_rows
+                    if self._research_claim_comparison_subject_match_count(
+                        claim=" ".join(
+                            part
+                            for part in (
+                                str(row.get("candidate") or "").strip(),
+                                str(row.get("note") or "").strip(),
+                            )
+                            if part
+                        ),
+                        sources=[
+                            str(row.get("candidate") or "").strip(),
+                            str(row.get("source") or "").strip(),
+                        ],
+                        entities=[entity_tokens],
+                    )
+                    > 0
+                ),
+                None,
+            )
+            if matching_row:
+                append_row(matching_row)
+
+        required_subject_rows = min(2, len(comparison_entities[:4]))
+        if required_subject_rows and len(focus_rows) >= required_subject_rows:
+            return focus_rows[:4]
+
+        for row in comparison_rows:
+            append_row(row)
+            if len(focus_rows) >= 4:
+                break
+        return focus_rows[:4]
+
+    def _research_comparison_profile(
+        self,
+        *,
+        candidate: str,
+        note: str,
+        fit: str,
+        url: str,
+    ) -> dict[str, str]:
+        text = " ".join(bit for bit in (candidate, note, fit, url) if bit).lower()
+        if any(token in text for token in ("responses api", "response api", "model response", "tool-using", "streaming")):
+            return {
+                "best_for": "interactive or tool-using request flows",
+                "operational_model": "request/response workflow with iterative calls",
+                "tradeoff": "less cost-efficient than batch for very large asynchronous jobs",
+            }
+        if any(token in text for token in ("batch api", "create batch", "batches", "jsonl", "bulk", "completion_window", "asynchronous")):
+            return {
+                "best_for": "bulk asynchronous workloads",
+                "operational_model": "file-backed batch execution",
+                "tradeoff": "higher latency and weaker fit for interactive request/response flows",
+            }
+        if "background" in text:
+            return {
+                "best_for": "long-running tasks without holding the client request open",
+                "operational_model": "background execution with later retrieval or polling",
+                "tradeoff": "complements, but does not replace, bulk batch processing",
+            }
+        if fit == "project-native source":
+            return {
+                "best_for": "direct product-side comparison context",
+                "operational_model": "product-native comparison page",
+                "tradeoff": "may be narrower than broader ecosystem analysis",
+            }
+        if fit == "canonical ground truth":
+            return {
+                "best_for": "canonical product guidance",
+                "operational_model": "first-party product documentation",
+                "tradeoff": "may describe capabilities more than head-to-head trade-offs",
+            }
+        if fit == "supporting analysis":
+            return {
+                "best_for": "secondary validation and implementation nuance",
+                "operational_model": "supporting vendor or official documentation",
+                "tradeoff": "usually complements, rather than replaces, canonical guidance",
+            }
+        return {
+            "best_for": fit or "general comparison coverage",
+            "operational_model": "comparison-oriented supporting source",
+            "tradeoff": "requires cross-checking against canonical product documentation",
+        }
+
+    def _research_build_decision_criteria(
+        self,
+        *,
+        focus_rows: Sequence[Mapping[str, Any]],
+    ) -> list[str]:
+        criteria: list[str] = []
+        focus_profiles: list[tuple[str, dict[str, str]]] = []
+        for row in focus_rows[:3]:
+            candidate = str(row.get("candidate") or "").strip()
+            if not candidate:
+                continue
+            profile = self._research_comparison_profile(
+                candidate=candidate,
+                note=str(row.get("note") or "").strip(),
+                fit=self._research_cluster_fit_summary(str(row.get("cluster") or "").strip()),
+                url=str(row.get("url") or "").strip(),
+            )
+            focus_profiles.append((candidate, profile))
+            criteria.append(
+                f"Use {candidate} when you need {profile['best_for']}."
+            )
+        responses_candidate = next(
+            (
+                candidate
+                for candidate, _profile in focus_profiles
+                if "responses" in candidate.lower() or "response" in candidate.lower()
+            ),
+            "",
+        )
+        batch_candidate = next(
+            (
+                candidate
+                for candidate, _profile in focus_profiles
+                if "batch" in candidate.lower()
+            ),
+            "",
+        )
+        background_candidate = next(
+            (
+                candidate
+                for candidate, _profile in focus_profiles
+                if "background" in candidate.lower()
+            ),
+            "",
+        )
+        if responses_candidate and batch_candidate:
+            criteria.append(
+                f"Prefer {batch_candidate} when discounted throughput matters more than immediate latency."
+            )
+            criteria.append(
+                f"Prefer {responses_candidate} when iterative request/response control matters more than offline throughput."
+            )
+        if background_candidate:
+            criteria.append(
+                f"Reach for {background_candidate} when work should continue asynchronously without holding the client connection open."
+            )
+        return criteria[:4]
+
+    def _research_build_comparison_matrix(
+        self,
+        *,
+        focus_rows: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, str]]:
+        matrix: list[dict[str, str]] = []
+        for row in focus_rows[:3]:
+            candidate = str(row.get("candidate") or "").strip()
+            if not candidate:
+                continue
+            profile = self._research_comparison_profile(
+                candidate=candidate,
+                note=str(row.get("note") or "").strip(),
+                fit=self._research_cluster_fit_summary(str(row.get("cluster") or "").strip()),
+                url=str(row.get("url") or "").strip(),
+            )
+            matrix.append(
+                {
+                    "candidate": candidate,
+                    "best_for": profile["best_for"],
+                    "operational_model": profile["operational_model"],
+                    "tradeoff": profile["tradeoff"],
+                }
+            )
+        return matrix[:3]
+
+    def _research_build_operational_tradeoffs(
+        self,
+        *,
+        focus_rows: Sequence[Mapping[str, Any]],
+    ) -> list[str]:
+        tradeoffs: list[str] = []
+        responses_candidate = ""
+        batch_candidate = ""
+        background_candidate = ""
+        for row in focus_rows[:4]:
+            candidate = str(row.get("candidate") or "").strip()
+            candidate_lower = candidate.lower()
+            if not responses_candidate and ("responses" in candidate_lower or "response" in candidate_lower):
+                responses_candidate = candidate
+            if not batch_candidate and "batch" in candidate_lower:
+                batch_candidate = candidate
+            if not background_candidate and "background" in candidate_lower:
+                background_candidate = candidate
+        if responses_candidate and batch_candidate:
+            tradeoffs.append(
+                f"Interaction model: {responses_candidate} is stronger for interactive or tool-using request flows, while {batch_candidate} is stronger for bulk asynchronous workloads."
+            )
+            tradeoffs.append(
+                f"Latency model: {responses_candidate} keeps a request/response loop, while {batch_candidate} trades latency for discounted high-volume execution."
+            )
+            tradeoffs.append(
+                f"Cost and scale: {batch_candidate} is the better fit when discounted throughput matters more than immediate answers."
+            )
+        if background_candidate:
+            anchor = responses_candidate or "the request/response path"
+            tradeoffs.append(
+                f"Asynchronous execution: {background_candidate} complements {anchor} when work should continue after handoff without keeping the client request open."
+            )
+        return tradeoffs[:4]
+
+    def _research_build_decision_checklist(
+        self,
+        *,
+        focus_rows: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, str]]:
+        checklist: list[dict[str, str]] = []
+        responses_candidate = ""
+        batch_candidate = ""
+        background_candidate = ""
+        for row in focus_rows[:4]:
+            candidate = str(row.get("candidate") or "").strip()
+            lowered = candidate.lower()
+            if not responses_candidate and ("responses" in lowered or "response" in lowered):
+                responses_candidate = candidate
+            if not batch_candidate and "batch" in lowered:
+                batch_candidate = candidate
+            if not background_candidate and "background" in lowered:
+                background_candidate = candidate
+        if responses_candidate and batch_candidate:
+            checklist.extend(
+                [
+                    {
+                        "factor": "Task duration",
+                        "prefer": responses_candidate,
+                        "rationale": "better when the answer needs to come back in an interactive request/response loop",
+                    },
+                    {
+                        "factor": "Workload volume",
+                        "prefer": batch_candidate,
+                        "rationale": "better when the job is bulk, asynchronous, and throughput-sensitive",
+                    },
+                    {
+                        "factor": "Latency sensitivity",
+                        "prefer": responses_candidate,
+                        "rationale": "better when immediate feedback matters more than discounted offline throughput",
+                    },
+                    {
+                        "factor": "Cost sensitivity",
+                        "prefer": batch_candidate,
+                        "rationale": "better when discounted high-volume execution matters more than immediate completion",
+                    },
+                ]
+            )
+        if background_candidate:
+            checklist.append(
+                {
+                    "factor": "Asynchronous continuation",
+                    "prefer": background_candidate,
+                    "rationale": "better when work should continue after handoff without holding the client request open",
+                }
+            )
+        return checklist[:5]
 
     def _research_decision_strengths(
         self,

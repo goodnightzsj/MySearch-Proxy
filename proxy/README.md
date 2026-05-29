@@ -152,12 +152,13 @@ DASHBOARD_BACKGROUND_SYNC_MIN_INTERVAL_SECONDS=45
 
 ```bash
 mkdir -p mysearch-proxy-data
+export ADMIN_PASSWORD="$(openssl rand -base64 24)"
 
 docker run -d \
   --name mysearch-proxy \
   --restart unless-stopped \
   -p 9874:9874 \
-  -e ADMIN_PASSWORD=change-me \
+  -e ADMIN_PASSWORD="$ADMIN_PASSWORD" \
   -v $(pwd)/mysearch-proxy-data:/data \
   skernelx/mysearch-proxy:latest
 ```
@@ -192,13 +193,16 @@ docker compose up -d
 ### 方式 D：单容器一体化镜像
 
 ```bash
+export ADMIN_PASSWORD="$(openssl rand -base64 24)"
+export MYSEARCH_PROXY_BOOTSTRAP_TOKEN="$(openssl rand -base64 32)"
+
 docker run -d \
   --name mysearch-stack \
   --restart unless-stopped \
   -p 9874:9874 \
   -p 8000:8000 \
-  -e ADMIN_PASSWORD=change-me \
-  -e MYSEARCH_PROXY_BOOTSTRAP_TOKEN=change-me-bootstrap-token \
+  -e ADMIN_PASSWORD="$ADMIN_PASSWORD" \
+  -e MYSEARCH_PROXY_BOOTSTRAP_TOKEN="$MYSEARCH_PROXY_BOOTSTRAP_TOKEN" \
   -v $(pwd)/mysearch-proxy-data:/data \
   skernelx/mysearch-stack:latest
 ```
@@ -212,7 +216,7 @@ docker run -d \
 ```bash
 cd proxy
 pip install -r requirements.txt
-ADMIN_PASSWORD=change-me uvicorn server:app --host 0.0.0.0 --port 9874
+ADMIN_PASSWORD="$(openssl rand -base64 24)" uvicorn server:app --host 0.0.0.0 --port 9874
 ```
 
 ## 首次初始化建议
@@ -290,7 +294,7 @@ MYSEARCH_PROXY_API_KEY=mysp-...
 关键环境变量：
 
 ```env
-ADMIN_PASSWORD=change-me
+ADMIN_PASSWORD=<generate-a-strong-password>
 ADMIN_SESSION_COOKIE=mysearch_proxy_session
 ADMIN_SESSION_MAX_AGE=2592000
 ```

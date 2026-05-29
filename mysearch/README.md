@@ -213,13 +213,16 @@ docker run --rm -p 8000:8000 \
 如果你更看重“部署最简单”，还可以直接跑单容器镜像：
 
 ```bash
+export ADMIN_PASSWORD="$(openssl rand -base64 24)"
+export MYSEARCH_PROXY_BOOTSTRAP_TOKEN="$(openssl rand -base64 32)"
+
 docker run -d \
   --name mysearch-stack \
   --restart unless-stopped \
   -p 9874:9874 \
   -p 8000:8000 \
-  -e ADMIN_PASSWORD=change-me \
-  -e MYSEARCH_PROXY_BOOTSTRAP_TOKEN=change-me-bootstrap-token \
+  -e ADMIN_PASSWORD="$ADMIN_PASSWORD" \
+  -e MYSEARCH_PROXY_BOOTSTRAP_TOKEN="$MYSEARCH_PROXY_BOOTSTRAP_TOKEN" \
   -v $(pwd)/mysearch-proxy-data:/data \
   skernelx/mysearch-stack:latest
 ```

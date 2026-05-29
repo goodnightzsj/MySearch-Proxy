@@ -129,6 +129,20 @@ class ProxySecurityHardeningTests(unittest.TestCase):
         self.assertNotIn('auth == f"Bearer {pwd}"', source)
         self.assertIn("compare_digest", source)
 
+    def test_weak_bootstrap_token_is_rejected_even_when_header_matches(self) -> None:
+        class _Request:
+            headers = {"X-Bootstrap-Token": "change-me-bootstrap-token"}
+
+        with patch.object(
+            self.proxy_server,
+            "MYSEARCH_PROXY_BOOTSTRAP_TOKEN",
+            "change-me-bootstrap-token",
+        ):
+            with self.assertRaises(Exception) as ctx:
+                self.proxy_server.verify_mysearch_bootstrap(_Request())
+
+        self.assertEqual(getattr(ctx.exception, "status_code", None), 503)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,6 +3,7 @@ import argparse
 import base64
 import csv
 import json
+import os
 import re
 import subprocess
 import sys
@@ -15,7 +16,7 @@ from typing import Optional
 DEFAULT_HOST = "root@192.168.31.122"
 DEFAULT_MYSEARCH_URL = "http://127.0.0.1:18000/mcp"
 DEFAULT_TAVILY_URL = "http://127.0.0.1:8787/mcp"
-DEFAULT_TAVILY_BEARER = "th-yXw6-UINstULph2WxuxQsqcuqVW2K"
+DEFAULT_TAVILY_BEARER = ""
 
 OFFICIAL_DOMAINS = {
     "official-web-01": ["openai.com"],
@@ -103,7 +104,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--mysearch-url", default=DEFAULT_MYSEARCH_URL)
     parser.add_argument("--tavily-url", default=DEFAULT_TAVILY_URL)
-    parser.add_argument("--tavily-bearer", default=DEFAULT_TAVILY_BEARER)
+    parser.add_argument("--tavily-bearer", default=os.environ.get("TAVILY_MCP_BEARER", DEFAULT_TAVILY_BEARER))
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--benchmark-id", action="append", default=[])
     parser.add_argument("--mysearch-only", action="store_true")
@@ -1078,6 +1079,12 @@ def main() -> int:
         selected_rows = selected_rows[: args.limit]
     if not selected_rows:
         print("No benchmark rows selected", file=sys.stderr)
+        return 1
+    if not args.mysearch_only and not str(args.tavily_bearer or "").strip():
+        print(
+            "Missing Tavily comparator bearer. Set TAVILY_MCP_BEARER or pass --tavily-bearer.",
+            file=sys.stderr,
+        )
         return 1
 
     reuse_path = Path(args.reuse_output_csv) if args.reuse_output_csv else output_path

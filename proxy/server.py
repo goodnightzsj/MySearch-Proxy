@@ -61,11 +61,12 @@ MYSEARCH_PROXY_BOOTSTRAP_TOKEN = os.environ.get("MYSEARCH_PROXY_BOOTSTRAP_TOKEN"
 # 在公网暴露的实例会被立即劫持。这里只 warn 不 fail——dev 环境仍可用，
 # 生产部署看到 warn 应立即覆盖。
 _KNOWN_WEAK_PASSWORDS = {"admin", "change-me", "password", "123456"}
+_KNOWN_WEAK_BOOTSTRAP_TOKENS = {"change-me", "change-me-bootstrap-token", "bootstrap-token", "123456"}
 _MYSEARCH_WEAK_DEFAULTS = []
 if ADMIN_PASSWORD in _KNOWN_WEAK_PASSWORDS:
     _MYSEARCH_WEAK_DEFAULTS.append(f"ADMIN_PASSWORD={ADMIN_PASSWORD}（已知弱默认）")
-if MYSEARCH_PROXY_BOOTSTRAP_TOKEN == "change-me-bootstrap-token":
-    _MYSEARCH_WEAK_DEFAULTS.append("MYSEARCH_PROXY_BOOTSTRAP_TOKEN=change-me-bootstrap-token（已知弱默认）")
+if MYSEARCH_PROXY_BOOTSTRAP_TOKEN in _KNOWN_WEAK_BOOTSTRAP_TOKENS:
+    _MYSEARCH_WEAK_DEFAULTS.append("MYSEARCH_PROXY_BOOTSTRAP_TOKEN=<weak-default>（已知弱默认）")
 if _MYSEARCH_WEAK_DEFAULTS:
     print(
         "\n!!! [MySearch Proxy security] 检测到弱默认凭证，公网暴露的实例会被劫持：\n  - "
@@ -990,6 +991,8 @@ def verify_mysearch_bootstrap(request: Request):
     expected = MYSEARCH_PROXY_BOOTSTRAP_TOKEN.strip()
     if not expected:
         raise HTTPException(status_code=404, detail="Bootstrap endpoint is disabled")
+    if expected in _KNOWN_WEAK_BOOTSTRAP_TOKENS:
+        raise HTTPException(status_code=503, detail="Bootstrap token uses an unsafe default")
 
     provided = request.headers.get("X-Bootstrap-Token", "").strip()
     auth = request.headers.get("Authorization", "").strip()
