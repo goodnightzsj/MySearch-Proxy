@@ -2778,6 +2778,8 @@ class MySearchClient:
                 include_answer=True,
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
+                from_date=from_date,
+                to_date=to_date,
             )
 
     def _run_research_tavily_discovery(
