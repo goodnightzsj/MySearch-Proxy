@@ -454,10 +454,11 @@ class RoutingTests(unittest.TestCase):
         self.assertIsNone(decision.fallback_chain)
 
     def test_news_mode_routes_to_tavily(self) -> None:
-        client = _make_client(tavily_keys=["key1"])
+        client = _make_client(tavily_keys=["key1"], exa_keys=["exa-key"])
         decision = self._route(client, mode="news", intent="news")
         self.assertEqual(decision.provider, "tavily")
         self.assertEqual(decision.tavily_topic, "news")
+        self.assertEqual(decision.fallback_chain, ["exa", "firecrawl"])
 
     def test_status_intent_routes_to_general_tavily_topic(self) -> None:
         client = _make_client(tavily_keys=["key1"])
@@ -706,8 +707,30 @@ class BlendingDecisionTests(unittest.TestCase):
             include_domains=["openai.com"],
         ))
 
-    def test_no_blend_for_news_profile(self) -> None:
+    def test_news_verify_blends_tavily_and_firecrawl(self) -> None:
         client = _make_client(tavily_keys=["k"], firecrawl_keys=["k"])
+        client._probe_provider_status = lambda provider, key_count: {  # type: ignore[method-assign]
+            "status": "ok",
+            "error": "",
+            "checked_at": "2026-05-29T00:00:00+00:00",
+        }
+        self.assertTrue(client._should_blend_web_providers(
+            requested_provider="auto",
+            decision=RouteDecision(provider="tavily", reason="test", result_profile="news"),
+            sources=["web"],
+            strategy="verify",
+            mode="news",
+            intent="news",
+            include_domains=None,
+        ))
+
+    def test_news_balanced_does_not_blend_tavily_and_firecrawl(self) -> None:
+        client = _make_client(tavily_keys=["k"], firecrawl_keys=["k"])
+        client._probe_provider_status = lambda provider, key_count: {  # type: ignore[method-assign]
+            "status": "ok",
+            "error": "",
+            "checked_at": "2026-05-29T00:00:00+00:00",
+        }
         self.assertFalse(client._should_blend_web_providers(
             requested_provider="auto",
             decision=RouteDecision(provider="tavily", reason="test", result_profile="news"),
@@ -1385,6 +1408,68 @@ class ErrorHandlingTests(unittest.TestCase):
         self.assertEqual(result["evidence"]["page_success_rate"], 1.0)
         self.assertEqual(result["evidence"]["confidence"], "high")
         self.assertEqual(result["evidence"]["source_domains"], ["openai.com"])
+
+    def test_research_treats_social_unavailable_payload_as_unavailable(self) -> None:
+        client = _make_client()
+
+        def fake_search(**kwargs):  # type: ignore[no-untyped-def]
+            if kwargs["mode"] == "social":
+                return {
+                    "provider": "social_unavailable",
+                    "results": [],
+                    "citations": [],
+                    "summary": "Social/X search unavailable: gateway timeout",
+                    "fallback": {
+                        "from": "xai_compatible",
+                        "to": "social_unavailable",
+                        "reason": "gateway timeout",
+                    },
+                }
+            return {
+                "provider": "tavily",
+                "intent": "resource",
+                "strategy": "balanced",
+                "results": [
+                    {
+                        "title": "Primary page",
+                        "url": "https://docs.example.com/primary",
+                        "snippet": "Primary source",
+                        "content": "",
+                    }
+                ],
+                "citations": [
+                    {"title": "Primary page", "url": "https://docs.example.com/primary"}
+                ],
+                "evidence": {
+                    "providers_consulted": ["tavily"],
+                    "verification": "single-provider",
+                    "citation_count": 1,
+                    "source_diversity": 1,
+                    "source_domains": ["example.com"],
+                    "official_source_count": 0,
+                    "official_mode": "off",
+                    "confidence": "medium",
+                    "conflicts": [],
+                },
+            }
+
+        client.search = fake_search  # type: ignore[method-assign]
+        client.extract_url = lambda **kwargs: {  # type: ignore[method-assign]
+            "url": kwargs["url"],
+            "provider": "firecrawl",
+            "content": "Primary page content.",
+        }
+
+        result = client.research(
+            query="compare AI search providers",
+            mode="research",
+            include_social=True,
+            scrape_top_n=1,
+        )
+
+        self.assertIn("social-search-unavailable", result["evidence"]["conflicts"])
+        self.assertNotIn("social_unavailable", result["evidence"]["providers_consulted"])
+        self.assertNotIn("social", result)
 
     def test_research_evidence_counts_exa_discovery_and_promoted_pages(self) -> None:
         client = _make_client(exa_keys=["exa-test"])

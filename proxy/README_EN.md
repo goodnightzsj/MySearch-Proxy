@@ -295,7 +295,7 @@ the UI latency).
 Baseline console config:
 
 ```env
-ADMIN_PASSWORD=change-me
+ADMIN_PASSWORD=<generate-a-strong-password>
 SOCIAL_GATEWAY_UPSTREAM_BASE_URL=https://api.x.ai/v1
 SOCIAL_GATEWAY_UPSTREAM_RESPONSES_PATH=/responses
 SOCIAL_GATEWAY_ADMIN_BASE_URL=https://media.example.com
