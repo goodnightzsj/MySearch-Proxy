@@ -1318,6 +1318,16 @@ class ErrorHandlingTests(unittest.TestCase):
         err = MySearchHTTPError(provider="exa", status_code=403, detail="forbidden", url="http://a.com")
         self.assertTrue(err.is_auth_error)
 
+    def test_mysearch_http_error_402_is_plan_limit(self) -> None:
+        err = MySearchHTTPError(
+            provider="exa",
+            status_code=402,
+            detail="You have exceeded your credits limit.",
+            url="http://a.com",
+        )
+        self.assertFalse(err.is_auth_error)
+        self.assertTrue(err.is_plan_limit_error)
+
     def test_stringify_error_detail_string(self) -> None:
         self.assertEqual(_stringify_error_detail("  error msg  "), "error msg")
 

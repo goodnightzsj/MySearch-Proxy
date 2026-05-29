@@ -4784,6 +4784,20 @@ class MySearchClientTests(unittest.TestCase):
         self.assertIn("secondary provider issue", result["route"]["reason"])
         self.assertIn("configured but the API key was rejected", result["route"]["reason"])
 
+    def test_provider_can_serve_skips_plan_limited_http_error(self) -> None:
+        client = MySearchClient()
+        client.keyring.has_provider = lambda provider: provider == "exa"  # type: ignore[method-assign]
+        client._probe_provider_status = lambda provider, key_count: {  # type: ignore[method-assign]
+            "status": "http_error",
+            "error": (
+                "exa request failed (HTTP 402): "
+                "You have exceeded your credits limit. Please top up to keep using Exa."
+            ),
+            "checked_at": "2026-05-30T00:00:00+00:00",
+        }
+
+        self.assertFalse(client._provider_can_serve(client.config.exa))
+
     def test_docs_route_skips_tavily_when_live_probe_reports_auth_error(self) -> None:
         client = MySearchClient()
         client.keyring.has_provider = lambda provider: provider in {"tavily", "firecrawl"}  # type: ignore[method-assign]
@@ -6300,6 +6314,143 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(result["results"][0]["url"], "https://www.apple.com.cn/shop/buy-mac/macbook-air")
         self.assertEqual(result["citations"][0]["url"], "https://www.apple.com.cn/shop/buy-mac/macbook-air")
+
+    def test_search_price_query_surfaces_exa_rescue_failure_without_failing_request(self) -> None:
+        client = MySearchClient()
+        client.keyring.has_provider = lambda provider: provider in {"tavily", "exa"}  # type: ignore[method-assign]
+        client._probe_provider_status = lambda provider, key_count: {  # type: ignore[method-assign]
+            "status": "ok",
+            "error": "",
+            "checked_at": "2026-05-30T00:00:00+00:00",
+        }
+        client._route_search = lambda **kwargs: RouteDecision(  # type: ignore[method-assign]
+            provider="tavily",
+            reason="普通网页检索默认走 Tavily",
+            tavily_topic="general",
+            result_profile="web",
+            allow_exa_rescue=True,
+        )
+        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "Apple 推出搭载M5 芯片的新款MacBook Air",
+                    "url": "https://www.apple.com.cn/newsroom/2026/03/apple-introduces-the-new-macbook-air-with-m5",
+                    "snippet": "Official newsroom page",
+                    "content": "",
+                }
+            ],
+            "citations": [
+                {
+                    "title": "Apple 推出搭载M5 芯片的新款MacBook Air",
+                    "url": "https://www.apple.com.cn/newsroom/2026/03/apple-introduces-the-new-macbook-air-with-m5",
+                }
+            ],
+        }
+
+        def fail_exa(**kwargs):  # type: ignore[no-untyped-def]
+            raise MySearchHTTPError(
+                provider="exa",
+                status_code=402,
+                detail="You have exceeded your credits limit.",
+                url="https://api.exa.ai/search",
+            )
+
+        client._search_exa = fail_exa  # type: ignore[method-assign]
+
+        result = client.search(
+            query="MacBook Air M5 国行价格 官方",
+            mode="web",
+            strategy="verify",
+            provider="auto",
+            include_answer=False,
+            include_domains=["apple.com.cn"],
+        )
+
+        self.assertEqual(result["provider"], "tavily")
+        self.assertEqual(
+            result["results"][0]["url"],
+            "https://www.apple.com.cn/newsroom/2026/03/apple-introduces-the-new-macbook-air-with-m5",
+        )
+        self.assertEqual(result["evidence"]["verification"], "single-provider-secondary-failed")
+        self.assertIn("secondary provider issue", result["route"]["reason"])
+        self.assertIn("HTTP 402", result["route"]["reason"])
+
+    def test_search_price_query_skips_exa_rescue_when_probe_reports_plan_limit(self) -> None:
+        client = MySearchClient()
+        client.keyring.has_provider = lambda provider: provider in {"tavily", "exa"}  # type: ignore[method-assign]
+
+        def fake_probe(provider, key_count):  # type: ignore[no-untyped-def]
+            if provider.name == "exa":
+                return {
+                    "status": "http_error",
+                    "error": (
+                        "exa request failed (HTTP 402): "
+                        "You have exceeded your credits limit. Please top up to keep using Exa."
+                    ),
+                    "checked_at": "2026-05-30T00:00:00+00:00",
+                }
+            return {
+                "status": "ok",
+                "error": "",
+                "checked_at": "2026-05-30T00:00:00+00:00",
+            }
+
+        client._probe_provider_status = fake_probe  # type: ignore[method-assign]
+        client._route_search = lambda **kwargs: RouteDecision(  # type: ignore[method-assign]
+            provider="tavily",
+            reason="普通网页检索默认走 Tavily",
+            tavily_topic="general",
+            result_profile="web",
+            allow_exa_rescue=True,
+        )
+        client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "transport": "env",
+            "query": kwargs["query"],
+            "answer": "",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "source": "web",
+                    "title": "Apple 推出搭载M5 芯片的新款MacBook Air",
+                    "url": "https://www.apple.com.cn/newsroom/2026/03/apple-introduces-the-new-macbook-air-with-m5",
+                    "snippet": "Official newsroom page",
+                    "content": "",
+                }
+            ],
+            "citations": [
+                {
+                    "title": "Apple 推出搭载M5 芯片的新款MacBook Air",
+                    "url": "https://www.apple.com.cn/newsroom/2026/03/apple-introduces-the-new-macbook-air-with-m5",
+                }
+            ],
+        }
+
+        exa_calls: list[str] = []
+
+        def fail_exa(**kwargs):  # type: ignore[no-untyped-def]
+            exa_calls.append(kwargs["query"])
+            raise AssertionError("Exa rescue should have been skipped")
+
+        client._search_exa = fail_exa  # type: ignore[method-assign]
+
+        result = client.search(
+            query="MacBook Air M5 国行价格 官方",
+            mode="web",
+            strategy="verify",
+            provider="auto",
+            include_answer=False,
+            include_domains=["apple.com.cn"],
+        )
+
+        self.assertEqual(result["provider"], "tavily")
+        self.assertEqual(exa_calls, [])
 
     def test_official_policy_final_rerank_prefers_specific_release_page_over_indexes(self) -> None:
         client = MySearchClient()
