@@ -14,6 +14,54 @@ from scripts import run_remote_mcp_benchmark
 
 
 class RemoteBenchmarkConfigTests(unittest.TestCase):
+    def test_is_recoverable_mcp_session_error_handles_session_required_variant(self) -> None:
+        self.assertTrue(
+            run_remote_mcp_benchmark.is_recoverable_mcp_session_error(
+                'HTTP 400: {"error":"session_required","message":"MCP requests after initialize must include mcp-session-id."}'
+            )
+        )
+
+    def test_classify_tavily_structural_failure_maps_session_required_variant(self) -> None:
+        self.assertEqual(
+            run_remote_mcp_benchmark.classify_tavily_structural_failure(
+                "",
+                "strict-constraint-03",
+                'tavily: HTTP 400: {"error":"session_required","message":"MCP requests after initialize must include mcp-session-id."}',
+            ),
+            "tavily-mcp-session-transport-blocked",
+        )
+
+    def test_mcp_client_reinitializes_on_session_required_error(self) -> None:
+        namespace: dict[str, object] = {}
+        helper_source = run_remote_mcp_benchmark.REMOTE_SCRIPT.split("\npayload = json.loads", 1)[0]
+        exec(helper_source, namespace)
+        client = namespace["MCPClient"]("http://example.com/mcp")
+        client.session_id = "stale-session"
+        calls: list[tuple[str, dict[str, str]]] = []
+
+        def fake_post(payload, headers, timeout, retries=4):  # type: ignore[no-untyped-def]
+            calls.append((payload["method"], dict(headers)))
+            method = payload["method"]
+            if method == "tools/call" and len([item for item in calls if item[0] == "tools/call"]) == 1:
+                raise RuntimeError(
+                    'HTTP 400: {"error":"session_required","message":"MCP requests after initialize must include mcp-session-id."}'
+                )
+            if method == "initialize":
+                return {"mcp-session-id": "fresh-session"}, {}
+            if method == "notifications/initialized":
+                return {}, {}
+            return {}, {"ok": True}
+
+        client._post = fake_post  # type: ignore[method-assign]
+
+        result = client.call_tool("tavily_search", {"query": "OpenAI webhooks official"})
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(client.session_id, "fresh-session")
+        self.assertEqual(calls[0][0], "tools/call")
+        self.assertEqual(calls[-1][0], "tools/call")
+        self.assertEqual(calls[-1][1].get("mcp-session-id"), "fresh-session")
+
     def test_missing_tavily_bearer_fails_when_comparator_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             argv = [

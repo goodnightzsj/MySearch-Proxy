@@ -409,6 +409,16 @@ def parse_tool_content_text(result_payload):
         return text, {"_text": text}
 
 
+def is_recoverable_mcp_session_error(error_text):
+    lowered = str(error_text or "").lower()
+    return (
+        "session not found" in lowered
+        or "missing mcp-session-id" in lowered
+        or "session_required" in lowered
+        or "must include mcp-session-id" in lowered
+    )
+
+
 def first_nonempty(*values):
     for value in values:
         if isinstance(value, str) and value.strip():
@@ -689,8 +699,7 @@ class MCPClient:
             _, response_payload = self._post(payload, headers, timeout=120, retries=4)
             return response_payload
         except Exception as exc:
-            lowered = str(exc).lower()
-            if "session not found" not in lowered and "missing mcp-session-id" not in lowered:
+            if not is_recoverable_mcp_session_error(str(exc)):
                 raise
         self.initialize()
         headers = dict(self.headers)
@@ -940,6 +949,16 @@ def write_raw(raw_dir: Path, benchmark_id: str, provider: str, text: str) -> str
     return str(path)
 
 
+def is_recoverable_mcp_session_error(error_text: str) -> bool:
+    lowered = str(error_text or "").lower()
+    return (
+        "session not found" in lowered
+        or "missing mcp-session-id" in lowered
+        or "session_required" in lowered
+        or "must include mcp-session-id" in lowered
+    )
+
+
 def classify_tavily_structural_failure(
     raw_text: str,
     benchmark_id: str,
@@ -959,7 +978,7 @@ def classify_tavily_structural_failure(
         or lowered_error.count("http 502") >= 2
     ):
         return "tavily-upstream-502"
-    if "missing mcp-session-id" in lowered_error or (
+    if is_recoverable_mcp_session_error(lowered_error) or (
         "mcp-session" in lowered_error and "transport" in lowered_error
     ):
         return "tavily-mcp-session-transport-blocked"
