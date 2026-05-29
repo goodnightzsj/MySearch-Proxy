@@ -31,6 +31,7 @@ class ServiceKeyPool:
         service = normalize_service(service)
         with self._lock:
             if service not in self._initialized:
+                self._initialized.add(service)
                 needs_load = True
             else:
                 needs_load = False
@@ -45,7 +46,6 @@ class ServiceKeyPool:
         fresh_keys = [dict(row) for row in get_active_keys(service)]
         with self._lock:
             self._keys[service] = fresh_keys
-            self._initialized.add(service)
             if not fresh_keys:
                 return None
             index = self._indexes.get(service, 0) % len(fresh_keys)
