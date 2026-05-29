@@ -5114,21 +5114,52 @@ class MySearchClient:
         if (
             mode == "docs"
             or intent in {"resource", "tutorial"}
-        ) and self._looks_like_api_docs_topic_query(query_lower):
+        ) and (
+            self._looks_like_api_docs_topic_query(query_lower)
+            or self._looks_like_debugging_query(query_lower)
+        ):
             topic_markers = [token for token in self._query_precision_tokens(query) if len(token) >= 4]
-            top_path_hits, top_total_hits = self._query_precision_hit_counts(
+            top_path_hits, top_total_hits = self._query_precision_hit_counts_with_body(
                 hostname=self._result_hostname(top_candidate),
                 path=top_path,
                 title_text=top_title,
+                body_text=f"{top_candidate.get('snippet', '')} {top_candidate.get('content', '')}",
                 query_tokens=topic_markers,
             )
             rescue_path = urlparse(rescue_url).path.lower()
-            rescue_path_hits, rescue_total_hits = self._query_precision_hit_counts(
+            rescue_path_hits, rescue_total_hits = self._query_precision_hit_counts_with_body(
                 hostname=self._result_hostname(rescue_candidate),
                 path=rescue_path,
                 title_text=str(rescue_candidate.get("title") or "").lower(),
+                body_text=f"{rescue_candidate.get('snippet', '')} {rescue_candidate.get('content', '')}",
                 query_tokens=topic_markers,
             )
+            if (
+                (
+                    self._looks_like_language_specific_sdk_reference_result(
+                        hostname=self._result_hostname(top_candidate),
+                        path=top_path,
+                        title_text=top_title,
+                    )
+                    or self._looks_like_language_specific_docs_result(
+                        path=top_path,
+                        title_text=top_title,
+                    )
+                )
+                and not self._query_mentions_programming_language(query_lower)
+                and rescue_total_hits >= top_total_hits
+            ):
+                return True
+            if (
+                self._looks_like_generic_official_docs_result(
+                    hostname=self._result_hostname(top_candidate),
+                    path=top_path,
+                    title_text=top_title,
+                )
+                and not self._query_mentions_programming_language(query_lower)
+                and rescue_total_hits >= top_total_hits
+            ):
+                return True
             if rescue_path_hits > top_path_hits or rescue_total_hits > top_total_hits:
                 return True
         return False
@@ -11039,6 +11070,23 @@ class MySearchClient:
         total_matches = sum(1 for token in query_tokens if token in full_text)
         return min(path_matches, 4), min(total_matches, 6)
 
+    def _query_precision_hit_counts_with_body(
+        self,
+        *,
+        hostname: str,
+        path: str,
+        title_text: str,
+        body_text: str,
+        query_tokens: list[str],
+    ) -> tuple[int, int]:
+        if not query_tokens:
+            return 0, 0
+        path_text = f"{hostname} {path}".lower()
+        full_text = f"{path_text} {title_text} {body_text}".lower()
+        path_matches = sum(1 for token in query_tokens if token in path_text)
+        total_matches = sum(1 for token in query_tokens if token in full_text)
+        return min(path_matches, 4), min(total_matches, 8)
+
     def _query_exact_identifier_tokens(self, query: str) -> list[str]:
         tokens: list[str] = []
         seen: set[str] = set()
@@ -11220,6 +11268,48 @@ class MySearchClient:
             marker in title_text
             for marker in ("python", "ruby", "go", "typescript", "javascript", "java", "php", "c#", "csharp", "node")
         ) and hostname.endswith("openai.com")
+
+    def _looks_like_language_specific_docs_result(
+        self,
+        *,
+        path: str,
+        title_text: str,
+    ) -> bool:
+        language_markers = (
+            "c#",
+            "csharp",
+            "go",
+            "java",
+            "javascript",
+            "node",
+            "php",
+            "python",
+            "ruby",
+            "typescript",
+        )
+        normalized_path = path.lower()
+        if any(f"/{marker}/" in normalized_path for marker in language_markers if marker not in {"c#"}):
+            return True
+        return any(marker in title_text for marker in language_markers)
+
+    def _looks_like_generic_official_docs_result(
+        self,
+        *,
+        hostname: str,
+        path: str,
+        title_text: str,
+    ) -> bool:
+        normalized_path = path.rstrip("/")
+        generic_doc_paths = {
+            "/docs/intro",
+            "/docs/locators",
+            "/docs/other-locators",
+            "/docs/running-tests",
+            "/docs/writing-tests",
+        }
+        if hostname == "playwright.dev" and normalized_path in generic_doc_paths:
+            return True
+        return False
 
     def _looks_like_changelog_result(self, *, url: str, hostname: str, title_text: str) -> bool:
         path = urlparse(url).path.lower()

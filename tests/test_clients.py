@@ -6437,6 +6437,37 @@ class MySearchClientTests(unittest.TestCase):
         self.assertTrue(result["evidence"]["official_filter_applied"])
         self.assertEqual(result["evidence"]["official_rescue_source"], "canonical-map")
 
+    def test_strict_docs_policy_promotes_playwright_rescue_over_generic_official_docs(self) -> None:
+        client = MySearchClient()
+
+        result = client._apply_official_resource_policy(
+            query="Playwright strict mode violation fix official docs",
+            mode="docs",
+            intent="tutorial",
+            result={
+                "results": [
+                    {
+                        "provider": "tavily",
+                        "title": "Other locators | Playwright",
+                        "url": "https://playwright.dev/docs/other-locators",
+                        "snippet": "Generic locator guide without the strictness error phrase.",
+                    },
+                    {
+                        "provider": "tavily",
+                        "title": "Locators | Playwright Python",
+                        "url": "https://playwright.dev/python/docs/locators",
+                        "snippet": "Generic locator guide without the strictness error phrase.",
+                    },
+                ],
+                "citations": [],
+                "evidence": {},
+            },
+            include_domains=["playwright.dev"],
+        )
+
+        self.assertEqual(result["results"][0]["url"], "https://playwright.dev/docs/locators")
+        self.assertEqual(result["evidence"]["official_rescue_source"], "canonical-map")
+
     def test_strict_docs_policy_promotes_known_openai_webhooks_guide_over_sdk_reference(self) -> None:
         client = MySearchClient()
 
