@@ -137,6 +137,36 @@ class RemoteBenchmarkConfigTests(unittest.TestCase):
         self.assertFalse(observed["partial_error"])
         self.assertEqual(observed["error"], "")
 
+    def test_timed_tool_runs_ignores_tavily_quota_errors_before_late_success(self) -> None:
+        namespace: dict[str, object] = {}
+        helper_source = run_remote_mcp_benchmark.REMOTE_SCRIPT.split("\npayload = json.loads", 1)[0]
+        exec(helper_source, namespace)
+
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def call_tool(self, tool_name, arguments):  # type: ignore[no-untyped-def]
+                self.calls += 1
+                if self.calls < 3:
+                    raise RuntimeError(
+                        'HTTP 429: {"error":"quota_exhausted","hourlyAny":{"limit":100,"used":100}}'
+                    )
+                return {
+                    "result": {
+                        "content": [
+                            {
+                                "text": '{"summary":"ok","results":[{"url":"https://example.com"}],"evidence":{"providers_consulted":["tavily"]}}',
+                            }
+                        ]
+                    }
+                }
+
+        observed = namespace["timed_tool_runs"](FakeClient(), "tavily_search", {"query": "x"}, 3)
+
+        self.assertFalse(observed["partial_error"])
+        self.assertEqual(observed["error"], "")
+
     def test_classify_tavily_structural_failure_maps_research_quota_exhausted_from_error_text(self) -> None:
         self.assertEqual(
             run_remote_mcp_benchmark.classify_tavily_structural_failure(
