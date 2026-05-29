@@ -62,6 +62,36 @@ class RemoteBenchmarkConfigTests(unittest.TestCase):
         self.assertEqual(calls[-1][0], "tools/call")
         self.assertEqual(calls[-1][1].get("mcp-session-id"), "fresh-session")
 
+    def test_timed_tool_runs_ignores_tavily_quota_exhausted_repeat_after_success(self) -> None:
+        namespace: dict[str, object] = {}
+        helper_source = run_remote_mcp_benchmark.REMOTE_SCRIPT.split("\npayload = json.loads", 1)[0]
+        exec(helper_source, namespace)
+
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def call_tool(self, tool_name, arguments):  # type: ignore[no-untyped-def]
+                self.calls += 1
+                if self.calls == 1:
+                    return {
+                        "result": {
+                            "content": [
+                                {
+                                    "text": '{"summary":"ok","results":[{"url":"https://example.com"}],"evidence":{"providers_consulted":["tavily"]}}',
+                                }
+                            ]
+                        }
+                    }
+                raise RuntimeError(
+                    'HTTP 429: {"error":"quota_exhausted","hourlyAny":{"limit":100,"used":100}}'
+                )
+
+        observed = namespace["timed_tool_runs"](FakeClient(), "tavily_research", {"input": "x"}, 3)
+
+        self.assertFalse(observed["partial_error"])
+        self.assertEqual(observed["error"], "")
+
     def test_missing_tavily_bearer_fails_when_comparator_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             argv = [
