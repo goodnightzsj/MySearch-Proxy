@@ -30,7 +30,7 @@
 | `skill/README.md` | AI 安装入口 | 告诉 Codex / Claude Code 如何从源码仓或远程 MCP 入口安装与验收 MySearch。来源：skill/README.md:40 |
 | `openclaw/README.md` | OpenClaw 安装入口 | 告诉 OpenClaw/ClawHub 如何安装 bundle、注入 env、执行健康检查。来源：openclaw/README.md:53 |
 
-Provider 路由补充：`mysearch/clients.py` 当前把 `news`、`award_result`、`status` 的 fallback 收成 `Tavily -> Exa -> Firecrawl`，并且 `verify/deep` 下允许 Tavily 与 Firecrawl 做 news/status blended。`web + x` hybrid 任一分支失败时会保留另一分支结果；`extract_url` 的 Exa fallback 只接受目标 URL 或同注册域候选。来源：mysearch/clients.py:143, mysearch/clients.py:910, mysearch/clients.py:6000, mysearch/clients.py:10704
+Provider 路由补充：`mysearch/clients.py` 当前把 `news`、`award_result`、`status` 的 fallback 收成 `Tavily -> Exa -> Firecrawl`，并且 `verify/deep` 下允许 Tavily 与 Firecrawl 做 news/status blended。`web + x` hybrid 的成功路径现在会统一 merge/dedupe，并按 `max_results` 裁剪后返回；相关 evidence 会暴露裁剪前后计数。domain-filtered、`docs/github/pdf/news`、`resource/tutorial/status` 这几类请求如果首个 provider 只返回空结果，也会继续走 fallback chain。Firecrawl 搜索优先使用原生 `includeDomains` / `excludeDomains`，只有 `includeDomains` 空结果时才退回 `site:` 重试；Exa 的 search type 已对齐到 `neural / fast / auto / deep`，`include_content` 时使用 `text=true + highlights=true`。`extract_url` 的 Exa fallback 只接受目标 URL 或同注册域候选。来源：mysearch/clients.py:143, mysearch/clients.py:1028, mysearch/clients.py:6000, mysearch/clients.py:6155, mysearch/clients.py:8473, mysearch/clients.py:8741, mysearch/clients.py:8875, mysearch/clients.py:8942, mysearch/clients.py:10704
 
 ## 关键配置族
 

@@ -595,6 +595,71 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(len(result["results"]), 1)
         self.assertIn("web-search-unavailable", result["evidence"]["conflicts"])
 
+    def test_hybrid_search_dedupes_and_trims_successful_web_and_social_results(self) -> None:
+        client = MySearchClient()
+
+        client.search = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "route": {"selected": "tavily"},
+            "answer": "",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "title": f"Web {index}",
+                    "url": f"https://example.com/web-{index}",
+                    "snippet": "",
+                    "content": "",
+                }
+                for index in range(3)
+            ],
+            "citations": [
+                {"title": f"Web {index}", "url": f"https://example.com/web-{index}"}
+                for index in range(3)
+            ],
+        }
+        client._search_xai = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "xai",
+            "answer": "",
+            "results": [
+                {
+                    "provider": "xai",
+                    "title": f"Social {index}",
+                    "url": f"https://x.com/example/status/{index}",
+                    "snippet": "",
+                    "content": "",
+                }
+                for index in range(3)
+            ],
+            "citations": [
+                {"title": f"Social {index}", "url": f"https://x.com/example/status/{index}"}
+                for index in range(3)
+            ],
+        }
+
+        result = client._search_hybrid(
+            query="latest AI launch reaction",
+            mode="auto",
+            resolved_intent="factual",
+            resolved_strategy="balanced",
+            decision=RouteDecision(provider="hybrid", reason="web+x"),
+            max_results=3,
+            include_content=False,
+            effective_include_answer=True,
+            include_domains=None,
+            exclude_domains=None,
+            allowed_x_handles=None,
+            excluded_x_handles=None,
+            from_date=None,
+            to_date=None,
+            include_x_images=False,
+            include_x_videos=False,
+        )
+
+        self.assertEqual(len(result["results"]), 3)
+        self.assertEqual(result["evidence"]["result_count_before_trim"], 6)
+        self.assertEqual(result["evidence"]["returned_result_count"], 3)
+        self.assertEqual([item["provider"] for item in result["results"]], ["tavily", "xai", "tavily"])
+
     def test_apply_result_event_answer_override_extracts_album_of_the_year_from_page_content(self) -> None:
         client = MySearchClient()
 
@@ -4093,11 +4158,66 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["fallback"]["to"], "tavily")
         self.assertEqual(len(result["results"]), 1)
 
+    def test_firecrawl_search_uses_native_domain_filters_before_site_retry(self) -> None:
+        client = MySearchClient()
+        calls: list[dict[str, object]] = []
+
+        def fake_search_firecrawl_once(**kwargs):  # type: ignore[no-untyped-def]
+            calls.append(dict(kwargs))
+            return {
+                "provider": "firecrawl",
+                "transport": "env",
+                "query": kwargs["query"],
+                "answer": "",
+                "results": [
+                    {
+                        "provider": "firecrawl",
+                        "source": "web",
+                        "title": "Scrape - Firecrawl Docs",
+                        "url": "https://docs.firecrawl.dev/api-reference/endpoint/scrape",
+                        "snippet": "Official Firecrawl docs",
+                        "content": "",
+                    }
+                ],
+                "citations": [
+                    {
+                        "title": "Scrape - Firecrawl Docs",
+                        "url": "https://docs.firecrawl.dev/api-reference/endpoint/scrape",
+                    }
+                ],
+            }
+
+        client._search_firecrawl_once = fake_search_firecrawl_once  # type: ignore[method-assign]
+
+        result = client._search_firecrawl(
+            query="Firecrawl docs scrape api",
+            max_results=5,
+            categories=["technical"],
+            include_content=False,
+            include_domains=["docs.firecrawl.dev"],
+            exclude_domains=["example.com"],
+        )
+
+        self.assertEqual(calls[0]["include_domains"], ["docs.firecrawl.dev"])
+        self.assertEqual(calls[0]["exclude_domains"], None)
+        self.assertNotIn("site:docs.firecrawl.dev", calls[0]["query"])
+        self.assertIn("-site:example.com", calls[0]["query"])
+        self.assertEqual(result["route_debug"]["domain_filter_mode"], "provider_native")
+
     def test_firecrawl_domain_filtered_search_retries_without_site_filter(self) -> None:
         client = MySearchClient()
         client.keyring.has_provider = lambda provider: False  # type: ignore[method-assign]
 
         def fake_search_firecrawl_once(**kwargs):  # type: ignore[no-untyped-def]
+            if kwargs.get("include_domains"):
+                return {
+                    "provider": "firecrawl",
+                    "transport": "env",
+                    "query": kwargs["query"],
+                    "answer": "",
+                    "results": [],
+                    "citations": [],
+                }
             query = kwargs["query"]
             if query.startswith("site:docs.firecrawl.dev "):
                 return {
@@ -4168,6 +4288,43 @@ class MySearchClientTests(unittest.TestCase):
             result["route_debug"]["retried_include_domains"],
             ["docs.firecrawl.dev"],
         )
+
+    def test_firecrawl_search_payload_uses_native_domain_filter_parameters(self) -> None:
+        client = MySearchClient()
+        request_payloads: list[dict[str, object]] = []
+        client._get_key_or_raise = lambda provider: type(  # type: ignore[method-assign]
+            "FakeKey",
+            (),
+            {"key": "test-key", "source": "env"},
+        )()
+
+        def fake_request_json(**kwargs):  # type: ignore[no-untyped-def]
+            request_payloads.append(dict(kwargs["payload"]))
+            return {"data": {"web": [], "news": []}}
+
+        client._request_json = fake_request_json  # type: ignore[method-assign]
+
+        client._search_firecrawl_once(
+            query="Firecrawl docs scrape api",
+            max_results=5,
+            categories=[],
+            include_content=False,
+            include_domains=["docs.firecrawl.dev"],
+            exclude_domains=None,
+        )
+        client._search_firecrawl_once(
+            query="Firecrawl docs scrape api",
+            max_results=5,
+            categories=[],
+            include_content=False,
+            include_domains=None,
+            exclude_domains=["example.com"],
+        )
+
+        self.assertEqual(request_payloads[0]["includeDomains"], ["docs.firecrawl.dev"])
+        self.assertNotIn("excludeDomains", request_payloads[0])
+        self.assertEqual(request_payloads[1]["excludeDomains"], ["example.com"])
+        self.assertNotIn("includeDomains", request_payloads[1])
 
     def test_firecrawl_domain_filtered_search_skips_tavily_auth_error_fallback(self) -> None:
         client = MySearchClient()
@@ -7495,7 +7652,7 @@ class MySearchClientTests(unittest.TestCase):
         self.assertTrue(firecrawl_calls)
         self.assertTrue(firecrawl_calls[0]["include_content"])
 
-    def test_exa_search_uses_keyword_mode_for_official_pricing_query(self) -> None:
+    def test_exa_search_uses_official_type_for_exact_pricing_query(self) -> None:
         client = MySearchClient()
         request_payloads: list[dict[str, object]] = []
 
@@ -7521,7 +7678,39 @@ class MySearchClientTests(unittest.TestCase):
             intent="factual",
         )
 
-        self.assertEqual(request_payloads[0]["type"], "keyword")
+        self.assertEqual(request_payloads[0]["type"], "neural")
+
+    def test_exa_search_uses_current_content_parameters(self) -> None:
+        client = MySearchClient()
+        request_payloads: list[dict[str, object]] = []
+
+        client._get_key_or_raise = lambda provider: type(  # type: ignore[method-assign]
+            "FakeKey",
+            (),
+            {"key": "test-key", "source": "env"},
+        )()
+
+        def fake_request_json(**kwargs):  # type: ignore[no-untyped-def]
+            request_payloads.append(dict(kwargs["payload"]))
+            return {"results": []}
+
+        client._request_json = fake_request_json  # type: ignore[method-assign]
+
+        client._search_exa(
+            query="agentic search comparison",
+            max_results=5,
+            include_domains=None,
+            exclude_domains=None,
+            include_content=True,
+            mode="research",
+            intent="comparison",
+            strategy="deep",
+        )
+
+        self.assertEqual(request_payloads[0]["type"], "deep")
+        self.assertTrue(request_payloads[0]["text"])
+        self.assertTrue(request_payloads[0]["highlights"])
+        self.assertNotIn("contents", request_payloads[0])
 
     def test_exa_search_uses_research_paper_category_for_pdf_mode(self) -> None:
         client = MySearchClient()
