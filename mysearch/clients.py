@@ -8780,6 +8780,11 @@ class MySearchClient:
                 }
             )
 
+        if include_domains or exclude_domains:
+            results = self._filter_results_by_domains(
+                results, include_domains=include_domains, exclude_domains=exclude_domains
+            )
+
         return {
             "provider": "exa",
             "transport": key.source,
