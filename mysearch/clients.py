@@ -9341,6 +9341,8 @@ class MySearchClient:
                     exclude_domains=None,
                     strategy="fast",
                     days=self._infer_tavily_days("status", from_date),
+                    from_date=from_date,
+                    to_date=to_date,
                     timeout_seconds=attempt_timeout,
                 )
                 break
