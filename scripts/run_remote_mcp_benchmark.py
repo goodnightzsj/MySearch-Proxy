@@ -974,7 +974,12 @@ def build_output_row(
             "tavily_tool": item.get("tavily_tool", ""),
         }
     )
-    row.update({k: v for k, v in item.items() if k in row})
+    for key, value in item.items():
+        if key not in row:
+            continue
+        if preserve_tavily and key.startswith("tavily_") and value in {"", None, False, 0, "0"}:
+            continue
+        row[key] = value
 
     mysearch_raw = item.get("mysearch_raw", "")
     tavily_raw = item.get("tavily_raw", "")

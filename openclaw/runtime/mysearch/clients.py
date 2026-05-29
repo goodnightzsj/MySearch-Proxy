@@ -1014,14 +1014,20 @@ class MySearchClient:
         social_route = social_result.get("provider", "xai")
         web_results = list(web_result.get("results") or [])
         social_results = list(social_result.get("results") or [])
-        merged_citations = self._dedupe_citations(
-            web_result.get("citations") or [],
-            social_result.get("citations") or [],
+        merged = self._merge_search_payloads(
+            primary_result=web_result,
+            secondary_result=social_result,
+            max_results=max_results,
         )
+        merged_results = list(merged["results"])
+        merged_citations = list(merged["citations"])
         evidence = {
             "providers_consulted": [web_result.get("provider"), social_result.get("provider")],
             "web_result_count": len(web_results),
             "social_result_count": len(social_results),
+            "result_count_before_trim": len(web_results) + len(social_results),
+            "returned_result_count": len(merged_results),
+            "matched_results": merged["matched_results"],
             "citation_count": len(merged_citations),
             "verification": "cross-provider",
         }
@@ -1048,7 +1054,7 @@ class MySearchClient:
             },
             "query": query,
             "answer": web_result.get("answer") or social_result.get("answer") or "",
-            "results": [*web_results, *social_results],
+            "results": merged_results,
             "citations": merged_citations,
             "evidence": evidence,
             "web": web_result,
@@ -1119,6 +1125,7 @@ class MySearchClient:
                 include_content=include_content,
                 mode=mode,
                 intent=resolved_intent,
+                strategy=resolved_strategy,
                 from_date=from_date,
                 to_date=to_date,
             )
@@ -1181,6 +1188,7 @@ class MySearchClient:
                     include_content=False,
                     mode=mode,
                     intent=resolved_intent,
+                    strategy=resolved_strategy,
                     from_date=from_date,
                     to_date=to_date,
                 )
@@ -1592,6 +1600,7 @@ class MySearchClient:
                     include_domains=None,
                     exclude_domains=None,
                     include_content=True,
+                    strategy="fast",
                 )
                 exa_results = exa_extract.get("results") or []
                 if exa_results:
@@ -1788,6 +1797,7 @@ class MySearchClient:
                 include_content=False,
                 mode=research_plan["web_mode"],
                 intent=resolved_intent,
+                strategy=resolved_strategy,
                 from_date=from_date,
                 to_date=to_date,
             )
@@ -6093,6 +6103,7 @@ class MySearchClient:
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         chain = [primary_provider, *(decision.fallback_chain or [])]
         last_error: Exception | None = None
+        last_quality_issue = ""
         for provider_name in chain:
             try:
                 result = self._dispatch_single_provider(
@@ -6110,12 +6121,27 @@ class MySearchClient:
                     from_date=from_date,
                     to_date=to_date,
                 )
+                quality_issue = self._fallback_quality_issue(
+                    result=result,
+                    mode=mode,
+                    intent=intent,
+                    include_domains=include_domains,
+                )
+                if quality_issue and provider_name != chain[-1]:
+                    last_quality_issue = f"{provider_name}: {quality_issue}"
+                    continue
                 fallback_info = None
                 if provider_name != primary_provider:
                     fallback_info = {
                         "from": primary_provider,
                         "to": provider_name,
-                        "reason": str(last_error)[:200] if last_error else "primary provider failed",
+                        "reason": (
+                            str(last_error)[:200]
+                            if last_error
+                            else last_quality_issue[:200]
+                            if last_quality_issue
+                            else "primary provider failed"
+                        ),
                     }
                 return result, fallback_info
             except MySearchError as exc:
@@ -6125,6 +6151,22 @@ class MySearchClient:
                 last_error = MySearchError(f"{provider_name}: {exc}")
                 continue
         raise MySearchError(f"All providers failed for query '{query[:80]}': {last_error}")
+
+    def _fallback_quality_issue(
+        self,
+        *,
+        result: dict[str, Any],
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        include_domains: list[str] | None,
+    ) -> str | None:
+        if result.get("results"):
+            return None
+        if include_domains:
+            return "provider returned no results for domain-filtered query"
+        if mode in {"docs", "github", "pdf", "news"} or intent in {"resource", "tutorial", "news", "status"}:
+            return "provider returned no results"
+        return None
 
     @staticmethod
     def _infer_tavily_days(
@@ -6220,6 +6262,7 @@ class MySearchClient:
                 include_content=include_content,
                 mode=mode,
                 intent=intent,
+                strategy=strategy,
                 from_date=from_date,
                 to_date=to_date,
             )
@@ -7067,6 +7110,7 @@ class MySearchClient:
         include_content: bool,
         mode: str = "",
         intent: str = "",
+        strategy: str = "fast",
         from_date: str | None = None,
         to_date: str | None = None,
     ) -> dict[str, Any]:
@@ -7078,6 +7122,7 @@ class MySearchClient:
             include_content=include_content,
             mode=mode,
             intent=intent,
+            strategy=strategy,
             from_date=from_date,
             to_date=to_date,
         )
@@ -7999,6 +8044,7 @@ class MySearchClient:
                 include_content=False,
                 mode=mode,
                 intent=intent,
+                strategy=strategy,
                 from_date=from_date,
                 to_date=to_date,
             )
@@ -8369,6 +8415,8 @@ class MySearchClient:
                 max_results=max_results,
                 categories=categories,
                 include_content=include_content,
+                include_domains=None,
+                exclude_domains=None,
                 from_date=from_date,
                 to_date=to_date,
             )
@@ -8449,6 +8497,29 @@ class MySearchClient:
         exclude_domains = [item.strip() for item in (exclude_domains or []) if item and item.strip()]
 
         if include_domains:
+            native_result = self._search_firecrawl_once(
+                query=self._build_firecrawl_domain_query(
+                    query=query,
+                    include_domain=None,
+                    exclude_domains=exclude_domains,
+                ),
+                max_results=max_results,
+                categories=categories,
+                include_content=include_content,
+                include_domains=include_domains,
+                exclude_domains=None,
+                from_date=from_date,
+                to_date=to_date,
+            )
+            if native_result.get("results"):
+                route_debug = dict(native_result.get("route_debug") or {})
+                route_debug["domain_filter_mode"] = "provider_native"
+                route_debug["include_domains"] = include_domains
+                if exclude_domains:
+                    route_debug["exclude_domains_query_encoded"] = exclude_domains
+                native_result["route_debug"] = route_debug
+                return native_result
+
             per_domain_results = []
             citations = []
             seen_urls: set[str] = set()
@@ -8463,6 +8534,8 @@ class MySearchClient:
                     max_results=max_results,
                     categories=categories,
                     include_content=include_content,
+                    include_domains=None,
+                    exclude_domains=None,
                     from_date=from_date,
                     to_date=to_date,
                 )
@@ -8520,14 +8593,12 @@ class MySearchClient:
             return response
 
         return self._search_firecrawl_once(
-            query=self._build_firecrawl_domain_query(
-                query=query,
-                include_domain=None,
-                exclude_domains=exclude_domains,
-            ),
+            query=query,
             max_results=max_results,
             categories=categories,
             include_content=include_content,
+            include_domains=None,
+            exclude_domains=exclude_domains,
             from_date=from_date,
             to_date=to_date,
         )
@@ -8610,6 +8681,8 @@ class MySearchClient:
             max_results=max_results,
             categories=categories,
             include_content=include_content,
+            include_domains=None,
+            exclude_domains=None,
             from_date=from_date,
             to_date=to_date,
         )
@@ -8645,6 +8718,8 @@ class MySearchClient:
         max_results: int,
         categories: list[str],
         include_content: bool,
+        include_domains: list[str] | None = None,
+        exclude_domains: list[str] | None = None,
         from_date: str | None = None,
         to_date: str | None = None,
     ) -> dict[str, Any]:
@@ -8660,6 +8735,12 @@ class MySearchClient:
             payload["sources"] = ["news", "web"]
         if search_categories:
             payload["categories"] = [{"type": item} for item in search_categories]
+        include_domains = [item.strip() for item in (include_domains or []) if item and item.strip()]
+        exclude_domains = [item.strip() for item in (exclude_domains or []) if item and item.strip()]
+        if include_domains:
+            payload["includeDomains"] = include_domains
+        elif exclude_domains:
+            payload["excludeDomains"] = exclude_domains
         tbs = self._build_firecrawl_tbs(from_date, to_date)
         if tbs:
             payload["tbs"] = tbs
@@ -8693,6 +8774,7 @@ class MySearchClient:
                         "snippet": item.get("description", "") or item.get("markdown", ""),
                         "content": item.get("markdown", "") if include_content else "",
                         "published_date": item.get("publishedDate")
+                        or item.get("date")
                         or item.get("published_date")
                         or item.get("published_at")
                         or "",
@@ -8796,20 +8878,24 @@ class MySearchClient:
         *,
         mode: str = "",
         intent: str = "",
+        strategy: str = "fast",
         include_domains: list[str] | None = None,
     ) -> str:
         query_lower = query.lower()
-        if self._looks_like_pricing_query(query_lower) and (
-            include_domains or mode in {"web", "docs"} or intent in {"factual", "resource"}
-        ):
-            return "keyword"
         exact_signals = re.findall(
-            r'[A-Z][a-zA-Z]+\.[a-zA-Z_]+|[a-z_]{2,}\.[a-z_]+\(|::\w+|#\w+|v\d+\.\d+',
+            r"[A-Z][a-zA-Z]+\.[a-zA-Z_]+|[a-z_]{2,}\.[a-z_]+\(|::\w+|#\w+|v\d+\.\d+",
             query,
         )
-        if exact_signals:
-            return "keyword"
-        return "neural"
+        if strategy == "deep":
+            return "deep"
+        if exact_signals or (
+            self._looks_like_pricing_query(query_lower)
+            and (include_domains or mode in {"web", "docs"} or intent in {"factual", "resource"})
+        ):
+            return "neural"
+        if strategy == "fast":
+            return "fast"
+        return "auto"
 
     def _exa_category(self, mode: str, intent: str) -> str:
         if mode == "pdf":
@@ -8830,6 +8916,7 @@ class MySearchClient:
         include_content: bool,
         mode: str = "",
         intent: str = "",
+        strategy: str = "fast",
         from_date: str | None = None,
         to_date: str | None = None,
         timeout_seconds: int | None = None,
@@ -8840,6 +8927,7 @@ class MySearchClient:
             query,
             mode=mode,
             intent=intent,
+            strategy=strategy,
             include_domains=include_domains,
         )
         payload: dict[str, Any] = {
@@ -8847,13 +8935,11 @@ class MySearchClient:
             "type": search_type,
             "numResults": max_results,
         }
-        if search_type == "neural":
-            payload["useAutoprompt"] = True
         exa_category = self._exa_category(mode, intent)
         if exa_category:
             payload["category"] = exa_category
         if include_content:
-            payload["text"] = {"maxCharacters": 8000}
+            payload["text"] = True
             payload["highlights"] = True
         if from_date:
             payload["startPublishedDate"] = from_date
@@ -9317,6 +9403,7 @@ class MySearchClient:
             include_content=False,
             mode="social",
             intent="status",
+            strategy="fast",
             from_date=from_date,
             to_date=to_date,
             timeout_seconds=per_call_timeout,
@@ -9331,6 +9418,7 @@ class MySearchClient:
                 include_content=False,
                 mode="web",
                 intent="factual",
+                strategy="fast",
                 from_date=from_date,
                 to_date=to_date,
                 timeout_seconds=per_call_timeout,
