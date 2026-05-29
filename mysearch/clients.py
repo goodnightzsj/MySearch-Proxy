@@ -964,6 +964,8 @@ class MySearchClient:
                         include_answer=effective_include_answer,
                         include_domains=include_domains,
                         exclude_domains=exclude_domains,
+                        from_date=from_date,
+                        to_date=to_date,
                     ),
                     "social": lambda: self._search_xai(
                         query=query,
