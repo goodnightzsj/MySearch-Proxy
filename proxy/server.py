@@ -2287,7 +2287,7 @@ def build_social_result(citation=None, matched=None):
 
 
 def build_social_search_upstream_payload(body, model):
-    model = (model or "").strip() or SOCIAL_GATEWAY_MODEL
+    model = (model or "").strip() or get_setting_text("social_model", SOCIAL_GATEWAY_MODEL) or SOCIAL_GATEWAY_MODEL
     query = str(body.get("query") or "").strip()
     try:
         max_results = max(1, min(int(body.get("max_results") or 5), 10))
@@ -2518,19 +2518,22 @@ async def execute_social_search_attempt(query, body, state, model, max_results):
     try:
         upstream_body = response.json()
     except Exception:
+        logger.warning("social upstream non-JSON response")
         return build_social_attempt_summary(
             model,
             False,
-            error=response.text[:300] or "Upstream returned non-JSON",
+            error="Upstream returned non-JSON",
             status_code=502,
             latency_ms=latency_ms,
         )
 
     if response.status_code >= 400:
+        safe_error = extract_social_upstream_error(upstream_body, "")
+        logger.warning("social upstream error %s: %s", response.status_code, safe_error)
         return build_social_attempt_summary(
             model,
             False,
-            error=extract_social_upstream_error(upstream_body, str(upstream_body)[:300]),
+            error=safe_error or f"Upstream returned {response.status_code}",
             status_code=response.status_code,
             latency_ms=latency_ms,
         )
@@ -2990,7 +2993,7 @@ async def login_session(request: Request):
 
 
 @app.post("/api/session/logout")
-async def logout_session():
+async def logout_session(_=Depends(verify_admin)):
     response = JSONResponse({"ok": True})
     clear_admin_session_cookie(response)
     return response

@@ -322,7 +322,7 @@ def import_keys_from_text(text, service="tavily"):
             continue
         key = match.group(1)
         parts = line.split(",")
-        email = parts[0].strip() if len(parts) >= 3 else ""
+        email = parts[0].strip() if len(parts) >= 2 else ""
         rows.append((service, key, email))
     if not rows:
         return 0
