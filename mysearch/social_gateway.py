@@ -1039,19 +1039,22 @@ async def execute_social_search_attempt(
     try:
         upstream_body = response.json()
     except Exception:
+        logger.warning("social upstream non-JSON response")
         return build_social_attempt_summary(
             model,
             False,
-            error=response.text[:300] or "Upstream returned non-JSON",
+            error="Upstream returned non-JSON",
             status_code=502,
             latency_ms=latency_ms,
         )
 
     if response.status_code >= 400:
+        safe_error = extract_social_upstream_error(upstream_body, "")
+        logger.warning("social upstream error %s: %s", response.status_code, safe_error)
         return build_social_attempt_summary(
             model,
             False,
-            error=extract_social_upstream_error(upstream_body, str(upstream_body)[:300]),
+            error=safe_error or f"Upstream returned {response.status_code}",
             status_code=response.status_code,
             latency_ms=latency_ms,
         )
