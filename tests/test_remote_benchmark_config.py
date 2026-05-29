@@ -62,6 +62,51 @@ class RemoteBenchmarkConfigTests(unittest.TestCase):
         self.assertEqual(calls[-1][0], "tools/call")
         self.assertEqual(calls[-1][1].get("mcp-session-id"), "fresh-session")
 
+    def test_remote_helper_parses_sse_payload_with_continuation_lines(self) -> None:
+        namespace: dict[str, object] = {}
+        helper_source = run_remote_mcp_benchmark.REMOTE_SCRIPT.split("\npayload = json.loads", 1)[0]
+        exec(helper_source, namespace)
+
+        payload = (
+            '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"'
+            '{\\"query\\":\\"2026 Oscars best picture result\\",'
+            '\\"results\\":[{\\"url\\":\\"https://example.com\\",'
+            '\\"content\\":\\"line1\\\\nline2\\"}]}"},{"type":"text","text":"ignored"}]}}'
+        )
+        raw = (
+            ": ping - 2026-05-29 20:18:34.458477+00:00\n"
+            ": ping - 2026-05-29 20:18:49.459287+00:00\n"
+            "event: message\n"
+            f"data: {payload[:160]}\n"
+            f"{payload[160:320]}\n"
+            f"{payload[320:]}\n\n"
+        ).encode()
+
+        parsed = namespace["parse_mcp_payload"](raw)
+
+        self.assertEqual(parsed["result"]["content"][0]["type"], "text")
+        self.assertIn("2026 Oscars best picture result", parsed["result"]["content"][0]["text"])
+
+    def test_remote_helper_preserves_captured_row_for_tavily_quota_limit(self) -> None:
+        namespace: dict[str, object] = {}
+        helper_source = run_remote_mcp_benchmark.REMOTE_SCRIPT.split("\npayload = json.loads", 1)[0]
+        exec(helper_source, namespace)
+
+        self.assertTrue(
+            namespace["should_preserve_captured_tavily_error"](
+                "captured",
+                "tavily_research",
+                'HTTP 429: {"error":"quota_exhausted","hourlyAny":{"limit":100,"used":100}}',
+            )
+        )
+        self.assertFalse(
+            namespace["should_preserve_captured_tavily_error"](
+                "partial-error",
+                "tavily_research",
+                'HTTP 429: {"error":"quota_exhausted","hourlyAny":{"limit":100,"used":100}}',
+            )
+        )
+
     def test_timed_tool_runs_ignores_tavily_quota_exhausted_repeat_after_success(self) -> None:
         namespace: dict[str, object] = {}
         helper_source = run_remote_mcp_benchmark.REMOTE_SCRIPT.split("\npayload = json.loads", 1)[0]
@@ -91,6 +136,49 @@ class RemoteBenchmarkConfigTests(unittest.TestCase):
 
         self.assertFalse(observed["partial_error"])
         self.assertEqual(observed["error"], "")
+
+    def test_classify_tavily_structural_failure_maps_research_quota_exhausted_from_error_text(self) -> None:
+        self.assertEqual(
+            run_remote_mcp_benchmark.classify_tavily_structural_failure(
+                "",
+                "research-03",
+                'tavily: HTTP 429: {"error":"quota_exhausted","hourlyAny":{"limit":100,"used":100}}',
+            ),
+            "tavily-research-upstream-rate-limited",
+        )
+
+    def test_estimate_remote_case_timeout_seconds_gives_research_more_budget(self) -> None:
+        self.assertEqual(
+            run_remote_mcp_benchmark.estimate_remote_case_timeout_seconds(
+                {
+                    "mysearch_tool": "research",
+                    "tavily_tool": "tavily_research",
+                    "repeat_runs": 2,
+                }
+            ),
+            600,
+        )
+        self.assertEqual(
+            run_remote_mcp_benchmark.estimate_remote_case_timeout_seconds(
+                {
+                    "mysearch_tool": "search",
+                    "tavily_tool": "tavily_search",
+                    "repeat_runs": 3,
+                }
+            ),
+            360,
+        )
+
+    def test_estimate_remote_batch_timeout_seconds_sums_case_budgets(self) -> None:
+        self.assertEqual(
+            run_remote_mcp_benchmark.estimate_remote_batch_timeout_seconds(
+                [
+                    {"mysearch_tool": "research", "tavily_tool": "tavily_research", "repeat_runs": 2},
+                    {"mysearch_tool": "search", "tavily_tool": "tavily_search", "repeat_runs": 3},
+                ]
+            ),
+            960,
+        )
 
     def test_missing_tavily_bearer_fails_when_comparator_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

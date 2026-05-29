@@ -385,11 +385,11 @@ def parse_mcp_payload(raw):
     if not text:
         return {}
     if text.startswith("event:") or "\ndata:" in text:
-        data_lines = []
-        for line in text.splitlines():
-            if line.startswith("data:"):
-                data_lines.append(line[len("data:"):].strip())
-        text = "\n".join(data_lines).strip()
+        text = re.sub(r"(?m)^:.*(?:\n|$)", "", text)
+        text = re.sub(r"(?m)^(event|id|retry):.*(?:\n|$)", "", text)
+        text = re.sub(r"(?m)^data:\s?", "", text)
+        text = text.replace("\r", "").replace("\n", "")
+        text = text.strip()
     if not text:
         return {}
     return json.loads(text)
@@ -419,7 +419,7 @@ def is_recoverable_mcp_session_error(error_text):
     )
 
 
-def is_nonfatal_tavily_repeat_error(tool_name, error_text):
+def is_tavily_comparator_limit_error(tool_name, error_text):
     lowered = str(error_text or "").lower()
     return str(tool_name or "").startswith("tavily") and any(
         token in lowered
@@ -432,6 +432,14 @@ def is_nonfatal_tavily_repeat_error(tool_name, error_text):
             "plan limit",
         )
     )
+
+
+def should_preserve_captured_tavily_error(run_status, tool_name, error_text):
+    return str(run_status or "") == "captured" and is_tavily_comparator_limit_error(tool_name, error_text)
+
+
+def is_nonfatal_tavily_repeat_error(tool_name, error_text):
+    return is_tavily_comparator_limit_error(tool_name, error_text)
 
 
 def first_nonempty(*values):
@@ -874,11 +882,14 @@ for case in payload["cases"]:
                 row["run_status"] = "partial-error" if row["run_status"] == "captured" else row["run_status"]
                 row["error"] = (row["error"] + " ; " if row["error"] else "") + f"tavily-repeat: {observed['error']}"
         except Exception as exc:
-            row["run_status"] = "partial-error" if row["run_status"] == "captured" else "error"
-            row["error"] = (row["error"] + " ; " if row["error"] else "") + f"tavily: {exc}"
-            row["tavily_raw"] = ""
+            error_text = str(exc)
+            if not should_preserve_captured_tavily_error(row["run_status"], case["tavily_tool"], error_text):
+                row["run_status"] = "partial-error" if row["run_status"] == "captured" else "error"
+            row["error"] = (row["error"] + " ; " if row["error"] else "") + f"tavily: {error_text}"
+            row["tavily_raw"] = json.dumps({"error": error_text, "phase": "tools/call"}, ensure_ascii=False)
     elif tavily_init_error:
-        row["run_status"] = "partial-error" if row["run_status"] == "captured" else row["run_status"]
+        if not should_preserve_captured_tavily_error(row["run_status"], case["tavily_tool"], tavily_init_error):
+            row["run_status"] = "partial-error" if row["run_status"] == "captured" else row["run_status"]
         row["error"] = (row["error"] + " ; " if row["error"] else "") + f"tavily-init: {tavily_init_error}"
         row["tavily_raw"] = json.dumps({"error": tavily_init_error, "phase": "initialize"}, ensure_ascii=False)
     output.append(row)
@@ -917,6 +928,7 @@ def run_remote_cases(
         "-",
         payload_b64,
     ]
+    timeout_seconds = estimate_remote_batch_timeout_seconds(cases)
     try:
         proc = subprocess.run(
             cmd,
@@ -924,7 +936,7 @@ def run_remote_cases(
             capture_output=True,
             text=True,
             input=REMOTE_SCRIPT,
-            timeout=max(300, 150 * max(1, len(cases))),
+            timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired as exc:
         timeout_rows: list[dict[str, str]] = []
@@ -962,6 +974,25 @@ def run_remote_cases(
     return json.loads(proc.stdout)
 
 
+def estimate_remote_case_timeout_seconds(case: dict[str, object]) -> int:
+    repeat_runs = max(1, int(case.get("repeat_runs", 1) or 1))
+    mysearch_tool = str(case.get("mysearch_tool", "") or "")
+    tavily_tool = str(case.get("tavily_tool", "") or "")
+    if mysearch_tool == "research" or tavily_tool == "tavily_research":
+        return max(600, 240 * repeat_runs)
+    if mysearch_tool == "extract_url" or tavily_tool == "tavily_extract":
+        return max(420, 150 * repeat_runs)
+    if repeat_runs >= 3:
+        return 360
+    return 300
+
+
+def estimate_remote_batch_timeout_seconds(cases: list[dict[str, object]]) -> int:
+    if not cases:
+        return 300
+    return max(300, sum(estimate_remote_case_timeout_seconds(case) for case in cases))
+
+
 def write_raw(raw_dir: Path, benchmark_id: str, provider: str, text: str) -> str:
     raw_dir.mkdir(parents=True, exist_ok=True)
     path = raw_dir / f"{benchmark_id}.{provider}.json"
@@ -985,6 +1016,18 @@ def classify_tavily_structural_failure(
     error_text: str = "",
 ) -> str:
     lowered_error = str(error_text or "").lower()
+    if (
+        "quota_exhausted" in lowered_error
+        or "excessive requests" in lowered_error
+        or "http 429" in lowered_error
+    ):
+        if "research" in str(benchmark_id).lower():
+            return "tavily-research-upstream-rate-limited"
+        return "tavily-search-upstream-rate-limited"
+    if "usage limit" in lowered_error or "http 432" in lowered_error:
+        if "research" in str(benchmark_id).lower():
+            return "tavily-research-upstream-plan-limited"
+        return "tavily-search-upstream-plan-limited"
     if (
         "timed out awaiting tools/call" in lowered_error
         or " timed out" in lowered_error
