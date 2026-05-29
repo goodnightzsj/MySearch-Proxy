@@ -1142,7 +1142,6 @@ def normalize_search_response(
             "social_search_calls": 1,
             "model": model or payload.get("model") or current_model(),
         },
-        "raw_text": text,
     }
 
 

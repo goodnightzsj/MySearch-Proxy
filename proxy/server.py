@@ -1710,9 +1710,9 @@ async def schedule_background_usage_sync(service, active_keys):
         async def _run():
             try:
                 await sync_usage_cache(force=False, service=service)
-            except Exception:
+            except Exception as exc:
                 # 后台同步失败不影响页面主流程，下次节流窗口后再尝试。
-                pass
+                logger.warning("background usage sync failed for %s: %s", service, exc)
             finally:
                 reset_stats_cache()
 
@@ -2615,7 +2615,6 @@ def normalize_social_search_response(query, payload, max_results, *, model=None)
             "social_search_calls": 1,
             "model": model or payload.get("model") or SOCIAL_GATEWAY_MODEL,
         },
-        "raw_text": text,
     }
 # ═══ Tavily 代理端点 ═══
 
@@ -2898,9 +2897,8 @@ async def proxy_social_search(request: Request):
             fallback_min_results=fallback_min_results,
             requested_max_results=max_results,
         )
-        if social_token_row:
-            latency_ms = selected_attempt.get("latency_ms") or 0
-            db.log_usage(social_token_row["id"], None, "social/search", 1, latency_ms, service="mysearch")
+        latency_ms = selected_attempt.get("latency_ms") or 0
+        db.log_usage(social_token_row["id"] if social_token_row else None, None, "social/search", 1, latency_ms, service="mysearch")
         return result
 
     if has_social_fallback(primary_model, fallback_model):
@@ -2923,20 +2921,17 @@ async def proxy_social_search(request: Request):
                 fallback_min_results=fallback_min_results,
                 requested_max_results=max_results,
             )
-            if social_token_row:
-                latency_ms = fallback_attempt.get("latency_ms") or 0
-                db.log_usage(social_token_row["id"], None, "social/search", 1, latency_ms, service="mysearch")
+            latency_ms = fallback_attempt.get("latency_ms") or 0
+            db.log_usage(social_token_row["id"] if social_token_row else None, None, "social/search", 1, latency_ms, service="mysearch")
             return result
         detail = fallback_attempt.get("error") or primary_attempt.get("error") or "Social search failed"
         status_code = int(fallback_attempt.get("status_code") or primary_attempt.get("status_code") or 502)
         fail_latency = fallback_attempt.get("latency_ms") or primary_attempt.get("latency_ms") or 0
-        if social_token_row:
-            db.log_usage(social_token_row["id"], None, "social/search", 0, fail_latency, service="mysearch")
+        db.log_usage(social_token_row["id"] if social_token_row else None, None, "social/search", 0, fail_latency, service="mysearch")
         raise HTTPException(status_code=max(400, status_code), detail=detail)
 
     fail_latency = primary_attempt.get("latency_ms") or 0
-    if social_token_row:
-        db.log_usage(social_token_row["id"], None, "social/search", 0, fail_latency, service="mysearch")
+    db.log_usage(social_token_row["id"] if social_token_row else None, None, "social/search", 0, fail_latency, service="mysearch")
     raise HTTPException(
         status_code=max(400, int(primary_attempt.get("status_code") or 502)),
         detail=primary_attempt.get("error") or "Social search failed",
