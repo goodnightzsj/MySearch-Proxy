@@ -116,6 +116,7 @@
 - `news / entertainment / status` 里，award / box-office / result-event query 会在结果排序之后进入一层确定性事实抽取。
 - 奖项结果题当前回到 **Tavily 主发现**，但 discovery 后会做两层 refinement：先对 `winners list / full results` 这类精确 query 做 Tavily query refinement，再按奖项类型定向补搜 trusted domains（例如 `oscars.org / theacademy.com`、`grammy.com`、`npr.org / apnews.com / reuters.com`），尽量在主链路内把强 winners-page 拉上来。
 - 先从 Top 结果的标题 / snippet / content 直接抽 `winner / category / title`；如果还不够，会按页面优先级对 Top5 结果做正文抓取，再从正文里抽最终答案。
+- `box-office` 标题抽取现在也覆盖**无引号 headline** 形式，例如 `Project Hail Mary becomes the biggest opening weekend...`，不再因为字符类转义错误把整条结果题打成 runtime regex 异常。
 - 页面优先级会提高主流来源、`winner / full results / full list` 这类 winners-page 信号，并下压 prediction 与年份不匹配页面，减少 Grammys / Oscars 一类结果题被泛娱乐报道带偏。
 - 弱 award-result 页面不再抢先覆盖最终答案；只有强 winners-page 信号才会短路 Exa rescue，否则保持 rescue 路径开启。最近一轮还补了官方页格式识别，例如 `Best Picture. Winner. ...`、`Album Of The Year · ...` 这类 dotted / bullet 形式也能被正确抽成最终答案。
 - `research` comparison report 现在把 markdown link-index / badge-shell 也视作可见层噪声：如果官方 row 只有 `* [Models]...`、`# Batch API | OpenAI API [![Image...` 这类导航壳，`Ranked Shortlist` 和 `Decision Table` 会优先回落到 claim text 或 cleaned title，而不是把壳文本直接展示给最终用户。
