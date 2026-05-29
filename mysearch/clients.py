@@ -8756,7 +8756,7 @@ class MySearchClient:
             payload["category"] = exa_category
         if include_content:
             payload["text"] = {"maxCharacters": 8000}
-        payload["highlights"] = True
+            payload["highlights"] = True
         if from_date:
             payload["startPublishedDate"] = from_date
         if to_date:
