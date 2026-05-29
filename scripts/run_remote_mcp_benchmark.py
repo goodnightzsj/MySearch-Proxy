@@ -764,6 +764,8 @@ def timed_tool_runs(client, tool_name, arguments, repeat_runs):
             errors.append(message)
             if "timed out" in message.lower():
                 timeout_flag = True
+    if first_success is not None and str(tool_name or "").startswith("tavily"):
+        errors = [message for message in errors if not is_tavily_comparator_limit_error(tool_name, message)]
     if first_success is None:
         raise RuntimeError(" ; ".join(errors[:3]) or "all repeats failed")
     variance_ms = 0.0
