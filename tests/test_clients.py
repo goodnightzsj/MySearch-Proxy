@@ -4356,6 +4356,61 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["provider"], "firecrawl")
         self.assertEqual(result["results"], [])
 
+    def test_exploratory_search_empty_exa_results_fallback_to_tavily(self) -> None:
+        client = MySearchClient()
+
+        def fake_dispatch_single_provider(**kwargs):  # type: ignore[no-untyped-def]
+            provider = kwargs["provider_name"]
+            if provider == "exa":
+                return {
+                    "provider": "exa",
+                    "query": kwargs["query"],
+                    "answer": "",
+                    "results": [],
+                    "citations": [],
+                }
+            if provider == "tavily":
+                return {
+                    "provider": "tavily",
+                    "query": kwargs["query"],
+                    "answer": "",
+                    "results": [
+                        {
+                            "provider": "tavily",
+                            "source": "web",
+                            "title": "Fallback result",
+                            "url": "https://example.com/fallback",
+                            "snippet": "",
+                            "content": "",
+                        }
+                    ],
+                    "citations": [{"title": "Fallback result", "url": "https://example.com/fallback"}],
+                }
+            raise AssertionError(provider)
+
+        client._dispatch_single_provider = fake_dispatch_single_provider  # type: ignore[method-assign]
+
+        result, fallback = client._search_with_fallback(
+            primary_provider="exa",
+            query="best MCP server for web search compare 2026",
+            max_results=5,
+            mode="web",
+            intent="comparison",
+            decision=RouteDecision(provider="exa", reason="test", fallback_chain=("tavily", "firecrawl")),
+            include_answer=False,
+            include_content=False,
+            include_domains=None,
+            exclude_domains=None,
+            strategy="balanced",
+        )
+
+        self.assertEqual(result["provider"], "tavily")
+        self.assertEqual(len(result["results"]), 1)
+        self.assertEqual(
+            fallback,
+            {"from": "exa", "to": "tavily", "reason": "exa: provider returned no results"},
+        )
+
     def test_tavily_domain_filtered_search_retries_with_site_query(self) -> None:
         client = MySearchClient()
         calls: list[dict[str, object]] = []

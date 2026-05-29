@@ -12,11 +12,18 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
+try:
+    import tomllib  # type: ignore[attr-defined]
+except ModuleNotFoundError:  # pragma: no cover - py311 fallback
+    import tomli as tomllib  # type: ignore[no-redef]
+
 
 DEFAULT_HOST = "root@192.168.31.122"
 DEFAULT_MYSEARCH_URL = "http://127.0.0.1:18000/mcp"
 DEFAULT_TAVILY_URL = "http://127.0.0.1:8787/mcp"
 DEFAULT_TAVILY_BEARER = ""
+DEFAULT_CODEX_CONFIG = str((Path(os.getenv("CODEX_HOME", "~/.codex")).expanduser() / "config.toml"))
+DEFAULT_TAVILY_MCP_SERVER = "tavily-hikari"
 
 OFFICIAL_DOMAINS = {
     "official-web-01": ["openai.com"],
@@ -105,6 +112,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mysearch-url", default=DEFAULT_MYSEARCH_URL)
     parser.add_argument("--tavily-url", default=DEFAULT_TAVILY_URL)
     parser.add_argument("--tavily-bearer", default=os.environ.get("TAVILY_MCP_BEARER", DEFAULT_TAVILY_BEARER))
+    parser.add_argument("--codex-config", default=DEFAULT_CODEX_CONFIG)
+    parser.add_argument("--tavily-mcp-server", default=DEFAULT_TAVILY_MCP_SERVER)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--benchmark-id", action="append", default=[])
     parser.add_argument("--mysearch-only", action="store_true")
@@ -151,6 +160,52 @@ def active_dimensions(row: dict[str, str]) -> str:
     if secondary:
         bits.append(f"secondary={secondary}")
     return "; ".join(bits)
+
+
+def _extract_authorization_header(headers: object) -> str:
+    if not isinstance(headers, dict):
+        return ""
+    for key, value in headers.items():
+        if str(key).lower() != "authorization":
+            continue
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _extract_bearer_token(value: str) -> str:
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        return ""
+    if cleaned.lower().startswith("bearer "):
+        return cleaned[7:].strip()
+    return cleaned
+
+
+def resolve_tavily_bearer(
+    current_value: str,
+    *,
+    codex_config_path: Path,
+    mcp_server_name: str,
+) -> str:
+    if str(current_value or "").strip():
+        return str(current_value).strip()
+    if not codex_config_path.exists():
+        return ""
+    try:
+        config = tomllib.loads(codex_config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    mcp_servers = config.get("mcp_servers")
+    if not isinstance(mcp_servers, dict):
+        return ""
+    server = mcp_servers.get(mcp_server_name)
+    if not isinstance(server, dict):
+        return ""
+    auth_header = _extract_authorization_header(server.get("headers"))
+    if not auth_header:
+        auth_header = _extract_authorization_header(server.get("http_headers"))
+    return _extract_bearer_token(auth_header)
 
 
 def map_mysearch_mode(row: dict[str, str]) -> str:
@@ -1074,6 +1129,11 @@ def main() -> int:
     input_path = Path(args.input_csv)
     output_path = Path(args.output_csv)
     raw_dir = Path(args.raw_dir)
+    resolved_tavily_bearer = resolve_tavily_bearer(
+        args.tavily_bearer,
+        codex_config_path=Path(args.codex_config).expanduser(),
+        mcp_server_name=args.tavily_mcp_server,
+    )
 
     all_input_rows = read_rows(input_path)
     selected_rows = all_input_rows
@@ -1085,9 +1145,10 @@ def main() -> int:
     if not selected_rows:
         print("No benchmark rows selected", file=sys.stderr)
         return 1
-    if not args.mysearch_only and not str(args.tavily_bearer or "").strip():
+    if not args.mysearch_only and not str(resolved_tavily_bearer or "").strip():
         print(
-            "Missing Tavily comparator bearer. Set TAVILY_MCP_BEARER or pass --tavily-bearer.",
+            "Missing Tavily comparator bearer. Set TAVILY_MCP_BEARER, pass --tavily-bearer, or configure mcp_servers."
+            f".{args.tavily_mcp_server}.headers.Authorization in {Path(args.codex_config).expanduser()}.",
             file=sys.stderr,
         )
         return 1
@@ -1102,7 +1163,7 @@ def main() -> int:
             host=args.host,
             mysearch_url=args.mysearch_url,
             tavily_url=args.tavily_url,
-            tavily_bearer=args.tavily_bearer,
+            tavily_bearer=resolved_tavily_bearer,
             cases=cases,
             mysearch_only=args.mysearch_only,
         )

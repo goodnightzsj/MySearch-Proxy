@@ -6164,7 +6164,14 @@ class MySearchClient:
             return None
         if include_domains:
             return "provider returned no results for domain-filtered query"
-        if mode in {"docs", "github", "pdf", "news"} or intent in {"resource", "tutorial", "news", "status"}:
+        if mode in {"docs", "github", "pdf", "news"} or intent in {
+            "comparison",
+            "exploratory",
+            "resource",
+            "tutorial",
+            "news",
+            "status",
+        }:
             return "provider returned no results"
         return None
 
