@@ -108,6 +108,11 @@
   - `tavily_research` 仍可能直接返回 `HTTP 502`
 - 因此 research comparator 现在要按“直接 Tavily 失败”理解，而不是按“内部 fallback 已兜底”理解。
 - `--mysearch-only` 现在是保守刷新：只更新 MySearch 列，不会再用空的 `tavily_*` 字段覆盖已有的 Tavily 对照列，也会保留既有 `tavily_raw=...` note。来源：scripts/run_remote_mcp_benchmark.py:952
+- Tavily comparator 的 session 自愈现在不只覆盖旧的 `Session not found` / `Missing mcp-session-id`，也覆盖新的 `session_required` / `must include mcp-session-id` 变体；遇到这类响应时，runner 会自动重新 `initialize` 再重放 `tools/call`，不再把这种可恢复的 MCP 会话抖动直接记成 `partial-error`。
+- Tavily comparator repeat sampling 现在也会把首个成功结果之后的 `HTTP 429 quota_exhausted` 当成非致命限流抖动处理，不再因为后续 repeat 被限流就把整行 benchmark 升成 `partial-error`。
+- 如果 Tavily comparator 的 `research` 流在真正 payload 前先发 `: ping ...` 这类 SSE heartbeat/comment 行，runner 现在会先剥掉这些行，再做 JSON 解析；不会再把心跳注释误判成 `Expecting value: line 1 column 1`.
+- Tavily comparator 的 SSE payload 如果被切成多行 continuation fragment，runner 现在会先去掉 `event:` / `data:` 前缀并把剩余片段重新拼回完整 JSON，再解析；像 `news-02` 这类长结果不再因为截断而掉成 `Unterminated string`.
+- 远端 benchmark SSH watchdog 不再固定写死 `300s`；研究型 case 会拿到更高 timeout budget，避免 `research-01` / `research-03` / `longtail-academic-01` 这类长 research comparator 还没返回就被 runner 自己提前打成 `remote-benchmark-timeout`.
 - 纯 `social/x` 查询如果刚刚已经通过 `tavily_social_fallback` 拿到有效结果，后续重复查询会直接命中这条 social cache，不再每次都重跑完整的 `xAI -> Tavily fallback` 退化链。
 - `news / entertainment` 的 result-event 事实抽取现在多了一层“官方奖项页 HTML fallback”：如果 top result 已经是 `oscars.org / grammy.com` 这类官方奖项页，但普通 snippet 和 `extract_url(... only_main_content=true)` 还没产出 winner，runtime 会再从原始 HTML 文本里补一次 `category + winner` 抽取。这样像 `2026 Oscars best picture winner` 这类题，不会再只停在 `Top news match: ...`，而会直接补成 `Best Picture winner: ...`。
 
