@@ -94,6 +94,10 @@ class MySearchHTTPError(MySearchError):
     def is_auth_error(self) -> bool:
         return self.status_code in {401, 403}
 
+    @property
+    def is_plan_limit_error(self) -> bool:
+        return self.status_code in {402, 432}
+
     def _build_message(self) -> str:
         detail_text = _stringify_error_detail(self.detail)
         if self.is_auth_error:
@@ -7121,18 +7125,34 @@ class MySearchClient:
         from_date: str | None = None,
         to_date: str | None = None,
     ) -> dict[str, Any]:
-        exa_result = self._search_exa(
-            query=query,
-            max_results=max_results,
-            include_domains=include_domains,
-            exclude_domains=exclude_domains,
-            include_content=include_content,
-            mode=mode,
-            intent=intent,
-            strategy=strategy,
-            from_date=from_date,
-            to_date=to_date,
-        )
+        try:
+            exa_result = self._search_exa(
+                query=query,
+                max_results=max_results,
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+                include_content=include_content,
+                mode=mode,
+                intent=intent,
+                strategy=strategy,
+                from_date=from_date,
+                to_date=to_date,
+            )
+        except MySearchError as exc:
+            degraded_result = dict(primary_result)
+            degraded_result["secondary_search"] = None
+            degraded_result["secondary_error"] = str(exc)[:200]
+            evidence = dict(degraded_result.get("evidence") or {})
+            providers_consulted = [
+                item for item in (evidence.get("providers_consulted") or []) if item
+            ]
+            if not providers_consulted and degraded_result.get("provider"):
+                providers_consulted = [str(degraded_result.get("provider") or "")]
+            if providers_consulted:
+                evidence["providers_consulted"] = providers_consulted
+            evidence["verification"] = "single-provider-secondary-failed"
+            degraded_result["evidence"] = evidence
+            return degraded_result
         if not exa_result.get("results"):
             return primary_result
 
@@ -12219,11 +12239,35 @@ class MySearchClient:
             return compact
         return f"{compact[:217]}..."
 
+    @staticmethod
+    def _looks_like_provider_limit_error(error_text: str) -> bool:
+        lowered = " ".join(error_text.lower().split())
+        return any(
+            token in lowered
+            for token in (
+                "http 402",
+                "http 432",
+                "credits limit",
+                "credit limit",
+                "exceeded your credits",
+                "usage limit",
+                "plan's set usage limit",
+                "plan limit",
+            )
+        )
+
     def _provider_can_serve(self, provider: ProviderConfig) -> bool:
-        status = self._provider_live_status(provider)
-        if status is None:
+        if not self.keyring.has_provider(provider.name):
             return False
-        return status != "auth_error"
+        probe = self._probe_provider_status(provider, 1)
+        status = str(probe.get("status") or "")
+        if status in {"", "not_configured", "auth_error"}:
+            return False
+        if status == "http_error" and self._looks_like_provider_limit_error(
+            str(probe.get("error") or "")
+        ):
+            return False
+        return True
 
     def _provider_live_status(self, provider: ProviderConfig) -> str | None:
         if not self.keyring.has_provider(provider.name):
