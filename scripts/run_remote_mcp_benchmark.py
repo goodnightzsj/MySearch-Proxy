@@ -419,6 +419,21 @@ def is_recoverable_mcp_session_error(error_text):
     )
 
 
+def is_nonfatal_tavily_repeat_error(tool_name, error_text):
+    lowered = str(error_text or "").lower()
+    return str(tool_name or "").startswith("tavily") and any(
+        token in lowered
+        for token in (
+            "quota_exhausted",
+            "http 429",
+            "excessive requests",
+            "rate limit",
+            "usage limit",
+            "plan limit",
+        )
+    )
+
+
 def first_nonempty(*values):
     for value in values:
         if isinstance(value, str) and value.strip():
@@ -723,7 +738,10 @@ def timed_tool_runs(client, tool_name, arguments, repeat_runs):
             text, blob = parse_tool_content_text(payload)
             tool_error = blob.get("_tool_error") if isinstance(blob, dict) else None
             if isinstance(tool_error, str) and tool_error.strip():
-                errors.append(tool_error.strip())
+                message = tool_error.strip()
+                if first_success is not None and is_nonfatal_tavily_repeat_error(tool_name, message):
+                    continue
+                errors.append(message)
                 if "timed out" in tool_error.lower() or "timeout" in tool_error.lower():
                     timeout_flag = True
                 continue
@@ -733,6 +751,8 @@ def timed_tool_runs(client, tool_name, arguments, repeat_runs):
                 raw_text = text
         except Exception as exc:
             message = str(exc)
+            if first_success is not None and is_nonfatal_tavily_repeat_error(tool_name, message):
+                continue
             errors.append(message)
             if "timed out" in message.lower():
                 timeout_flag = True
