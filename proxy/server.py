@@ -523,7 +523,7 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="MySearch Proxy", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
 templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
-http_client = httpx.AsyncClient(timeout=max(120, SOCIAL_GATEWAY_TIMEOUT_SECONDS), limits=httpx.Limits(max_connections=20, max_keepalive_connections=10))
+http_client = httpx.AsyncClient(timeout=httpx.Timeout(max(120, SOCIAL_GATEWAY_TIMEOUT_SECONDS), connect=10.0), limits=httpx.Limits(max_connections=20, max_keepalive_connections=10))
 social_gateway_state_cache = {"expires_at": 0.0, "value": None}
 social_gateway_state_lock = asyncio.Lock()
 stats_payload_cache = {"expires_at": 0.0, "value": None}
@@ -2980,8 +2980,9 @@ async def login_session(request: Request):
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Expected JSON request body")
     password = str(body.get("password") or "").strip()
-    if not password or not hmac.compare_digest(password, get_admin_password()):
-        await asyncio.sleep(1)
+    valid = bool(password) and hmac.compare_digest(password, get_admin_password())
+    await asyncio.sleep(1)
+    if not valid:
         raise HTTPException(status_code=401, detail="Unauthorized")
     response = JSONResponse({"ok": True})
     apply_admin_session_cookie(response, request, password)

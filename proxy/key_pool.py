@@ -2,8 +2,11 @@
 按服务维度管理 API Key 轮询池
 """
 import threading
+import time
 
 from database import SUPPORTED_SERVICES, get_active_keys, normalize_service, update_key_usage
+
+_FAILURE_RELOAD_COOLDOWN = 5.0
 
 
 class ServiceKeyPool:
@@ -12,6 +15,7 @@ class ServiceKeyPool:
         self._keys = {service: [] for service in SUPPORTED_SERVICES}
         self._indexes = {service: 0 for service in SUPPORTED_SERVICES}
         self._initialized = set()
+        self._last_failure_reload = {service: 0.0 for service in SUPPORTED_SERVICES}
 
     def reload(self, service=None):
         services = [normalize_service(service)] if service else list(SUPPORTED_SERVICES)
@@ -54,6 +58,11 @@ class ServiceKeyPool:
         service = normalize_service(service)
         update_key_usage(key_id, success)
         if not success:
+            now = time.monotonic()
+            with self._lock:
+                if now - self._last_failure_reload.get(service, 0.0) < _FAILURE_RELOAD_COOLDOWN:
+                    return
+                self._last_failure_reload[service] = now
             self.reload(service)
 
 

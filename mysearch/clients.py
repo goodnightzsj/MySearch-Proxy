@@ -8085,10 +8085,10 @@ class MySearchClient:
             "include_answer": include_answer,
             "include_raw_content": include_content,
         }
-        if days and days > 0:
-            payload["days"] = days
         if from_date:
             payload["start_date"] = from_date
+        elif days and days > 0:
+            payload["days"] = days
         if to_date:
             payload["end_date"] = to_date
         if include_domains:
