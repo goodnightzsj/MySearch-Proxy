@@ -225,6 +225,26 @@ class RemoteBenchmarkConfigTests(unittest.TestCase):
             "tavily-research-upstream-rate-limited",
         )
 
+    def test_classify_tavily_structural_failure_ignores_mysearch_rate_limit_text(self) -> None:
+        self.assertEqual(
+            run_remote_mcp_benchmark.classify_tavily_structural_failure(
+                '{"results": ["https://example.com"]}',
+                "crawl-map-01",
+                "mysearch: Error executing tool map_site: firecrawl request failed (HTTP 429): Rate limit exceeded",
+            ),
+            "",
+        )
+
+    def test_classify_tavily_structural_failure_reads_only_tavily_error_chunk(self) -> None:
+        self.assertEqual(
+            run_remote_mcp_benchmark.classify_tavily_structural_failure(
+                "",
+                "crawl-map-01",
+                "mysearch: HTTP 429 from firecrawl ; tavily: HTTP 429: quota_exhausted",
+            ),
+            "tavily-search-upstream-rate-limited",
+        )
+
     def test_estimate_remote_case_timeout_seconds_gives_research_more_budget(self) -> None:
         self.assertEqual(
             run_remote_mcp_benchmark.estimate_remote_case_timeout_seconds(
@@ -278,6 +298,96 @@ class RemoteBenchmarkConfigTests(unittest.TestCase):
         self.assertEqual(case["mysearch_tool"], "search")
         self.assertEqual(case["mysearch_args"]["sources"], ["web", "x"])
         self.assertEqual(case["tavily_tool"], "tavily_search")
+
+    def test_build_case_maps_site_mapping_tools(self) -> None:
+        case = run_remote_mcp_benchmark.build_case(
+            {
+                "benchmark_id": "crawl-map-01",
+                "domain": "站点地图",
+                "query": "https://fastapi.tiangolo.com",
+                "prompt_variant": "map",
+                "preferred_tool": "map_site",
+                "mode_hint": "map",
+                "strategy_hint": "balanced",
+                "primary_dimensions": "coverage|constraint_execution",
+                "secondary_dimensions": "efficiency|stability",
+                "repeat_runs": "2",
+            }
+        )
+
+        self.assertEqual(case["mysearch_tool"], "map_site")
+        self.assertEqual(case["mysearch_mode"], "map")
+        self.assertEqual(case["mysearch_args"]["url"], "https://fastapi.tiangolo.com")
+        self.assertEqual(case["mysearch_args"]["limit"], 10)
+        self.assertEqual(case["tavily_tool"], "tavily_map")
+        self.assertEqual(case["tavily_args"]["max_depth"], 1)
+
+    def test_build_case_maps_site_crawl_tools(self) -> None:
+        case = run_remote_mcp_benchmark.build_case(
+            {
+                "benchmark_id": "crawl-map-02",
+                "domain": "站点爬取",
+                "query": "https://fastapi.tiangolo.com/tutorial/background-tasks/",
+                "prompt_variant": "crawl",
+                "preferred_tool": "crawl_site",
+                "mode_hint": "crawl",
+                "strategy_hint": "balanced",
+                "primary_dimensions": "coverage|extraction_quality",
+                "secondary_dimensions": "efficiency|stability",
+                "repeat_runs": "1",
+            }
+        )
+
+        self.assertEqual(case["mysearch_tool"], "crawl_site")
+        self.assertEqual(case["mysearch_mode"], "crawl")
+        self.assertEqual(case["mysearch_args"]["max_depth"], 1)
+        self.assertEqual(case["mysearch_args"]["limit"], 5)
+        self.assertEqual(case["tavily_tool"], "tavily_crawl")
+        self.assertEqual(case["tavily_args"]["extract_depth"], "basic")
+
+    def test_summarize_handles_map_and_crawl_collections(self) -> None:
+        namespace: dict[str, object] = {}
+        helper_source = run_remote_mcp_benchmark.REMOTE_SCRIPT.split("\npayload = json.loads", 1)[0]
+        exec(helper_source, namespace)
+
+        mapped = namespace["summarize"](
+            {
+                "links": [
+                    {"url": "https://example.com/a"},
+                    "https://example.com/b",
+                ],
+                "count": 2,
+            }
+        )
+        crawled = namespace["summarize"](
+            {
+                "pages": [
+                    {"url": "https://example.com/a", "content": "A"},
+                    {"url": "https://example.com/b", "content": "B"},
+                ],
+                "count": 2,
+            }
+        )
+
+        self.assertEqual(mapped["summary"], "Mapped URLs: 2")
+        self.assertEqual(mapped["urls"], ["https://example.com/a", "https://example.com/b"])
+        self.assertFalse(mapped["empty_result"])
+        self.assertEqual(crawled["summary"], "Crawled pages: 2")
+        self.assertEqual(crawled["citation_count"], 2)
+
+    def test_map_and_crawl_receive_longer_timeout_budgets(self) -> None:
+        self.assertEqual(
+            run_remote_mcp_benchmark.estimate_remote_case_timeout_seconds(
+                {"mysearch_tool": "map_site", "tavily_tool": "tavily_map", "repeat_runs": 2}
+            ),
+            420,
+        )
+        self.assertEqual(
+            run_remote_mcp_benchmark.estimate_remote_case_timeout_seconds(
+                {"mysearch_tool": "crawl_site", "tavily_tool": "tavily_crawl", "repeat_runs": 1}
+            ),
+            600,
+        )
 
     def test_missing_tavily_bearer_fails_when_comparator_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -469,6 +579,45 @@ Authorization = "Bearer th-from-http-headers"
         self.assertEqual(row["tavily_citation_count"], "1")
         self.assertEqual(row["tavily_empty_result"], "False")
         self.assertIn("tavily_raw=raw/case-1.tavily.json", row["notes"])
+
+    def test_build_output_row_clears_stale_structural_failure_on_normal_rerun(self) -> None:
+        input_row = {
+            "benchmark_id": "crawl-map-01",
+            "domain": "站点地图",
+            "query": "https://fastapi.tiangolo.com",
+            "prompt_variant": "map",
+            "primary_dimensions": "",
+            "secondary_dimensions": "",
+            "notes": "",
+        }
+        existing = {key: "" for key in run_remote_mcp_benchmark.FIELDNAMES}
+        existing.update(
+            {
+                "benchmark_id": "crawl-map-01",
+                "structural_failure": "tavily-search-upstream-rate-limited",
+                "optimization_hint": "old hint",
+            }
+        )
+        item = {
+            "benchmark_id": "crawl-map-01",
+            "run_status": "captured",
+            "mysearch_tool": "map_site",
+            "mysearch_mode": "map",
+            "tavily_tool": "tavily_map",
+            "mysearch_raw": '{"links":["https://fastapi.tiangolo.com"]}',
+            "tavily_raw": '{"results":["https://fastapi.tiangolo.com"]}',
+        }
+
+        row = run_remote_mcp_benchmark.build_output_row(
+            input_row,
+            item,
+            Path("raw"),
+            existing=existing,
+            preserve_tavily=False,
+        )
+
+        self.assertEqual(row["structural_failure"], "")
+        self.assertEqual(row["optimization_hint"], "")
 
 
 if __name__ == "__main__":
