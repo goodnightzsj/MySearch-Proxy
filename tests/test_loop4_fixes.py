@@ -1,0 +1,171 @@
+from __future__ import annotations
+
+import sys
+import types
+import unittest
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from mysearch.clients import MySearchClient
+
+
+def _fake_key(_provider):
+    return types.SimpleNamespace(key="firecrawl-key", source="env")
+
+
+class FactualNewsRoutingTests(unittest.TestCase):
+    def test_software_version_queries_not_treated_as_news(self) -> None:
+        client = MySearchClient()
+        for query in [
+            "python latest stable version",
+            "node current version",
+            "rust newest release",
+            "what is the latest stable version of go",
+            "postgres current stable",
+            "newest version of kubernetes",
+        ]:
+            self.assertFalse(
+                client._looks_like_news_query(query.lower()),
+                msg=f"should not be news: {query!r}",
+            )
+
+    def test_genuine_news_queries_still_detected(self) -> None:
+        client = MySearchClient()
+        for query in [
+            "latest news today",
+            "box office this week",
+            "breaking news anthropic",
+        ]:
+            self.assertTrue(
+                client._looks_like_news_query(query.lower()),
+                msg=f"should be news: {query!r}",
+            )
+
+
+class ExtractContentCleanupTests(unittest.TestCase):
+    def _dirty_sample(self) -> str:
+        languages = "\n\n".join([
+            "Afrikaans", "Albanian", "Amharic", "Arabic", "Armenian",
+            "Azerbaijani", "Basque", "Belarusian", "Bengali", "Bulgarian",
+            "Bosnian", "Burmese", "Catalan", "Cebuano", "Chinese", "Croatian",
+            "Czech", "Danish", "Dutch", "English", "Zulu",
+        ])
+        return (
+            "# Real Title\n\n"
+            "This is the real body paragraph that must survive cleanup.\n\n"
+            "![diagram](data:image/svg+xml,%3Csvg%3E%3Cpath/%3E%3C/svg%3E)\n\n"
+            "![](<Base64-Image-Removed>)\n\n"
+            "Ask AI\n\n"
+            "hCaptcha\n\n"
+            "I am human\n\n"
+            + languages + "\n\n"
+            "EN\n\n"
+            "[hCaptcha logo, opens new window with more information]"
+            "(https://www.hcaptcha.com/what-is-hcaptcha-about)\n\n"
+            "Final real sentence stays."
+        )
+
+    def test_removes_hcaptcha_widget_and_broken_images(self) -> None:
+        client = MySearchClient()
+        cleaned = client._clean_extract_content(self._dirty_sample())
+        # real content survives
+        self.assertIn("real body paragraph that must survive", cleaned)
+        self.assertIn("Final real sentence stays.", cleaned)
+        # noise removed
+        self.assertNotIn("Base64-Image-Removed", cleaned)
+        self.assertNotIn("data:image", cleaned)
+        self.assertNotIn("hCaptcha", cleaned)
+        self.assertNotIn("hcaptcha.com", cleaned)
+        self.assertNotIn("Afrikaans", cleaned)
+        self.assertNotIn("Zulu", cleaned)
+        self.assertNotIn("I am human", cleaned)
+
+    def test_preserves_prose_mentioning_a_single_language(self) -> None:
+        client = MySearchClient()
+        prose = (
+            "The library ships docs in English and Chinese.\n\n"
+            "Spanish translations are community maintained."
+        )
+        self.assertEqual(client._clean_extract_content(prose), prose)
+
+    def test_empty_content_passthrough(self) -> None:
+        client = MySearchClient()
+        self.assertEqual(client._clean_extract_content(""), "")
+
+
+class FirecrawlMapCrawlTests(unittest.TestCase):
+    def test_map_site_builds_request_and_parses_links(self) -> None:
+        client = MySearchClient()
+        client._get_key_or_raise = _fake_key  # type: ignore[method-assign]
+        captured: dict[str, object] = {}
+
+        def fake_request_json(**kwargs):  # type: ignore[no-untyped-def]
+            captured.update(kwargs)
+            return {
+                "success": True,
+                "links": [
+                    {"url": "https://site/a", "title": "A", "description": "da"},
+                    "https://site/b",
+                    {"no_url": True},
+                ],
+            }
+
+        client._request_json = fake_request_json  # type: ignore[method-assign]
+        out = client.map_site(url="https://site", limit=10, search="docs")
+
+        self.assertEqual(captured["method"], "POST")
+        self.assertTrue(str(captured["path"]).endswith("/map"))
+        payload = captured["payload"]
+        assert isinstance(payload, dict)
+        self.assertEqual(payload["url"], "https://site")
+        self.assertEqual(payload["limit"], 10)
+        self.assertEqual(payload["search"], "docs")
+        self.assertEqual(out["count"], 2)
+        self.assertEqual(out["links"][0]["url"], "https://site/a")
+        self.assertEqual(out["links"][1]["url"], "https://site/b")
+
+    def test_crawl_site_polls_status_and_cleans_pages(self) -> None:
+        client = MySearchClient()
+        client._get_key_or_raise = _fake_key  # type: ignore[method-assign]
+        calls: list[dict[str, object]] = []
+
+        def fake_request_json(**kwargs):  # type: ignore[no-untyped-def]
+            calls.append(kwargs)
+            if str(kwargs.get("method")).upper() == "POST":
+                return {"success": True, "id": "job-1"}
+            return {
+                "status": "completed",
+                "total": 2,
+                "completed": 2,
+                "data": [
+                    {
+                        "markdown": "page one body",
+                        "metadata": {"sourceURL": "https://s/a", "title": "A"},
+                    },
+                    {
+                        "markdown": "![](<Base64-Image-Removed>)\n\npage two body",
+                        "metadata": {"sourceURL": "https://s/b"},
+                    },
+                ],
+            }
+
+        client._request_json = fake_request_json  # type: ignore[method-assign]
+        out = client.crawl_site(url="https://s", limit=5, max_depth=2)
+
+        self.assertEqual(out["status"], "completed")
+        self.assertEqual(out["count"], 2)
+        self.assertEqual(out["pages"][0]["url"], "https://s/a")
+        self.assertIn("page two body", out["pages"][1]["content"])
+        self.assertNotIn("Base64-Image-Removed", out["pages"][1]["content"])
+        # POST then at least one GET status poll
+        self.assertEqual(str(calls[0]["method"]).upper(), "POST")
+        self.assertEqual(calls[0]["payload"]["maxDepth"], 2)
+        self.assertEqual(str(calls[1]["method"]).upper(), "GET")
+        self.assertTrue(str(calls[1]["path"]).endswith("/crawl/job-1"))
+
+
+if __name__ == "__main__":
+    unittest.main()

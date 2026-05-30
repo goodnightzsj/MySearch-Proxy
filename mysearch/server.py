@@ -145,6 +145,24 @@ def build_mcp(config: MySearchConfig) -> tuple[MySearchClient, FastMCP]:
         )
 
     @mcp.tool()
+    def map_site(
+        url: str,
+        limit: int = 50,
+        search: str | None = None,
+    ) -> dict:
+        """获取站点地图：返回某站点下可发现的 URL 列表（基于 Firecrawl map）。"""
+        return client.map_site(url=url, limit=limit, search=search)
+
+    @mcp.tool()
+    def crawl_site(
+        url: str,
+        limit: int = 20,
+        max_depth: int | None = None,
+    ) -> dict:
+        """爬取整站：抓取某站点多页正文并清洗（基于 Firecrawl crawl，正文复用 extract 清洗）。"""
+        return client.crawl_site(url=url, limit=limit, max_depth=max_depth)
+
+    @mcp.tool()
     def mysearch_health() -> dict:
         """查看 MySearch 当前 provider 配置、search mode、auth 模式、base URL 和 key 可用性。"""
         return client.health()

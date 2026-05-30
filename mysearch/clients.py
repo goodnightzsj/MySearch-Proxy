@@ -9701,12 +9701,159 @@ class MySearchClient:
         content = data.get("markdown", "")
         if not content and "json" in data:
             content = json.dumps(data["json"], ensure_ascii=False, indent=2)
+        content = self._clean_extract_content(content)
         return {
             "provider": "firecrawl",
             "transport": key.source,
             "url": metadata.get("sourceURL") or metadata.get("url") or url,
             "content": content,
             "metadata": metadata,
+        }
+
+    def map_site(
+        self,
+        *,
+        url: str,
+        limit: int = 50,
+        search: str | None = None,
+    ) -> dict[str, Any]:
+        return self._map_firecrawl(url=url, limit=limit, search=search)
+
+    def crawl_site(
+        self,
+        *,
+        url: str,
+        limit: int = 20,
+        max_depth: int | None = None,
+    ) -> dict[str, Any]:
+        return self._crawl_firecrawl(url=url, limit=limit, max_depth=max_depth)
+
+    def _map_firecrawl(
+        self,
+        *,
+        url: str,
+        limit: int = 50,
+        search: str | None = None,
+    ) -> dict[str, Any]:
+        provider = self.config.firecrawl
+        key = self._get_key_or_raise(provider)
+        payload: dict[str, Any] = {"url": url, "limit": limit}
+        if search:
+            payload["search"] = search
+        response = self._request_json(
+            provider=provider,
+            method="POST",
+            path=provider.path("map"),
+            payload=payload,
+            key=key.key,
+        )
+        links_raw = response.get("links") or []
+        if not isinstance(links_raw, list):
+            links_raw = []
+        links: list[dict[str, Any]] = []
+        for item in links_raw:
+            if isinstance(item, str) and item:
+                links.append({"url": item, "title": "", "description": ""})
+            elif isinstance(item, dict) and item.get("url"):
+                links.append({
+                    "url": item.get("url"),
+                    "title": item.get("title", ""),
+                    "description": item.get("description", ""),
+                })
+        return {
+            "provider": "firecrawl",
+            "transport": key.source,
+            "url": url,
+            "links": links,
+            "count": len(links),
+            "metadata": {"requested_limit": limit, "search": search or ""},
+        }
+
+    def _crawl_firecrawl(
+        self,
+        *,
+        url: str,
+        limit: int = 20,
+        max_depth: int | None = None,
+        poll_interval_seconds: float = 2.0,
+        max_poll_attempts: int = 30,
+    ) -> dict[str, Any]:
+        provider = self.config.firecrawl
+        key = self._get_key_or_raise(provider)
+        payload: dict[str, Any] = {"url": url, "limit": limit}
+        if max_depth is not None:
+            payload["maxDepth"] = max_depth
+        start = self._request_json(
+            provider=provider,
+            method="POST",
+            path=provider.path("crawl"),
+            payload=payload,
+            key=key.key,
+        )
+        job_id = start.get("id")
+        if not job_id:
+            # Some deployments answer synchronously with the data already present.
+            return self._build_firecrawl_crawl_result(
+                url=url, limit=limit, transport=key.source, status_payload=start
+            )
+        status_path = f"{provider.path('crawl')}/{job_id}"
+        status_payload: dict[str, Any] = start
+        for _ in range(max(1, max_poll_attempts)):
+            status_payload = self._request_json(
+                provider=provider,
+                method="GET",
+                path=status_path,
+                payload=None,
+                key=key.key,
+            )
+            state = str(status_payload.get("status") or "").lower()
+            if state in {"completed", "failed", "cancelled"}:
+                break
+            time.sleep(poll_interval_seconds)
+        return self._build_firecrawl_crawl_result(
+            url=url, limit=limit, transport=key.source, status_payload=status_payload
+        )
+
+    def _build_firecrawl_crawl_result(
+        self,
+        *,
+        url: str,
+        limit: int,
+        transport: str,
+        status_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        data = status_payload.get("data")
+        if not isinstance(data, list):
+            data = []
+        pages: list[dict[str, Any]] = []
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            metadata = entry.get("metadata")
+            if not isinstance(metadata, dict):
+                metadata = {}
+            content = entry.get("markdown") or entry.get("content") or ""
+            if content:
+                content = self._clean_extract_content(content)
+            pages.append({
+                "url": metadata.get("sourceURL")
+                or metadata.get("url")
+                or entry.get("url", ""),
+                "title": metadata.get("title", ""),
+                "content": content,
+            })
+        return {
+            "provider": "firecrawl",
+            "transport": transport,
+            "url": url,
+            "status": status_payload.get("status", ""),
+            "pages": pages,
+            "count": len(pages),
+            "metadata": {
+                "requested_limit": limit,
+                "total": status_payload.get("total"),
+                "completed": status_payload.get("completed"),
+            },
         }
 
     def _extract_tavily(self, *, url: str) -> dict[str, Any]:
@@ -9806,6 +9953,83 @@ class MySearchClient:
             f"https://raw.githubusercontent.com/{owner}/{repo}/{candidate_ref}/{raw_path}"
             for candidate_ref in refs
         ]
+
+    _HCAPTCHA_LANGUAGES = frozenset({
+        "afrikaans", "albanian", "amharic", "arabic", "armenian", "azerbaijani",
+        "basque", "belarusian", "bengali", "bulgarian", "bosnian", "burmese",
+        "catalan", "cebuano", "chinese", "chinese simplified", "chinese traditional",
+        "corsican", "croatian", "czech", "danish", "dutch", "english", "esperanto",
+        "estonian", "filipino", "finnish", "french", "frisian", "galician",
+        "georgian", "german", "greek", "gujarati", "haitian creole", "hausa",
+        "hawaiian", "hebrew", "hindi", "hmong", "hungarian", "icelandic", "igbo",
+        "indonesian", "irish", "italian", "japanese", "javanese", "kannada",
+        "kazakh", "khmer", "kinyarwanda", "korean", "kurdish", "kyrgyz", "lao",
+        "latin", "latvian", "lithuanian", "luxembourgish", "macedonian",
+        "malagasy", "malay", "malayalam", "maltese", "maori", "marathi",
+        "mongolian", "nepali", "norwegian", "nyanja", "odia", "pashto", "persian",
+        "polish", "portuguese", "punjabi", "romanian", "russian", "samoan",
+        "scots gaelic", "serbian", "sesotho", "shona", "sindhi", "sinhala",
+        "slovak", "slovenian", "somali", "spanish", "sundanese", "swahili",
+        "swedish", "tagalog", "tajik", "tamil", "tatar", "telugu", "thai",
+        "turkish", "turkmen", "ukrainian", "urdu", "uyghur", "uzbek",
+        "vietnamese", "welsh", "xhosa", "yiddish", "yoruba", "zulu",
+    })
+
+    def _clean_extract_content(self, content: str) -> str:
+        if not isinstance(content, str) or not content.strip():
+            return content
+        text = content
+        text = re.sub(r"!\[[^\]]*\]\(\s*<?Base64-Image-Removed>?\s*\)", "", text)
+        text = text.replace("<Base64-Image-Removed>", "")
+        text = re.sub(r"!\[[^\]]*\]\(\s*data:[^)]*\)", "", text)
+        text = re.sub(r"data:image/[^\s)\]]+", "", text)
+        text = self._strip_hcaptcha_block(text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    def _strip_hcaptcha_block(self, text: str) -> str:
+        paragraphs = text.split("\n\n")
+        total = len(paragraphs)
+        is_language = [
+            para.strip().lower() in self._HCAPTCHA_LANGUAGES for para in paragraphs
+        ]
+        artifact = re.compile(
+            r"^(hcaptcha|en|verify|ask ai|i am human|please try again.*"
+            r"|\[hcaptcha logo[^\]]*\]\([^)]*\)|.*hcaptcha\.com.*)$",
+            re.IGNORECASE | re.DOTALL,
+        )
+        remove: set[int] = set()
+        index = 0
+        while index < total:
+            if is_language[index]:
+                end = index
+                while end < total and is_language[end]:
+                    end += 1
+                # Only a long contiguous run is the hCaptcha language dropdown;
+                # a stray language name in prose never reaches this threshold.
+                if end - index >= 12:
+                    remove.update(range(index, end))
+                    back = index - 1
+                    while back >= 0 and (
+                        not paragraphs[back].strip()
+                        or artifact.match(paragraphs[back].strip())
+                    ):
+                        remove.add(back)
+                        back -= 1
+                    forward = end
+                    while forward < total and (
+                        not paragraphs[forward].strip()
+                        or artifact.match(paragraphs[forward].strip())
+                    ):
+                        remove.add(forward)
+                        forward += 1
+                index = end
+            else:
+                index += 1
+        if not remove:
+            return text
+        kept = [para for pos, para in enumerate(paragraphs) if pos not in remove]
+        return "\n\n".join(kept)
 
     def _has_meaningful_extract_content(self, result: dict[str, Any]) -> bool:
         return self._extract_quality_issue(result) is None
@@ -12423,6 +12647,9 @@ class MySearchClient:
             "breaking change", "breaking update",
             "latest version", "latest release", "latest docs",
             "latest commit", "latest tag",
+            "latest stable", "stable version", "stable release",
+            "current version", "current stable",
+            "newest version", "newest release",
         ]
         if any(neg in query_lower for neg in tech_negatives):
             return False
