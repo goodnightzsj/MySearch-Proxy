@@ -263,6 +263,7 @@ def build_case(row: dict[str, str]) -> dict[str, object]:
     query = row["query"]
     mode = map_mysearch_mode(row)
     strategy = map_strategy(row)
+    sources_hint = parse_pipe_list(row.get("sources_hint", ""))
     strict_domains = parse_pipe_list(row.get("include_domains", "")) or OFFICIAL_DOMAINS.get(benchmark_id, [])
     exclude_domains = parse_pipe_list(row.get("exclude_domains", ""))
     repeat_runs = max(1, int((row.get("repeat_runs") or "1").strip()))
@@ -335,7 +336,9 @@ def build_case(row: dict[str, str]) -> dict[str, object]:
         mysearch_args["include_domains"] = strict_domains
     if exclude_domains:
         mysearch_args["exclude_domains"] = exclude_domains
-    if mode == "social":
+    if sources_hint:
+        mysearch_args["sources"] = sources_hint
+    elif mode == "social":
         mysearch_args["sources"] = ["x"]
 
     tavily_args: dict[str, object] = {

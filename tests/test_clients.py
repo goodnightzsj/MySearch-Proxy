@@ -7939,9 +7939,35 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertEqual(request_payloads[0]["type"], "deep")
-        self.assertTrue(request_payloads[0]["text"])
-        self.assertTrue(request_payloads[0]["highlights"])
-        self.assertNotIn("contents", request_payloads[0])
+        self.assertEqual(
+            request_payloads[0]["contents"],
+            {"text": True, "highlights": True},
+        )
+        self.assertNotIn("text", request_payloads[0])
+        self.assertNotIn("highlights", request_payloads[0])
+
+    def test_xai_responses_payload_prefers_allowed_filters_when_both_lists_are_present(self) -> None:
+        client = MySearchClient()
+
+        payload = client._build_xai_responses_payload(
+            query="latest status",
+            sources=["web", "x"],
+            max_results=3,
+            include_domains=["openai.com"],
+            exclude_domains=["reddit.com"],
+            allowed_x_handles=["openai"],
+            excluded_x_handles=["spam_handle"],
+            from_date="2026-05-01",
+            to_date="2026-05-30",
+            include_x_images=False,
+            include_x_videos=False,
+        )
+
+        web_tool, x_tool = payload["tools"]
+        self.assertEqual(web_tool["filters"], {"allowed_domains": ["openai.com"]})
+        self.assertNotIn("excluded_domains", web_tool["filters"])
+        self.assertEqual(x_tool["allowed_x_handles"], ["openai"])
+        self.assertNotIn("excluded_x_handles", x_tool)
 
     def test_exa_search_uses_research_paper_category_for_pdf_mode(self) -> None:
         client = MySearchClient()
