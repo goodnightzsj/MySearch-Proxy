@@ -8966,8 +8966,10 @@ class MySearchClient:
         if exa_category:
             payload["category"] = exa_category
         if include_content:
-            payload["text"] = True
-            payload["highlights"] = True
+            payload["contents"] = {
+                "text": True,
+                "highlights": True,
+            }
         if from_date:
             payload["startPublishedDate"] = from_date
         if to_date:
@@ -9888,7 +9890,7 @@ class MySearchClient:
             filters: dict[str, Any] = {}
             if include_domains:
                 filters["allowed_domains"] = include_domains
-            if exclude_domains:
+            elif exclude_domains:
                 filters["excluded_domains"] = exclude_domains
             if filters:
                 tool["filters"] = filters
@@ -9898,7 +9900,7 @@ class MySearchClient:
             tool = {"type": "x_search"}
             if allowed_x_handles:
                 tool["allowed_x_handles"] = allowed_x_handles
-            if excluded_x_handles:
+            elif excluded_x_handles:
                 tool["excluded_x_handles"] = excluded_x_handles
             if from_date:
                 tool["from_date"] = from_date

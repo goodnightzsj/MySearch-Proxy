@@ -210,6 +210,27 @@ class RemoteBenchmarkConfigTests(unittest.TestCase):
             960,
         )
 
+    def test_build_case_uses_sources_hint_for_hybrid_search_row(self) -> None:
+        case = run_remote_mcp_benchmark.build_case(
+            {
+                "benchmark_id": "hybrid-web-x-01",
+                "domain": "技术动态 / status",
+                "query": "OpenAI background mode latest status reactions",
+                "prompt_variant": "status",
+                "preferred_tool": "search",
+                "mode_hint": "web",
+                "strategy_hint": "verify",
+                "primary_dimensions": "freshness|richness|explainability",
+                "secondary_dimensions": "stability|efficiency",
+                "repeat_runs": "3",
+                "sources_hint": "web|x",
+            }
+        )
+
+        self.assertEqual(case["mysearch_tool"], "search")
+        self.assertEqual(case["mysearch_args"]["sources"], ["web", "x"])
+        self.assertEqual(case["tavily_tool"], "tavily_search")
+
     def test_missing_tavily_bearer_fails_when_comparator_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             argv = [
