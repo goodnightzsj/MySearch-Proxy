@@ -9782,7 +9782,8 @@ class MySearchClient:
         key = self._get_key_or_raise(provider)
         payload: dict[str, Any] = {"url": url, "limit": limit}
         if max_depth is not None:
-            payload["maxDepth"] = max_depth
+            # Firecrawl v2 crawl uses `maxDiscoveryDepth`; `maxDepth` is silently ignored.
+            payload["maxDiscoveryDepth"] = max_depth
         start = self._request_json(
             provider=provider,
             method="POST",
@@ -9985,6 +9986,7 @@ class MySearchClient:
         text = re.sub(r"data:image/[^\s)\]]+", "", text)
         text = self._strip_trailing_hcaptcha(text)
         text = self._strip_hcaptcha_block(text)
+        text = self._strip_trailing_empty_headings(text)
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
 
@@ -10022,11 +10024,54 @@ class MySearchClient:
             if pj in {"hcaptcha", "ask ai"} or pj.startswith("### filters") or pj.startswith("#### tags"):
                 start = j
         kept = paragraphs[:start]
+        dropped = paragraphs[start:]
         joined = "\n\n".join(kept)
-        # Safety: never truncate away the bulk of the document.
+        # Safety 1: never truncate away the bulk of the document.
         if not kept or len(joined) < len(text) * 0.3:
             return text
+        # Safety 2: only truncate when the dropped suffix is widget-artifact
+        # dominated. A captcha trigger phrase can legitimately appear in prose
+        # (e.g. a page that is *about* hCaptcha); in that case the dropped region
+        # still holds real content and must be preserved.
+        residual_content = sum(
+            len(para.strip())
+            for para in dropped
+            if not self._is_hcaptcha_artifact_paragraph(para.strip().lower())
+        )
+        if residual_content > 80:
+            return text
         return joined
+
+    def _is_hcaptcha_artifact_paragraph(self, p_lower: str) -> bool:
+        if not p_lower:
+            return True
+        if p_lower in self._HCAPTCHA_LANGUAGES:
+            return True
+        if p_lower in {"hcaptcha", "ask ai", "en", "verify", "i am human"}:
+            return True
+        if (
+            "select in order to trigger" in p_lower
+            or "accessibility cookie" in p_lower
+            or "hcaptcha" in p_lower
+            or p_lower.startswith("please try again")
+        ):
+            return True
+        if p_lower.startswith("### filters") or p_lower.startswith("#### tags"):
+            return True
+        # Short standalone tokens are widget chrome, not prose.
+        return len(p_lower) <= 24
+
+    def _strip_trailing_empty_headings(self, text: str) -> str:
+        # Remove dangling heading-only paragraphs left at the very end after
+        # widget removal (e.g. a lone trailing `### Filters` with no body).
+        paragraphs = text.split("\n\n")
+        while paragraphs:
+            last = paragraphs[-1].strip()
+            if last and "\n" not in last and re.match(r"^#{1,6}\s+\S", last):
+                paragraphs.pop()
+            else:
+                break
+        return "\n\n".join(paragraphs)
 
     def _strip_hcaptcha_block(self, text: str) -> str:
         paragraphs = text.split("\n\n")
@@ -12692,7 +12737,13 @@ class MySearchClient:
             "current version", "current stable",
             "newest version", "newest release",
         ]
-        if any(neg in query_lower for neg in tech_negatives):
+        # An explicit hard-news marker overrides the software-version whitelist, so
+        # entertainment/event queries like "Taylor Swift newest release news today"
+        # are not misclassified as non-news. Software-version queries such as
+        # "latest stable version of Python" carry no such marker, so the Loop 4 fix
+        # is preserved.
+        explicit_news = bool(re.search(r"\bnews\b", query_lower)) or "breaking news" in query_lower
+        if not explicit_news and any(neg in query_lower for neg in tech_negatives):
             return False
         en_keywords = [
             "latest",

@@ -198,7 +198,7 @@ class FirecrawlMapCrawlTests(unittest.TestCase):
         self.assertNotIn("Base64-Image-Removed", out["pages"][1]["content"])
         # POST then at least one GET status poll
         self.assertEqual(str(calls[0]["method"]).upper(), "POST")
-        self.assertEqual(calls[0]["payload"]["maxDepth"], 2)
+        self.assertEqual(calls[0]["payload"]["maxDiscoveryDepth"], 2)
         self.assertEqual(str(calls[1]["method"]).upper(), "GET")
         self.assertTrue(str(calls[1]["path"]).endswith("/crawl/job-1"))
 
