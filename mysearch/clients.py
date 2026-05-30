@@ -8919,7 +8919,7 @@ class MySearchClient:
             self._looks_like_pricing_query(query_lower)
             and (include_domains or mode in {"web", "docs"} or intent in {"factual", "resource"})
         ):
-            return "neural"
+            return "auto"
         if strategy == "fast":
             return "fast"
         return "auto"

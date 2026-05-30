@@ -7883,7 +7883,7 @@ class MySearchClientTests(unittest.TestCase):
         self.assertTrue(firecrawl_calls)
         self.assertTrue(firecrawl_calls[0]["include_content"])
 
-    def test_exa_search_uses_official_type_for_exact_pricing_query(self) -> None:
+    def test_exa_search_uses_current_type_for_exact_pricing_query(self) -> None:
         client = MySearchClient()
         request_payloads: list[dict[str, object]] = []
 
@@ -7909,7 +7909,7 @@ class MySearchClientTests(unittest.TestCase):
             intent="factual",
         )
 
-        self.assertEqual(request_payloads[0]["type"], "neural")
+        self.assertEqual(request_payloads[0]["type"], "auto")
 
     def test_exa_search_uses_current_content_parameters(self) -> None:
         client = MySearchClient()

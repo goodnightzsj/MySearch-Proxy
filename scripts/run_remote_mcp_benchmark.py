@@ -290,6 +290,55 @@ def build_case(row: dict[str, str]) -> dict[str, object]:
             },
         }
 
+    if row["preferred_tool"] == "map_site":
+        return {
+            "benchmark_id": benchmark_id,
+            "domain": row["domain"],
+            "query": query,
+            "prompt_variant": row["prompt_variant"],
+            "repeat_runs": repeat_runs,
+            "active_dimensions": active_dimensions(row),
+            "mysearch_tool": "map_site",
+            "mysearch_mode": "map",
+            "mysearch_args": {
+                "url": query,
+                "limit": 10,
+            },
+            "tavily_tool": "tavily_map",
+            "tavily_args": {
+                "url": query,
+                "limit": 10,
+                "max_depth": 1,
+                "max_breadth": 10,
+            },
+        }
+
+    if row["preferred_tool"] == "crawl_site":
+        return {
+            "benchmark_id": benchmark_id,
+            "domain": row["domain"],
+            "query": query,
+            "prompt_variant": row["prompt_variant"],
+            "repeat_runs": repeat_runs,
+            "active_dimensions": active_dimensions(row),
+            "mysearch_tool": "crawl_site",
+            "mysearch_mode": "crawl",
+            "mysearch_args": {
+                "url": query,
+                "limit": 5,
+                "max_depth": 1,
+            },
+            "tavily_tool": "tavily_crawl",
+            "tavily_args": {
+                "url": query,
+                "limit": 5,
+                "max_depth": 1,
+                "max_breadth": 10,
+                "format": "markdown",
+                "extract_depth": "basic",
+            },
+        }
+
     if row["preferred_tool"] == "research":
         mysearch_args: dict[str, object] = {
             "query": query,
@@ -476,11 +525,13 @@ def collect_urls(blob):
     if isinstance(blob, dict):
         if isinstance(blob.get("url"), str) and blob["url"]:
             urls.append(blob["url"])
-        for key in ("results", "citations", "pages", "sources", "items"):
+        for key in ("results", "citations", "pages", "sources", "items", "links"):
             value = blob.get(key)
             if isinstance(value, list):
                 for item in value:
-                    if isinstance(item, dict) and isinstance(item.get("url"), str) and item["url"]:
+                    if isinstance(item, str) and item:
+                        urls.append(item)
+                    elif isinstance(item, dict) and isinstance(item.get("url"), str) and item["url"]:
                         urls.append(item["url"])
         urls.extend(extract_urls_from_text(blob.get("content", "")))
     deduped = []
@@ -495,7 +546,7 @@ def collect_urls(blob):
 def collect_citation_count(blob):
     if not isinstance(blob, dict):
         return 0
-    for key in ("citations", "results", "pages", "sources", "items"):
+    for key in ("citations", "results", "pages", "sources", "items", "links"):
         value = blob.get(key)
         if isinstance(value, list) and value:
             return len(value)
@@ -582,6 +633,21 @@ def fallback_used(blob):
     return False
 
 
+def collection_summary(blob):
+    if not isinstance(blob, dict):
+        return ""
+    for key, label in (
+        ("links", "Mapped URLs"),
+        ("pages", "Crawled pages"),
+        ("results", "Results"),
+    ):
+        value = blob.get(key)
+        if isinstance(value, list):
+            count = blob.get("count") if isinstance(blob.get("count"), int) else len(value)
+            return f"{label}: {count}"
+    return ""
+
+
 def summarize(blob):
     if not isinstance(blob, dict):
         return {
@@ -608,6 +674,7 @@ def summarize(blob):
         first_result.get("content", "") if isinstance(first_result, dict) else "",
         blob.get("content", ""),
         blob.get("text", ""),
+        collection_summary(blob),
         extract_error_summary(blob),
         blob.get("_text", ""),
         blob.get("server_name", ""),
@@ -987,6 +1054,10 @@ def estimate_remote_case_timeout_seconds(case: dict[str, object]) -> int:
     tavily_tool = str(case.get("tavily_tool", "") or "")
     if mysearch_tool == "research" or tavily_tool == "tavily_research":
         return max(600, 240 * repeat_runs)
+    if mysearch_tool == "crawl_site" or tavily_tool == "tavily_crawl":
+        return max(600, 240 * repeat_runs)
+    if mysearch_tool == "map_site" or tavily_tool == "tavily_map":
+        return max(420, 150 * repeat_runs)
     if mysearch_tool == "extract_url" or tavily_tool == "tavily_extract":
         return max(420, 150 * repeat_runs)
     if repeat_runs >= 3:
@@ -1019,12 +1090,25 @@ def is_recoverable_mcp_session_error(error_text: str) -> bool:
     )
 
 
+def extract_tavily_error_text(error_text: str) -> str:
+    chunks = [
+        chunk.strip()
+        for chunk in str(error_text or "").split(" ; ")
+        if chunk.strip()
+    ]
+    return " ; ".join(
+        chunk
+        for chunk in chunks
+        if chunk.lower().startswith(("tavily:", "tavily-repeat:", "tavily-init:"))
+    )
+
+
 def classify_tavily_structural_failure(
     raw_text: str,
     benchmark_id: str,
     error_text: str = "",
 ) -> str:
-    lowered_error = str(error_text or "").lower()
+    lowered_error = extract_tavily_error_text(error_text).lower()
     if (
         "quota_exhausted" in lowered_error
         or "excessive requests" in lowered_error
@@ -1148,8 +1232,8 @@ def build_output_row(
     row["notes"] = " ; ".join(chunk for chunk in note_chunks if chunk)
     row["winner"] = existing.get("winner", "pending-review") if preserve_tavily else "pending-review"
     row["winner_reason"] = existing.get("winner_reason", "matrix raw capture completed; scoring pending") if preserve_tavily else "matrix raw capture completed; scoring pending"
-    row["structural_failure"] = existing.get("structural_failure", "")
-    row["optimization_hint"] = existing.get("optimization_hint", "")
+    row["structural_failure"] = existing.get("structural_failure", "") if preserve_tavily else ""
+    row["optimization_hint"] = existing.get("optimization_hint", "") if preserve_tavily else ""
     if not row["structural_failure"]:
         tavily_failure = classify_tavily_structural_failure(
             tavily_raw,
