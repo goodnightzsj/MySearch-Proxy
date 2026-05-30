@@ -95,6 +95,42 @@ class ExtractContentCleanupTests(unittest.TestCase):
         client = MySearchClient()
         self.assertEqual(client._clean_extract_content(""), "")
 
+    def test_removes_real_world_hcaptcha_tail_with_variant_spellings(self) -> None:
+        # Mirrors a live Firecrawl extract: the trailing hCaptcha widget uses
+        # non-standard language spellings (Galacian/Gujurati/Teluga) and a partial
+        # list, so name-set matching alone misses it; the signature-anchored cut
+        # must still remove the whole widget.
+        client = MySearchClient()
+        variant_langs = "\n\n".join([
+            "Gaelic", "Galacian", "Georgian", "German", "Greek", "Gujurati",
+            "Haitian", "Kirghiz", "Oriya", "Persian", "Polish", "Romanian",
+            "Russian", "Samoan", "Sinhalese", "Southern Sotho", "Teluga",
+        ])
+        dirty = (
+            "# Background Tasks\n\n"
+            "You can define background tasks to be run after returning a response.\n\n"
+            "## Recap\n\n"
+            "Import and use BackgroundTasks to add background tasks.\n\n"
+            "Back to top\n\n"
+            "### Filters\n\n"
+            "#### Tags\n\n"
+            "Ask AI\n\n"
+            "hCaptcha\n\n"
+            "'I am human', Select in order to trigger the challenge, or to bypass "
+            "it if you have an accessibility cookie\n\n"
+            + variant_langs
+        )
+        cleaned = client._clean_extract_content(dirty)
+        self.assertIn("Import and use BackgroundTasks to add background tasks.", cleaned)
+        self.assertIn("# Background Tasks", cleaned)
+        self.assertNotIn("hCaptcha", cleaned)
+        self.assertNotIn("I am human", cleaned)
+        self.assertNotIn("accessibility cookie", cleaned)
+        self.assertNotIn("Galacian", cleaned)
+        self.assertNotIn("Teluga", cleaned)
+        self.assertNotIn("### Filters", cleaned)
+        self.assertNotIn("Ask AI", cleaned)
+
 
 class FirecrawlMapCrawlTests(unittest.TestCase):
     def test_map_site_builds_request_and_parses_links(self) -> None:

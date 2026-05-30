@@ -9983,9 +9983,50 @@ class MySearchClient:
         text = text.replace("<Base64-Image-Removed>", "")
         text = re.sub(r"!\[[^\]]*\]\(\s*data:[^)]*\)", "", text)
         text = re.sub(r"data:image/[^\s)\]]+", "", text)
+        text = self._strip_trailing_hcaptcha(text)
         text = self._strip_hcaptcha_block(text)
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
+
+    def _strip_trailing_hcaptcha(self, text: str) -> str:
+        low = text.lower()
+        if "hcaptcha" not in low:
+            return text
+        # Only act when the actual verification widget is present, not a passing
+        # mention of the word in prose.
+        if not (
+            "select in order to trigger" in low
+            or "accessibility cookie" in low
+            or "\ni am human\n" in low
+        ):
+            return text
+        paragraphs = text.split("\n\n")
+        sig_idx = None
+        for i, para in enumerate(paragraphs):
+            pl = para.strip().lower()
+            if (
+                "select in order to trigger" in pl
+                or "accessibility cookie" in pl
+                or pl == "i am human"
+            ):
+                sig_idx = i
+                break
+        if sig_idx is None:
+            return text
+        # Walk back a few paragraphs to the widget header so the cut starts at the
+        # widget, not at its accessibility sentence. Language labels vary in spelling
+        # across hCaptcha locales, so anchor on structural markers, not a name list.
+        start = sig_idx
+        for j in range(sig_idx, max(-1, sig_idx - 6), -1):
+            pj = paragraphs[j].strip().lower()
+            if pj in {"hcaptcha", "ask ai"} or pj.startswith("### filters") or pj.startswith("#### tags"):
+                start = j
+        kept = paragraphs[:start]
+        joined = "\n\n".join(kept)
+        # Safety: never truncate away the bulk of the document.
+        if not kept or len(joined) < len(text) * 0.3:
+            return text
+        return joined
 
     def _strip_hcaptcha_block(self, text: str) -> str:
         paragraphs = text.split("\n\n")
