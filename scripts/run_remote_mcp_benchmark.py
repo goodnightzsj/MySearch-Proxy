@@ -419,6 +419,8 @@ def is_recoverable_mcp_session_error(error_text):
         or "missing mcp-session-id" in lowered
         or "session_required" in lowered
         or "must include mcp-session-id" in lowered
+        or "session_unavailable" in lowered
+        or "please reconnect to initialize a new session" in lowered
     )
 
 
@@ -1012,6 +1014,8 @@ def is_recoverable_mcp_session_error(error_text: str) -> bool:
         or "missing mcp-session-id" in lowered
         or "session_required" in lowered
         or "must include mcp-session-id" in lowered
+        or "session_unavailable" in lowered
+        or "please reconnect to initialize a new session" in lowered
     )
 
 
