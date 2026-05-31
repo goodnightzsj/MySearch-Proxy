@@ -7,7 +7,7 @@
 | `install.sh` | 本地安装与注册入口 | 安装 `mysearch/requirements.txt`，继承宿主 `MYSEARCH_*`，再向 `claude` / `codex` 注册 `mysearch` MCP。来源：install.sh:13, install.sh:74, install.sh:174 |
 | `docker-compose.yml` | 一套部署入口 | 在仓库根目录同时编排 `proxy` 与 `mysearch` 两个服务：`proxy` 继续监听 `9874` 并落盘 SQLite，`mysearch` 继续以 `streamable-http` 形式监听 `8000/mcp`，并通过 `MYSEARCH_PROXY_BASE_URL=http://proxy:9874` 反向接入同 stack 内的 Proxy。compose 现在要求 `ADMIN_PASSWORD` 显式提供，不再给 `change-me` 默认值；`MYSEARCH_PROXY_BOOTSTRAP_TOKEN` 仍默认空，空值代表 bootstrap endpoint disabled。需要启用自动签发 `mysp-` token 时，必须显式设置随机 bootstrap token。来源：docker-compose.yml:1 |
 | `mysearch/__main__.py` | MySearch CLI 入口 | 解析 `stdio`、`sse`、`streamable-http` transport 及 host/port/path 参数，然后调用 `mysearch.server.main`。来源：mysearch/__main__.py:8 |
-| `mysearch/server.py` | MCP tool 暴露层 | 用 `FastMCP` 注册 `search`、`extract_url`、`research`、`map_site`、`crawl_site`、`mysearch_health`，并根据 transport 启动服务。`map_site` / `crawl_site` 基于 Firecrawl `/v2/map`、`/v2/crawl`，对齐 Tavily 的 `tavily_map` / `tavily_crawl`。来源：mysearch/server.py:34, mysearch/server.py:47, mysearch/server.py:148, mysearch/server.py:157, mysearch/server.py:166 |
+| `mysearch/server.py` | MCP tool 暴露层 | 用 `FastMCP` 注册 `search`、`extract_url`、`research`、`map_site`、`crawl_site`、`mysearch_health`，并根据 transport 启动服务。`map_site` / `crawl_site` 基于 Firecrawl `/v2/map`、`/v2/crawl`，对齐 Tavily 的 `tavily_map` / `tavily_crawl`；对应 Firecrawl 请求现在会对瞬时 `429 / 502 / 503 / 504` 先重试一次。来源：mysearch/server.py:34, mysearch/server.py:47, mysearch/server.py:148, mysearch/server.py:157, mysearch/server.py:166, mysearch/clients.py:9551, mysearch/clients.py:9774, mysearch/clients.py:9818 |
 | `mysearch/Dockerfile` | MySearch MCP 容器入口 | 基于 `python:3.11-slim` 安装 `mysearch/requirements.txt`，只复制 `mysearch/` 目录到镜像内部，并默认以 `python -m mysearch --transport streamable-http --host 0.0.0.0 --port 8000` 暴露远程 MCP。来源：mysearch/Dockerfile:1 |
 | `mysearch/docker-entrypoint.sh` | MySearch 容器启动引导 | 容器启动时如果还没有显式 `MYSEARCH_PROXY_API_KEY`，但存在 `MYSEARCH_PROXY_BOOTSTRAP_TOKEN`，就先调用 `mysearch/scripts/bootstrap_proxy_token.py` 向 Proxy 请求或复用一个 `mysp-` token，再继续启动 `python -m mysearch`。来源：mysearch/docker-entrypoint.sh:1 |
 | `mysearch/scripts/bootstrap_proxy_token.py` | Proxy token bootstrap 客户端 | 负责轮询 `MYSEARCH_PROXY_BASE_URL/api/internal/mysearch/token`，用 `MYSEARCH_PROXY_BOOTSTRAP_TOKEN` 鉴权并把返回的 `mysp-` token 输出给容器启动脚本。来源：mysearch/scripts/bootstrap_proxy_token.py:1 |
@@ -56,9 +56,9 @@ Provider 路由补充：`mysearch/clients.py` 当前把 `news`、`award_result`�
 - `research`
   - 入口在 `mysearch/server.py:112`；内部会并行做 web discovery、可选 social，再对前几条页面跑正文抓取。来源：mysearch/clients.py:802
 - `map_site`
-  - 入口在 `mysearch/server.py:148`；走 Firecrawl `/v2/map` 同步返回站点 URL 列表，归一成 `links/count`。来源：mysearch/clients.py:9713, mysearch/clients.py:9731
+  - 入口在 `mysearch/server.py:148`；走 Firecrawl `/v2/map` 同步返回站点 URL 列表，归一成 `links/count`，并会对瞬时 `429 / 502 / 503 / 504` 自动重试一次。来源：mysearch/clients.py:9768, mysearch/clients.py:9774, mysearch/clients.py:9800
 - `crawl_site`
-  - 入口在 `mysearch/server.py:157`；走 Firecrawl `/v2/crawl` 异步任务，POST 拿 job id 后轮询 `/v2/crawl/{id}` 直到 completed，再逐页复用 extract 清洗归一成 `pages/count`。来源：mysearch/clients.py:9722, mysearch/clients.py:9772
+  - 入口在 `mysearch/server.py:157`；走 Firecrawl `/v2/crawl` 异步任务，POST 拿 job id 后轮询 `/v2/crawl/{id}` 直到 completed，再逐页复用 extract 清洗归一成 `pages/count`。启动请求和轮询请求都会对瞬时 `429 / 502 / 503 / 504` 自动重试一次。来源：mysearch/clients.py:9803, mysearch/clients.py:9818, mysearch/clients.py:9831
 - `mysearch_health`
   - 入口在 `mysearch/server.py:166`；会返回每个 provider 的 `base_url`、`paths`、`auth_mode`、`available_keys`，现在也会暴露 `provider_mode`，便于区分 Tavily 当前是 `official` 还是 `gateway`。X/Social 的 live probe 也已经分流成两套：official 先读 `status.x.ai`，状态获取失败时再回退到 `grok-4.20-fast` 的轻量 `/responses`；compatible 先读根 `/health`，必要时再回退到 `grok-4.20-fast` 的轻量 `social_search`。来源：mysearch/server.py:166, mysearch/clients.py:2717
 
