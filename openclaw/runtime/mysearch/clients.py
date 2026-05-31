@@ -1422,6 +1422,12 @@ class MySearchClient:
                 results=list(result.get("results") or []),
                 citations=list(result.get("citations") or []),
             )
+        result = self._apply_software_version_answer_override(
+            query=query,
+            mode=mode,
+            intent=resolved_intent,
+            result=result,
+        )
         result["summary"] = self._build_search_summary_fallback(
             query=query,
             mode=mode,
@@ -7553,6 +7559,7 @@ class MySearchClient:
             )
         )
         local_life_query = self._looks_like_local_life_query(query_lower)
+        software_version_query = self._looks_like_software_version_query(query_lower)
         non_social_query = not self._query_prefers_web_social_sources(query_lower)
         canonical_local_guide_match = int(
             local_life_query
@@ -7592,6 +7599,29 @@ class MySearchClient:
                 }
             )
         )
+        canonical_version_reference_match = int(
+            software_version_query
+            and self._looks_like_canonical_software_version_result(
+                hostname=hostname,
+                path=path,
+                title_text=title_text,
+            )
+        )
+        version_reference_match = int(
+            software_version_query
+            and self._looks_like_software_version_reference_result(
+                url=url,
+                hostname=hostname,
+                title_text=title_text,
+                snippet_text=(item.get("snippet") or "").lower(),
+            )
+        )
+        non_software_version_aggregator = int(
+            not (
+                software_version_query
+                and self._is_obvious_web_aggregator(registered_domain)
+            )
+        )
         non_aggregator = int(not self._is_obvious_web_aggregator(registered_domain))
         matched_provider_count = len(item.get("matched_providers") or [])
         cross_provider_boost = min(matched_provider_count, 3)
@@ -7603,6 +7633,8 @@ class MySearchClient:
             status_page_match,
             canonical_pricing_page_match,
             pricing_page_match,
+            canonical_version_reference_match,
+            version_reference_match,
             debugging_community_match,
             debugging_brand_aligned,
             non_generic_debugging_docs,
@@ -7613,6 +7645,7 @@ class MySearchClient:
             local_guide_match,
             non_local_life_repost,
             non_low_signal_social_repost,
+            non_software_version_aggregator,
             exact_path_hits,
             exact_total_hits,
             path_precision_hits,
@@ -11577,6 +11610,87 @@ class MySearchClient:
         registered_domain = self._registered_domain(cleaned)
         return registered_domain.endswith("status.com") or registered_domain.endswith("status.io")
 
+    def _looks_like_software_version_reference_result(
+        self,
+        *,
+        url: str,
+        hostname: str,
+        title_text: str,
+        snippet_text: str,
+    ) -> bool:
+        path = urlparse(url).path.lower()
+        text = f"{title_text} {snippet_text} {path}"
+        version_markers = (
+            "latest version",
+            "latest release",
+            "latest stable",
+            "stable version",
+            "stable release",
+            "supported versions",
+            "version support",
+            "current stable",
+        )
+        path_markers = (
+            "/download",
+            "/downloads",
+            "/release",
+            "/releases",
+            "/release-notes",
+            "/versions",
+            "/whats-new",
+            "/what-s-new",
+        )
+        title_markers = (
+            "download",
+            "release notes",
+            "stable",
+            "support",
+            "version",
+            "what's new",
+            "whats new",
+        )
+        return (
+            any(marker in text for marker in version_markers)
+            or any(marker in path for marker in path_markers)
+            or any(marker in title_text for marker in title_markers)
+            or self._looks_like_changelog_result(url=url, hostname=hostname, title_text=title_text)
+        )
+
+    def _looks_like_canonical_software_version_result(
+        self,
+        *,
+        hostname: str,
+        path: str,
+        title_text: str,
+    ) -> bool:
+        normalized_path = path.rstrip("/")
+        if hostname in {"python.org", "www.python.org"} and normalized_path.startswith("/downloads"):
+            return True
+        if hostname == "devguide.python.org" and normalized_path.startswith("/versions"):
+            return True
+        canonical_path_markers = (
+            "/download",
+            "/downloads",
+            "/release-notes",
+            "/releases",
+            "/versions",
+            "/whats-new",
+            "/what-s-new",
+        )
+        if any(marker in normalized_path for marker in canonical_path_markers):
+            return True
+        return any(
+            marker in title_text
+            for marker in (
+                "latest version",
+                "release notes",
+                "supported versions",
+                "version support",
+                "what's new",
+                "whats new",
+            )
+        )
+
     def _looks_like_resource_result(
         self,
         *,
@@ -12437,6 +12551,33 @@ class MySearchClient:
         ]
         return any(keyword in query_lower for keyword in en_keywords)
 
+    def _looks_like_software_version_query(self, query_lower: str) -> bool:
+        version_markers = [
+            "latest version",
+            "latest release",
+            "latest stable",
+            "stable version",
+            "stable release",
+            "current version",
+            "current stable",
+            "newest version",
+            "newest release",
+        ]
+        if not any(marker in query_lower for marker in version_markers):
+            return False
+        if self._query_mentions_programming_language(query_lower):
+            return True
+        software_terms = [
+            "cli",
+            "database",
+            "framework",
+            "library",
+            "package",
+            "runtime",
+            "sdk",
+        ]
+        return any(term in query_lower for term in software_terms)
+
     def _looks_like_award_result_query(self, query_lower: str) -> bool:
         keywords = [
             "academy awards",
@@ -12996,6 +13137,238 @@ class MySearchClient:
             return updated
 
         return result
+
+    def _apply_software_version_answer_override(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        query_lower = query.lower()
+        if not self._looks_like_software_version_query(query_lower):
+            return result
+        if mode == "news" or intent in {"news", "status", "social"}:
+            return result
+
+        result_items = list(result.get("results") or [])
+        if not result_items:
+            return result
+
+        extracted_answer = self._extract_software_version_answer(
+            query=query,
+            results=result_items,
+        )
+        if not extracted_answer:
+            return result
+
+        current_answer = str(result.get("answer") or "").strip()
+        current_version = self._extract_semantic_version(current_answer)
+        extracted_version = self._extract_semantic_version(extracted_answer)
+        should_override = not current_answer
+        if extracted_version is not None:
+            if current_version is None or extracted_version > current_version or current_answer != extracted_answer:
+                should_override = True
+        elif current_answer != extracted_answer:
+            should_override = True
+        if not should_override:
+            return result
+
+        updated = dict(result)
+        updated["answer"] = extracted_answer
+        updated["evidence"] = dict(updated.get("evidence") or {})
+        updated["evidence"]["answer_source"] = "software-version-extraction"
+        return updated
+
+    def _extract_software_version_answer(
+        self,
+        *,
+        query: str,
+        results: list[dict[str, Any]],
+    ) -> str:
+        subject = self._software_version_subject(query)
+        candidates: list[tuple[int, tuple[int, int, int], int, str]] = []
+        for index, item in enumerate(results[:5]):
+            item_score = self._software_version_result_score(query=query, item=item)
+            if item_score <= 0:
+                continue
+            seen_versions: dict[tuple[int, int, int], int] = {}
+            text_chunks = [
+                str(item.get("title") or ""),
+                str(item.get("snippet") or ""),
+                str(item.get("content") or ""),
+            ]
+            for text in text_chunks:
+                for version_text, version_tuple, signal_score in self._software_version_candidates_from_text(text):
+                    prior = seen_versions.get(version_tuple)
+                    if prior is not None and prior >= signal_score:
+                        continue
+                    seen_versions[version_tuple] = signal_score
+                    candidates.append((item_score + signal_score, version_tuple, -index, version_text))
+
+        if not candidates:
+            return ""
+
+        best_score = max(item[0] for item in candidates)
+        shortlist = [item for item in candidates if item[0] >= best_score - 1]
+        _, _, _, version_text = max(shortlist, key=lambda item: (item[1], item[0], item[2]))
+        if subject:
+            return f"The latest stable version of {subject} is {version_text}."
+        return f"The latest stable version is {version_text}."
+
+    def _software_version_candidates_from_text(
+        self,
+        text: str,
+    ) -> list[tuple[str, tuple[int, int, int], int]]:
+        if not text:
+            return []
+        normalized = re.sub(r"\s+", " ", text).strip()
+        lowered = normalized.lower()
+        if not normalized:
+            return []
+        positive_markers = (
+            "current stable",
+            "latest stable",
+            "stable version",
+            "stable release",
+            "latest version",
+            "latest release",
+            "released",
+            "release",
+            "supported",
+            "version",
+        )
+        negative_markers = (
+            "alpha",
+            "beta",
+            "planned",
+            "preview",
+            "rc",
+            "release candidate",
+            "scheduled",
+            "upcoming",
+        )
+        candidates: list[tuple[str, tuple[int, int, int], int]] = []
+        for match in re.finditer(r"\b\d+\.\d+(?:\.\d+)?\b", normalized):
+            version_text = match.group(0)
+            version_tuple = self._extract_semantic_version(version_text)
+            if version_tuple is None:
+                continue
+            start = max(0, match.start() - 80)
+            end = min(len(lowered), match.end() + 80)
+            context = lowered[start:end]
+            if any(marker in context for marker in negative_markers):
+                continue
+            score = 0
+            if any(marker in context for marker in positive_markers):
+                score += 2
+            if "latest" in context and "stable" in context:
+                score += 2
+            if "as of" in context or "maintenance release" in context:
+                score += 1
+            if score <= 0:
+                continue
+            candidates.append((version_text, version_tuple, score))
+        return candidates
+
+    def _software_version_result_score(
+        self,
+        *,
+        query: str,
+        item: Mapping[str, Any],
+    ) -> int:
+        url = str(item.get("url") or "")
+        hostname = self._result_hostname(item)
+        registered_domain = self._registered_domain(hostname)
+        path = urlparse(url).path.lower()
+        title_text = str(item.get("title") or "").lower()
+        snippet_text = str(item.get("snippet") or "").lower()
+        query_tokens = self._query_brand_tokens(query)
+
+        score = 0
+        if self._looks_like_canonical_software_version_result(
+            hostname=hostname,
+            path=path,
+            title_text=title_text,
+        ):
+            score += 4
+        elif self._looks_like_software_version_reference_result(
+            url=url,
+            hostname=hostname,
+            title_text=title_text,
+            snippet_text=snippet_text,
+        ):
+            score += 2
+        if self._registered_domain_label_matches(
+            registered_domain=registered_domain,
+            query_tokens=query_tokens,
+        ):
+            score += 2
+        if self._result_matches_official_policy(
+            item=item,
+            mode="web",
+            query_tokens=query_tokens,
+            include_domains=None,
+            strict_official=False,
+        ):
+            score += 2
+        if not self._is_obvious_web_aggregator(registered_domain):
+            score += 1
+        else:
+            score -= 2
+        return score
+
+    def _software_version_subject(self, query: str) -> str:
+        subject = ""
+        match = re.search(r"(?:version|release)\s+of\s+([^?]+)", query, flags=re.IGNORECASE)
+        if match:
+            subject = match.group(1).strip(" .?!")
+        if not subject:
+            skip_tokens = {
+                "current",
+                "latest",
+                "newest",
+                "release",
+                "stable",
+                "version",
+            }
+            candidates = [
+                token for token in self._query_brand_tokens(query)
+                if token not in skip_tokens
+            ]
+            if candidates:
+                subject = candidates[-1]
+        if not subject:
+            return ""
+        normalized = re.sub(r"\s+", " ", subject).strip()
+        subject_map = {
+            "go": "Go",
+            "javascript": "JavaScript",
+            "kubernetes": "Kubernetes",
+            "next.js": "Next.js",
+            "node": "Node.js",
+            "node.js": "Node.js",
+            "openai": "OpenAI",
+            "postgres": "Postgres",
+            "postgresql": "PostgreSQL",
+            "python": "Python",
+            "react": "React",
+            "rust": "Rust",
+            "typescript": "TypeScript",
+        }
+        return subject_map.get(normalized.lower(), normalized if any(ch.isupper() for ch in normalized) else normalized.title())
+
+    def _extract_semantic_version(self, text: str) -> tuple[int, int, int] | None:
+        if not text:
+            return None
+        match = re.search(r"\b(\d+)\.(\d+)(?:\.(\d+))?\b", text)
+        if not match:
+            return None
+        major = int(match.group(1))
+        minor = int(match.group(2))
+        patch = int(match.group(3) or 0)
+        return (major, minor, patch)
 
     def _extract_result_event_answer_from_top_page(
         self,

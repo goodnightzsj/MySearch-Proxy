@@ -158,9 +158,15 @@ def build_mcp(config: MySearchConfig) -> tuple[MySearchClient, FastMCP]:
         url: str,
         limit: int = 20,
         max_depth: int | None = None,
+        crawl_entire_domain: bool = True,
     ) -> dict:
         """爬取整站：抓取某站点多页正文并清洗（基于 Firecrawl crawl，正文复用 extract 清洗）。"""
-        return client.crawl_site(url=url, limit=limit, max_depth=max_depth)
+        return client.crawl_site(
+            url=url,
+            limit=limit,
+            max_depth=max_depth,
+            crawl_entire_domain=crawl_entire_domain,
+        )
 
     @mcp.tool()
     def mysearch_health() -> dict:
