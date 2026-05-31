@@ -13602,7 +13602,12 @@ class MySearchClient:
         negative_markers = (
             "alpha",
             "beta",
+            "development branch",
+            "future",
+            "main branch",
             "planned",
+            "pre-release",
+            "prerelease",
             "preview",
             "rc",
             "release candidate",
