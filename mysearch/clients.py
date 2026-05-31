@@ -9548,6 +9548,37 @@ class MySearchClient:
     def _is_retryable_transient_error(self, exc: Exception) -> bool:
         return isinstance(exc, MySearchHTTPError) and exc.status_code in {429, 502, 503, 504}
 
+    def _request_json_with_transient_retry(
+        self,
+        *,
+        provider: ProviderConfig,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None,
+        key: str,
+        base_url: str | None = None,
+        timeout_seconds: int | None = None,
+        attempts: int = 2,
+    ) -> dict[str, Any]:
+        effective_attempts = max(1, attempts)
+        for attempt in range(effective_attempts):
+            try:
+                return self._request_json(
+                    provider=provider,
+                    method=method,
+                    path=path,
+                    payload=payload,
+                    key=key,
+                    base_url=base_url,
+                    timeout_seconds=timeout_seconds,
+                )
+            except MySearchError as exc:
+                if attempt < effective_attempts - 1 and self._is_retryable_transient_error(exc):
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                raise
+        raise AssertionError("unreachable")
+
     def _search_tavily_social_fallback(
         self,
         *,
@@ -9740,7 +9771,7 @@ class MySearchClient:
         payload: dict[str, Any] = {"url": url, "limit": limit}
         if search:
             payload["search"] = search
-        response = self._request_json(
+        response = self._request_json_with_transient_retry(
             provider=provider,
             method="POST",
             path=provider.path("map"),
@@ -9784,7 +9815,7 @@ class MySearchClient:
         if max_depth is not None:
             # Firecrawl v2 crawl uses `maxDiscoveryDepth`; `maxDepth` is silently ignored.
             payload["maxDiscoveryDepth"] = max_depth
-        start = self._request_json(
+        start = self._request_json_with_transient_retry(
             provider=provider,
             method="POST",
             path=provider.path("crawl"),
@@ -9800,7 +9831,7 @@ class MySearchClient:
         status_path = f"{provider.path('crawl')}/{job_id}"
         status_payload: dict[str, Any] = start
         for _ in range(max(1, max_poll_attempts)):
-            status_payload = self._request_json(
+            status_payload = self._request_json_with_transient_retry(
                 provider=provider,
                 method="GET",
                 path=status_path,
