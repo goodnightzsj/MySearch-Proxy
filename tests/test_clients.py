@@ -4,6 +4,7 @@ import io
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.error import HTTPError
 from unittest.mock import patch
 
@@ -4083,6 +4084,83 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(attempts, 2)
         self.assertEqual(result["provider"], "firecrawl")
         self.assertFalse(result["cache"]["extract"]["hit"])
+
+    def test_map_site_retries_transient_firecrawl_failure_once(self) -> None:
+        client = MySearchClient()
+        client._get_key_or_raise = lambda provider: SimpleNamespace(key="fc-key", source="env")  # type: ignore[method-assign]
+        calls: list[tuple[str, str]] = []
+
+        def fake_request_json(**kwargs):  # type: ignore[no-untyped-def]
+            calls.append((kwargs["method"], kwargs["path"]))
+            if len(calls) == 1:
+                raise MySearchHTTPError(
+                    provider="firecrawl",
+                    status_code=502,
+                    detail={"detail": ""},
+                    url="https://api.firecrawl.dev/v2/map",
+                )
+            return {"links": ["https://fastapi.tiangolo.com/"]}
+
+        client._request_json = fake_request_json  # type: ignore[method-assign]
+
+        with patch("mysearch.clients.time.sleep") as sleep:
+            result = client.map_site(url="https://fastapi.tiangolo.com", limit=10)
+
+        self.assertEqual(calls, [("POST", "/v2/map"), ("POST", "/v2/map")])
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["links"][0]["url"], "https://fastapi.tiangolo.com/")
+        sleep.assert_called_once_with(1.5)
+
+    def test_crawl_site_retries_transient_firecrawl_status_poll_once(self) -> None:
+        client = MySearchClient()
+        client._get_key_or_raise = lambda provider: SimpleNamespace(key="fc-key", source="env")  # type: ignore[method-assign]
+        calls: list[tuple[str, str]] = []
+
+        def fake_request_json(**kwargs):  # type: ignore[no-untyped-def]
+            calls.append((kwargs["method"], kwargs["path"]))
+            if kwargs["method"] == "POST":
+                return {"id": "job-1"}
+            if len(calls) == 2:
+                raise MySearchHTTPError(
+                    provider="firecrawl",
+                    status_code=502,
+                    detail={"detail": ""},
+                    url="https://api.firecrawl.dev/v2/crawl/job-1",
+                )
+            return {
+                "status": "completed",
+                "data": [
+                    {
+                        "metadata": {"sourceURL": "https://fastapi.tiangolo.com/tutorial/background-tasks/"},
+                        "markdown": "Background tasks content",
+                    }
+                ],
+            }
+
+        client._request_json = fake_request_json  # type: ignore[method-assign]
+
+        with patch("mysearch.clients.time.sleep") as sleep:
+            result = client.crawl_site(
+                url="https://fastapi.tiangolo.com/tutorial/background-tasks/",
+                limit=5,
+                max_depth=1,
+            )
+
+        self.assertEqual(
+            calls,
+            [
+                ("POST", "/v2/crawl"),
+                ("GET", "/v2/crawl/job-1"),
+                ("GET", "/v2/crawl/job-1"),
+            ],
+        )
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(
+            result["pages"][0]["url"],
+            "https://fastapi.tiangolo.com/tutorial/background-tasks/",
+        )
+        sleep.assert_called_once_with(1.5)
 
     def test_extract_url_exa_fallback_rejects_different_domain_content(self) -> None:
         client = MySearchClient()

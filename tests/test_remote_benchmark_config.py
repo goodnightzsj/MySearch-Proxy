@@ -317,6 +317,7 @@ class RemoteBenchmarkConfigTests(unittest.TestCase):
 
         self.assertEqual(case["mysearch_tool"], "map_site")
         self.assertEqual(case["mysearch_mode"], "map")
+        self.assertEqual(case["repeat_runs"], 1)
         self.assertEqual(case["mysearch_args"]["url"], "https://fastapi.tiangolo.com")
         self.assertEqual(case["mysearch_args"]["limit"], 10)
         self.assertEqual(case["tavily_tool"], "tavily_map")
@@ -334,16 +335,141 @@ class RemoteBenchmarkConfigTests(unittest.TestCase):
                 "strategy_hint": "balanced",
                 "primary_dimensions": "coverage|extraction_quality",
                 "secondary_dimensions": "efficiency|stability",
-                "repeat_runs": "1",
+                "repeat_runs": "2",
             }
         )
 
         self.assertEqual(case["mysearch_tool"], "crawl_site")
         self.assertEqual(case["mysearch_mode"], "crawl")
+        self.assertEqual(case["repeat_runs"], 1)
         self.assertEqual(case["mysearch_args"]["max_depth"], 1)
         self.assertEqual(case["mysearch_args"]["limit"], 5)
         self.assertEqual(case["tavily_tool"], "tavily_crawl")
         self.assertEqual(case["tavily_args"]["extract_depth"], "basic")
+
+    def test_batched_rows_isolate_firecrawl_map_and_crawl_cases(self) -> None:
+        batches = run_remote_mcp_benchmark.batched_rows(
+            [
+                {"benchmark_id": "a", "preferred_tool": "search"},
+                {"benchmark_id": "b", "preferred_tool": "extract_url"},
+                {"benchmark_id": "c", "preferred_tool": "map_site"},
+                {"benchmark_id": "d", "preferred_tool": "crawl_site"},
+                {"benchmark_id": "e", "preferred_tool": "search"},
+            ],
+            3,
+        )
+        self.assertEqual(
+            [[row["benchmark_id"] for row in batch] for batch in batches],
+            [["a", "b"], ["c"], ["d"], ["e"]],
+        )
+
+    def test_batch_uses_firecrawl_crawl_map_detects_special_batches(self) -> None:
+        self.assertTrue(
+            run_remote_mcp_benchmark.batch_uses_firecrawl_crawl_map(
+                [{"benchmark_id": "c", "preferred_tool": "map_site"}]
+            )
+        )
+        self.assertFalse(
+            run_remote_mcp_benchmark.batch_uses_firecrawl_crawl_map(
+                [{"benchmark_id": "a", "preferred_tool": "search"}]
+            )
+        )
+
+    def test_main_isolates_firecrawl_batches_and_only_cools_down_between_adjacent_special_batches(self) -> None:
+        argv = [
+            "run_remote_mcp_benchmark.py",
+            "--input-csv",
+            "dummy.csv",
+            "--output-csv",
+            "out.csv",
+            "--raw-dir",
+            "raw",
+            "--tavily-bearer",
+            "token",
+            "--chunk-size",
+            "3",
+        ]
+        rows = [
+            {
+                "benchmark_id": "search-1",
+                "query": "OpenAI pricing",
+                "domain": "Web",
+                "preferred_tool": "search",
+                "prompt_variant": "balanced",
+                "primary_dimensions": "",
+                "secondary_dimensions": "",
+                "repeat_runs": "2",
+            },
+            {
+                "benchmark_id": "map-1",
+                "query": "https://fastapi.tiangolo.com",
+                "domain": "站点地图",
+                "preferred_tool": "map_site",
+                "prompt_variant": "map",
+                "primary_dimensions": "",
+                "secondary_dimensions": "",
+                "repeat_runs": "2",
+            },
+            {
+                "benchmark_id": "crawl-1",
+                "query": "https://fastapi.tiangolo.com/tutorial/background-tasks/",
+                "domain": "站点爬取",
+                "preferred_tool": "crawl_site",
+                "prompt_variant": "crawl",
+                "primary_dimensions": "",
+                "secondary_dimensions": "",
+                "repeat_runs": "2",
+            },
+            {
+                "benchmark_id": "search-2",
+                "query": "OpenAI background mode",
+                "domain": "Web",
+                "preferred_tool": "search",
+                "prompt_variant": "balanced",
+                "primary_dimensions": "",
+                "secondary_dimensions": "",
+                "repeat_runs": "2",
+            },
+        ]
+        batch_cases: list[list[dict[str, object]]] = []
+
+        def fake_run_remote_cases(**kwargs):  # type: ignore[no-untyped-def]
+            cases = kwargs["cases"]
+            batch_cases.append(cases)
+            return [{"benchmark_id": case["benchmark_id"]} for case in cases]
+
+        with patch.object(sys, "argv", argv), patch.object(
+            run_remote_mcp_benchmark,
+            "read_rows",
+            return_value=rows,
+        ), patch.object(
+            run_remote_mcp_benchmark,
+            "load_existing_rows",
+            return_value=([], {}),
+        ), patch.object(
+            run_remote_mcp_benchmark,
+            "run_remote_cases",
+            side_effect=fake_run_remote_cases,
+        ), patch.object(
+            run_remote_mcp_benchmark,
+            "merge_output_rows",
+            return_value=[],
+        ), patch.object(
+            run_remote_mcp_benchmark,
+            "write_output",
+        ), patch.object(
+            run_remote_mcp_benchmark.time,
+            "sleep",
+        ) as sleep:
+            self.assertEqual(run_remote_mcp_benchmark.main(), 0)
+
+        self.assertEqual(
+            [[case["benchmark_id"] for case in cases] for cases in batch_cases],
+            [["search-1"], ["map-1"], ["crawl-1"], ["search-2"]],
+        )
+        self.assertEqual(batch_cases[1][0]["repeat_runs"], 1)
+        self.assertEqual(batch_cases[2][0]["repeat_runs"], 1)
+        sleep.assert_called_once_with(run_remote_mcp_benchmark.FIRECRAWL_CRAWL_MAP_COOLDOWN_SECONDS)
 
     def test_summarize_handles_map_and_crawl_collections(self) -> None:
         namespace: dict[str, object] = {}

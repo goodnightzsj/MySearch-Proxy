@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.parse
 from datetime import date
 from pathlib import Path
@@ -24,6 +25,8 @@ DEFAULT_TAVILY_URL = "http://127.0.0.1:8787/mcp"
 DEFAULT_TAVILY_BEARER = ""
 DEFAULT_CODEX_CONFIG = str((Path(os.getenv("CODEX_HOME", "~/.codex")).expanduser() / "config.toml"))
 DEFAULT_TAVILY_MCP_SERVER = "tavily-hikari"
+FIRECRAWL_CRAWL_MAP_TOOLS = {"map_site", "crawl_site"}
+FIRECRAWL_CRAWL_MAP_COOLDOWN_SECONDS = 65
 
 OFFICIAL_DOMAINS = {
     "official-web-01": ["openai.com"],
@@ -296,7 +299,7 @@ def build_case(row: dict[str, str]) -> dict[str, object]:
             "domain": row["domain"],
             "query": query,
             "prompt_variant": row["prompt_variant"],
-            "repeat_runs": repeat_runs,
+            "repeat_runs": 1,
             "active_dimensions": active_dimensions(row),
             "mysearch_tool": "map_site",
             "mysearch_mode": "map",
@@ -319,7 +322,7 @@ def build_case(row: dict[str, str]) -> dict[str, object]:
             "domain": row["domain"],
             "query": query,
             "prompt_variant": row["prompt_variant"],
-            "repeat_runs": repeat_runs,
+            "repeat_runs": 1,
             "active_dimensions": active_dimensions(row),
             "mysearch_tool": "crawl_site",
             "mysearch_mode": "crawl",
@@ -1294,9 +1297,30 @@ def write_output(path: Path, rows: list[dict[str, str]]) -> None:
 
 
 def batched_rows(rows: list[dict[str, str]], chunk_size: int) -> list[list[dict[str, str]]]:
-    if chunk_size <= 0 or chunk_size >= len(rows):
-        return [rows]
-    return [rows[index : index + chunk_size] for index in range(0, len(rows), chunk_size)]
+    if not rows:
+        return []
+    effective_chunk_size = len(rows) if chunk_size <= 0 else chunk_size
+    batches: list[list[dict[str, str]]] = []
+    current: list[dict[str, str]] = []
+    for row in rows:
+        preferred_tool = row.get("preferred_tool", "").strip()
+        if preferred_tool in FIRECRAWL_CRAWL_MAP_TOOLS:
+            if current:
+                batches.append(current)
+                current = []
+            batches.append([row])
+            continue
+        current.append(row)
+        if len(current) >= effective_chunk_size:
+            batches.append(current)
+            current = []
+    if current:
+        batches.append(current)
+    return batches
+
+
+def batch_uses_firecrawl_crawl_map(rows: list[dict[str, str]]) -> bool:
+    return any(row.get("preferred_tool", "").strip() in FIRECRAWL_CRAWL_MAP_TOOLS for row in rows)
 
 
 def main() -> int:
@@ -1332,7 +1356,8 @@ def main() -> int:
     existing_order, existing_rows = load_existing_rows(reuse_path)
     output_rows = [existing_rows[benchmark_id] for benchmark_id in existing_order if benchmark_id in existing_rows]
 
-    for batch_index, batch_rows in enumerate(batched_rows(selected_rows, args.chunk_size), start=1):
+    batches = batched_rows(selected_rows, args.chunk_size)
+    for batch_index, batch_rows in enumerate(batches, start=1):
         cases = [build_case(row) for row in batch_rows]
         results = run_remote_cases(
             host=args.host,
@@ -1355,8 +1380,12 @@ def main() -> int:
         existing_order, existing_rows = load_existing_rows(output_path)
         print(
             f"Wrote {len(output_rows)} rows to {output_path} "
-            f"(batch {batch_index}/{len(batched_rows(selected_rows, args.chunk_size))})"
+            f"(batch {batch_index}/{len(batches)})"
         )
+        if batch_index < len(batches):
+            next_batch = batches[batch_index]
+            if batch_uses_firecrawl_crawl_map(batch_rows) and batch_uses_firecrawl_crawl_map(next_batch):
+                time.sleep(FIRECRAWL_CRAWL_MAP_COOLDOWN_SECONDS)
     return 0
 
 
