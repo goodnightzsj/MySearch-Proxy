@@ -84,6 +84,58 @@ class SoftwareVersionFixTests(unittest.TestCase):
 
         self.assertEqual(reranked[0]["url"], liquidweb["url"])
 
+    def test_version_query_ignores_future_development_branch_versions(self) -> None:
+        client = MySearchClient()
+        result = {
+            "answer": "",
+            "results": [
+                {
+                    "title": "Status of Python versions - Python Developer's Guide",
+                    "url": "https://devguide.python.org/versions/",
+                    "snippet": (
+                        "The main branch is currently the future Python 3.16, "
+                        "and is the only branch that accepts new features."
+                    ),
+                    "content": "",
+                },
+                {
+                    "title": "Download Python - Python.org",
+                    "url": "https://www.python.org/downloads/",
+                    "snippet": (
+                        "Download the latest version of Python. "
+                        "Download Python 3.14.5."
+                    ),
+                    "content": "",
+                },
+                {
+                    "title": "The latest Python version: Python 3.14 - Liquid Web",
+                    "url": "https://www.liquidweb.com/blog/latest-python-version/",
+                    "snippet": (
+                        "What's the latest Python version? "
+                        "The latest stable version of Python is 3.14."
+                    ),
+                    "content": "",
+                },
+            ],
+            "evidence": {},
+        }
+
+        updated = client._apply_software_version_answer_override(
+            query="what is the latest stable version of Python",
+            mode="web",
+            intent="factual",
+            result=result,
+        )
+
+        self.assertEqual(
+            updated["answer"],
+            "The latest stable version of Python is 3.14.5.",
+        )
+        self.assertEqual(
+            updated["evidence"]["answer_source"],
+            "software-version-extraction",
+        )
+
 
 class CrawlBreadthFixTests(unittest.TestCase):
     def test_crawl_site_defaults_to_crawl_entire_domain(self) -> None:
