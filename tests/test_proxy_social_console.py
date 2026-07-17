@@ -57,6 +57,7 @@ class ProxySocialConsoleTests(unittest.TestCase):
         self.assertIn('aria-labelledby="workspace-${service}-tab-overview"', javascript)
         self.assertIn('aria-label="搜索 ${meta.label} Token"', javascript)
         self.assertIn('aria-label="搜索 ${meta.label} API Key"', javascript)
+        self.assertIn('class="inline-meta-base-url"', javascript)
 
 
 if __name__ == "__main__":

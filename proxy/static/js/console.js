@@ -2365,7 +2365,7 @@ function renderServiceShells() {
               <h3>调用方式</h3>
               <p class="desc">${meta.routeHint}</p>
               <div class="inline-meta">
-                <span>Base URL: <b class="mono" id="base-url-${service}"></b></span>
+                <span class="inline-meta-base-url">Base URL: <b class="mono" id="base-url-${service}"></b></span>
                 <span>代理 Token 前缀: <b class="mono">${meta.tokenPrefix}</b></span>
               </div>
               <div class="code-toolbar">

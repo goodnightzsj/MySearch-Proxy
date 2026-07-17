@@ -10,6 +10,7 @@
 - Replaced the marketing hero with a compact operations bar, global status strip, sticky Provider rail, one active workspace, and progressive `overview/token/key` tabs.
 - Moved all overlays outside `#dashboard` and centralized background inertness, overlay priority, `aria-hidden`, focus trapping, and focus restoration.
 - Added skip links, complete tab/radiogroup contracts, labels for dynamic inputs, assertive login errors, reduced-motion scrolling, numeric mobile inputs, and responsive summary/provider state bands.
+- Kept the mobile Base URL metadata on its own full-width line so the deployed host does not orphan the final port digit at 375px.
 - Updated grok2api v3 model, client-key, and endpoint guidance in the console.
 
 ## Local Validation
