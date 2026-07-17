@@ -102,8 +102,11 @@ class SoftwareVersionFixTests(unittest.TestCase):
                     "title": "Download Python - Python.org",
                     "url": "https://www.python.org/downloads/",
                     "snippet": (
-                        "Download the latest version of Python. "
-                        "Download Python 3.14.5."
+                        "Download the latest version of Python. Download Python 3.14.6. "
+                        "Looking for Python with a different OS? Windows, Linux/Unix, "
+                        "macOS, Android, iOS, other. Want to help test development "
+                        "versions of Python 3.15? For more information visit the "
+                        "Python Developer's Guide."
                     ),
                     "content": "",
                 },
@@ -129,7 +132,7 @@ class SoftwareVersionFixTests(unittest.TestCase):
 
         self.assertEqual(
             updated["answer"],
-            "The latest stable version of Python is 3.14.5.",
+            "The latest stable version of Python is 3.14.6.",
         )
         self.assertEqual(
             updated["evidence"]["answer_source"],

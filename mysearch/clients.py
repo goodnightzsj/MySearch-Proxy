@@ -13603,6 +13603,7 @@ class MySearchClient:
             "alpha",
             "beta",
             "development branch",
+            "development version",
             "future",
             "main branch",
             "planned",

@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-07-17T10:13:21Z",
+  "updated_at": "2026-07-17T10:51:35Z",
   "current_loop": 10,
   "consecutive_loops_with_no_new_issues": 0,
   "stop_condition": "end after three consecutive loops with no new Critical/High/Medium/Low findings under the loop's final benchmark definition",
-  "last_new_issue": "Loop 10 found grok2api v3 compatibility regressions after the provider container update: the old grok-4.20-fast Social primary was no longer exposed and forced every request through fallback; v2 admin paths could return the v3 SPA with HTTP 200 and be reported as a connected admin API. The inference endpoint remains POST /v1/responses but v3 requires an explicit g2a_ client key. The fixes passed 623 local tests and the live runtime setting now completes Social search in one grok-4.20-0309 call.",
+  "last_new_issue": "Loop 10 found grok2api v3 compatibility regressions after the provider container update: the old grok-4.20-fast Social primary was no longer exposed and forced every request through fallback; v2 admin paths could return the v3 SPA with HTTP 200 and be reported as a connected admin API. The first repaired 41-row comparison then found that Python's official 'development versions of Python 3.15' wording bypassed the prerelease marker and was promoted above stable 3.14.6. All fixes pass the 623-test local suite.",
   "last_no_new_issue_loop": 9,
-  "next_step": "Commit and push the verified Loop 10 fixes, wait for the Docker workflow, redeploy mysearch-stack, and run a fresh full 41-row comparison. Loop 10 remains non-clean; Loop 11 is the next chance to earn 1/3."
+  "next_step": "Commit and push the Loop 10 version-extraction follow-up, wait for the Docker workflow, redeploy mysearch-stack, and run a fresh final 41-row comparison. Loop 10 remains non-clean; Loop 11 is the next chance to earn 1/3."
 }
