@@ -13264,7 +13264,18 @@ class MySearchClient:
             start = max(0, match.start() - 80)
             end = min(len(lowered), match.end() + 80)
             context = lowered[start:end]
-            if any(marker in context for marker in negative_markers):
+            sentence_start = start
+            sentence_end = end
+            left_context = lowered[start:match.start()]
+            left_boundaries = list(re.finditer(r"[.!?;]\s+", left_context))
+            if left_boundaries:
+                sentence_start += left_boundaries[-1].end()
+            right_context = lowered[match.end():end]
+            right_boundary = re.search(r"[.!?;]\s+", right_context)
+            if right_boundary:
+                sentence_end = match.end() + right_boundary.start()
+            sentence_context = lowered[sentence_start:sentence_end]
+            if any(marker in sentence_context for marker in negative_markers):
                 continue
             score = 0
             if any(marker in context for marker in positive_markers):
@@ -13621,7 +13632,13 @@ class MySearchClient:
             title_text = str(item.get("title") or "").strip()
             snippet_text = str(item.get("snippet") or "").strip()
             content_text = str(item.get("content") or "").strip()
-            path = urlparse(str(item.get("url") or "")).path.lower()
+            url = str(item.get("url") or "")
+            path = urlparse(url).path.lower()
+            if award_query and self._looks_like_query_year_mismatch(
+                query=query_lower,
+                text=f"{title_text} {snippet_text} {content_text} {url}",
+            ):
+                continue
             if (
                 award_query
                 and self._looks_like_award_category_conflict(
@@ -13698,6 +13715,7 @@ class MySearchClient:
             entity = self._extract_named_fact_entity(
                 text,
                 patterns=[
+                    r"(?:^|[.!?]\s+)([A-Z][A-Za-z0-9'’&.\- ]{2,80}?)\s+and\s+[A-Z][A-Za-z0-9'’&.\- ]{2,80}\s+won\s+best actor\s+and\s+best actress\b",
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+won[^\n]{0,80}\bbest actor\b",
                     r"([A-Z][A-Za-z0-9'’&.\- ]{2,100})\s+wins\s+best actor",
                     r"([A-Z][A-Za-z0-9'’&.\- ]{2,100})\s+is\s+the\s+(?:20\d{2}\s+)?best actor winner",

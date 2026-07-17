@@ -1,5 +1,5 @@
-<div class="settings-modal-shell hidden" id="settings-modal">
-  <div class="settings-backdrop" onclick="closeSettingsModal()"></div>
+<div class="settings-modal-shell hidden" id="settings-modal" aria-hidden="true">
+  <div class="settings-backdrop" aria-hidden="true" onclick="closeSettingsModal()"></div>
   <div class="settings-dialog card" role="dialog" aria-modal="true" aria-labelledby="settings-title">
     <div class="settings-head">
       <div>
@@ -16,12 +16,12 @@
     </div>
 
     <div class="settings-tabs" role="tablist" aria-label="Settings tabs">
-      <button type="button" class="settings-tab is-active" role="tab" id="settings-tab-console" data-settings-tab="console" aria-selected="true" aria-controls="settings-panel-console" onclick="setActiveSettingsTab('console')">控制台</button>
-      <button type="button" class="settings-tab" role="tab" id="settings-tab-tavily" data-settings-tab="tavily" aria-selected="false" aria-controls="settings-panel-tavily" onclick="setActiveSettingsTab('tavily')">Tavily</button>
-      <button type="button" class="settings-tab" role="tab" id="settings-tab-social" data-settings-tab="social" aria-selected="false" aria-controls="settings-panel-social" onclick="setActiveSettingsTab('social')">Social / X</button>
+      <button type="button" class="settings-tab is-active" role="tab" id="settings-tab-console" data-settings-tab="console" aria-selected="true" aria-controls="settings-panel-console" tabindex="0" onclick="setActiveSettingsTab('console')">控制台</button>
+      <button type="button" class="settings-tab" role="tab" id="settings-tab-tavily" data-settings-tab="tavily" aria-selected="false" aria-controls="settings-panel-tavily" tabindex="-1" onclick="setActiveSettingsTab('tavily')">Tavily</button>
+      <button type="button" class="settings-tab" role="tab" id="settings-tab-social" data-settings-tab="social" aria-selected="false" aria-controls="settings-panel-social" tabindex="-1" onclick="setActiveSettingsTab('social')">Social / X</button>
     </div>
 
-    <section class="settings-panel settings-tab-panel is-active" data-settings-panel="console" id="settings-panel-console" role="tabpanel" aria-labelledby="settings-tab-console">
+    <section class="settings-panel settings-tab-panel is-active" data-settings-panel="console" id="settings-panel-console" role="tabpanel" aria-labelledby="settings-tab-console" aria-hidden="false">
       <div class="settings-panel-grid">
         <div class="settings-panel-aside">
           <h3>控制台权限</h3>
@@ -61,7 +61,7 @@
       </div>
     </section>
 
-    <section class="settings-panel settings-tab-panel hidden" data-settings-panel="tavily" id="settings-panel-tavily" role="tabpanel" aria-labelledby="settings-tab-tavily">
+    <section class="settings-panel settings-tab-panel hidden" data-settings-panel="tavily" id="settings-panel-tavily" role="tabpanel" aria-labelledby="settings-tab-tavily" aria-hidden="true">
       <div class="settings-panel-grid">
         <div class="settings-panel-aside">
           <h3>Tavily 路由</h3>
@@ -79,10 +79,10 @@
               <div class="settings-field">
                 <label for="settings-tavily-mode">工作模式</label>
                 <input type="hidden" id="settings-tavily-mode" value="auto">
-                <div class="mode-switch" role="tablist" aria-label="Tavily mode switch">
-                  <button type="button" class="mode-switch-btn is-active" data-tavily-mode="auto" aria-selected="true" onclick="setTavilyMode('auto')">自动识别</button>
-                  <button type="button" class="mode-switch-btn" data-tavily-mode="pool" aria-selected="false" onclick="setTavilyMode('pool')">API Key 池</button>
-                  <button type="button" class="mode-switch-btn" data-tavily-mode="upstream" aria-selected="false" onclick="setTavilyMode('upstream')">上游 Gateway</button>
+                <div class="mode-switch" role="radiogroup" aria-label="Tavily 工作模式">
+                  <button type="button" class="mode-switch-btn is-active" role="radio" data-tavily-mode="auto" aria-checked="true" tabindex="0" onclick="setTavilyMode('auto')">自动识别</button>
+                  <button type="button" class="mode-switch-btn" role="radio" data-tavily-mode="pool" aria-checked="false" tabindex="-1" onclick="setTavilyMode('pool')">API Key 池</button>
+                  <button type="button" class="mode-switch-btn" role="radio" data-tavily-mode="upstream" aria-checked="false" tabindex="-1" onclick="setTavilyMode('upstream')">上游 Gateway</button>
                 </div>
                 <div class="hint" id="settings-tavily-mode-hint">自动模式会先检测上游凭证；如果你只是导入 Tavily key，就会默认回到 API Key 池。</div>
                 <div class="mode-runtime-strip" id="settings-tavily-runtime-strip">当前实际：等待识别</div>
@@ -151,13 +151,13 @@
       </div>
     </section>
 
-    <section class="settings-panel settings-tab-panel hidden" data-settings-panel="social" id="settings-panel-social" role="tabpanel" aria-labelledby="settings-tab-social">
+    <section class="settings-panel settings-tab-panel hidden" data-settings-panel="social" id="settings-panel-social" role="tabpanel" aria-labelledby="settings-tab-social" aria-hidden="true">
       <div class="settings-panel-grid">
         <div class="settings-panel-aside">
           <h3>Social / X / grok2api</h3>
-          <p>推荐优先填写 grok2api 后台地址和 `app_key`。如果你有自己的 compatible 网关，也可以在这里手动覆写上游 key、客户端 token 和高级路径。</p>
+          <p>grok2api v3 请填写 `/v1` 上游地址和管理端创建的 `g2a_` client key；`app_key` 仅用于 v2-compatible legacy 部署。</p>
           <div class="settings-note-list">
-            <div class="settings-note">优先让后台自动继承 token 池，再考虑手动覆写。</div>
+            <div class="settings-note">v3 推理凭据与管理员会话分离，必须显式配置 client key。</div>
             <div class="settings-note">这里只管理兼容 Social/X 路由，不影响其他 provider。</div>
           </div>
           <div class="settings-secret-meta" id="settings-social-meta"></div>
@@ -173,27 +173,27 @@
               </div>
               <div class="settings-field">
                 <label for="settings-social-model">模型</label>
-                <input type="text" id="settings-social-model" placeholder="grok-4.20-fast" list="grok-models-builtin" autocomplete="off">
+                <input type="text" id="settings-social-model" placeholder="grok-4.20-0309" list="grok-models-builtin" autocomplete="off">
                 <div class="hint">用于 `x_search` 请求的默认模型名。默认对齐上游 grok2api basic 层（免费账号可用）。</div>
               </div>
               <div class="settings-field">
                 <label for="settings-social-fallback-model">Fallback 模型</label>
-                <input type="text" id="settings-social-fallback-model" placeholder="grok-4.20-0309-non-reasoning" list="grok-models-builtin" autocomplete="off">
+                <input type="text" id="settings-social-fallback-model" placeholder="grok-4.3" list="grok-models-builtin" autocomplete="off">
                 <div class="hint">当主模型结果太少或请求失败时，自动补一轮的候选模型。</div>
               </div>
               <!-- 保持与 mysearch/config.py:_BUILTIN_GROK_MODELS 同步；用户自定义清单仍可手输。 -->
               <datalist id="grok-models-builtin">
-                <option value="grok-4.20-fast">basic · 默认主模型</option>
-                <option value="grok-4.20-0309-non-reasoning">basic · 默认 fallback</option>
-                <option value="grok-4.3-beta">basic · beta</option>
+                <option value="grok-4.20-0309">basic · 默认主模型</option>
+                <option value="grok-4.3">basic · 默认 fallback</option>
+                <option value="grok-4.5">advanced</option>
               </datalist>
               <div class="settings-field">
                 <label for="settings-social-admin-base-url">后台管理地址</label>
                 <input type="text" id="settings-social-admin-base-url" placeholder="https://media.example.com">
-                <div class="hint">推荐填后台根地址，系统会自动拉 `config` 和 `tokens`。</div>
+                <div class="hint">仅 v2-compatible legacy 部署用于读取旧 `config` 和 `tokens`。</div>
               </div>
               <div class="settings-field">
-                <label for="settings-social-admin-app-key">后台管理 app key</label>
+                <label for="settings-social-admin-app-key">Legacy v2 后台 app key</label>
                 <div class="input-reveal-wrap">
                   <input type="password" id="settings-social-admin-app-key" placeholder="留空表示保持当前值">
                   <button type="button" class="input-reveal-btn" aria-label="显示密码" aria-pressed="false" data-reveal-target="settings-social-admin-app-key"><span class="reveal-icon" aria-hidden="true">👁</span></button>
@@ -239,12 +239,12 @@
                 </div>
                 <div class="settings-field full-width">
                   <label for="settings-social-cache-ttl-seconds">缓存秒数</label>
-                  <input type="text" id="settings-social-cache-ttl-seconds" placeholder="60">
+                  <input type="number" id="settings-social-cache-ttl-seconds" min="5" step="1" inputmode="numeric" placeholder="60">
                   <div class="hint">控制后台状态缓存多久刷新一次，最小 5 秒。</div>
                 </div>
                 <div class="settings-field full-width">
                   <label for="settings-social-fallback-min-results">Fallback 阈值</label>
-                  <input type="text" id="settings-social-fallback-min-results" placeholder="3">
+                  <input type="number" id="settings-social-fallback-min-results" min="1" step="1" inputmode="numeric" placeholder="3">
                   <div class="hint">主模型结果数低于这个值时，会自动尝试 fallback 模型，最小 1。</div>
                 </div>
               </div>

@@ -369,6 +369,40 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["answer"], "Best Actor winner: Colman Domingo")
         self.assertEqual(result["evidence"]["answer_source"], "result-event-extraction")
 
+    def test_extract_result_event_answer_keeps_best_actor_from_paired_winner_sentence(self) -> None:
+        client = MySearchClient()
+
+        answer = client._extract_result_event_answer(
+            query="2026 Oscars best actor winner",
+            results=[
+                {
+                    "title": "Oscars 2026: The complete winners list",
+                    "url": "https://www.npr.org/2026/03/15/oscars-2026-winners-list",
+                    "snippet": "Michael B. Jordan and Jessie Buckley won best actor and best actress.",
+                    "content": "",
+                }
+            ],
+        )
+
+        self.assertEqual(answer, "Best Actor winner: Michael B. Jordan")
+
+    def test_extract_result_event_answer_skips_explicit_year_mismatch(self) -> None:
+        client = MySearchClient()
+
+        answer = client._extract_result_event_answer(
+            query="2026 Oscars best actor winner",
+            results=[
+                {
+                    "title": "The 78th Academy Awards | 2006",
+                    "url": "https://www.oscars.org/oscars/ceremonies/2006",
+                    "snippet": "Philip Seymour Hoffman won best actor for Capote.",
+                    "content": "",
+                }
+            ],
+        )
+
+        self.assertEqual(answer, "")
+
     def test_apply_result_event_answer_override_extracts_best_picture_from_headline_style_result(self) -> None:
         client = MySearchClient()
 

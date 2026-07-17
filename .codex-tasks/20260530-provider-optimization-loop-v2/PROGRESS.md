@@ -13,7 +13,7 @@
 
 ## Loop State
 
-- Current loop: 10
+- Current loop: 11
 - Consecutive loops with no new issues: 0 (Loop 10 found actionable grok2api v3 model and admin-health compatibility issues)
 - Stop condition: three consecutive loops with no new Critical, High, Medium, or Low findings after the full benchmark has been rerun under the loop's final benchmark definition.
 
@@ -39,7 +39,11 @@
 - Loop 8 found a further runtime issue on that deployed Loop 7 baseline: software-version extraction could treat `future Python 3.16` from `devguide.python.org/versions` as the latest stable version even when `python.org/downloads` still exposed stable `3.14.5`. The runtime fix was committed as `7ec7a62`, GitHub Actions run `26708697235` succeeded, remote `mysearch-stack` was rebuilt as `helloworldz1024/mysearch-stack:7ec7a62-local`, and the fresh full 41-row comparison captured 41/41 with 0 partial-error, 0 timeout, 0 empty-result, and one non-actionable Tavily comparator structural failure `tavily-search-upstream-plan-limited` on `crawl-map-01`.
 - Loop 9 re-labeled the same 41-row comparison around capability-chain dimensions (`authority_precision`, `semantic_discovery`, `provider_orchestration`, `multi_source_fusion`, `content_fidelity`, `freshness_signal`, `site_coverage`, `traceability`, `resilience`, `efficiency`) without changing the runner or row set. The full 41-row comparison remains complete with 41/41 captured, 0 partial-error, 0 timeout, 0 empty-result, and one non-actionable Tavily comparator structural failure `tavily-search-upstream-plan-limited` on `crawl-map-01`.
 - Loop 10 found that the deployed grok2api v3 no longer exposed the old `grok-4.20-fast` default, while its inference route remained `POST /v1/responses` and authentication changed to explicit `g2a_` client keys. It also found that v2 admin fallback paths could return the v3 SPA with HTTP 200 and be misreported as a connected admin API. The first repaired 41-row comparison then exposed another runtime issue: Python's official `development versions of Python 3.15` wording bypassed the prerelease marker and was promoted above stable `3.14.6`. All three findings now have local fixes; both full-suite runs passed with 623 tests, and the live Social setting completes with one `grok-4.20-0309` call instead of an invalid primary plus fallback.
-- Streak is now `0 / 3`; Loop 10 cannot count as clean because it found actionable issues. Current work is the Loop 10 release gate followed by a fresh full 41-row comparison.
+- Loop 10 release gate is complete: commits `19a566e` and `47b417f` were pushed, Docker workflows `29572859355` and `29574992460` succeeded, and remote `mysearch-stack` now runs `helloworldz1024/mysearch-stack:sha-47b417f` with health and MCP initialize verified.
+- Loop 10 final comparison is complete: `raw/loop10-remote-compare-final.csv` captured 41/41 unique rows with zero missing IDs, structural failures, timeouts, empty MySearch results, or row errors. All referenced raw artifacts exist, and `factual-accuracy-01` now answers Python `3.14.6`.
+- Loop 11 Inspect found benchmark-integrity gaps: the old output schema did not score the ten active dimensions, preserve per-repeat evidence, enforce latency budgets, keep trace JSON valid, or distinguish normal orchestration from actual fallback. The user also requested a complete console optimization, which exposed an overlay `inert` ancestor bug and incomplete control semantics.
+- Loop 11 local fixes are complete. The runner now emits auditable ten-dimension evidence and the console now uses an operations-first single-workspace layout with unified overlay isolation. The full local suite passes with 634 tests, and browser checks pass at 320/375/768/1440 widths.
+- Streak remains `0 / 3`; Loop 11 found actionable issues and cannot count as clean. Current work is its release/deploy gate followed by a fresh full 41-row comparison under the changed runner contract.
 
 ## Notes
 
@@ -59,3 +63,5 @@
 - Loop 8 analysis/research/decision/fixes/results are recorded in `raw/loop8-code-analysis.md`, `raw/loop8-provider-research.md`, `raw/loop8-benchmark-evolution.md`, `raw/loop8-fix-and-validation.md`, `raw/loop8-ci.md`, `raw/loop8-deploy.md`, and `raw/loop8-benchmark.md`; Loop 8 fixes are covered by `tests/test_loop7_fixes.py`.
 - Loop 9 benchmark evolution and comparison are recorded in `raw/loop9-benchmark-evolution.md`, `raw/loop9-benchmark-input.csv`, and `raw/loop9-remote-compare.csv`.
 - Loop 10 analysis, provider refresh, benchmark decision, and local validation are recorded in `raw/loop10-code-analysis.md`, `raw/loop10-provider-research.md`, `raw/loop10-benchmark-evolution.md`, and `raw/loop10-fix-and-validation.md`.
+- Loop 10 release and final comparison are recorded in `raw/loop10-ci.md`, `raw/loop10-deploy.md`, `raw/loop10-benchmark.md`, `raw/loop10-remote-compare-final.csv`, and `raw/loop10-remote-compare-final-raw/`.
+- Loop 11 analysis, provider delta, benchmark decision, and local validation are recorded in `raw/loop11-code-analysis.md`, `raw/loop11-provider-research.md`, `raw/loop11-benchmark-evolution.md`, and `raw/loop11-fix-and-validation.md`.

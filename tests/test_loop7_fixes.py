@@ -139,6 +139,16 @@ class SoftwareVersionFixTests(unittest.TestCase):
             "software-version-extraction",
         )
 
+    def test_version_candidates_scope_prerelease_markers_to_the_same_sentence(self) -> None:
+        client = MySearchClient()
+
+        candidates = client._software_version_candidates_from_text(
+            "Python 3.14.6 is the latest stable release. "
+            "Development versions of Python 3.15 are available for testing."
+        )
+
+        self.assertEqual([candidate[0] for candidate in candidates], ["3.14.6"])
+
 
 class CrawlBreadthFixTests(unittest.TestCase):
     def test_crawl_site_defaults_to_crawl_entire_domain(self) -> None:

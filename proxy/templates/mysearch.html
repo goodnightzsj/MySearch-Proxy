@@ -9,37 +9,30 @@
 </head>
 <body class="console-body">
 
+<a class="skip-link" href="#mysearch-quickstart">跳到接入配置</a>
+
 <div id="login-box" class="auth card{% if initial_authenticated %} hidden{% endif %}">
   <div class="auth-orb auth-orb-a"></div>
   <div class="auth-orb auth-orb-b"></div>
   <div class="auth-kicker">MySearch Access</div>
-  <div class="auth-badges">
-    <span class="auth-badge">Unified Entry</span>
-    <span class="auth-badge">MCP Ready</span>
-    <span class="auth-badge">Team Ready</span>
+  <div class="auth-context">
+    <span class="auth-context-signal" aria-hidden="true"></span>
+    <span>管理员会话</span>
   </div>
-  <h2>MySearch 接入台</h2>
-  <p>这里专门管理 MySearch 的统一接入配置、安装路径和通用 Token。登录后你可以直接复制 `.env`、安装命令，并回到搜索控制台继续维护 provider 工作台。</p>
+  <h2>登录 MySearch 接入台</h2>
+  <p id="login-help">管理统一接入配置、安装命令和通用 Token。</p>
   <form class="stack" onsubmit="doLogin(event)">
     <input type="text" name="proxy-admin-user" value="admin" autocomplete="username" tabindex="-1" aria-hidden="true" style="position:absolute;opacity:0;pointer-events:none;height:0">
-    <input type="password" id="pwd-input" placeholder="输入管理密码" autocomplete="current-password">
+    <label class="auth-field-label" for="pwd-input">管理密码</label>
+    <input type="password" id="pwd-input" placeholder="请输入管理密码" autocomplete="current-password" aria-describedby="login-help login-err">
     <button type="submit" class="btn btn-primary" id="login-submit">进入接入台</button>
   </form>
-  <div class="auth-meta">
-    <div class="auth-meta-card">
-      <div class="label">统一入口</div>
-      <strong>MYSEARCH_PROXY_*</strong>
-    </div>
-    <div class="auth-meta-card">
-      <div class="label">客户端</div>
-      <strong>Codex / Claude Code / MCP</strong>
-    </div>
-    <div class="auth-meta-card">
-      <div class="label">目标</div>
-      <strong>配置 · 安装 · Token</strong>
-    </div>
+  <div class="auth-foot" aria-label="接入台能力">
+    <span>MCP ready</span>
+    <span>Shared tokens</span>
+    <span>Install config</span>
   </div>
-  <p id="login-err" class="login-error hidden"></p>
+  <p id="login-err" class="login-error hidden" role="alert" aria-live="assertive"></p>
 </div>
 
 <div id="dashboard" class="{% if not initial_authenticated %}hidden{% endif %}">
@@ -60,11 +53,12 @@
 
     <section class="card mysearch-shell" id="mysearch-quickstart"></section>
   </div>
+</div>
 
   {% include "components/_settings_modal.html" %}
 
-  <div id="detail-drawer" class="detail-drawer-shell hidden">
-    <div class="detail-drawer-backdrop" onclick="closeDetailDrawer()"></div>
+  <div id="detail-drawer" class="detail-drawer-shell hidden" aria-hidden="true">
+    <div class="detail-drawer-backdrop" aria-hidden="true" onclick="closeDetailDrawer()"></div>
     <aside class="detail-drawer card" role="dialog" aria-modal="true" aria-labelledby="detail-drawer-title">
       <div class="detail-drawer-head">
         <div>
@@ -80,8 +74,8 @@
     </aside>
   </div>
 
-  <div id="app-dialog" class="app-dialog-shell hidden">
-    <div class="app-dialog-backdrop" onclick="closeAppDialog(false)"></div>
+  <div id="app-dialog" class="app-dialog-shell hidden" aria-hidden="true">
+    <div class="app-dialog-backdrop" aria-hidden="true" onclick="closeAppDialog(false)"></div>
     <div class="app-dialog card" role="alertdialog" aria-modal="true" aria-labelledby="app-dialog-title">
       <div class="app-dialog-head">
         <div class="app-dialog-kicker" id="app-dialog-kicker">Action Required</div>
@@ -99,6 +93,5 @@
   window.PAGE_KIND = "mysearch";
   </script>
   <script src="{{ url_for('static', path='/js/console.js') }}"></script>
-</div>
 </body>
 </html>

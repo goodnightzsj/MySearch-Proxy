@@ -121,7 +121,7 @@ const WORKSPACE_META = {
     routeHint: '代理端点: POST /social/search',
     quotaSource: 'grok2api / xAI-compatible social router',
     switcherRoute: '/social/search',
-    switcherBadges: ['X Search', '自动继承'],
+    switcherBadges: ['X Search', 'g2a_ client key'],
     switcherFoot: '兼容路由 + 统一输出',
     spotlightDesc: 'Social / X 工作台负责舆情路由和 token 池映射，对外统一暴露 /social/search。',
   },
@@ -148,8 +148,22 @@ function isShellVisible(id) {
 }
 
 function syncOverlayState() {
-  const overlayOpen = ['settings-modal', 'detail-drawer', 'app-dialog'].some(isShellVisible);
+  const topOverlayId = getTopOpenOverlayId();
+  const overlayOpen = Boolean(topOverlayId);
   document.body.classList.toggle('modal-open', overlayOpen);
+  const dashboard = document.getElementById('dashboard');
+  if (dashboard && 'inert' in dashboard) {
+    dashboard.inert = overlayOpen;
+  }
+  OVERLAY_PRIORITY.forEach((id) => {
+    const shell = document.getElementById(id);
+    if (!shell) return;
+    const isOpen = isShellVisible(id);
+    shell.setAttribute('aria-hidden', isOpen && id === topOverlayId ? 'false' : 'true');
+    if ('inert' in shell) {
+      shell.inert = isOpen && id !== topOverlayId;
+    }
+  });
 }
 
 function getFocusableElements(root) {
@@ -214,7 +228,7 @@ function trapOverlayFocus(event) {
 }
 
 function handleSegmentedControlKey(event) {
-  const trigger = event.target.closest('.mini-switch-btn, .mode-switch-btn, .settings-tab');
+  const trigger = event.target.closest('.mini-switch-btn, .mode-switch-btn, .settings-tab, .workspace-tab');
   if (!trigger) return false;
   const isPrev = ['ArrowLeft', 'ArrowUp'].includes(event.key);
   const isNext = ['ArrowRight', 'ArrowDown'].includes(event.key);
@@ -222,9 +236,11 @@ function handleSegmentedControlKey(event) {
   const isEnd = event.key === 'End';
   if (!isPrev && !isNext && !isHome && !isEnd) return false;
 
-  const container = trigger.closest('.mini-switch, .mode-switch, .settings-tabs');
+  const container = trigger.closest('.mini-switch, .mode-switch, .settings-tabs, .workspace-tabs');
   if (!container) return false;
-  const selector = trigger.classList.contains('settings-tab')
+  const selector = trigger.classList.contains('workspace-tab')
+    ? '.workspace-tab'
+    : trigger.classList.contains('settings-tab')
     ? '.settings-tab'
     : trigger.classList.contains('mode-switch-btn')
       ? '.mode-switch-btn'
@@ -652,7 +668,7 @@ function renderSettingsSummaries(settings = latestSettings) {
     socialSummary.innerHTML = [
       summaryCard('工作模式', socialModeLabel(social.mode || 'manual'), social.admin_connected ? '后台已连通' : '可手动覆写上游'),
       summaryCard('Token 来源', socialTokenSourceLabel(social.token_source || ''), social.gateway_token_configured ? '客户端 token 已配置' : '可直接复用统一 token'),
-      summaryCard('默认模型', social.model || 'grok-4.20-fast', social.fallback_model ? `Fallback ${social.fallback_model}` : '未配置 fallback'),
+      summaryCard('默认模型', social.model || 'grok-4.20-0309', social.fallback_model ? `Fallback ${social.fallback_model}` : '未配置 fallback'),
     ].join('');
   }
 }
@@ -752,9 +768,11 @@ function syncThemeToggle() {
   if (button) {
     button.dataset.theme = activeTheme;
     button.dataset.effectiveTheme = effectiveTheme;
+    const nextLabel = getThemePreferenceLabel(getNextTheme());
     button.title = activeTheme === 'auto'
       ? getThemeSummaryHint()
-      : `点击切换到${getThemePreferenceLabel(getNextTheme())}`;
+      : `点击切换到${nextLabel}`;
+    button.setAttribute('aria-label', `当前${getThemePreferenceLabel()}，切换到${nextLabel}`);
   }
 }
 
@@ -769,7 +787,8 @@ function scrollToCurrentPanel() {
   }
   const panel = document.querySelector(`.service-panel[data-service="${activeService}"]`);
   if (panel) {
-    panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    const behavior = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
+    panel.scrollIntoView({ behavior, block: 'start' });
   }
 }
 
@@ -780,7 +799,8 @@ function scrollToQuickstart() {
   }
   const shell = document.getElementById('mysearch-quickstart');
   if (shell) {
-    shell.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    const behavior = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
+    shell.scrollIntoView({ behavior, block: 'start' });
   }
 }
 
@@ -803,7 +823,7 @@ function setLoginBusy(isBusy) {
     if (isBusy) {
       button.classList.remove('is-success', 'is-error');
     }
-    button.textContent = isBusy ? COPY.loginBusy : COPY.loginEnter;
+    button.textContent = isBusy ? COPY.loginBusy : (PAGE_KIND === 'mysearch' ? '进入接入台' : COPY.loginEnter);
   }
 }
 
@@ -815,8 +835,6 @@ function showDashboard(options = {}) {
   loginBox.classList.add('hidden');
   dashboard.classList.remove('hidden');
   dashboard.classList.remove('is-entering');
-  // r5 P1-5: 已登录用户进来时打上 has-session，CSS 把 hero 营销文案折叠
-  document.body.classList.add('has-session');
   if (animate) {
     dashboard.classList.add('is-entering');
     setTimeout(() => {
@@ -832,8 +850,6 @@ function showLogin() {
   dashboard.classList.remove('is-entering');
   dashboard.classList.add('hidden');
   loginBox.classList.remove('hidden');
-  // r5 P1-5: 退到登录页时恢复 hero 营销文案
-  document.body.classList.remove('has-session');
   closeSettingsModal();
   closeDetailDrawer();
   closeAppDialog(false);
@@ -1179,7 +1195,7 @@ function getQuickstartProviderCards(services = latestServices, social = latestSo
       label: 'Social / X',
       tone: 'danger',
       title: '待配置上游',
-      desc: '补 grok2api 后台或兼容上游后，统一 token 会自动复用',
+      desc: '补 grok2api v3 client key 或兼容上游 key 后，统一 token 会自动复用',
     });
   }
 
@@ -1361,7 +1377,6 @@ function renderHeroFocus(services, social) {
   const focusDesc = root.querySelector('.hero-focus-desc');
   const focusStamp = document.getElementById('hero-focus-stamp');
   const signalDot = document.getElementById('hero-focus-signal');
-  const metrics = document.getElementById('hero-focus-metrics');
 
   if (focusName) focusName.textContent = meta.label || '未知工作台';
   if (focusStatus) {
@@ -1379,46 +1394,23 @@ function renderHeroFocus(services, social) {
   if (signalDot) {
     signalDot.className = `hero-focus-signal is-${signal.tone}`;
   }
-  if (metrics) {
-    const metricOneLabel = snapshot.primaryMetricLabel || (activeService === 'social' ? '正常 Token' : '活跃 Key');
-    const metricOneValue = snapshot.primaryMetricValue ?? snapshot.keysActive;
-    const metricFourLabel = snapshot.quaternaryMetricLabel || snapshot.remainingLabel;
-    const metricFourValue = snapshot.quaternaryMetricValue ?? snapshot.remaining;
-    metrics.innerHTML = `
-      <div class="hero-focus-metric">
-        <span class="label">${metricOneLabel}</span>
-        <strong>${fmtNum(metricOneValue)}</strong>
-      </div>
-      <div class="hero-focus-metric">
-        <span class="label">Token</span>
-        <strong>${fmtNum(snapshot.tokensCount)}</strong>
-      </div>
-      <div class="hero-focus-metric">
-        <span class="label">${metricFourLabel}</span>
-        <strong>${metricFourValue === null ? '暂不可查' : fmtNum(metricFourValue)}</strong>
-      </div>
-      <div class="hero-focus-metric">
-        <span class="label">${activeService === 'social' ? '总调用' : '今日调用'}</span>
-        <strong>${fmtNum(snapshot.todayCount)}</strong>
-      </div>
-    `;
-  }
 }
 
 function buildSocialProxyEnv(social) {
   const baseUrl = social.upstream_base_url || 'https://media.example.com/v1';
   const adminBaseUrl = social.admin_base_url || baseUrl.replace(/\/v1$/, '');
-  const model = social.model || 'grok-4.20-fast';
-  const fallbackModel = social.fallback_model || 'grok-4.20-0309-non-reasoning';
-  return `# 推荐：只填 grok2api 后台地址和后台 app_key，proxy 会自动继承上游凭证与 token 池
+  const model = social.model || 'grok-4.20-0309';
+  const fallbackModel = social.fallback_model || 'grok-4.3';
+  return `# grok2api v3：在客户端密钥页面创建 g2a_ key
 SOCIAL_GATEWAY_UPSTREAM_BASE_URL=${baseUrl}
-SOCIAL_GATEWAY_ADMIN_BASE_URL=${adminBaseUrl}
-SOCIAL_GATEWAY_ADMIN_APP_KEY=YOUR_GROK2API_APP_KEY
+SOCIAL_GATEWAY_UPSTREAM_API_KEY=YOUR_GROK2API_G2A_CLIENT_KEY
 SOCIAL_GATEWAY_MODEL=${model}
 SOCIAL_GATEWAY_FALLBACK_MODEL=${fallbackModel}
 
-# 可选：只有你想覆写默认行为时才需要
-# SOCIAL_GATEWAY_UPSTREAM_API_KEY=
+# 仅 grok2api v2-compatible legacy 部署需要后台 app_key 自动继承
+# SOCIAL_GATEWAY_ADMIN_BASE_URL=${adminBaseUrl}
+# SOCIAL_GATEWAY_ADMIN_APP_KEY=YOUR_GROK2API_V2_APP_KEY
+# 可选：单独保护 /social/search；留空时复用 Proxy 通用 token
 # SOCIAL_GATEWAY_TOKEN=`;
 }
 
@@ -1633,11 +1625,11 @@ function renderSocialIntegration(social) {
   const statusLabel = socialStatusLabel(social);
   const upstreamBase = social?.upstream_base_url || 'https://media.example.com/v1';
   const adminBase = social?.admin_base_url || '未设置';
-  let note = '推荐只填写 grok2api 后台地址和 app key，让 proxy 自动继承上游密钥和 token 池。';
+  let note = 'grok2api v3 请填写 /v1 上游地址和管理端创建的 g2a_ client key。';
   if (social?.admin_connected) {
-    note = '当前已经走后台自动继承，后面通常不需要再手动维护上游 key 和客户端 token。';
+    note = '当前 legacy v2 后台自动继承已连通；v3 部署应改用独立 g2a_ client key。';
   } else if (social?.upstream_key_configured) {
-    note = '当前已经可以调用，但还没有接上后台 token 面板；如果你想看到完整统计，补上 grok2api app key 即可。';
+    note = '当前上游调用凭据已配置，可以直接使用 /social/search。';
   }
   const noteClass = social?.error ? 'integration-note is-error' : 'integration-note';
 
@@ -1649,7 +1641,7 @@ function renderSocialIntegration(social) {
       </div>
       <span class="detail-pill">摘要优先</span>
     </div>
-    <p class="desc">推荐优先接 grok2api 后台。这样只要填后台地址和 app key，proxy 就能自动继承上游密钥与 token 池，不需要再把配置拆成很多手动变量。</p>
+    <p class="desc">grok2api v3 使用独立的 g2a_ client key 调用 /v1/responses；后台 app key 自动继承仅保留给 v2-compatible legacy 部署。</p>
     <div class="integration-summary integration-summary-compact">
       <div class="integration-summary-item">
         <div class="label">当前状态</div>
@@ -1707,12 +1699,12 @@ function renderSocialIntegration(social) {
     </div>
     <div class="code-toolbar">
       <div class="endpoint">Proxy 端环境变量。通常只要复制这一段，再补你自己的 grok2api app key。</div>
-      <button class="btn btn-sm" onclick="copyCode('social-proxy-env', this)">复制 Proxy 配置</button>
+      <button class="btn btn-sm" type="button" onclick="copyCode('social-proxy-env', this)">复制 Proxy 配置</button>
     </div>
     <pre class="code-block mono" id="social-proxy-env"></pre>
     <div class="code-toolbar" style="margin-top:12px">
       <div class="endpoint">MySearch / MCP / Skill 端环境变量。现在更推荐直接使用 MySearch 通用 token，一次接上全部路由。</div>
-      <button class="btn btn-sm" onclick="copyCode('social-mysearch-env', this)">复制 MySearch 配置</button>
+      <button class="btn btn-sm" type="button" onclick="copyCode('social-mysearch-env', this)">复制 MySearch 配置</button>
     </div>
     <pre class="code-block mono" id="social-mysearch-env"></pre>
   `;
@@ -1817,7 +1809,7 @@ function renderMySearchQuickstart(mysearch, social) {
               </div>
               <div class="code-toolbar">
                 <div class="endpoint">复制到 <span class="mono">mysearch/.env</span> 就能用。默认已经包含统一 proxy 接法。</div>
-                <button class="btn btn-sm" onclick="copyCode('mysearch-proxy-env', this)">复制 .env</button>
+                <button class="btn btn-sm" type="button" onclick="copyCode('mysearch-proxy-env', this)">复制 .env</button>
               </div>
               <pre class="code-block mono" id="mysearch-proxy-env"></pre>
             </div>
@@ -1860,7 +1852,7 @@ function renderMySearchQuickstart(mysearch, social) {
               <div class="quickstart-command-shell">
                 <div class="code-toolbar">
                   <div class="endpoint">本地安装 / 远程启动命令，按仓库默认流程直接走。</div>
-                  <button class="btn btn-sm" onclick="copyCode('mysearch-install-cmd', this)">复制命令</button>
+                  <button class="btn btn-sm" type="button" onclick="copyCode('mysearch-install-cmd', this)">复制命令</button>
                 </div>
                 <pre class="code-block mono" id="mysearch-install-cmd"></pre>
               </div>
@@ -1877,18 +1869,18 @@ function renderMySearchQuickstart(mysearch, social) {
           </div>
           <div class="detail-body">
             <div class="form-row token-create-row">
-              <input class="input-grow" type="text" id="token-name-mysearch" placeholder="可选备注，例如 Codex / Claude Code / Team Demo">
-              <button class="btn btn-primary" onclick="createToken('mysearch', this)">创建通用 Token</button>
+              <input class="input-grow" type="text" id="token-name-mysearch" aria-label="MySearch Token 备注" placeholder="可选备注，例如 Codex / Claude Code / Team Demo">
+              <button class="btn btn-primary" type="button" onclick="createToken('mysearch', this)">创建通用 Token</button>
             </div>
             <div class="detail-glance" id="token-glance-mysearch"></div>
             <div class="detail-caption">表格只保留摘要。点击任一行，会在右侧抽屉里查看完整 token、调用统计和维护动作。</div>
             ${renderTableLegend('token')}
             <div class="table-tools">
               <div class="table-tools-row">
-                <input class="input-grow" type="text" id="token-search-mysearch" placeholder="搜索 token / 名称 / 创建时间" oninput="setTokenSearch('mysearch', this.value)">
+                <input class="input-grow" type="text" id="token-search-mysearch" aria-label="搜索 MySearch Token" placeholder="搜索 token / 名称 / 创建时间" oninput="setTokenSearch('mysearch', this.value)">
               </div>
               <div class="table-tools-row">
-                <div class="mini-switch" role="tablist" aria-label="MySearch token sort">
+                <div class="mini-switch" role="group" aria-label="MySearch Token 排序">
                   <button class="mini-switch-btn is-active" type="button" data-token-sort="risk" data-service="mysearch" aria-pressed="true" onclick="setTokenSort('mysearch', 'risk')">失败优先</button>
                   <button class="mini-switch-btn" type="button" data-token-sort="activity" data-service="mysearch" aria-pressed="false" onclick="setTokenSort('mysearch', 'activity')">按活跃度</button>
                   <button class="mini-switch-btn" type="button" data-token-sort="today" data-service="mysearch" aria-pressed="false" onclick="setTokenSort('mysearch', 'today')">按今日调用</button>
@@ -2050,7 +2042,7 @@ function getSettingsProbeMeta(kind, payload = {}) {
     } else if (payload.ok) {
       recommendation = '当前已能转发 Social / X 搜索；如果要更完整的 token 元数据，继续补 grok2api 后台。';
     } else {
-      recommendation = '优先检查 grok2api 后台地址与 app key；如果没有后台，再补手动上游 key 和客户端 token。';
+      recommendation = '优先检查 grok2api /v1 地址与 g2a_ client key；只有 v2-compatible legacy 部署才检查后台 app key。';
     }
   }
   return {
@@ -2202,7 +2194,7 @@ function setTavilyMode(mode) {
   document.querySelectorAll('.mode-switch-btn[data-tavily-mode]').forEach((button) => {
     const active = button.dataset.tavilyMode === nextMode;
     button.classList.toggle('is-active', active);
-    button.setAttribute('aria-selected', active ? 'true' : 'false');
+    button.setAttribute('aria-checked', active ? 'true' : 'false');
     button.setAttribute('tabindex', active ? '0' : '-1');
   });
   const tavily = latestSettings?.tavily || {};
@@ -2266,8 +2258,8 @@ function fillSettingsForm(settings) {
   document.getElementById('settings-social-admin-verify-path').value = social.admin_verify_path || '/v1/admin/verify';
   document.getElementById('settings-social-admin-config-path').value = social.admin_config_path || '/admin/api/config';
   document.getElementById('settings-social-admin-tokens-path').value = social.admin_tokens_path || '/admin/api/tokens';
-  document.getElementById('settings-social-model').value = social.model || 'grok-4.20-fast';
-  document.getElementById('settings-social-fallback-model').value = social.fallback_model || 'grok-4.20-0309-non-reasoning';
+  document.getElementById('settings-social-model').value = social.model || 'grok-4.20-0309';
+  document.getElementById('settings-social-fallback-model').value = social.fallback_model || 'grok-4.3';
   document.getElementById('settings-social-cache-ttl-seconds').value = String(social.cache_ttl_seconds || 60);
   document.getElementById('settings-social-fallback-min-results').value = String(social.fallback_min_results || 3);
 
@@ -2312,9 +2304,6 @@ async function openSettingsModal() {
   document.getElementById('settings-modal').classList.remove('hidden');
   setActiveSettingsTab(document.querySelector('.settings-tab.is-active')?.dataset.settingsTab || 'console');
   syncOverlayState();
-  // r7 U2: modal 打开时把 #dashboard 设 inert，确保 Tab 不会跑到 modal 外
-  const dashboard = document.getElementById('dashboard');
-  if (dashboard && 'inert' in dashboard) dashboard.inert = true;
   focusOverlay('settings-modal');
   try {
     await loadSettings();
@@ -2330,9 +2319,6 @@ async function openSettingsModal() {
 
 function closeSettingsModal() {
   document.getElementById('settings-modal').classList.add('hidden');
-  // r7 U2: 关闭 modal 后取消 dashboard inert，恢复 Tab 顺序
-  const dashboard = document.getElementById('dashboard');
-  if (dashboard && 'inert' in dashboard) dashboard.inert = false;
   syncOverlayState();
   restoreOverlayFocus('settings-modal');
 }
@@ -2365,11 +2351,17 @@ function renderServiceShells() {
             <button class="btn btn-soft" id="sync-btn-${service}" onclick="syncUsage('${service}', true, this)">${meta.syncButton}</button>
           </div>
         </div>
+        <div class="workspace-tabs" role="tablist" aria-label="${meta.label} 工作台分区">
+          <button type="button" class="workspace-tab is-active" id="workspace-${service}-tab-overview" role="tab" aria-selected="true" aria-controls="workspace-${service}-overview" tabindex="0" data-workspace-tab="overview" onclick="setWorkspaceTab('${service}', 'overview')">概览</button>
+          <button type="button" class="workspace-tab" id="workspace-${service}-tab-tokens" role="tab" aria-selected="false" aria-controls="workspace-${service}-tokens" tabindex="-1" data-workspace-tab="tokens" onclick="setWorkspaceTab('${service}', 'tokens')">Token</button>
+          <button type="button" class="workspace-tab" id="workspace-${service}-tab-keys" role="tab" aria-selected="false" aria-controls="workspace-${service}-keys" tabindex="-1" data-workspace-tab="keys" onclick="setWorkspaceTab('${service}', 'keys')">API Key</button>
+        </div>
         <div class="service-body">
-          <div class="stats-grid" id="overview-${service}"></div>
+          <section class="workspace-tab-panel is-active" id="workspace-${service}-overview" role="tabpanel" aria-labelledby="workspace-${service}-tab-overview" aria-hidden="false" data-workspace-panel="overview">
+            <div class="stats-grid" id="overview-${service}"></div>
 
-          <div class="section-grid service-intake-grid">
-            <div class="subcard api-shell">
+            <div class="section-grid service-intake-grid">
+              <div class="subcard api-shell">
               <h3>调用方式</h3>
               <p class="desc">${meta.routeHint}</p>
               <div class="inline-meta">
@@ -2378,12 +2370,12 @@ function renderServiceShells() {
               </div>
               <div class="code-toolbar">
                 <div class="endpoint">${meta.quotaSource}</div>
-                <button class="btn btn-sm" onclick="copyCode('curl-example-${service}', this)">复制示例</button>
+                <button class="btn btn-sm" type="button" onclick="copyCode('curl-example-${service}', this)">复制示例</button>
               </div>
               <pre class="code-block mono" id="curl-example-${service}"></pre>
             </div>
 
-            <div class="subcard service-brief">
+              <div class="subcard service-brief">
               <div class="service-brief-head">
                 <h3>接线摘要</h3>
                 <span class="service-brief-note">摘要优先</span>
@@ -2407,11 +2399,11 @@ function renderServiceShells() {
                   <strong>${meta.switcherFoot}</strong>
                 </div>
               </div>
+              </div>
             </div>
-          </div>
+          </section>
 
-          <div class="detail-panels">
-            <section class="subcard detail-card detail-card-static">
+          <section class="subcard detail-card detail-card-static workspace-tab-panel hidden" id="workspace-${service}-tokens" role="tabpanel" aria-labelledby="workspace-${service}-tab-tokens" aria-hidden="true" data-workspace-panel="tokens">
               <div class="detail-card-static-head">
                 <div>
                   <h3>Token 池</h3>
@@ -2421,8 +2413,8 @@ function renderServiceShells() {
               </div>
 	              <div class="detail-body">
 	                <div class="form-row">
-	                  <input class="input-grow" type="text" id="token-name-${service}" placeholder="Token 备注（可选）">
-                  <button class="btn btn-primary" onclick="createToken('${service}', this)">创建 ${meta.label} Token</button>
+		                  <input class="input-grow" type="text" id="token-name-${service}" aria-label="${meta.label} Token 备注" placeholder="Token 备注（可选）">
+                  <button class="btn btn-primary" type="button" onclick="createToken('${service}', this)">创建 ${meta.label} Token</button>
 	                </div>
                   <div class="detail-glance" id="token-glance-${service}"></div>
                 <div class="table-tools">
@@ -2430,10 +2422,11 @@ function renderServiceShells() {
                       class="input-grow"
                       type="text"
                       id="token-search-${service}"
+                      aria-label="搜索 ${meta.label} Token"
                       placeholder="搜索备注 / token / ID"
                       oninput="setTokenSearch('${service}', this.value)"
                     >
-                    <div class="mini-switch" role="tablist" aria-label="${meta.label} token sort">
+                    <div class="mini-switch" role="group" aria-label="${meta.label} Token 排序">
                       <button type="button" class="mini-switch-btn is-active" data-service="${service}" data-token-sort="risk" aria-pressed="true" onclick="setTokenSort('${service}', 'risk')">失败优先</button>
                       <button type="button" class="mini-switch-btn" data-service="${service}" data-token-sort="activity" aria-pressed="false" onclick="setTokenSort('${service}', 'activity')">活跃度</button>
                       <button type="button" class="mini-switch-btn" data-service="${service}" data-token-sort="today" aria-pressed="false" onclick="setTokenSort('${service}', 'today')">今日调用</button>
@@ -2456,9 +2449,9 @@ function renderServiceShells() {
 	                  </table>
                 </div>
               </div>
-            </section>
+          </section>
 
-            <section class="subcard detail-card detail-card-static">
+          <section class="subcard detail-card detail-card-static workspace-tab-panel hidden" id="workspace-${service}-keys" role="tabpanel" aria-labelledby="workspace-${service}-tab-keys" aria-hidden="true" data-workspace-panel="keys">
               <div class="detail-card-static-head">
                 <div>
                   <h3>API Key 池</h3>
@@ -2468,14 +2461,14 @@ function renderServiceShells() {
               </div>
 	              <div class="detail-body">
 	                <div class="form-row">
-	                  <input class="input-grow mono" type="text" id="single-key-${service}" placeholder="${meta.keyPlaceholder}">
-	                  <button class="btn btn-primary" onclick="addSingleKey('${service}', this)">添加 ${meta.label} Key</button>
-	                  <button class="btn btn-soft" onclick="toggleImport('${service}')">批量导入</button>
-	                </div>
-	                  <div id="import-wrap-${service}" class="toggle-area hidden">
-	                    <textarea id="import-text-${service}" placeholder="${meta.importPlaceholder}"></textarea>
-	                    <div class="form-row form-row-end">
-	                      <button class="btn btn-primary" onclick="importKeys('${service}', this)">导入到 ${meta.label} 池</button>
+		                  <input class="input-grow mono" type="text" id="single-key-${service}" aria-label="${meta.label} API Key" placeholder="${meta.keyPlaceholder}">
+		                  <button class="btn btn-primary" type="button" onclick="addSingleKey('${service}', this)">添加 ${meta.label} Key</button>
+		                  <button class="btn btn-soft" type="button" aria-expanded="false" aria-controls="import-wrap-${service}" onclick="toggleImport('${service}', this)">批量导入</button>
+		                </div>
+		                  <div id="import-wrap-${service}" class="toggle-area hidden">
+		                    <textarea id="import-text-${service}" aria-label="批量导入 ${meta.label} API Key" placeholder="${meta.importPlaceholder}"></textarea>
+		                    <div class="form-row form-row-end">
+		                      <button class="btn btn-primary" type="button" onclick="importKeys('${service}', this)">导入到 ${meta.label} 池</button>
 	                    </div>
 	                  </div>
                   <div class="detail-glance" id="key-glance-${service}"></div>
@@ -2484,18 +2477,19 @@ function renderServiceShells() {
                       class="input-grow"
                       type="text"
                       id="key-search-${service}"
+                      aria-label="搜索 ${meta.label} API Key"
                       placeholder="搜索邮箱 / key / ID"
                       oninput="setKeySearch('${service}', this.value)"
                     >
                     <div class="table-tools-row">
-                      <div class="mini-switch" role="tablist" aria-label="${meta.label} key filter">
+                      <div class="mini-switch" role="group" aria-label="${meta.label} API Key 筛选">
                         <button type="button" class="mini-switch-btn is-active" data-service="${service}" data-key-filter="all" aria-pressed="true" onclick="setKeyFilter('${service}', 'all')">全部</button>
                         <button type="button" class="mini-switch-btn" data-service="${service}" data-key-filter="issue" aria-pressed="false" onclick="setKeyFilter('${service}', 'issue')">待处理</button>
                         <button type="button" class="mini-switch-btn" data-service="${service}" data-key-filter="active" aria-pressed="false" onclick="setKeyFilter('${service}', 'active')">正常</button>
                         <button type="button" class="mini-switch-btn" data-service="${service}" data-key-filter="disabled" aria-pressed="false" onclick="setKeyFilter('${service}', 'disabled')">禁用</button>
                         <button type="button" class="mini-switch-btn" data-service="${service}" data-key-filter="error" aria-pressed="false" onclick="setKeyFilter('${service}', 'error')">异常</button>
                       </div>
-                      <div class="mini-switch" role="tablist" aria-label="${meta.label} key sort">
+                      <div class="mini-switch" role="group" aria-label="${meta.label} API Key 排序">
                         <button type="button" class="mini-switch-btn is-active" data-service="${service}" data-key-sort="risk" aria-pressed="true" onclick="setKeySort('${service}', 'risk')">异常优先</button>
                         <button type="button" class="mini-switch-btn" data-service="${service}" data-key-sort="recent" aria-pressed="false" onclick="setKeySort('${service}', 'recent')">最近使用</button>
                         <button type="button" class="mini-switch-btn" data-service="${service}" data-key-sort="usage" aria-pressed="false" onclick="setKeySort('${service}', 'usage')">成功调用</button>
@@ -2522,8 +2516,7 @@ function renderServiceShells() {
                   </table>
                 </div>
               </div>
-            </section>
-          </div>
+          </section>
         </div>
       </section>
     `;
@@ -2547,12 +2540,18 @@ function renderServiceShells() {
           <div class="service-sync-meta">用于查看 token 池、剩余额度、调用次数和客户端接线方式。</div>
         </div>
       </div>
+      <div class="workspace-tabs" role="tablist" aria-label="Social / X 工作台分区">
+        <button type="button" class="workspace-tab is-active" id="workspace-social-tab-overview" role="tab" aria-selected="true" aria-controls="workspace-social-overview" tabindex="0" data-workspace-tab="overview" onclick="setWorkspaceTab('social', 'overview')">状态</button>
+        <button type="button" class="workspace-tab" id="workspace-social-tab-integration" role="tab" aria-selected="false" aria-controls="workspace-social-integration" tabindex="-1" data-workspace-tab="integration" onclick="setWorkspaceTab('social', 'integration')">接线</button>
+      </div>
       <div class="service-body">
-        <div class="stats-grid" id="overview-social"></div>
-        <div class="section-grid social-section-grid">
+        <section class="workspace-tab-panel is-active" id="workspace-social-overview" role="tabpanel" aria-labelledby="workspace-social-tab-overview" aria-hidden="false" data-workspace-panel="overview">
+          <div class="stats-grid" id="overview-social"></div>
           <div class="subcard social-board" id="social-board"></div>
+        </section>
+        <section class="workspace-tab-panel hidden" id="workspace-social-integration" role="tabpanel" aria-labelledby="workspace-social-tab-integration" aria-hidden="true" data-workspace-panel="integration">
           <div class="subcard api-shell" id="social-integration"></div>
-        </div>
+        </section>
       </div>
     </section>
   `;
@@ -2565,6 +2564,26 @@ function renderServiceShells() {
   applyActiveService();
 }
 
+function setWorkspaceTab(service, tabName) {
+  const panel = document.querySelector(`.service-panel[data-service="${service}"]`);
+  if (!panel) return;
+  const target = panel.querySelector(`.workspace-tab-panel[data-workspace-panel="${tabName}"]`);
+  if (!target) return;
+
+  panel.querySelectorAll('.workspace-tab').forEach((button) => {
+    const isActive = button.dataset.workspaceTab === tabName;
+    button.classList.toggle('is-active', isActive);
+    button.setAttribute('aria-selected', isActive ? 'true' : 'false');
+    button.setAttribute('tabindex', isActive ? '0' : '-1');
+  });
+  panel.querySelectorAll('.workspace-tab-panel').forEach((item) => {
+    const isActive = item.dataset.workspacePanel === tabName;
+    item.classList.toggle('hidden', !isActive);
+    item.classList.toggle('is-active', isActive);
+    item.setAttribute('aria-hidden', isActive ? 'false' : 'true');
+  });
+}
+
 function renderServiceSwitcher(services, social) {
   const root = document.getElementById('service-switcher');
   if (!root) return;
@@ -2572,14 +2591,12 @@ function renderServiceSwitcher(services, social) {
     const isSocial = service === 'social';
     const snapshot = getWorkspaceSnapshot(service, services, social);
     const signal = workspaceSignal(service, services, social);
-    const foot = meta.switcherFoot || (isSocial ? '统一 Social 路由 + 统一输出结构' : '独立 Key 池 + 独立额度同步');
     const metricOneLabel = snapshot.primaryMetricLabel || (isSocial ? '可用 Token' : '活跃 Key');
     const metricTwoLabel = isSocial ? '今日调用' : 'Token';
     const metricTwoValue = isSocial ? fmtNum(snapshot.todayCount) : fmtNum(snapshot.tokensCount);
-    const badge = (meta.switcherBadges || [isSocial ? 'X Search' : '池状态'])[0];
     const footnote = snapshot.remaining !== null && snapshot.remaining !== undefined
       ? `${snapshot.remainingLabel} ${fmtNum(snapshot.remaining)}`
-      : foot;
+      : (meta.switcherFoot || (isSocial ? '统一 Social 路由' : '独立 Provider 池'));
 
     return `
       <button
@@ -2587,34 +2604,25 @@ function renderServiceSwitcher(services, social) {
         class="service-toggle ${activeService === service ? 'is-active' : ''}"
         data-service="${service}"
         aria-pressed="${activeService === service ? 'true' : 'false'}"
+        aria-current="${activeService === service ? 'page' : 'false'}"
         onclick="setActiveService('${service}')"
       >
         <div class="service-toggle-top">
           <div class="service-toggle-title">
-            <span class="service-chip" data-service="${service}">${meta.label}</span>
-            <strong>${meta.label}</strong>
-          </div>
-          <div class="service-toggle-status-wrap">
-            ${activeService === service ? '<span class="service-toggle-flag">当前查看</span>' : ''}
-            <div class="service-toggle-status is-${signal.tone}">
-              <span class="service-toggle-signal"></span>
-              <span>${signal.label}</span>
+            <span class="service-toggle-mark" data-service="${service}" aria-hidden="true">${isSocial ? 'X' : meta.label.slice(0, 1)}</span>
+            <div>
+              <strong>${meta.label}</strong>
+              <span>${escapeHtml(footnote)}</span>
             </div>
           </div>
-        </div>
-        <div class="service-toggle-grid">
-          <div class="service-toggle-metric">
-            <div class="label">${metricOneLabel}</div>
-            <div class="value">${fmtNum(snapshot.primaryMetricValue ?? snapshot.keysActive)}</div>
-          </div>
-          <div class="service-toggle-metric">
-            <div class="label">${metricTwoLabel}</div>
-            <div class="value">${metricTwoValue}</div>
+          <div class="service-toggle-status is-${signal.tone}">
+            <span class="service-toggle-signal"></span>
+            <span>${signal.label}</span>
           </div>
         </div>
         <div class="service-toggle-meta">
-          <span class="service-toggle-badge">${escapeHtml(badge)}</span>
-          <span class="service-toggle-footnote">${escapeHtml(footnote)}</span>
+          <span>${escapeHtml(metricOneLabel)} <strong>${fmtNum(snapshot.primaryMetricValue ?? snapshot.keysActive)}</strong></span>
+          <span>${escapeHtml(metricTwoLabel)} <strong>${metricTwoValue}</strong></span>
         </div>
       </button>
     `;
@@ -2638,6 +2646,7 @@ function applyActiveService() {
     const isActive = item.dataset.service === activeService;
     item.classList.toggle('is-active', isActive);
     item.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+    item.setAttribute('aria-current', isActive ? 'page' : 'false');
     const status = item.querySelector('.service-toggle-status');
     if (status) {
       const label = status.querySelector('span:last-child');
@@ -2646,15 +2655,20 @@ function applyActiveService() {
         label.textContent = signal.label;
       }
     }
-    const flag = item.querySelector('.service-toggle-flag');
-    if (flag) {
-      flag.classList.toggle('hidden', !isActive);
-    }
   });
 
   const switcherNote = document.getElementById('switcher-note');
   if (switcherNote) {
     switcherNote.textContent = `当前工作台：${WORKSPACE_META[activeService].label} · 已记住你的切换偏好`;
+  }
+
+  const activeToggle = document.querySelector(`.service-toggle[data-service="${activeService}"]`);
+  if (activeToggle && window.innerWidth <= 1024) {
+    const navigator = activeToggle.closest('.service-switcher');
+    if (navigator) {
+      const left = activeToggle.offsetLeft - ((navigator.clientWidth - activeToggle.offsetWidth) / 2);
+      navigator.scrollTo({ left: Math.max(0, left), behavior: 'auto' });
+    }
   }
 }
 
@@ -2690,7 +2704,8 @@ function setActiveService(service) {
   renderSettingsSummaries();
   const panel = document.querySelector(`.service-panel[data-service="${service}"]`);
   if (panel) {
-    panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    const behavior = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
+    panel.scrollIntoView({ behavior, block: 'start' });
   }
 }
 
@@ -3644,8 +3659,15 @@ async function refresh(options = {}) {
   renderDashboardScope(options.scope);
 }
 
-function toggleImport(service) {
-  document.getElementById(`import-wrap-${service}`).classList.toggle('hidden');
+function toggleImport(service, button) {
+  const shell = document.getElementById(`import-wrap-${service}`);
+  if (!shell) return;
+  const expanded = shell.classList.contains('hidden');
+  shell.classList.toggle('hidden', !expanded);
+  button?.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  if (expanded) {
+    document.getElementById(`import-text-${service}`)?.focus({ preventScroll: true });
+  }
 }
 
 async function createToken(service, button) {
@@ -4058,8 +4080,10 @@ function setActiveSettingsTab(tabName) {
     btn.setAttribute('tabindex', btn.dataset.settingsTab === tabName ? '0' : '-1');
   });
   document.querySelectorAll('.settings-tab-panel').forEach(panel => {
-    panel.classList.toggle('hidden', panel.dataset.settingsPanel !== tabName);
-    panel.classList.toggle('is-active', panel.dataset.settingsPanel === tabName);
+    const isActive = panel.dataset.settingsPanel === tabName;
+    panel.classList.toggle('hidden', !isActive);
+    panel.classList.toggle('is-active', isActive);
+    panel.setAttribute('aria-hidden', isActive ? 'false' : 'true');
   });
 }
 
