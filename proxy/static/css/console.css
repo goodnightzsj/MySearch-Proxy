@@ -3374,6 +3374,17 @@ body.theme-dark .app-dialog {
     overflow-x: auto;
   }
 
+  .inline-meta-base-url {
+    flex: 1 0 100%;
+    flex-direction: column;
+    border-radius: 12px;
+  }
+
+  .inline-meta-base-url .mono {
+    width: 100%;
+    overflow-wrap: anywhere;
+  }
+
   .integration-summary-item-wide {
     grid-column: auto;
   }
