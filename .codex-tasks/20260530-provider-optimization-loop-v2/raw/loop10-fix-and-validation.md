@@ -1,7 +1,7 @@
 ## Loop 10 Fixes And Validation
 
 - Date: 2026-07-17
-- Status: local fixes and validation complete; release and full comparison pending.
+- Status: the first release and 41-row comparison exposed a version-extraction regression; the follow-up local fix is validated and awaits release plus the final comparison.
 
 ## Fixes
 
@@ -10,6 +10,7 @@
 - Changed v2 admin readers to fail explicitly when a successful HTTP response is not a JSON object, preventing grok2api v3 SPA HTML from being reported as a connected admin API.
 - Made the standalone Social gateway lock lazy and event-loop scoped so import does not require a current loop under Python 3.9.
 - Removed a test-only `sys.modules` reset that corrupted later package-level mocks.
+- Added `development version` to software-version prerelease markers in both runtime copies. This matches the current Python downloads wording without widening the surrounding context window.
 
 ## Validation
 
@@ -20,10 +21,13 @@
 - Live grok2api probe: `grok-4.20-0309` returned HTTP 200 and X citations through `/v1/responses`.
 - Live grok2api probe: `grok-4.3` returned HTTP 200 through `/v1/responses`.
 - Live MySearch Social probe after the runtime setting update: one Social call, selected model `grok-4.20-0309`, two X results.
+- First post-deploy comparison: 41/41 captured, zero structural failures, zero timeouts, and zero empty results; it exposed the incorrect `Python 3.15` stable-version answer.
+- Current Python downloads raw-result replay after the follow-up fix: `The latest stable version of Python is 3.14.6.`
+- Follow-up `pytest -q tests/test_loop7_fixes.py tests/test_clients.py`: 364 passed.
+- Follow-up `pytest -q`: 623 passed.
 
 ## Pending Gates
 
-- Commit and push the verified changes.
-- Wait for the Docker workflow.
-- Build/redeploy `mysearch-stack` from the committed tree.
-- Run a fresh full 41-row comparison and record Loop 10 convergence.
+- Commit and push the follow-up version-extraction fix.
+- Wait for the Docker workflow and redeploy `mysearch-stack` again.
+- Run a fresh final 41-row comparison and record Loop 10 convergence.
