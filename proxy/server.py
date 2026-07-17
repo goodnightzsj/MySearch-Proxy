@@ -39,7 +39,7 @@ def _default_social_model() -> str:
         resolved = _resolve_grok_models()
         if resolved:
             return resolved[0].id
-    return "grok-4.20-fast"
+    return "grok-4.20-0309"
 
 
 def _default_social_fallback_model(primary: str) -> str:
@@ -47,7 +47,7 @@ def _default_social_fallback_model(primary: str) -> str:
         resolved = _resolve_grok_models()
         if len(resolved) >= 2:
             return resolved[1].id
-    return "grok-4.20-0309-non-reasoning" if primary != "grok-4.20-0309-non-reasoning" else primary
+    return "grok-4.3" if primary != "grok-4.3" else primary
 
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin")
 ADMIN_SESSION_COOKIE = os.environ.get("ADMIN_SESSION_COOKIE", "mysearch_proxy_session")
@@ -1228,7 +1228,9 @@ async def fetch_social_admin_json(config, path):
         if not detail:
             detail = response.text.strip()[:240] or f"HTTP {response.status_code}"
         raise RuntimeError(f"{path} -> {detail}")
-    return payload if isinstance(payload, dict) else {}
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{path} -> expected JSON object")
+    return payload
 
 
 def build_social_admin_path_candidates(path, *, kind):

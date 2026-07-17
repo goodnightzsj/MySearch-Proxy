@@ -305,8 +305,8 @@ SOCIAL_GATEWAY_ADMIN_CONFIG_PATH=/admin/api/config
 SOCIAL_GATEWAY_ADMIN_TOKENS_PATH=/admin/api/tokens
 SOCIAL_GATEWAY_CACHE_TTL_SECONDS=60
 SOCIAL_GATEWAY_UPSTREAM_API_KEY=
-SOCIAL_GATEWAY_MODEL=grok-4.20-fast
-SOCIAL_GATEWAY_FALLBACK_MODEL=grok-4.20-0309-non-reasoning
+SOCIAL_GATEWAY_MODEL=grok-4.20-0309
+SOCIAL_GATEWAY_FALLBACK_MODEL=grok-4.3
 SOCIAL_GATEWAY_TOKEN=
 ```
 
@@ -332,22 +332,20 @@ mode instead of pretending that detailed upstream key/quota data is available.
 
 ### Recommended `grok2api` setup
 
-If the upstream is `grok2api`, it is better to set only:
+For `grok2api` v3, create a client key in `/client-keys`, then configure:
 
 ```env
 SOCIAL_GATEWAY_UPSTREAM_BASE_URL=https://media.example.com/v1
-SOCIAL_GATEWAY_ADMIN_BASE_URL=https://media.example.com
-SOCIAL_GATEWAY_ADMIN_APP_KEY=YOUR_GROK2API_APP_KEY
-SOCIAL_GATEWAY_MODEL=grok-4.20-fast
-SOCIAL_GATEWAY_FALLBACK_MODEL=grok-4.20-0309-non-reasoning
+SOCIAL_GATEWAY_UPSTREAM_API_KEY=g2a_your_client_key
+SOCIAL_GATEWAY_MODEL=grok-4.20-0309
+SOCIAL_GATEWAY_FALLBACK_MODEL=grok-4.3
 ```
 
-The console will then:
-
-- inherit `app.api_key` from `/admin/api/config`
-- read token state from `/admin/api/tokens`
-- reuse inherited credentials when `SOCIAL_GATEWAY_UPSTREAM_API_KEY` or
-  `SOCIAL_GATEWAY_TOKEN` are not explicitly set
+The inference endpoint remains `POST /v1/responses`. The old
+`/admin/api/config` and `/admin/api/tokens` auto-inheritance flow is retained
+only for grok2api v2-compatible deployments; v3 uses `/api/admin/v1/*` with an
+administrator session and intentionally separates that session from `g2a_`
+client keys.
 
 ### Manual mode
 

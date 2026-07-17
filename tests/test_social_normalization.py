@@ -47,12 +47,24 @@ def _payload(*, text: str, citations: list[dict[str, str]] | None = None) -> dic
 
 
 class _FakeResponse:
-    def __init__(self, status_code: int, payload: dict[str, object], text: str = "") -> None:
+    def __init__(
+        self,
+        status_code: int,
+        payload: object,
+        text: str = "",
+        *,
+        json_error: bool = False,
+    ) -> None:
         self.status_code = status_code
         self._payload = payload
         self.text = text or str(payload)
+        self._json_error = json_error
 
     def json(self) -> dict[str, object]:
+        if self._json_error:
+            raise ValueError("response is not JSON")
+        if not isinstance(self._payload, dict):
+            return self._payload  # type: ignore[return-value]
         return self._payload
 
 
@@ -256,11 +268,11 @@ class SocialFallbackRouteTests(unittest.IsolatedAsyncioTestCase):
                 ],
             )
             self.assertEqual(len(client.calls), 2)
-            self.assertEqual(client.calls[0]["json"]["model"], "grok-4.20-fast")
-            self.assertEqual(client.calls[1]["json"]["model"], "grok-4.20-0309-non-reasoning")
+            self.assertEqual(client.calls[0]["json"]["model"], "grok-4.20-0309")
+            self.assertEqual(client.calls[1]["json"]["model"], "grok-4.3")
             self.assertEqual(result["tool_usage"]["social_search_calls"], 2)
-            self.assertEqual(result["tool_usage"]["model"], "grok-4.20-0309-non-reasoning")
-            self.assertEqual(result["route"]["selected_model"], "grok-4.20-0309-non-reasoning")
+            self.assertEqual(result["tool_usage"]["model"], "grok-4.3")
+            self.assertEqual(result["route"]["selected_model"], "grok-4.3")
 
     async def test_requested_model_overrides_primary_model(self) -> None:
         primary = _payload(
@@ -329,8 +341,8 @@ class SocialFallbackRouteTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(len(client.calls), 1)
             self.assertEqual(result["tool_usage"]["social_search_calls"], 1)
-            self.assertEqual(result["tool_usage"]["model"], "grok-4.20-fast")
-            self.assertEqual(result["route"]["selected_model"], "grok-4.20-fast")
+            self.assertEqual(result["tool_usage"]["model"], "grok-4.20-0309")
+            self.assertEqual(result["route"]["selected_model"], "grok-4.20-0309")
             self.assertFalse(result["route"]["fallback"]["triggered"])
             self.assertFalse(result["route"]["fallback"]["used"])
 
@@ -370,8 +382,8 @@ class SocialFallbackRouteTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(len(client.calls), 2)
             self.assertEqual(result["tool_usage"]["social_search_calls"], 2)
-            self.assertEqual(result["tool_usage"]["model"], "grok-4.20-0309-non-reasoning")
-            self.assertEqual(result["route"]["selected_model"], "grok-4.20-0309-non-reasoning")
+            self.assertEqual(result["tool_usage"]["model"], "grok-4.3")
+            self.assertEqual(result["route"]["selected_model"], "grok-4.3")
             self.assertEqual(result["route"]["fallback"]["reason"], "upstream_error")
             self.assertTrue(result["route"]["fallback"]["used"])
             self.assertEqual(len(result["results"]), 2)
@@ -427,8 +439,8 @@ class SocialAdminCompatibilityTests(unittest.IsolatedAsyncioTestCase):
             "admin_app_key": "admin-key",
             "upstream_api_key": "",
             "gateway_token": "",
-            "model": "grok-4.20-fast",
-            "fallback_model": "grok-4.20-0309-non-reasoning",
+            "model": "grok-4.20-0309",
+            "fallback_model": "grok-4.3",
             "fallback_min_results": 3,
             "cache_ttl_seconds": 60,
         }
@@ -461,6 +473,68 @@ class SocialAdminCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("http://example.test:8000/v1/admin/tokens", called_urls)
         self.assertIn("http://example.test:8000/admin/api/tokens", called_urls)
 
+    async def test_v3_spa_fallback_is_not_treated_as_admin_json(self) -> None:
+        original_http_client = proxy_server.http_client
+        config = {
+            "upstream_base_url": "http://example.test/v1",
+            "upstream_responses_path": "/responses",
+            "admin_base_url": "http://example.test:8000",
+            "admin_verify_path": "/v1/admin/verify",
+            "admin_config_path": "/admin/api/config",
+            "admin_tokens_path": "/admin/api/tokens",
+            "admin_app_key": "legacy-admin-key",
+            "upstream_api_key": "g2a-client-key",
+            "gateway_token": "",
+            "model": "grok-4.20-0309",
+            "fallback_model": "grok-4.3",
+            "fallback_min_results": 3,
+            "cache_ttl_seconds": 60,
+        }
+        spa_response = _FakeResponse(200, None, "<html>grok2api v3</html>", json_error=True)
+        fake_client = _FakeGetClient(
+            {
+                "http://example.test:8000/admin/api/config": spa_response,
+                "http://example.test:8000/v1/admin/config": spa_response,
+                "http://example.test:8000/api/v1/admin/config": spa_response,
+            }
+        )
+        proxy_server.http_client = fake_client
+        try:
+            state = await proxy_server.resolve_social_gateway_state_for_config(config)
+        finally:
+            proxy_server.http_client = original_http_client
+
+        self.assertFalse(state["admin_connected"])
+        self.assertEqual(state["mode"], "manual")
+        self.assertEqual(state["resolved_upstream_api_key"], "g2a-client-key")
+        self.assertIn("expected JSON object", state["error"])
+
+    async def test_standalone_gateway_rejects_v3_spa_as_admin_json(self) -> None:
+        from mysearch import social_gateway
+
+        original_http_client = social_gateway.http_client
+        original_admin_base_url = social_gateway.ADMIN_BASE_URL
+        original_admin_app_key = social_gateway.ADMIN_APP_KEY
+        social_gateway.http_client = _FakeGetClient(
+            {
+                "http://example.test:8000/admin/api/config": _FakeResponse(
+                    200,
+                    None,
+                    "<html>grok2api v3</html>",
+                    json_error=True,
+                )
+            }
+        )
+        social_gateway.ADMIN_BASE_URL = "http://example.test:8000"
+        social_gateway.ADMIN_APP_KEY = "legacy-admin-key"
+        try:
+            with self.assertRaisesRegex(RuntimeError, "expected JSON object"):
+                await social_gateway.fetch_admin_json("/admin/api/config")
+        finally:
+            social_gateway.http_client = original_http_client
+            social_gateway.ADMIN_BASE_URL = original_admin_base_url
+            social_gateway.ADMIN_APP_KEY = original_admin_app_key
+
 
 async def _fake_gateway_state(force: bool = False) -> dict[str, object]:
     return {
@@ -468,8 +542,8 @@ async def _fake_gateway_state(force: bool = False) -> dict[str, object]:
         "upstream_responses_path": "/responses",
         "accepted_tokens": ["test-token"],
         "resolved_upstream_api_key": "upstream-key",
-        "model": "grok-4.20-fast",
-        "fallback_model": "grok-4.20-0309-non-reasoning",
+        "model": "grok-4.20-0309",
+        "fallback_model": "grok-4.3",
         "fallback_min_results": 3,
     }
 
@@ -480,8 +554,8 @@ async def _fake_proxy_state(force: bool = False) -> dict[str, object]:
         "upstream_responses_path": "/responses",
         "accepted_tokens": ["test-token"],
         "resolved_upstream_api_key": "upstream-key",
-        "model": "grok-4.20-fast",
-        "fallback_model": "grok-4.20-0309-non-reasoning",
+        "model": "grok-4.20-0309",
+        "fallback_model": "grok-4.3",
         "fallback_min_results": 3,
     }
 

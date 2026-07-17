@@ -283,17 +283,16 @@ Without X / Social:
 So no X provider is not a blocker for MySearch as a general-purpose search
 stack.
 
-#### Grok model registry (basic-tier defaults + user overlay)
+#### Grok model registry (v3-compatible defaults + user overlay)
 
 Heads-up: as of 2026-05-15, several Grok models retired from the xAI API
 (`grok-3-mini`, `grok-4.1-fast`, `grok-4-fast`, `grok-4`, `grok-code-fast-1`).
-Project defaults now align with
-[`chenyme/grok2api`](https://github.com/chenyme/grok2api) **basic tier**
-(free-account compatible):
+Project defaults now align with model IDs verified against
+[`chenyme/grok2api`](https://github.com/chenyme/grok2api) v3:
 
-- Primary: `grok-4.20-fast`
-- Fallback: `grok-4.20-0309-non-reasoning`
-- Also recognized: `grok-4.3-beta`
+- Primary: `grok-4.20-0309`
+- Fallback: `grok-4.3`
+- Also recognized: `grok-4.5`
 
 The registry is overlay-driven, controlled by two env variables:
 

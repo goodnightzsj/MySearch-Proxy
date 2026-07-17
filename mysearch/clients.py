@@ -12452,7 +12452,7 @@ class MySearchClient:
         models = self.config.xai_models
         if models:
             return models[0].id
-        return "grok-4.20-fast"
+        return "grok-4.20-0309"
 
     def _derive_root_health_base_url(self, provider: ProviderConfig) -> str:
         candidate = (

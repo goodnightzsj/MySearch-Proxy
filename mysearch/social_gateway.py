@@ -31,7 +31,7 @@ def _grok_default_primary() -> str:
     """social gateway 主模型默认值。
 
     优先使用用户在 `MYSEARCH_GROK_MODELS` / `MYSEARCH_GROK_EXTRA_MODELS` 配置的清单第 1 项，
-    回退到内置 basic 层第 1 项（`grok-4.20-fast`）。这样 `SOCIAL_GATEWAY_MODEL` 与
+    回退到内置 basic 层第 1 项（`grok-4.20-0309`）。这样 `SOCIAL_GATEWAY_MODEL` 与
     `MYSEARCH_GROK_MODELS` 在零配置下天然一致。
     """
 
@@ -135,10 +135,16 @@ http_client = httpx.AsyncClient(
     limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
 )
 state_cache: dict[str, Any] = {"expires_at": 0.0, "value": None}
-state_lock = asyncio.Lock()
+state_lock: asyncio.Lock | None = None
+state_lock_loop: asyncio.AbstractEventLoop | None = None
 
 
 def get_state_lock() -> asyncio.Lock:
+    global state_lock, state_lock_loop
+    loop = asyncio.get_running_loop()
+    if state_lock is None or state_lock_loop is not loop:
+        state_lock = asyncio.Lock()
+        state_lock_loop = loop
     return state_lock
 
 
@@ -363,7 +369,9 @@ async def fetch_admin_json(path: str) -> dict[str, Any]:
         if not detail:
             detail = response.text[:240] or f"HTTP {response.status_code}"
         raise RuntimeError(f"{path} -> {detail}")
-    return payload if isinstance(payload, dict) else {}
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{path} -> expected JSON object")
+    return payload
 
 
 def build_admin_path_candidates(path: str, *, kind: str) -> list[str]:

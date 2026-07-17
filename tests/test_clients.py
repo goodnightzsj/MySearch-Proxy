@@ -2578,7 +2578,7 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(calls[1]["method"], "POST")
         self.assertEqual(calls[1]["path"], "/social/search")
         self.assertEqual(calls[1]["payload"]["max_results"], 1)
-        self.assertEqual(calls[1]["payload"]["model"], "grok-4.20-fast")
+        self.assertEqual(calls[1]["payload"]["model"], "grok-4.20-0309")
 
     def test_xai_official_health_probe_uses_status_page(self) -> None:
         client = MySearchClient()
@@ -2621,7 +2621,7 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(len(text_calls), 1)
         self.assertEqual(len(json_calls), 1)
         self.assertEqual(json_calls[0]["path"], "/responses")
-        self.assertEqual(json_calls[0]["payload"]["model"], "grok-4.20-fast")
+        self.assertEqual(json_calls[0]["payload"]["model"], "grok-4.20-0309")
 
     def test_xai_compatible_search_timeout_falls_back_to_tavily_x_results(self) -> None:
         client = MySearchClient()

@@ -372,8 +372,8 @@ Minimal config:
 SOCIAL_GATEWAY_UPSTREAM_BASE_URL=https://media.example.com/v1
 SOCIAL_GATEWAY_UPSTREAM_RESPONSES_PATH=/responses
 SOCIAL_GATEWAY_UPSTREAM_API_KEY=your-upstream-key
-SOCIAL_GATEWAY_MODEL=grok-4.20-fast
-SOCIAL_GATEWAY_FALLBACK_MODEL=grok-4.20-0309-non-reasoning
+SOCIAL_GATEWAY_MODEL=grok-4.20-0309
+SOCIAL_GATEWAY_FALLBACK_MODEL=grok-4.3
 SOCIAL_GATEWAY_TOKEN=your-social-gateway-token
 ```
 
@@ -420,9 +420,8 @@ configuration without restarting:
 
 ## Grok model registry
 
-Defaults align with `chenyme/grok2api` basic tier (free-account
-compatible): `grok-4.20-fast`, `grok-4.20-0309-non-reasoning`,
-`grok-4.3-beta`.
+Defaults are verified against `chenyme/grok2api` v3:
+`grok-4.20-0309`, `grok-4.3`, and `grok-4.5`.
 
 Overlay env vars (live-resolved by `social_gateway`):
 

@@ -219,9 +219,8 @@ For the full behavior rules, see:
   `~/.codex/config.toml` (Codex) or `openclaw.json` skill env first;
   `.env` is fallback only. Python 3.10 compat path retained (`tomllib`
   graceful fallback).
-- Grok default models migrated to `grok-4.20-fast` /
-  `grok-4.20-0309-non-reasoning` (aligned with `chenyme/grok2api`
-  basic tier, free-account compatible). The retired
+- Grok default models now use `grok-4.20-0309` / `grok-4.3`
+  (verified against `chenyme/grok2api` v3). The retired
   `grok-3-mini` / `grok-4.1-fast` are no longer used anywhere in the
   bundle.
 - New Grok model registry: `MYSEARCH_GROK_MODELS` /
