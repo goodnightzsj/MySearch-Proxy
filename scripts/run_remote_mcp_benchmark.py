@@ -40,6 +40,19 @@ OFFICIAL_DOMAINS = {
     "strict-constraint-01": ["openai.com"],
 }
 
+BENCHMARK_DIMENSIONS = (
+    "authority_precision",
+    "semantic_discovery",
+    "provider_orchestration",
+    "multi_source_fusion",
+    "content_fidelity",
+    "freshness_signal",
+    "site_coverage",
+    "traceability",
+    "resilience",
+    "efficiency",
+)
+
 FIELDNAMES = [
     "benchmark_id",
     "domain",
@@ -48,6 +61,7 @@ FIELDNAMES = [
     "run_date",
     "active_dimensions",
     "run_status",
+    "latency_budget_ms",
     "mysearch_tool",
     "mysearch_mode",
     "mysearch_provider_trace",
@@ -58,35 +72,36 @@ FIELDNAMES = [
     "mysearch_conflicts",
     "mysearch_latency_ms",
     "mysearch_repeat_variance",
+    "mysearch_repeat_observations",
+    "mysearch_cold_latency_ms",
+    "mysearch_warm_latency_ms",
+    "mysearch_latency_budget_exceeded",
     "mysearch_empty_result",
     "mysearch_timeout",
+    "mysearch_orchestration_used",
+    "mysearch_fallback_attempted",
+    "mysearch_fallback_reason",
     "mysearch_fallback_used",
     "tavily_tool",
+    "tavily_provider_trace",
     "tavily_summary",
     "tavily_top_urls",
     "tavily_citation_count",
     "tavily_latency_ms",
     "tavily_repeat_variance",
+    "tavily_repeat_observations",
+    "tavily_cold_latency_ms",
+    "tavily_warm_latency_ms",
+    "tavily_latency_budget_exceeded",
     "tavily_empty_result",
     "tavily_timeout",
+    "tavily_orchestration_used",
+    "tavily_fallback_attempted",
+    "tavily_fallback_reason",
     "tavily_fallback_used",
-    "mysearch_accuracy_score",
-    "mysearch_richness_score",
-    "mysearch_stability_score",
-    "mysearch_constraint_execution_score",
-    "mysearch_freshness_score",
-    "mysearch_extraction_quality_score",
-    "mysearch_efficiency_score",
-    "mysearch_explainability_score",
+    *(f"mysearch_{dimension}_score" for dimension in BENCHMARK_DIMENSIONS),
     "mysearch_total_score",
-    "tavily_accuracy_score",
-    "tavily_richness_score",
-    "tavily_stability_score",
-    "tavily_constraint_execution_score",
-    "tavily_freshness_score",
-    "tavily_extraction_quality_score",
-    "tavily_efficiency_score",
-    "tavily_explainability_score",
+    *(f"tavily_{dimension}_score" for dimension in BENCHMARK_DIMENSIONS),
     "tavily_total_score",
     "winner",
     "winner_reason",
@@ -270,6 +285,7 @@ def build_case(row: dict[str, str]) -> dict[str, object]:
     strict_domains = parse_pipe_list(row.get("include_domains", "")) or OFFICIAL_DOMAINS.get(benchmark_id, [])
     exclude_domains = parse_pipe_list(row.get("exclude_domains", ""))
     repeat_runs = max(1, int((row.get("repeat_runs") or "1").strip()))
+    latency_budget_ms = max(0.0, float((row.get("latency_budget_ms") or "0").strip()))
 
     if row["preferred_tool"] == "extract_url":
         return {
@@ -278,6 +294,7 @@ def build_case(row: dict[str, str]) -> dict[str, object]:
             "query": query,
             "prompt_variant": row["prompt_variant"],
             "repeat_runs": repeat_runs,
+            "latency_budget_ms": latency_budget_ms,
             "active_dimensions": active_dimensions(row),
             "mysearch_tool": "extract_url",
             "mysearch_mode": "extract",
@@ -300,6 +317,7 @@ def build_case(row: dict[str, str]) -> dict[str, object]:
             "query": query,
             "prompt_variant": row["prompt_variant"],
             "repeat_runs": 1,
+            "latency_budget_ms": latency_budget_ms,
             "active_dimensions": active_dimensions(row),
             "mysearch_tool": "map_site",
             "mysearch_mode": "map",
@@ -323,6 +341,7 @@ def build_case(row: dict[str, str]) -> dict[str, object]:
             "query": query,
             "prompt_variant": row["prompt_variant"],
             "repeat_runs": 1,
+            "latency_budget_ms": latency_budget_ms,
             "active_dimensions": active_dimensions(row),
             "mysearch_tool": "crawl_site",
             "mysearch_mode": "crawl",
@@ -362,6 +381,7 @@ def build_case(row: dict[str, str]) -> dict[str, object]:
             "query": query,
             "prompt_variant": row["prompt_variant"],
             "repeat_runs": repeat_runs,
+            "latency_budget_ms": latency_budget_ms,
             "active_dimensions": active_dimensions(row),
             "mysearch_tool": "research",
             "mysearch_mode": "research",
@@ -415,6 +435,7 @@ def build_case(row: dict[str, str]) -> dict[str, object]:
         "query": query,
         "prompt_variant": row["prompt_variant"],
         "repeat_runs": repeat_runs,
+        "latency_budget_ms": latency_budget_ms,
         "active_dimensions": active_dimensions(row),
         "mysearch_tool": "search",
         "mysearch_mode": mode,
@@ -612,28 +633,74 @@ def extract_official_mode(blob):
     return ""
 
 
-def fallback_used(blob):
+def walk_dicts(value):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from walk_dicts(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from walk_dicts(child)
+
+
+def fallback_metadata(blob):
+    attempted = False
+    used = False
+    reasons = []
+    if not isinstance(blob, dict):
+        return attempted, used, ""
+    for container in walk_dicts(blob):
+        fallback = container.get("fallback")
+        if not isinstance(fallback, dict):
+            continue
+        has_state = any(key in fallback for key in ("configured", "triggered", "used"))
+        reason = str(fallback.get("reason") or "").strip()
+        fallback_from = str(fallback.get("from") or "").strip()
+        fallback_to = str(fallback.get("to") or "").strip()
+        entry_attempted = bool(fallback.get("triggered") or fallback.get("used"))
+        if not has_state:
+            entry_attempted = bool(reason or fallback_from or fallback_to)
+        entry_used = bool(fallback.get("used")) if has_state else bool(entry_attempted and fallback_to)
+        attempted = attempted or entry_attempted
+        used = used or entry_used
+        if entry_attempted:
+            detail = reason or " -> ".join(part for part in (fallback_from, fallback_to) if part)
+            if detail and detail not in reasons:
+                reasons.append(detail)
+    return attempted, used, " | ".join(reasons)
+
+
+def orchestration_used(blob):
     if not isinstance(blob, dict):
         return False
-    evidence = blob.get("evidence") if isinstance(blob.get("evidence"), dict) else {}
-    route_debug = blob.get("route_debug") if isinstance(blob.get("route_debug"), dict) else {}
-    providers = evidence.get("providers_consulted")
-    matched = blob.get("matched_providers")
-    if blob.get("provider") == "hybrid":
-        return True
-    if route_debug.get("route_provider") == "hybrid":
-        return True
-    if isinstance(providers, list) and len(providers) > 1:
-        return True
-    if isinstance(matched, list) and len(matched) > 1:
-        return True
-    if evidence.get("exa_discovery_count"):
-        return True
-    if evidence.get("retry_hint"):
-        return True
-    if blob.get("xai_arbitration_summary"):
-        return True
-    return False
+    providers = set()
+    for item in walk_dicts(blob):
+        provider = item.get("provider")
+        if isinstance(provider, str) and provider.strip():
+            if provider.strip().lower() == "hybrid":
+                return True
+            providers.add(provider.strip())
+        for key in ("providers_consulted", "matched_providers"):
+            values = item.get(key)
+            if isinstance(values, list):
+                providers.update(str(value).strip() for value in values if str(value).strip())
+        route_provider = item.get("route_provider")
+        if isinstance(route_provider, str) and route_provider.strip().lower() == "hybrid":
+            return True
+        selected = item.get("selected")
+        if isinstance(selected, str) and "+" in selected:
+            return True
+    return len(providers) > 1
+
+
+def collect_published_date_count(blob):
+    count = 0
+    for item in walk_dicts(blob):
+        for key in ("published_date", "published_at", "date"):
+            if isinstance(item.get(key), str) and item[key].strip():
+                count += 1
+                break
+    return count
 
 
 def collection_summary(blob):
@@ -661,6 +728,9 @@ def summarize(blob):
             "official_mode": "",
             "conflicts": [],
             "empty_result": True,
+            "orchestration_used": False,
+            "fallback_attempted": False,
+            "fallback_reason": "",
             "fallback_used": False,
         }
     results = blob.get("results")
@@ -683,20 +753,39 @@ def summarize(blob):
         blob.get("server_name", ""),
     )
     urls = collect_urls(blob)
+    fallback_attempted, fallback_used, fallback_reason = fallback_metadata(blob)
+    used_orchestration = orchestration_used(blob)
+    published_date_count = collect_published_date_count(blob)
     trace_blob = {}
-    for key in ("provider", "providers_consulted", "matched_providers", "route_debug", "evidence", "official_mode"):
+    for key in (
+        "provider",
+        "providers_consulted",
+        "matched_providers",
+        "route_debug",
+        "evidence",
+        "official_mode",
+        "route",
+        "fallback",
+    ):
         if key in blob:
             trace_blob[key] = blob[key]
+    trace_blob["orchestration_used"] = used_orchestration
+    trace_blob["fallback_attempted"] = fallback_attempted
+    trace_blob["fallback_reason"] = fallback_reason
+    trace_blob["published_date_count"] = published_date_count
     provider_trace = json.dumps(trace_blob, ensure_ascii=False) if trace_blob else ""
     return {
         "summary": summary[:500],
         "urls": urls,
-        "provider_trace": provider_trace[:1200],
+        "provider_trace": provider_trace,
         "citation_count": collect_citation_count(blob),
         "official_mode": extract_official_mode(blob),
         "conflicts": collect_conflicts(blob),
         "empty_result": not urls and not summary.strip(),
-        "fallback_used": fallback_used(blob),
+        "orchestration_used": used_orchestration,
+        "fallback_attempted": fallback_attempted,
+        "fallback_reason": fallback_reason,
+        "fallback_used": fallback_used,
     }
 
 
@@ -807,13 +896,57 @@ class MCPClient:
         return response_payload
 
 
-def timed_tool_runs(client, tool_name, arguments, repeat_runs):
+def normalize_summary(value):
+    return " ".join(str(value or "").lower().split())
+
+
+def repeat_variance(observations):
+    successful = [item for item in observations if item.get("success")]
+    attempted_count = len(observations)
+    success_ratio = len(successful) / attempted_count if attempted_count else 0.0
+    summary_match_rate = 1.0
+    url_overlap = 1.0
+    consistency_parts = []
+    if len(successful) >= 2:
+        first_summary = normalize_summary(successful[0].get("summary"))
+        summaries = [normalize_summary(item.get("summary")) for item in successful[1:]]
+        if first_summary or any(summaries):
+            summary_match_rate = sum(value == first_summary for value in summaries) / len(summaries)
+            consistency_parts.append(summary_match_rate)
+        first_urls = set(successful[0].get("urls") or [])
+        overlaps = []
+        for item in successful[1:]:
+            current_urls = set(item.get("urls") or [])
+            union = first_urls | current_urls
+            if union:
+                overlaps.append(len(first_urls & current_urls) / len(union))
+        if overlaps:
+            url_overlap = sum(overlaps) / len(overlaps)
+            consistency_parts.append(url_overlap)
+    consistency = sum(consistency_parts) / len(consistency_parts) if consistency_parts else 1.0
+    latencies = [float(item["latency_ms"]) for item in observations if item.get("latency_ms") is not None]
+    return {
+        "latency_range_ms": round(max(latencies) - min(latencies), 1) if len(latencies) >= 2 else 0.0,
+        "result_stability": round(consistency * success_ratio, 3),
+        "summary_match_rate": round(summary_match_rate, 3),
+        "url_overlap": round(url_overlap, 3),
+        "successful_runs": len(successful),
+        "attempted_runs": attempted_count,
+    }
+
+
+def timed_tool_runs(client, tool_name, arguments, repeat_runs, latency_budget_ms=0):
     latencies = []
     errors = []
     timeout_flag = False
     first_success = None
     raw_text = ""
-    for _ in range(max(1, int(repeat_runs or 1))):
+    observations = []
+    fallback_reasons = []
+    used_orchestration = False
+    fallback_attempted = False
+    fallback_used = False
+    for run_index in range(max(1, int(repeat_runs or 1))):
         started = time.perf_counter()
         try:
             payload = client.call_tool(tool_name, arguments)
@@ -822,18 +955,59 @@ def timed_tool_runs(client, tool_name, arguments, repeat_runs):
             tool_error = blob.get("_tool_error") if isinstance(blob, dict) else None
             if isinstance(tool_error, str) and tool_error.strip():
                 message = tool_error.strip()
+                observations.append(
+                    {
+                        "run": run_index + 1,
+                        "cache_state": "cold" if run_index == 0 else "warm",
+                        "success": False,
+                        "latency_ms": elapsed_ms,
+                        "summary": "",
+                        "urls": [],
+                        "error": message[:500],
+                    }
+                )
                 if first_success is not None and is_nonfatal_tavily_repeat_error(tool_name, message):
                     continue
                 errors.append(message)
                 if "timed out" in tool_error.lower() or "timeout" in tool_error.lower():
                     timeout_flag = True
                 continue
+            summarized = summarize(blob)
             latencies.append(elapsed_ms)
+            observations.append(
+                {
+                    "run": run_index + 1,
+                    "cache_state": "cold" if run_index == 0 else "warm",
+                    "success": True,
+                    "latency_ms": elapsed_ms,
+                    "summary": summarized["summary"],
+                    "urls": summarized["urls"],
+                    "citation_count": summarized["citation_count"],
+                    "empty_result": summarized["empty_result"],
+                }
+            )
+            used_orchestration = used_orchestration or summarized["orchestration_used"]
+            fallback_attempted = fallback_attempted or summarized["fallback_attempted"]
+            fallback_used = fallback_used or summarized["fallback_used"]
+            if summarized["fallback_reason"] and summarized["fallback_reason"] not in fallback_reasons:
+                fallback_reasons.append(summarized["fallback_reason"])
             if first_success is None:
-                first_success = summarize(blob)
+                first_success = summarized
                 raw_text = text
         except Exception as exc:
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
             message = str(exc)
+            observations.append(
+                {
+                    "run": run_index + 1,
+                    "cache_state": "cold" if run_index == 0 else "warm",
+                    "success": False,
+                    "latency_ms": elapsed_ms,
+                    "summary": "",
+                    "urls": [],
+                    "error": message[:500],
+                }
+            )
             if first_success is not None and is_nonfatal_tavily_repeat_error(tool_name, message):
                 continue
             errors.append(message)
@@ -843,9 +1017,10 @@ def timed_tool_runs(client, tool_name, arguments, repeat_runs):
         errors = [message for message in errors if not is_tavily_comparator_limit_error(tool_name, message)]
     if first_success is None:
         raise RuntimeError(" ; ".join(errors[:3]) or "all repeats failed")
-    variance_ms = 0.0
-    if len(latencies) >= 2:
-        variance_ms = round(max(latencies) - min(latencies), 1)
+    variance = repeat_variance(observations)
+    observation_latencies = [float(item["latency_ms"]) for item in observations]
+    warm_latencies = observation_latencies[1:]
+    budget_ms = float(latency_budget_ms or 0)
     return {
         "summary": first_success["summary"],
         "urls": first_success["urls"],
@@ -854,9 +1029,16 @@ def timed_tool_runs(client, tool_name, arguments, repeat_runs):
         "official_mode": first_success["official_mode"],
         "conflicts": first_success["conflicts"],
         "empty_result": first_success["empty_result"],
-        "fallback_used": first_success["fallback_used"],
+        "orchestration_used": used_orchestration,
+        "fallback_attempted": fallback_attempted,
+        "fallback_reason": " | ".join(fallback_reasons),
+        "fallback_used": fallback_used,
         "latency_ms": round(sum(latencies) / len(latencies), 1) if latencies else 0.0,
-        "repeat_variance": variance_ms,
+        "repeat_variance": json.dumps(variance, ensure_ascii=False, sort_keys=True),
+        "repeat_observations": json.dumps(observations, ensure_ascii=False),
+        "cold_latency_ms": observation_latencies[0] if observation_latencies else 0.0,
+        "warm_latency_ms": round(sum(warm_latencies) / len(warm_latencies), 1) if warm_latencies else "",
+        "latency_budget_exceeded": bool(budget_ms and any(value > budget_ms for value in observation_latencies)),
         "timeout": timeout_flag,
         "partial_error": bool(errors),
         "error": " ; ".join(errors[:3]),
@@ -890,6 +1072,7 @@ for case in payload["cases"]:
         "prompt_variant": case.get("prompt_variant", ""),
         "active_dimensions": case.get("active_dimensions", ""),
         "run_status": "captured",
+        "latency_budget_ms": case.get("latency_budget_ms", 0),
         "mysearch_tool": case["mysearch_tool"],
         "mysearch_mode": case.get("mysearch_mode", ""),
         "mysearch_summary": "",
@@ -900,21 +1083,37 @@ for case in payload["cases"]:
         "mysearch_conflicts": "",
         "mysearch_latency_ms": "",
         "mysearch_repeat_variance": "",
+        "mysearch_repeat_observations": "",
+        "mysearch_cold_latency_ms": "",
+        "mysearch_warm_latency_ms": "",
+        "mysearch_latency_budget_exceeded": False,
         "mysearch_empty_result": False,
         "mysearch_timeout": False,
+        "mysearch_orchestration_used": False,
+        "mysearch_fallback_attempted": False,
+        "mysearch_fallback_reason": "",
         "mysearch_fallback_used": False,
         "tavily_tool": case.get("tavily_tool", ""),
+        "tavily_provider_trace": "",
         "tavily_summary": "",
         "tavily_top_urls": "",
         "tavily_citation_count": 0,
         "tavily_latency_ms": "",
         "tavily_repeat_variance": "",
+        "tavily_repeat_observations": "",
+        "tavily_cold_latency_ms": "",
+        "tavily_warm_latency_ms": "",
+        "tavily_latency_budget_exceeded": False,
         "tavily_empty_result": False,
         "tavily_timeout": False,
+        "tavily_orchestration_used": False,
+        "tavily_fallback_attempted": False,
+        "tavily_fallback_reason": "",
         "tavily_fallback_used": False,
         "error": "",
     }
     repeat_runs = case.get("repeat_runs", 1)
+    latency_budget_ms = case.get("latency_budget_ms", 0)
 
     if mysearch is None:
         row["run_status"] = "partial-error"
@@ -922,7 +1121,13 @@ for case in payload["cases"]:
         row["mysearch_raw"] = json.dumps({"error": mysearch_init_error, "phase": "initialize"}, ensure_ascii=False)
     else:
         try:
-            observed = timed_tool_runs(mysearch, case["mysearch_tool"], case["mysearch_args"], repeat_runs)
+            observed = timed_tool_runs(
+                mysearch,
+                case["mysearch_tool"],
+                case["mysearch_args"],
+                repeat_runs,
+                latency_budget_ms,
+            )
             row["mysearch_summary"] = observed["summary"]
             row["mysearch_top_urls"] = " | ".join(observed["urls"])
             row["mysearch_provider_trace"] = observed["provider_trace"]
@@ -931,8 +1136,15 @@ for case in payload["cases"]:
             row["mysearch_conflicts"] = " | ".join(observed["conflicts"])
             row["mysearch_latency_ms"] = observed["latency_ms"]
             row["mysearch_repeat_variance"] = observed["repeat_variance"]
+            row["mysearch_repeat_observations"] = observed["repeat_observations"]
+            row["mysearch_cold_latency_ms"] = observed["cold_latency_ms"]
+            row["mysearch_warm_latency_ms"] = observed["warm_latency_ms"]
+            row["mysearch_latency_budget_exceeded"] = observed["latency_budget_exceeded"]
             row["mysearch_empty_result"] = observed["empty_result"]
             row["mysearch_timeout"] = observed["timeout"]
+            row["mysearch_orchestration_used"] = observed["orchestration_used"]
+            row["mysearch_fallback_attempted"] = observed["fallback_attempted"]
+            row["mysearch_fallback_reason"] = observed["fallback_reason"]
             row["mysearch_fallback_used"] = observed["fallback_used"]
             row["mysearch_raw"] = observed["raw_text"]
             if observed["partial_error"]:
@@ -945,14 +1157,28 @@ for case in payload["cases"]:
 
     if tavily is not None:
         try:
-            observed = timed_tool_runs(tavily, case["tavily_tool"], case["tavily_args"], repeat_runs)
+            observed = timed_tool_runs(
+                tavily,
+                case["tavily_tool"],
+                case["tavily_args"],
+                repeat_runs,
+                latency_budget_ms,
+            )
+            row["tavily_provider_trace"] = observed["provider_trace"]
             row["tavily_summary"] = observed["summary"]
             row["tavily_top_urls"] = " | ".join(observed["urls"])
             row["tavily_citation_count"] = observed["citation_count"]
             row["tavily_latency_ms"] = observed["latency_ms"]
             row["tavily_repeat_variance"] = observed["repeat_variance"]
+            row["tavily_repeat_observations"] = observed["repeat_observations"]
+            row["tavily_cold_latency_ms"] = observed["cold_latency_ms"]
+            row["tavily_warm_latency_ms"] = observed["warm_latency_ms"]
+            row["tavily_latency_budget_exceeded"] = observed["latency_budget_exceeded"]
             row["tavily_empty_result"] = observed["empty_result"]
             row["tavily_timeout"] = observed["timeout"]
+            row["tavily_orchestration_used"] = observed["orchestration_used"]
+            row["tavily_fallback_attempted"] = observed["fallback_attempted"]
+            row["tavily_fallback_reason"] = observed["fallback_reason"]
             row["tavily_fallback_used"] = observed["fallback_used"]
             row["tavily_raw"] = observed["raw_text"]
             if observed["partial_error"]:
@@ -969,6 +1195,10 @@ for case in payload["cases"]:
             row["run_status"] = "partial-error" if row["run_status"] == "captured" else row["run_status"]
         row["error"] = (row["error"] + " ; " if row["error"] else "") + f"tavily-init: {tavily_init_error}"
         row["tavily_raw"] = json.dumps({"error": tavily_init_error, "phase": "initialize"}, ensure_ascii=False)
+    if row["run_status"] == "captured" and (
+        row["mysearch_latency_budget_exceeded"] or row["tavily_latency_budget_exceeded"]
+    ):
+        row["run_status"] = "budget-exceeded"
     output.append(row)
 
 print(json.dumps(output, ensure_ascii=False))
@@ -1171,6 +1401,259 @@ def classify_tavily_structural_failure(
     return ""
 
 
+def _as_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _as_float(value: object) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _json_value(value: object, default: object) -> object:
+    if isinstance(value, (dict, list)):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return default
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return default
+
+
+def _row_urls(row: dict[str, object], prefix: str) -> list[str]:
+    return [value.strip() for value in str(row.get(f"{prefix}_top_urls", "")).split(" | ") if value.strip()]
+
+
+def _hostname_matches(hostname: str, domain: str) -> bool:
+    normalized_host = hostname.lower().strip(".")
+    normalized_domain = domain.lower().strip(".")
+    return normalized_host == normalized_domain or normalized_host.endswith(f".{normalized_domain}")
+
+
+def _url_satisfies_constraints(url: str, include_domains: list[str], exclude_domains: list[str]) -> bool:
+    hostname = (urllib.parse.urlparse(url).hostname or "").lower()
+    if not hostname:
+        return False
+    if any(_hostname_matches(hostname, domain) for domain in exclude_domains):
+        return False
+    return not include_domains or any(_hostname_matches(hostname, domain) for domain in include_domains)
+
+
+def _trace_provider_names(trace: dict[str, object]) -> set[str]:
+    providers: set[str] = set()
+    stack: list[object] = [trace]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, dict):
+            provider = value.get("provider")
+            if isinstance(provider, str) and provider.strip() and provider.strip().lower() != "hybrid":
+                providers.add(provider.strip())
+            for key in ("providers_consulted", "matched_providers"):
+                items = value.get(key)
+                if isinstance(items, list):
+                    providers.update(str(item).strip() for item in items if str(item).strip())
+            stack.extend(value.values())
+        elif isinstance(value, list):
+            stack.extend(value)
+    return providers
+
+
+def _repeat_metrics(row: dict[str, object], prefix: str) -> tuple[float, list[dict[str, object]]]:
+    variance = _json_value(row.get(f"{prefix}_repeat_variance"), {})
+    observations = _json_value(row.get(f"{prefix}_repeat_observations"), [])
+    stability = 1.0
+    if isinstance(variance, dict):
+        stability = max(0.0, min(1.0, _as_float(variance.get("result_stability", 1.0))))
+    typed_observations = [item for item in observations if isinstance(item, dict)] if isinstance(observations, list) else []
+    return stability, typed_observations
+
+
+def _provider_captured(row: dict[str, object], prefix: str) -> bool:
+    return bool(
+        str(row.get(f"{prefix}_summary", "")).strip()
+        or _row_urls(row, prefix)
+        or _as_float(row.get(f"{prefix}_citation_count")) > 0
+    ) and not _as_bool(row.get(f"{prefix}_empty_result"))
+
+
+def _clamp_score(value: float) -> float:
+    return round(max(0.0, min(5.0, value)), 2)
+
+
+def _efficiency_score(
+    row: dict[str, object],
+    prefix: str,
+    latency_budget_ms: float,
+    observations: list[dict[str, object]],
+) -> tuple[float, bool]:
+    latencies = [
+        _as_float(item.get("latency_ms"))
+        for item in observations
+        if item.get("latency_ms") not in {None, ""}
+    ]
+    if not latencies:
+        latency = _as_float(row.get(f"{prefix}_latency_ms"))
+        if latency:
+            latencies.append(latency)
+    if not latencies:
+        return 0.0, False
+    if latency_budget_ms <= 0:
+        return 3.0, False
+    ratio = max(latencies) / latency_budget_ms
+    exceeded = ratio > 1.0
+    if exceeded:
+        return _clamp_score(2.0 - ((ratio - 1.0) * 4.0)), True
+    return _clamp_score(3.0 + (1.0 - ratio) * 2.0), False
+
+
+def _score_provider(
+    input_row: dict[str, str],
+    row: dict[str, object],
+    prefix: str,
+) -> dict[str, float]:
+    if not _provider_captured(row, prefix):
+        return {dimension: 0.0 for dimension in BENCHMARK_DIMENSIONS}
+
+    summary = str(row.get(f"{prefix}_summary", "")).strip()
+    urls = _row_urls(row, prefix)
+    citation_count = max(0.0, _as_float(row.get(f"{prefix}_citation_count")))
+    trace_value = _json_value(row.get(f"{prefix}_provider_trace"), {})
+    trace = trace_value if isinstance(trace_value, dict) else {}
+    provider_names = _trace_provider_names(trace)
+    include_domains = parse_pipe_list(input_row.get("include_domains", "")) or OFFICIAL_DOMAINS.get(
+        input_row.get("benchmark_id", ""), []
+    )
+    exclude_domains = parse_pipe_list(input_row.get("exclude_domains", ""))
+    compliant_count = sum(_url_satisfies_constraints(url, include_domains, exclude_domains) for url in urls)
+    constraint_ratio = compliant_count / len(urls) if urls else 0.0
+    strict_required = parse_optional_bool(input_row.get("strict_required"), False)
+    orchestration = (
+        _as_bool(row.get(f"{prefix}_orchestration_used"))
+        or _as_bool(trace.get("orchestration_used"))
+        or str(trace.get("provider", "")).strip().lower() == "hybrid"
+        or len(provider_names) > 1
+    )
+    fallback_attempted = _as_bool(row.get(f"{prefix}_fallback_attempted")) or _as_bool(
+        trace.get("fallback_attempted")
+    )
+    fallback_reason = str(row.get(f"{prefix}_fallback_reason", "") or trace.get("fallback_reason", "")).strip()
+    fallback_used = _as_bool(row.get(f"{prefix}_fallback_used")) if fallback_attempted else False
+    row[f"{prefix}_orchestration_used"] = orchestration
+    row[f"{prefix}_fallback_attempted"] = fallback_attempted
+    row[f"{prefix}_fallback_reason"] = fallback_reason if fallback_attempted else ""
+    row[f"{prefix}_fallback_used"] = fallback_used
+    stability, observations = _repeat_metrics(row, prefix)
+    latency_budget_ms = max(0.0, _as_float(input_row.get("latency_budget_ms")))
+    efficiency, measured_budget_exceeded = _efficiency_score(row, prefix, latency_budget_ms, observations)
+    budget_exceeded = measured_budget_exceeded or _as_bool(row.get(f"{prefix}_latency_budget_exceeded"))
+    if budget_exceeded:
+        efficiency = min(efficiency, 2.0)
+    row[f"{prefix}_latency_budget_exceeded"] = budget_exceeded
+
+    if include_domains:
+        authority = 5.0 * constraint_ratio
+    else:
+        authority = 2.5 + min(1.5, len(urls) * 0.5) + (0.5 if trace else 0.0)
+    if strict_required and include_domains and constraint_ratio < 1.0:
+        authority = min(authority, 1.0)
+
+    semantic_discovery = 2.0 + min(1.5, len(urls) * 0.5) + min(1.5, citation_count / 5.0)
+    provider_orchestration = 5.0 if orchestration else 4.0 if fallback_attempted else 3.0 if trace else 2.0
+    domain_count = len({urllib.parse.urlparse(url).hostname for url in urls if urllib.parse.urlparse(url).hostname})
+    if orchestration and len(provider_names) > 1:
+        multi_source_fusion = 5.0
+    elif orchestration or domain_count > 1:
+        multi_source_fusion = 4.0
+    elif citation_count > 1:
+        multi_source_fusion = 3.0
+    else:
+        multi_source_fusion = 2.0
+
+    content_fidelity = 2.0
+    content_fidelity += 1.0 if len(summary) >= 80 else 0.5 if summary else 0.0
+    content_fidelity += 1.0 if len(summary) >= 250 else 0.0
+    content_fidelity += 0.5 if urls else 0.0
+    content_fidelity += 0.5 if citation_count else 0.0
+
+    published_date_count = _as_float(trace.get("published_date_count"))
+    has_explicit_date = bool(re.search(r"\b20\d{2}(?:[-/]\d{1,2})?\b", summary))
+    freshness_signal = 5.0 if published_date_count else 4.0 if has_explicit_date else 2.5
+    site_coverage = 2.0 + min(2.0, citation_count / 3.0) + min(1.0, domain_count / 2.0)
+    traceability = 1.5 + (1.5 if trace else 0.0) + min(1.5, citation_count / 3.0) + (0.5 if urls else 0.0)
+
+    resilience = 5.0 * stability
+    if _as_bool(row.get(f"{prefix}_timeout")):
+        resilience = 0.0
+    elif fallback_attempted and not fallback_used:
+        resilience = min(resilience, 4.0)
+
+    scores = {
+        "authority_precision": authority,
+        "semantic_discovery": semantic_discovery,
+        "provider_orchestration": provider_orchestration,
+        "multi_source_fusion": multi_source_fusion,
+        "content_fidelity": content_fidelity,
+        "freshness_signal": freshness_signal,
+        "site_coverage": site_coverage,
+        "traceability": traceability,
+        "resilience": resilience,
+        "efficiency": efficiency,
+    }
+    return {dimension: _clamp_score(scores[dimension]) for dimension in BENCHMARK_DIMENSIONS}
+
+
+def _dimension_weights(input_row: dict[str, str]) -> dict[str, float]:
+    weights: dict[str, float] = {}
+    for dimension in parse_pipe_list(input_row.get("primary_dimensions", "")):
+        if dimension in BENCHMARK_DIMENSIONS:
+            weights[dimension] = 2.0
+    for dimension in parse_pipe_list(input_row.get("secondary_dimensions", "")):
+        if dimension in BENCHMARK_DIMENSIONS:
+            weights.setdefault(dimension, 1.0)
+    return weights or {dimension: 1.0 for dimension in BENCHMARK_DIMENSIONS}
+
+
+def score_output_row(input_row: dict[str, str], row: dict[str, object]) -> dict[str, object]:
+    weights = _dimension_weights(input_row)
+    totals: dict[str, float] = {}
+    for prefix in ("mysearch", "tavily"):
+        scores = _score_provider(input_row, row, prefix)
+        for dimension, score in scores.items():
+            row[f"{prefix}_{dimension}_score"] = score
+        weighted_score = sum(scores[dimension] * weight for dimension, weight in weights.items())
+        total = round((weighted_score / sum(weights.values())) * 10.0, 2)
+        row[f"{prefix}_total_score"] = total
+        totals[prefix] = total
+
+    if str(row.get("run_status", "")) == "captured" and (
+        _as_bool(row.get("mysearch_latency_budget_exceeded"))
+        or _as_bool(row.get("tavily_latency_budget_exceeded"))
+    ):
+        row["run_status"] = "budget-exceeded"
+
+    if _provider_captured(row, "mysearch") and _provider_captured(row, "tavily"):
+        if totals["mysearch"] > totals["tavily"]:
+            winner = "mysearch"
+        elif totals["tavily"] > totals["mysearch"]:
+            winner = "tavily"
+        else:
+            winner = "tie"
+        row["winner"] = winner
+        row["winner_reason"] = (
+            f"observable contract score: mysearch={totals['mysearch']:.2f}, "
+            f"tavily={totals['tavily']:.2f}; semantic correctness was not inferred"
+        )
+    else:
+        row["winner"] = "incomplete"
+        row["winner_reason"] = "dual result incomplete; no comparative winner"
+    return row
+
+
 def load_existing_rows(path: Path) -> tuple[list[str], dict[str, dict[str, str]]]:
     if not path.exists():
         return [], {}
@@ -1202,6 +1685,7 @@ def build_output_row(
             "prompt_variant": input_row["prompt_variant"],
             "run_date": date.today().isoformat(),
             "active_dimensions": active_dimensions(input_row),
+            "latency_budget_ms": input_row.get("latency_budget_ms", ""),
             "mysearch_tool": item.get("mysearch_tool", ""),
             "mysearch_mode": item.get("mysearch_mode", ""),
             "tavily_tool": item.get("tavily_tool", ""),
@@ -1233,8 +1717,6 @@ def build_output_row(
         note_chunks.append(input_row["notes"].strip())
     note_chunks.extend(raw_notes)
     row["notes"] = " ; ".join(chunk for chunk in note_chunks if chunk)
-    row["winner"] = existing.get("winner", "pending-review") if preserve_tavily else "pending-review"
-    row["winner_reason"] = existing.get("winner_reason", "matrix raw capture completed; scoring pending") if preserve_tavily else "matrix raw capture completed; scoring pending"
     row["structural_failure"] = existing.get("structural_failure", "") if preserve_tavily else ""
     row["optimization_hint"] = existing.get("optimization_hint", "") if preserve_tavily else ""
     if not row["structural_failure"]:
@@ -1245,6 +1727,7 @@ def build_output_row(
         )
         if tavily_failure:
             row["structural_failure"] = tavily_failure
+    score_output_row(input_row, row)
     return row
 
 
@@ -1286,7 +1769,12 @@ def merge_output_rows(
         if benchmark_id in merged and benchmark_id not in seen:
             ordered_ids.append(benchmark_id)
             seen.add(benchmark_id)
-    return [merged[benchmark_id] for benchmark_id in ordered_ids]
+    output_rows = []
+    for benchmark_id in ordered_ids:
+        row = merged[benchmark_id]
+        score_output_row(input_row_map[benchmark_id], row)
+        output_rows.append(row)
+    return output_rows
 
 
 def write_output(path: Path, rows: list[dict[str, str]]) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -14,6 +15,17 @@ from scripts import run_remote_mcp_benchmark
 
 
 class RemoteBenchmarkConfigTests(unittest.TestCase):
+    def test_fieldnames_use_loop9_dimensions_and_explicit_orchestration_contract(self) -> None:
+        for provider in ("mysearch", "tavily"):
+            for dimension in run_remote_mcp_benchmark.BENCHMARK_DIMENSIONS:
+                self.assertIn(f"{provider}_{dimension}_score", run_remote_mcp_benchmark.FIELDNAMES)
+            self.assertIn(f"{provider}_orchestration_used", run_remote_mcp_benchmark.FIELDNAMES)
+            self.assertIn(f"{provider}_fallback_attempted", run_remote_mcp_benchmark.FIELDNAMES)
+            self.assertIn(f"{provider}_fallback_reason", run_remote_mcp_benchmark.FIELDNAMES)
+            self.assertIn(f"{provider}_repeat_observations", run_remote_mcp_benchmark.FIELDNAMES)
+        self.assertNotIn("mysearch_accuracy_score", run_remote_mcp_benchmark.FIELDNAMES)
+        self.assertNotIn("tavily_richness_score", run_remote_mcp_benchmark.FIELDNAMES)
+
     def test_is_recoverable_mcp_session_error_handles_session_required_variant(self) -> None:
         self.assertTrue(
             run_remote_mcp_benchmark.is_recoverable_mcp_session_error(
@@ -215,6 +227,90 @@ class RemoteBenchmarkConfigTests(unittest.TestCase):
         self.assertFalse(observed["partial_error"])
         self.assertEqual(observed["error"], "")
 
+    def test_summarize_keeps_provider_trace_valid_json_without_conflating_orchestration(self) -> None:
+        namespace: dict[str, object] = {}
+        helper_source = run_remote_mcp_benchmark.REMOTE_SCRIPT.split("\npayload = json.loads", 1)[0]
+        exec(helper_source, namespace)
+        blob = {
+            "provider": "hybrid",
+            "summary": "captured response",
+            "results": [{"url": "https://example.com/result"}],
+            "evidence": {
+                "providers_consulted": ["tavily", "exa"],
+                "retry_hint": "broaden verification",
+                "diagnostic": "x" * 2000,
+            },
+        }
+
+        summarized = namespace["summarize"](blob)
+        trace = json.loads(summarized["provider_trace"])
+
+        self.assertGreater(len(summarized["provider_trace"]), 1200)
+        self.assertEqual(trace["provider"], "hybrid")
+        self.assertTrue(summarized["orchestration_used"])
+        self.assertFalse(summarized["fallback_attempted"])
+        self.assertFalse(summarized["fallback_used"])
+        self.assertEqual(summarized["fallback_reason"], "")
+
+    def test_summarize_derives_fallback_only_from_actual_fallback_metadata(self) -> None:
+        namespace: dict[str, object] = {}
+        helper_source = run_remote_mcp_benchmark.REMOTE_SCRIPT.split("\npayload = json.loads", 1)[0]
+        exec(helper_source, namespace)
+
+        summarized = namespace["summarize"](
+            {
+                "provider": "exa",
+                "summary": "fallback response",
+                "results": [{"url": "https://example.com/result"}],
+                "fallback": {"from": "tavily", "to": "exa", "reason": "primary returned no results"},
+            }
+        )
+
+        self.assertTrue(summarized["fallback_attempted"])
+        self.assertTrue(summarized["fallback_used"])
+        self.assertEqual(summarized["fallback_reason"], "primary returned no results")
+
+    def test_timed_tool_runs_retains_cold_and_warm_observations_and_result_stability(self) -> None:
+        namespace: dict[str, object] = {}
+        helper_source = run_remote_mcp_benchmark.REMOTE_SCRIPT.split("\npayload = json.loads", 1)[0]
+        exec(helper_source, namespace)
+
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def call_tool(self, tool_name, arguments):  # type: ignore[no-untyped-def]
+                self.calls += 1
+                return {
+                    "result": {
+                        "content": [
+                            {
+                                "text": json.dumps(
+                                    {
+                                        "summary": f"response {self.calls}",
+                                        "results": [{"url": f"https://example.com/{self.calls}"}],
+                                    }
+                                )
+                            }
+                        ]
+                    }
+                }
+
+        perf_counter_values = [0.0, 0.1, 1.0, 1.05, 2.0, 2.02]
+        with patch.object(namespace["time"], "perf_counter", side_effect=perf_counter_values):
+            observed = namespace["timed_tool_runs"](FakeClient(), "search", {"query": "x"}, 3, 75)
+
+        observations = json.loads(observed["repeat_observations"])
+        variance = json.loads(observed["repeat_variance"])
+        self.assertEqual([item["summary"] for item in observations], ["response 1", "response 2", "response 3"])
+        self.assertEqual([item["cache_state"] for item in observations], ["cold", "warm", "warm"])
+        self.assertEqual([item["latency_ms"] for item in observations], [100.0, 50.0, 20.0])
+        self.assertEqual(observed["cold_latency_ms"], 100.0)
+        self.assertEqual(observed["warm_latency_ms"], 35.0)
+        self.assertTrue(observed["latency_budget_exceeded"])
+        self.assertEqual(variance["latency_range_ms"], 80.0)
+        self.assertLess(variance["result_stability"], 1.0)
+
     def test_classify_tavily_structural_failure_maps_research_quota_exhausted_from_error_text(self) -> None:
         self.assertEqual(
             run_remote_mcp_benchmark.classify_tavily_structural_failure(
@@ -291,6 +387,7 @@ class RemoteBenchmarkConfigTests(unittest.TestCase):
                 "primary_dimensions": "freshness|richness|explainability",
                 "secondary_dimensions": "stability|efficiency",
                 "repeat_runs": "3",
+                "latency_budget_ms": "20000",
                 "sources_hint": "web|x",
             }
         )
@@ -298,6 +395,7 @@ class RemoteBenchmarkConfigTests(unittest.TestCase):
         self.assertEqual(case["mysearch_tool"], "search")
         self.assertEqual(case["mysearch_args"]["sources"], ["web", "x"])
         self.assertEqual(case["tavily_tool"], "tavily_search")
+        self.assertEqual(case["latency_budget_ms"], 20000.0)
 
     def test_build_case_maps_site_mapping_tools(self) -> None:
         case = run_remote_mcp_benchmark.build_case(
@@ -705,6 +803,63 @@ Authorization = "Bearer th-from-http-headers"
         self.assertEqual(row["tavily_citation_count"], "1")
         self.assertEqual(row["tavily_empty_result"], "False")
         self.assertIn("tavily_raw=raw/case-1.tavily.json", row["notes"])
+
+    def test_build_output_row_enforces_latency_budget_and_scores_successful_dual_run(self) -> None:
+        input_row = {
+            "benchmark_id": "case-budget",
+            "query": "OpenAI pricing",
+            "domain": "Web",
+            "prompt_variant": "strict",
+            "include_domains": "openai.com",
+            "exclude_domains": "",
+            "strict_required": "true",
+            "primary_dimensions": "authority_precision|efficiency",
+            "secondary_dimensions": "traceability|resilience",
+            "latency_budget_ms": "100",
+            "notes": "",
+        }
+        variance = json.dumps(
+            {
+                "latency_range_ms": 0.0,
+                "result_stability": 1.0,
+                "successful_runs": 1,
+                "attempted_runs": 1,
+            }
+        )
+        item = {
+            "benchmark_id": "case-budget",
+            "run_status": "captured",
+            "mysearch_tool": "search",
+            "mysearch_mode": "web",
+            "mysearch_summary": "official pricing result",
+            "mysearch_top_urls": "https://openai.com/api/pricing",
+            "mysearch_citation_count": 1,
+            "mysearch_repeat_variance": variance,
+            "mysearch_repeat_observations": json.dumps([{"success": True, "latency_ms": 120.0}]),
+            "mysearch_empty_result": False,
+            "tavily_tool": "tavily_search",
+            "tavily_summary": "official pricing result",
+            "tavily_top_urls": "https://openai.com/api/pricing",
+            "tavily_citation_count": 1,
+            "tavily_repeat_variance": variance,
+            "tavily_repeat_observations": json.dumps([{"success": True, "latency_ms": 80.0}]),
+            "tavily_empty_result": False,
+        }
+
+        row = run_remote_mcp_benchmark.build_output_row(input_row, item, Path("raw"))
+
+        self.assertEqual(row["run_status"], "budget-exceeded")
+        self.assertTrue(row["mysearch_latency_budget_exceeded"])
+        self.assertFalse(row["tavily_latency_budget_exceeded"])
+        self.assertLess(row["mysearch_efficiency_score"], row["tavily_efficiency_score"])
+        for provider in ("mysearch", "tavily"):
+            for dimension in run_remote_mcp_benchmark.BENCHMARK_DIMENSIONS:
+                self.assertGreaterEqual(row[f"{provider}_{dimension}_score"], 0.0)
+                self.assertLessEqual(row[f"{provider}_{dimension}_score"], 5.0)
+            self.assertGreater(row[f"{provider}_total_score"], 0.0)
+        self.assertEqual(row["winner"], "tavily")
+        self.assertNotEqual(row["winner"], "pending-review")
+        self.assertIn("semantic correctness was not inferred", row["winner_reason"])
 
     def test_build_output_row_clears_stale_structural_failure_on_normal_rerun(self) -> None:
         input_row = {

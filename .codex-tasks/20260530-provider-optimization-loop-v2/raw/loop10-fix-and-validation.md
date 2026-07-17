@@ -1,7 +1,7 @@
 ## Loop 10 Fixes And Validation
 
 - Date: 2026-07-17
-- Status: the first release and 41-row comparison exposed a version-extraction regression; the follow-up local fix is validated and awaits release plus the final comparison.
+- Status: complete; the follow-up fix was released, deployed, and verified by the final 41-row comparison.
 
 ## Fixes
 
@@ -26,8 +26,9 @@
 - Follow-up `pytest -q tests/test_loop7_fixes.py tests/test_clients.py`: 364 passed.
 - Follow-up `pytest -q`: 623 passed.
 
-## Pending Gates
+## Completed Gates
 
-- Commit and push the follow-up version-extraction fix.
-- Wait for the Docker workflow and redeploy `mysearch-stack` again.
-- Run a fresh final 41-row comparison and record Loop 10 convergence.
+- Follow-up commit `47b417f` was pushed to `main`.
+- Docker workflow `29574992460` completed successfully.
+- Remote `mysearch-stack` was replaced with `helloworldz1024/mysearch-stack:sha-47b417f`; proxy health and MCP initialize passed.
+- Final comparison `loop10-remote-compare-final.csv` captured 41/41 rows with no structural failures, timeouts, empty MySearch results, or errors.

@@ -9,94 +9,75 @@
 </head>
 <body class="console-body">
 
+<a class="skip-link" href="#services-root">跳到当前工作台</a>
+
 <div id="login-box" class="auth card{% if initial_authenticated %} hidden{% endif %}">
   <div class="auth-orb auth-orb-a"></div>
   <div class="auth-orb auth-orb-b"></div>
   <div class="auth-kicker">MySearch Proxy</div>
-  <div class="auth-badges">
-    <span class="auth-badge">Unified Proxy</span>
-    <span class="auth-badge">Provider Pools</span>
-    <span class="auth-badge">Team Ready</span>
+  <div class="auth-context">
+    <span class="auth-context-signal" aria-hidden="true"></span>
+    <span>管理员会话</span>
   </div>
-  <h2>Search Infrastructure Console</h2>
-  <p>把 Tavily、Exa、Firecrawl 和 Social / X 接入放进同一块工作台里，适合你自己用，也适合直接公开给团队或社区部署。</p>
+  <h2>登录搜索控制台</h2>
+  <p id="login-help">查看 Provider 健康状态，管理 Token、API Key 与额度。</p>
   <form class="stack" onsubmit="doLogin(event)">
     <input type="text" name="proxy-admin-user" value="admin" autocomplete="username" tabindex="-1" aria-hidden="true" style="position:absolute;opacity:0;pointer-events:none;height:0">
-    <input type="password" id="pwd-input" placeholder="输入管理密码" autocomplete="current-password">
+    <label class="auth-field-label" for="pwd-input">管理密码</label>
+    <input type="password" id="pwd-input" placeholder="请输入管理密码" autocomplete="current-password" aria-describedby="login-help login-err">
     <button type="submit" class="btn btn-primary" id="login-submit">进入控制台</button>
   </form>
-  <div class="auth-meta">
-    <div class="auth-meta-card">
-      <div class="label">统一入口</div>
-      <strong>MySearch Token</strong>
-    </div>
-    <div class="auth-meta-card">
-      <div class="label">Provider</div>
-      <strong>Tavily / Exa / Firecrawl / Social</strong>
-    </div>
-    <div class="auth-meta-card">
-      <div class="label">控制面</div>
-      <strong>Key 池 · 路由 · 额度</strong>
-    </div>
+  <div class="auth-foot" aria-label="控制台能力">
+    <span>4 Providers</span>
+    <span>Token pools</span>
+    <span>Quota sync</span>
   </div>
-  <p id="login-err" class="login-error hidden"></p>
+  <p id="login-err" class="login-error hidden" role="alert" aria-live="assertive"></p>
 </div>
 
 <div id="dashboard" class="{% if not initial_authenticated %}hidden{% endif %}">
   <div class="container">
     {% include "components/_hero.html" %}
 
-    <section class="summary-strip" id="global-summary"></section>
+    <section class="summary-strip" id="global-summary" aria-label="全局运行摘要"></section>
 
     <div class="dashboard-flow">
-      <section class="switcher-shell card">
+      <aside class="switcher-shell card" aria-label="Provider 工作台导航">
         <div class="switcher-head">
           <div>
-            <span class="switcher-eyebrow">Workspace Navigator</span>
-            <h2>一屏切换不同搜索引擎工作台</h2>
-            <p>先用这一屏判断当前该处理哪个工作台，再在下面展开实际的 Token、Key、额度与接线细节。</p>
+            <span class="switcher-eyebrow">Providers</span>
+            <h2>工作台</h2>
           </div>
           <div class="switcher-note" id="switcher-note">已记住上次打开的工作台</div>
         </div>
-        <section class="service-switcher" id="service-switcher"></section>
+        <nav class="service-switcher" id="service-switcher" aria-label="选择 Provider"></nav>
 
-        <section class="credit-strip credit-strip-inline">
+        <section class="rail-note">
           <div class="credit-copy">
             <span class="credit-kicker">Social Compatibility</span>
-            <strong>Social / X 工作台默认兼容 grok2api</strong>
-            <p>这部分能力基于 grok2api 的兼容接口与后台 token 状态完成接线。控制台保留它作为默认兼容来源，同时允许你切到其他 xAI-compatible 上游。</p>
+            <strong>Social / X 兼容 grok2api v3</strong>
+            <p>使用 `g2a_` client key，经 `/social/search` 输出统一结果。</p>
             <a
               class="credit-link mono"
               href="https://github.com/chenyme/grok2api"
               target="_blank"
               rel="noopener noreferrer"
             >
-              github.com/chenyme/grok2api
+              查看兼容实现
             </a>
           </div>
-          <div class="credit-meta">
-            <div class="credit-pill">
-              <div class="label">当前用途</div>
-              <div class="value">X Search</div>
-              <div class="credit-pill-note mono">compatible router</div>
-            </div>
-            <div class="credit-pill">
-              <div class="label">默认实现</div>
-              <div class="value">grok2api</div>
-              <div class="credit-pill-note">后台自动继承</div>
-            </div>
-          </div>
         </section>
-      </section>
+      </aside>
 
-      <div id="services-root" class="services-root"></div>
+      <main id="services-root" class="services-root" tabindex="-1"></main>
     </div>
   </div>
+</div>
 
-	  {% include "components/_settings_modal.html" %}
+  {% include "components/_settings_modal.html" %}
 
-    <div id="detail-drawer" class="detail-drawer-shell hidden">
-      <div class="detail-drawer-backdrop" onclick="closeDetailDrawer()"></div>
+    <div id="detail-drawer" class="detail-drawer-shell hidden" aria-hidden="true">
+      <div class="detail-drawer-backdrop" aria-hidden="true" onclick="closeDetailDrawer()"></div>
       <aside class="detail-drawer card" role="dialog" aria-modal="true" aria-labelledby="detail-drawer-title">
         <div class="detail-drawer-head">
           <div>
@@ -112,8 +93,8 @@
       </aside>
     </div>
 
-    <div id="app-dialog" class="app-dialog-shell hidden">
-      <div class="app-dialog-backdrop" onclick="closeAppDialog(false)"></div>
+    <div id="app-dialog" class="app-dialog-shell hidden" aria-hidden="true">
+      <div class="app-dialog-backdrop" aria-hidden="true" onclick="closeAppDialog(false)"></div>
       <div class="app-dialog card" role="alertdialog" aria-modal="true" aria-labelledby="app-dialog-title">
         <div class="app-dialog-head">
           <div class="app-dialog-kicker" id="app-dialog-kicker">Action Required</div>
@@ -126,10 +107,10 @@
 
     <div id="toast-root" class="toast-root" role="status" aria-live="polite" aria-atomic="false"></div>
 
-	<script>
-	const INITIAL_AUTHENTICATED = {{ "true" if initial_authenticated else "false" }};
+  <script>
+  const INITIAL_AUTHENTICATED = {{ "true" if initial_authenticated else "false" }};
   window.PAGE_KIND = "console";
-	</script>
-	<script src="{{ url_for('static', path='/js/console.js') }}"></script>
-	</body>
-	</html>
+  </script>
+  <script src="{{ url_for('static', path='/js/console.js') }}"></script>
+</body>
+</html>
