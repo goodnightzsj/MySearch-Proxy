@@ -120,12 +120,12 @@ provider。
 - Social / X fallback：
   - `social/search` 现在支持主模型结果过少或上游报错时自动 fallback。
   - 返回里新增 `route` 元信息，能直接看到实际选中的模型、fallback 是否触发，以及每轮尝试结果数。
-  - 推荐线上配置改为：主模型 `grok-4.20-fast`，fallback `grok-4.20-0309-non-reasoning`，阈值 `3`。
-  - 注意：2026-05-15 起 `grok-3-mini` / `grok-4.1-fast` / `grok-4-fast` / `grok-4` / `grok-code-fast-1` 已退役。当前默认值对齐上游 [`chenyme/grok2api`](https://github.com/chenyme/grok2api) **basic 层**（免费账号可用）：`grok-4.20-fast`、`grok-4.20-0309-non-reasoning`。如果你接的是官方 xAI API 而非 grok2api，可以按需把 `MYSEARCH_XAI_MODEL` / `SOCIAL_GATEWAY_MODEL` 显式覆盖成 `grok-4.3`、`grok-4.20-0309-*` 等官方 ID。
+  - 推荐线上配置改为：主模型 `grok-4.20-0309`，fallback `grok-4.3`，阈值 `3`。
+  - `grok2api` v3 继续使用 `POST /v1/responses`，但调用凭据改为管理端创建的 `g2a_` client key；旧 `/admin/api/config`、`/admin/api/tokens` 自动继承只适用于 v2 兼容部署。
 
 - Grok 模型自定义清单：
-  - 上游 grok2api 把模型表硬编码在 `app/control/model/registry.py`，无法在不改源码的前提下扩展。本项目把这一层做成 env 可配。
-  - 内置默认清单（与上游 basic 层一致）：`grok-4.20-fast`、`grok-4.20-0309-non-reasoning`、`grok-4.3-beta`。
+  - `grok2api` v3 会按账号能力动态同步模型；本项目保留一组已验证的兼容默认值，并允许用 env 覆盖。
+  - 内置默认清单：`grok-4.20-0309`、`grok-4.3`、`grok-4.5`。
   - `MYSEARCH_GROK_MODELS`：逗号分隔，**完全替换**内置清单（用于纯私有部署）。
   - `MYSEARCH_GROK_EXTRA_MODELS`：逗号分隔，在内置之后**追加**（自动去重；用于扩充 super/heavy 或自建别名）。
   - 清单暴露在 `mysearch_health.known_grok_models`，每项包含 `id` / `tier` / `source`，方便 AI 助手或控制台直接发现可用模型。

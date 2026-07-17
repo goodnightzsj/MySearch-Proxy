@@ -53,9 +53,9 @@ class GrokModelSpec:
 
 
 _BUILTIN_GROK_MODELS: tuple[GrokModelSpec, ...] = (
-    GrokModelSpec(id="grok-4.20-fast", tier="basic", source="builtin"),
-    GrokModelSpec(id="grok-4.20-0309-non-reasoning", tier="basic", source="builtin"),
-    GrokModelSpec(id="grok-4.3-beta", tier="basic", source="builtin"),
+    GrokModelSpec(id="grok-4.20-0309", tier="basic", source="builtin"),
+    GrokModelSpec(id="grok-4.3", tier="basic", source="builtin"),
+    GrokModelSpec(id="grok-4.5", tier="advanced", source="builtin"),
 )
 
 

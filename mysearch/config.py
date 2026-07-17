@@ -324,7 +324,7 @@ class MySearchConfig:
             xai_social_timeout_seconds=max(30, _get_int("MYSEARCH_XAI_SOCIAL_TIMEOUT_SECONDS", 120)),
             xai_model=_get_str(
                 "MYSEARCH_XAI_MODEL",
-                default="grok-4.20-fast",
+                default=_BUILTIN_GROK_MODELS[0].id,
             ),
             xai_models=_resolve_grok_models(),
             max_parallel_workers=max(1, _get_int("MYSEARCH_MAX_PARALLEL_WORKERS", 4)),

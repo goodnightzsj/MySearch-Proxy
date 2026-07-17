@@ -248,7 +248,7 @@ class GrokModelRegistryTests(unittest.TestCase):
             else:
                 os.environ[key] = value
 
-    def test_builtin_basic_tier_models_loaded_by_default(self) -> None:
+    def test_builtin_compatible_models_loaded_by_default(self) -> None:
         snapshot = self._preserve_env("MYSEARCH_GROK_MODELS", "MYSEARCH_GROK_EXTRA_MODELS")
         try:
             module = _load_module(
@@ -259,10 +259,10 @@ class GrokModelRegistryTests(unittest.TestCase):
             ids = [m.id for m in models]
             self.assertEqual(
                 ids,
-                ["grok-4.20-fast", "grok-4.20-0309-non-reasoning", "grok-4.3-beta"],
+                ["grok-4.20-0309", "grok-4.3", "grok-4.5"],
             )
+            self.assertEqual([m.tier for m in models], ["basic", "basic", "advanced"])
             for m in models:
-                self.assertEqual(m.tier, "basic")
                 self.assertEqual(m.source, "builtin")
         finally:
             self._restore_env(snapshot)
@@ -271,7 +271,7 @@ class GrokModelRegistryTests(unittest.TestCase):
         snapshot = self._preserve_env("MYSEARCH_GROK_MODELS", "MYSEARCH_GROK_EXTRA_MODELS")
         try:
             os.environ["MYSEARCH_GROK_EXTRA_MODELS"] = (
-                "grok-4.20-auto, grok-4.20-expert, grok-4.20-fast"
+                "grok-4.20-auto, grok-4.20-expert, grok-4.20-0309"
             )
             module = _load_module(
                 "test_mysearch_grok_models_extras",
@@ -282,16 +282,16 @@ class GrokModelRegistryTests(unittest.TestCase):
             self.assertEqual(
                 ids,
                 [
-                    "grok-4.20-fast",
-                    "grok-4.20-0309-non-reasoning",
-                    "grok-4.3-beta",
+                    "grok-4.20-0309",
+                    "grok-4.3",
+                    "grok-4.5",
                     "grok-4.20-auto",
                     "grok-4.20-expert",
                 ],
             )
             sources = {m.id: m.source for m in models}
             tiers = {m.id: m.tier for m in models}
-            self.assertEqual(sources["grok-4.20-fast"], "builtin")
+            self.assertEqual(sources["grok-4.20-0309"], "builtin")
             self.assertEqual(sources["grok-4.20-auto"], "user")
             self.assertEqual(sources["grok-4.20-expert"], "user")
             # 追加项的 tier 必须显式为 `custom`；防止未来重构把默认值改回 `basic`。
@@ -314,7 +314,7 @@ class GrokModelRegistryTests(unittest.TestCase):
                 ids = [m.id for m in models]
                 self.assertEqual(
                     ids,
-                    ["grok-4.20-fast", "grok-4.20-0309-non-reasoning", "grok-4.3-beta"],
+                    ["grok-4.20-0309", "grok-4.3", "grok-4.5"],
                     f"blank env {raw!r} should fall back to builtin",
                 )
             finally:
@@ -384,9 +384,6 @@ class GrokModelRegistryTests(unittest.TestCase):
         # 同时确保 sys.path 含 repo root，让 mysearch 作为 package 可导入
         if str(REPO_ROOT) not in sys.path:
             sys.path.insert(0, str(REPO_ROOT))
-        # 清掉缓存以让 module 重新求值新 env
-        for mod_name in ("mysearch.social_gateway", "mysearch.config", "mysearch"):
-            sys.modules.pop(mod_name, None)
         try:
             os.environ["MYSEARCH_GROK_MODELS"] = "grok-only-one"
             import importlib
@@ -394,12 +391,9 @@ class GrokModelRegistryTests(unittest.TestCase):
             primary = social_gateway._grok_default_primary()
             fallback = social_gateway._grok_default_fallback(primary)
             self.assertEqual(primary, "grok-only-one")
-            self.assertEqual(fallback, "grok-4.20-0309-non-reasoning")
+            self.assertEqual(fallback, "grok-4.3")
         finally:
             self._restore_env(snapshot)
-            # 重置 module cache，避免污染后续测试
-            for mod_name in ("mysearch.social_gateway", "mysearch.config", "mysearch"):
-                sys.modules.pop(mod_name, None)
 
     def test_full_override_replaces_builtins(self) -> None:
         snapshot = self._preserve_env("MYSEARCH_GROK_MODELS", "MYSEARCH_GROK_EXTRA_MODELS")

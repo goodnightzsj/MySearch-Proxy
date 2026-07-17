@@ -1,7 +1,7 @@
 ## Loop 7 Fixes And Validation
 
 - Date: 2026-05-31
-- Status: local fixes and regression validation complete; commit/push, CI, deploy, and full benchmark rerun pending.
+- Status: completed, pushed, deployed, and benchmarked.
 
 ## Fixes
 
@@ -27,9 +27,14 @@
 - `pytest tests/test_clients.py`: PASS, 359 tests.
 - Real Loop 6 factual baseline replay: the raw `factual-accuracy-01` payload now rewrites `3.13` to `3.14`, and reranking moves the Liquid Web version page above the Reddit thread.
 
-## Pending completion gates
+## Completion
 
-- Commit and push verified Loop 7 changes to `main`.
-- Wait for GitHub Actions release workflow.
-- Redeploy `mysearch-stack` because runtime image inputs changed.
-- Run a fresh full 41-row MCP comparison and record the loop outcome.
+- Commit `699c8a7` (`Fix version answers and crawl breadth defaults`) was pushed to `main`.
+- GitHub Actions run `26708010346` for that commit completed with `success`.
+- Remote `mysearch-stack` was rebuilt from the Loop 7 tree as image `helloworldz1024/mysearch-stack:699c8a7-local` and redeployed on `root@192.168.31.122`.
+- Post-deploy checks passed: `http://192.168.31.122:9874/health` returned success and MCP `initialize` on `http://192.168.31.122:18000/mcp` returned an `mcp-session-id`.
+- Fresh full post-deploy 41-row comparison is recorded in `.codex-tasks/20260530-provider-optimization-loop-v2/raw/loop7-remote-compare.csv` with 41/41 captured, 0 timeout, 0 empty-result, and a single non-actionable comparator structural failure `tavily-research-upstream-plan-limited` on `research-01`.
+
+## Loop Outcome
+
+- Loop 7 is complete but not clean. The benchmark confirms both runtime fixes worked (`factual-accuracy-01` now lands on official Python version pages and `crawl-map-02` captures 5 pages), but the loop itself still found actionable issues, so the no-new-issue streak remains `0 / 3`.

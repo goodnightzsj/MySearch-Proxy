@@ -128,6 +128,22 @@
 - `research` comparison report 现在把 markdown link-index / badge-shell 也视作可见层噪声：如果官方 row 只有 `* [Models]...`、`# Batch API | OpenAI API [![Image...` 这类导航壳，`Ranked Shortlist` 和 `Decision Table` 会优先回落到 claim text 或 cleaned title，而不是把壳文本直接展示给最终用户。
 - strict official / exact docs 的普通 `summary` fallback 也补了同一类可见层去噪：如果 top hit 已经正确，但 snippet 只剩导航壳、badge-shell 或代码壳，`Top official match: ...` 不再把这些碎片拼到标题后面。
 
+## Benchmark 观察口径
+
+- 现在的对比不再只看 generic `accuracy/richness`，而是按能力链看：
+  - `authority_precision`
+  - `semantic_discovery`
+  - `provider_orchestration`
+  - `multi_source_fusion`
+  - `content_fidelity`
+  - `freshness_signal`
+  - `site_coverage`
+  - `traceability`
+  - `resilience`
+  - `efficiency`
+- 这意味着 `MySearch` 的主要判断点是 orchestration / fusion / extraction / coverage，`tavily-hikari` 的主要判断点是 authority / freshness / traceability。
+- 做后续 benchmark 复核时，优先看 `active_dimensions` 是否落在这组能力链上，而不是沿用旧的内容类型标签。
+
 2026-03-25：继续收口 `official-web / pdf / tutorial-debugging / status`。
 
 2026-03-30：active benchmark 进入 provider-limit 窗口后，运行时和 comparator 又补了三条 resilience 语义：
