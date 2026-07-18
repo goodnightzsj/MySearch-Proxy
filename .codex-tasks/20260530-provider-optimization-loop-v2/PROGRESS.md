@@ -6,9 +6,9 @@
 - This epic replaces the old loop only as the active truth source; `.codex-tasks/20260529-provider-optimization-loop/` remains the completed historical reference.
 - User requested a stricter per-loop protocol: every loop must analyze whether the benchmark itself should change based on provider capabilities and collaboration design.
 - Loop 1 is complete under the final 37-row definition.
-- Latest pushed runtime commit: `55cee0c`.
-- Latest runtime deploy uses `helloworldz1024/mysearch-stack` at image revision `55cee0c6e8191a5bceeb5fb293c3dbed0e1b1e0a`.
-- Remote `mysearch-stack` is healthy after the Loop 11 redeploy.
+- Latest pushed runtime commit: `2ab00cf`; latest pushed HEAD is the test-isolation follow-up `1e54884`.
+- Latest runtime deploy uses `helloworldz1024/mysearch-stack` at image revision `1e548848d44c802ce841775a7f6d3526c506ff43`.
+- Remote `mysearch-stack` is healthy after the final Loop 11 provider-scheduling redeploy; Proxy health and MCP initialize both pass.
 - Loop 2 completed on the same final Loop 1 code state without additional code changes.
 
 ## Loop State
@@ -53,7 +53,10 @@
 - Commit `55cee0c` was pushed, Docker workflow `29644084979` succeeded, and the immutable image was deployed. The fresh 84-column comparison captured 41/41 unique rows with no MySearch timeout, empty result, budget overrun, or row error and a 40-1 MySearch win count. Two structural failures and all three budget overruns belonged to the Tavily comparator, but `factual-accuracy-01` regressed to Python `3.14.3` despite nested official `3.14.6` evidence, so this remains a finding-discovery artifact.
 - The user added provider-key scheduling as an explicit Loop 11 resilience requirement. The current local candidate separates temporary `429` cooldown from terminal quota/auth isolation, honors numeric and HTTP-date `Retry-After`, rotates every direct provider and all Proxy key pools, preserves proxy-token/direct-key boundaries, persists SQLite and Social fingerprint schedules, lets manual enable/replace restore keys, exposes available/quarantined status in health and console, binds direct Firecrawl crawl polling to the successful creation key, and lets Proxy Firecrawl status lookup find an account-scoped job without misclassifying `403/404` as bad credentials.
 - Three independent release reviews found and the candidate now fixes cooldown downgrade races, structured error-code loss, Social fallback header assumptions, misleading schedulability filters, missing manual-key API contracts, and secret leakage through truncation or public health diagnostics. Dedicated scheduling tests pass 66 cases and the final CI-equivalent suite passes 728 tests; runtime mirrors, syntax, diff, and secret scans pass.
-- Streak remains `0 / 3`; Loop 11 found actionable issues and cannot count as clean. Current work is commit/push, Docker CI, required runtime redeploy, and another fresh full 41-row comparison under the unchanged 84-column contract. Only that new artifact may close Loop 11.
+- The provider-scheduling release is complete: `2ab00cf` contained the runtime change, `1e54884` isolated the Social scheduling test, Docker workflow `29652482238` published all three images, and the remote stack now runs revision `1e54884` with Proxy health and MCP initialize verified.
+- The fresh revision-`1e54884` 84-column comparison captured 41/41 rows with zero structural failures, timeouts, empty results, or row errors; MySearch won 39 rows. It still exposed `factual-accuracy-01`: MySearch answered Python `3.14.3` instead of expected `3.14.6` despite nested official `python.org/downloads` evidence.
+- Follow-up review also found and locally fixed direct-key error redaction, stale in-flight failure writes after manual reload/resume, loss of Proxy-wide cooldown `Retry-After`, and non-finite `Retry-After` parsing. The local candidate now passes 738 tests; its release gate is pending.
+- Streak remains `0 / 3`; Loop 11 found actionable issues and cannot count as clean. Current work is commit/push, Docker CI, redeploy, and another fresh full 41-row comparison under the unchanged 84-column contract.
 
 ## Notes
 

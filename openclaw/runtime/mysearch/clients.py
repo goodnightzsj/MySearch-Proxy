@@ -138,6 +138,11 @@ def _stringify_error_detail(detail: Any) -> str:
     return str(detail).strip()
 
 
+def _redact_provider_secret(detail: Any, secret: str) -> str:
+    text = _stringify_error_detail(detail)
+    return text.replace(secret, "<redacted>") if secret else text
+
+
 _QUOTA_FAILURE_MARKERS = (
     "quota_exhausted",
     "quota exhausted",
@@ -198,7 +203,7 @@ def _parse_retry_after_seconds(headers: Any) -> int | None:
         return None
     try:
         return max(1, min(86400, math.ceil(float(raw_value))))
-    except ValueError:
+    except (ValueError, OverflowError):
         pass
     try:
         retry_at = parsedate_to_datetime(raw_value)
@@ -12828,6 +12833,7 @@ class MySearchClient:
         allow_key_rotation: bool = True,
     ) -> tuple[dict[str, Any], str]:
         current_key = key
+        request_generation = self.keyring.generation
         attempted_keys: set[str] = set()
         if (
             allow_key_rotation
@@ -12840,6 +12846,7 @@ class MySearchClient:
                     f"{provider.name} has no available API keys; manual key action required"
                 )
             current_key = replacement.key
+            request_generation = self.keyring.generation
         while True:
             try:
                 return (
@@ -12865,9 +12872,15 @@ class MySearchClient:
                             current_key,
                             failure_kind,
                             retry_after_seconds=exc.retry_after_seconds or 60,
+                            generation=request_generation,
                         )
                     else:
-                        self.keyring.quarantine(provider.name, current_key, failure_kind)
+                        self.keyring.quarantine(
+                            provider.name,
+                            current_key,
+                            failure_kind,
+                            generation=request_generation,
+                        )
                 if (
                     not failure_kind
                     or (provider.managed_key_pool and failure_kind != "auth_rejected")
@@ -12879,6 +12892,7 @@ class MySearchClient:
                 if replacement is None or replacement.key in attempted_keys:
                     raise
                 current_key = replacement.key
+                request_generation = self.keyring.generation
 
     def _request_json_once(
         self,
@@ -12951,7 +12965,7 @@ class MySearchClient:
                 raise MySearchHTTPError(
                     provider=provider.name,
                     status_code=status_code,
-                    detail=response_text[:300],
+                    detail=_redact_provider_secret(response_text, key)[:300],
                     url=url,
                     retry_after_seconds=_parse_retry_after_seconds(response_headers),
                 ) from exc
@@ -12969,13 +12983,14 @@ class MySearchClient:
             raise MySearchHTTPError(
                 provider=provider.name,
                 status_code=status_code,
-                detail=detail,
+                detail=_redact_provider_secret(detail, key)[:500],
                 url=url,
                 retry_after_seconds=_parse_retry_after_seconds(response_headers),
                 classification_detail=data,
             )
         if not isinstance(data, dict):
-            raise MySearchError(f"non-dict JSON response from {provider.name}: {response_text[:200]}")
+            safe_response = _redact_provider_secret(response_text, key)[:200]
+            raise MySearchError(f"non-dict JSON response from {provider.name}: {safe_response}")
         return data
 
     def _request_text(
@@ -14229,6 +14244,10 @@ class MySearchClient:
             if "latest" in context and "stable" in context:
                 score += 2
             if "as of" in context or "maintenance release" in context:
+                score += 1
+            # Prefer an exact patch release over a major-only status-page mention
+            # when both are otherwise plausible stable-version evidence.
+            if version_text.count(".") >= 2:
                 score += 1
             if score <= 0:
                 continue

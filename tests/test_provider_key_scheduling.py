@@ -105,10 +105,46 @@ class DirectKeySchedulingTests(unittest.TestCase):
         self.assertGreaterEqual(parsed, 1)
         self.assertLessEqual(parsed, 30)
 
+    def test_direct_retry_after_ignores_non_finite_values(self) -> None:
+        self.assertIsNone(_parse_retry_after_seconds({"retry-after": "inf"}))
+
+    def test_direct_error_detail_redacts_the_selected_key(self) -> None:
+        client = MySearchClient(self.config)
+        leaked_key = "first-key"
+        response = httpx.Response(
+            401,
+            json={"error": {"message": f"invalid api key: {leaked_key}"}},
+        )
+        with patch.object(client._http, "request", return_value=response):
+            with self.assertRaises(MySearchHTTPError) as raised:
+                client._request_json_once(
+                    provider=self.config.tavily,
+                    method="POST",
+                    path="/search",
+                    payload={"query": "test"},
+                    key=leaked_key,
+                )
+
+        self.assertNotIn(leaked_key, str(raised.exception))
+        self.assertIn("<redacted>", str(raised.exception))
+
     def test_quota_exhausted_key_requires_explicit_reload(self) -> None:
         self.ring.quarantine("tavily", "first-key", "quota_exhausted")
         self.assertEqual(self.ring.describe()["tavily"]["count"], 1)
         self.ring.reload()
+        self.assertEqual(self.ring.describe()["tavily"]["count"], 2)
+
+    def test_late_failure_from_before_reload_cannot_quarantine_reloaded_key(self) -> None:
+        generation = self.ring.generation
+        self.ring.reload()
+        self.assertFalse(
+            self.ring.quarantine(
+                "tavily",
+                "first-key",
+                "quota_exhausted",
+                generation=generation,
+            )
+        )
         self.assertEqual(self.ring.describe()["tavily"]["count"], 2)
 
     def test_terminal_quarantine_cannot_be_downgraded_by_late_429(self) -> None:
@@ -931,6 +967,75 @@ class ProxyDatabaseSchedulingTests(unittest.TestCase):
 
 
 class ProxyPoolCooldownTests(unittest.TestCase):
+    def test_stale_report_cannot_disable_key_after_pool_invalidation(self) -> None:
+        key_pool = proxy_key_pool.ServiceKeyPool()
+        keys = [{"id": 1, "key": "first-key"}]
+        with patch.object(
+            proxy_key_pool,
+            "get_active_keys",
+            return_value=keys,
+        ), patch.object(
+            proxy_key_pool,
+            "get_next_key_schedule_delay",
+            return_value=None,
+        ), patch.object(proxy_key_pool, "update_key_usage") as update_key_usage:
+            key_pool.reload("tavily")
+            selected = key_pool.get_next_key("tavily")
+            self.assertIsNotNone(selected)
+            key_pool.invalidate("tavily")
+            self.assertFalse(
+                key_pool.report_result(
+                    "tavily",
+                    1,
+                    False,
+                    failure_kind="auth_rejected",
+                    generation=selected["_pool_generation"],
+                )
+            )
+
+        update_key_usage.assert_not_called()
+
+    def test_all_cooled_keys_expose_retry_after(self) -> None:
+        key_pool = proxy_key_pool.ServiceKeyPool()
+        keys = [{"id": 1, "key": "first-key"}]
+        now = [100.0]
+
+        with patch.object(
+            proxy_key_pool,
+            "get_active_keys",
+            side_effect=[keys, []],
+        ), patch.object(
+            proxy_key_pool,
+            "get_next_key_schedule_delay",
+            return_value=30.0,
+        ), patch.object(
+            proxy_key_pool,
+            "update_key_usage",
+        ), patch.object(
+            proxy_key_pool.time,
+            "monotonic",
+            side_effect=lambda: now[0],
+        ):
+            key_pool.reload("tavily")
+            selected = key_pool.get_next_key("tavily")
+            key_pool.report_result(
+                "tavily",
+                selected["id"],
+                False,
+                failure_kind="rate_limited",
+                retry_after_seconds=30,
+                generation=selected["_pool_generation"],
+            )
+            now[0] = 101.0
+            self.assertIsNone(key_pool.get_next_key("tavily"))
+            self.assertEqual(key_pool.get_retry_after("tavily"), 30)
+
+    def test_proxy_retry_after_normalizes_non_finite_values(self) -> None:
+        self.assertEqual(
+            proxy_key_pool.normalize_retry_after_seconds(float("inf")),
+            60,
+        )
+
     def test_cooled_key_rejoins_pool_while_other_keys_remain(self) -> None:
         key_pool = proxy_key_pool.ServiceKeyPool()
         keys = [
@@ -1437,6 +1542,22 @@ class ProxyForwardingSchedulingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.server._available_social_upstream_keys([raw_key]), [raw_key])
         self.assertEqual(self.server.db.set_setting.call_args.args[1], "{}")
 
+    async def test_social_late_failure_cannot_requarantine_resumed_key(self) -> None:
+        raw_key = "social-secret-key"
+        self.server._schedule_social_upstream_key(raw_key, "quota_exhausted")
+        key_id = self.server._social_key_fingerprint(raw_key)[:12]
+        generation = self.server.social_upstream_key_generation
+
+        self.assertTrue(self.server._resume_social_upstream_key(key_id, [raw_key]))
+        self.assertFalse(
+            self.server._schedule_social_upstream_key(
+                raw_key,
+                "quota_exhausted",
+                generation=generation,
+            )
+        )
+        self.assertEqual(self.server._available_social_upstream_keys([raw_key]), [raw_key])
+
     def test_proxy_retry_after_accepts_http_date(self) -> None:
         retry_at = datetime.now(timezone.utc) + timedelta(seconds=30)
         parsed = self.server._parse_retry_after_header(
@@ -1446,6 +1567,16 @@ class ProxyForwardingSchedulingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(parsed)
         self.assertGreaterEqual(parsed, 1)
         self.assertLessEqual(parsed, 30)
+
+    def test_proxy_retry_after_ignores_non_finite_values(self) -> None:
+        self.assertIsNone(self.server._parse_retry_after_header({"retry-after": "inf"}))
+
+    def test_proxy_all_cooled_keys_keep_retry_after_semantics(self) -> None:
+        with patch.object(self.server.pool, "get_retry_after", return_value=15):
+            error = self.server._no_available_key_error("tavily")
+
+        self.assertEqual(error.status_code, 429)
+        self.assertEqual(error.headers["Retry-After"], "15")
 
     async def test_social_resume_api_restores_quarantined_key(self) -> None:
         raw_key = "social-secret-key"

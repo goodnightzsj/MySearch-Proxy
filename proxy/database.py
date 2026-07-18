@@ -2,6 +2,7 @@
 SQLite 数据库管理
 """
 import atexit
+import math
 import os
 import re
 import secrets
@@ -299,6 +300,16 @@ def get_next_key_schedule_delay(service=None):
         pass  # connection reused via thread-local
 
 
+def normalize_retry_after_seconds(value, default=60):
+    try:
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            raise ValueError("retry delay must be finite")
+        return max(1, min(86400, math.ceil(numeric)))
+    except (TypeError, ValueError, OverflowError):
+        return max(1, min(86400, int(default)))
+
+
 def update_key_usage(
     key_id,
     success,
@@ -341,7 +352,7 @@ def update_key_usage(
                 (now, key_id),
             )
             if normalized_kind == "rate_limited":
-                cooldown_seconds = max(1, min(86400, int(retry_after_seconds or 60)))
+                cooldown_seconds = normalize_retry_after_seconds(retry_after_seconds)
                 schedule_until = (
                     datetime.now(timezone.utc) + timedelta(seconds=cooldown_seconds)
                 ).isoformat()

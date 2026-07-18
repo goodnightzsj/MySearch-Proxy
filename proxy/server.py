@@ -534,6 +534,7 @@ templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "t
 http_client = httpx.AsyncClient(timeout=httpx.Timeout(max(120, SOCIAL_GATEWAY_TIMEOUT_SECONDS), connect=10.0), limits=httpx.Limits(max_connections=20, max_keepalive_connections=10))
 social_gateway_state_cache = {"expires_at": 0.0, "value": None}
 social_upstream_key_schedule = {}
+social_upstream_key_generation = 0
 social_upstream_key_cursor = 0
 social_upstream_key_lock = threading.Lock()
 social_gateway_state_lock = None
@@ -649,12 +650,13 @@ def is_key_schedulable(key):
 
 
 def reset_social_gateway_cache(*, clear_key_schedule=False):
-    global social_upstream_key_cursor
+    global social_upstream_key_cursor, social_upstream_key_generation
     social_gateway_state_cache["expires_at"] = 0.0
     social_gateway_state_cache["value"] = None
     if clear_key_schedule:
         with social_upstream_key_lock:
             social_upstream_key_schedule.clear()
+            social_upstream_key_generation += 1
             social_upstream_key_cursor = 0
         db.set_setting("social_upstream_key_schedule", "{}")
     _clear_social_admin_session()
@@ -2900,7 +2902,7 @@ def _social_key_fingerprint(key):
 
 
 def _load_social_upstream_key_schedule():
-    global social_upstream_key_cursor
+    global social_upstream_key_cursor, social_upstream_key_generation
     raw_value = db.get_setting("social_upstream_key_schedule", "{}") or "{}"
     try:
         payload = json.loads(raw_value)
@@ -2924,6 +2926,7 @@ def _load_social_upstream_key_schedule():
     with social_upstream_key_lock:
         social_upstream_key_schedule.clear()
         social_upstream_key_schedule.update(restored)
+        social_upstream_key_generation += 1
         social_upstream_key_cursor = 0
 
 
@@ -2971,20 +2974,30 @@ def _ordered_social_upstream_keys(keys):
     return available[start:] + available[:start]
 
 
-def _schedule_social_upstream_key(key, failure_kind, retry_after_seconds=None):
+def _schedule_social_upstream_key(
+    key,
+    failure_kind,
+    retry_after_seconds=None,
+    *,
+    generation=None,
+):
     with social_upstream_key_lock:
+        if generation is not None and generation != social_upstream_key_generation:
+            return False
         social_upstream_key_schedule[_social_key_fingerprint(key)] = {
             "reason": failure_kind,
             "until": (
-                time.time() + max(1, min(86400, int(retry_after_seconds or 60)))
+                time.time() + db.normalize_retry_after_seconds(retry_after_seconds)
                 if failure_kind == "rate_limited"
                 else None
             ),
         }
     _persist_social_upstream_key_schedule()
+    return True
 
 
 def _resume_social_upstream_key(key_id, keys):
+    global social_upstream_key_generation
     normalized_id = str(key_id or "").strip().lower()
     if not re.fullmatch(r"[0-9a-f]{12}", normalized_id):
         return None
@@ -2998,6 +3011,8 @@ def _resume_social_upstream_key(key_id, keys):
     fingerprint = _social_key_fingerprint(matches[0])
     with social_upstream_key_lock:
         resumed = social_upstream_key_schedule.pop(fingerprint, None) is not None
+        if resumed:
+            social_upstream_key_generation += 1
     if resumed:
         _persist_social_upstream_key_schedule()
     return resumed
@@ -3076,7 +3091,7 @@ def _parse_retry_after_header(headers):
         return None
     try:
         return max(1, min(86400, math.ceil(float(raw_retry_after))))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         pass
     try:
         retry_at = parsedate_to_datetime(raw_retry_after)
@@ -3099,6 +3114,8 @@ async def execute_social_search_attempt(query, body, state, model, max_results):
         state.get("resolved_upstream_api_key")
     ]
     upstream_keys = _ordered_social_upstream_keys(configured_keys)
+    with social_upstream_key_lock:
+        schedule_generation = social_upstream_key_generation
     if not upstream_keys:
         failure_kind, retry_after_seconds = _social_upstream_pool_failure(
             configured_keys
@@ -3185,6 +3202,7 @@ async def execute_social_search_attempt(query, body, state, model, max_results):
                     upstream_key,
                     failure_kind,
                     retry_after_seconds=retry_after_seconds,
+                    generation=schedule_generation,
                 )
                 last_key_failure = attempt
                 last_key_failure_kind = failure_kind
@@ -3374,6 +3392,17 @@ def _select_key_pool_failure(failures):
     return selected[0], selected[1], True
 
 
+def _no_available_key_error(service):
+    retry_after = pool.get_retry_after(service)
+    if retry_after:
+        return HTTPException(
+            status_code=429,
+            detail=f"All {service} API keys are temporarily rate limited",
+            headers={"Retry-After": str(retry_after)},
+        )
+    return HTTPException(status_code=503, detail="No available API keys")
+
+
 # ═══ Tavily 代理端点 ═══
 
 @app.post("/api/search")
@@ -3441,7 +3470,7 @@ async def proxy_tavily(request: Request):
                 if selected_failure is not None:
                     resp, upstream_key, pool_exhausted = selected_failure
                     break
-                raise HTTPException(status_code=503, detail="No available API keys")
+                raise _no_available_key_error("tavily")
 
             attempted_key_ids.add(key_info["id"])
             upstream_key = key_info["key"]
@@ -3457,7 +3486,12 @@ async def proxy_tavily(request: Request):
                 )
             except Exception:
                 latency = int((time.monotonic() - start) * 1000)
-                pool.report_result("tavily", key_info["id"], False)
+                pool.report_result(
+                    "tavily",
+                    key_info["id"],
+                    False,
+                    generation=key_info.get("_pool_generation"),
+                )
                 db.log_usage(
                     token_row["id"], key_info["id"], endpoint, 0, latency, service="tavily"
                 )
@@ -3477,6 +3511,7 @@ async def proxy_tavily(request: Request):
                 failure_kind=failure_kind,
                 failure_detail=failure_detail,
                 retry_after_seconds=retry_after_seconds,
+                generation=key_info.get("_pool_generation"),
             )
             db.log_usage(
                 token_row["id"], key_info["id"], endpoint, int(success), latency, service="tavily"
@@ -3533,7 +3568,7 @@ async def proxy_firecrawl(path: str, request: Request):
             if last_scope_miss is not None:
                 resp, last_upstream_key = last_scope_miss
                 break
-            raise HTTPException(status_code=503, detail="No available API keys")
+            raise _no_available_key_error("firecrawl")
 
         attempted_key_ids.add(key_info["id"])
         last_upstream_key = key_info["key"]
@@ -3554,7 +3589,12 @@ async def proxy_firecrawl(path: str, request: Request):
             )
         except Exception:
             latency = int((time.monotonic() - start) * 1000)
-            pool.report_result("firecrawl", key_info["id"], False)
+            pool.report_result(
+                "firecrawl",
+                key_info["id"],
+                False,
+                generation=key_info.get("_pool_generation"),
+            )
             db.log_usage(token_row["id"], key_info["id"], path, 0, latency, service="firecrawl")
             logger.exception("firecrawl proxy error")
             raise HTTPException(status_code=502, detail="upstream request failed")
@@ -3572,6 +3612,7 @@ async def proxy_firecrawl(path: str, request: Request):
             failure_kind=failure_kind,
             failure_detail=failure_detail,
             retry_after_seconds=retry_after_seconds,
+            generation=key_info.get("_pool_generation"),
         )
         db.log_usage(
             token_row["id"], key_info["id"], path, int(success), latency, service="firecrawl"
@@ -3633,7 +3674,7 @@ async def proxy_exa_search(request: Request):
             if selected_failure is not None:
                 resp, last_upstream_key, pool_exhausted = selected_failure
                 break
-            raise HTTPException(status_code=503, detail="No available API keys")
+            raise _no_available_key_error("exa")
 
         attempted_key_ids.add(key_info["id"])
         last_upstream_key = key_info["key"]
@@ -3647,7 +3688,12 @@ async def proxy_exa_search(request: Request):
             )
         except Exception:
             latency = int((time.monotonic() - start) * 1000)
-            pool.report_result("exa", key_info["id"], False)
+            pool.report_result(
+                "exa",
+                key_info["id"],
+                False,
+                generation=key_info.get("_pool_generation"),
+            )
             db.log_usage(token_row["id"], key_info["id"], "search", 0, latency, service="exa")
             logger.exception("exa proxy error")
             raise HTTPException(status_code=502, detail="upstream request failed")
@@ -3665,6 +3711,7 @@ async def proxy_exa_search(request: Request):
             failure_kind=failure_kind,
             failure_detail=failure_detail,
             retry_after_seconds=retry_after_seconds,
+            generation=key_info.get("_pool_generation"),
         )
         db.log_usage(
             token_row["id"], key_info["id"], "search", int(success), latency, service="exa"
@@ -4200,11 +4247,13 @@ async def add_keys(request: Request, _=Depends(verify_admin)):
         file_content = body["file"]
         if not isinstance(file_content, str):
             raise HTTPException(status_code=400, detail="'file' must be a string")
+        pool.invalidate(service)
         count = db.import_keys_from_text(file_content, service=service)
         pool.reload(service)
         reset_stats_cache()
         return {"imported": count, "service": service}
     if "key" in body:
+        pool.invalidate(service)
         db.add_key(body["key"], body.get("email", ""), service=service)
         pool.reload(service)
         reset_stats_cache()
@@ -4217,6 +4266,7 @@ async def remove_key(key_id: int, _=Depends(verify_admin)):
     key_row = db.get_key_by_id(key_id)
     if not key_row:
         raise HTTPException(status_code=404, detail="Key not found")
+    pool.invalidate(key_row["service"])
     db.delete_key(key_id)
     pool.reload(key_row["service"])
     reset_stats_cache()
@@ -4242,6 +4292,7 @@ async def toggle_key(key_id: int, request: Request, _=Depends(verify_admin)):
             active = 1 if int(raw) else 0
         except (TypeError, ValueError):
             active = 1
+    pool.invalidate(key_row["service"])
     db.toggle_key(key_id, active)
     pool.reload(key_row["service"])
     reset_stats_cache()
