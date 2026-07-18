@@ -464,6 +464,18 @@ class MySearchConfig:
                         proxy_default="/firecrawl/v2/scrape",
                         default="/v2/scrape",
                     ),
+                    "crawl": _provider_path(
+                        explicit_name="MYSEARCH_FIRECRAWL_CRAWL_PATH",
+                        proxy_base_url=proxy_base_url,
+                        proxy_default="/firecrawl/v2/crawl",
+                        default="/v2/crawl",
+                    ),
+                    "map": _provider_path(
+                        explicit_name="MYSEARCH_FIRECRAWL_MAP_PATH",
+                        proxy_base_url=proxy_base_url,
+                        proxy_default="/firecrawl/v2/map",
+                        default="/v2/map",
+                    ),
                 },
                 api_keys=[
                     *_get_list("MYSEARCH_FIRECRAWL_API_KEYS"),

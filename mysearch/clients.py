@@ -12,7 +12,7 @@ import re
 import sys
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass as _dataclass
 from datetime import date, datetime, time as dt_time, timezone
 from email.utils import parsedate_to_datetime
@@ -67,6 +67,8 @@ SEARCH_MODES: tuple[SearchMode, ...] = (
     "github",
     "pdf",
 )
+OPTIONAL_VERIFY_TIMEOUT_SECONDS = 10
+HYBRID_SOCIAL_TIMEOUT_SECONDS = 20
 
 
 class MySearchError(RuntimeError):
@@ -275,7 +277,7 @@ class MySearchClient:
             "social_unavailable": {"hits": 0, "misses": 0},
         }
         self._cache_max_entries = 256
-        self._provider_probe_ttl_seconds = 300
+        self._provider_probe_ttl_seconds = 1800
         self._provider_probe_cache: dict[str, dict[str, Any]] = {}
         self._http = httpx.Client(
             timeout=httpx.Timeout(self.config.timeout_seconds, connect=10.0),
@@ -457,6 +459,8 @@ class MySearchClient:
         tasks: dict[str, Callable[[], Any]],
         *,
         max_workers: int | None = None,
+        timeout_seconds: float | None = None,
+        stop_after_primary_and_verifier: bool = False,
     ) -> tuple[dict[str, Any], dict[str, Exception]]:
         if not tasks:
             return {}, {}
@@ -470,15 +474,77 @@ class MySearchClient:
 
         results: dict[str, Any] = {}
         errors: dict[str, Exception] = {}
+        worker_count = max(1, min(max_workers or self.config.max_parallel_workers, len(tasks)))
+        executor = self._executor
+        temporary_executor: ThreadPoolExecutor | None = None
+        if max_workers is not None:
+            temporary_executor = ThreadPoolExecutor(
+                max_workers=worker_count,
+                thread_name_prefix="mysearch-branch",
+            )
+            executor = temporary_executor
         future_map: dict[Future[Any], str] = {
-            self._executor.submit(task): name
-            for name, task in tasks.items()
+            executor.submit(task): name for name, task in tasks.items()
         }
-        for future, name in future_map.items():
-            try:
-                results[name] = future.result(timeout=self.config.timeout_seconds + 5)
-            except Exception as exc:  # pragma: no cover - network/runtime dependent
-                errors[name] = exc
+        pending = set(future_map)
+        budget = max(
+            0.001,
+            float(timeout_seconds)
+            if timeout_seconds is not None
+            else float(self.config.timeout_seconds + 5),
+        )
+        deadline = time.monotonic() + budget
+
+        def cancel_pending(reason: str) -> None:
+            for pending_future in pending:
+                pending_future.cancel()
+                pending_name = future_map[pending_future]
+                errors.setdefault(pending_name, MySearchError(reason))
+
+        try:
+            while pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    cancel_pending(f"parallel task timed out after {budget:g}s")
+                    break
+                completed, _ = wait(
+                    pending,
+                    timeout=remaining,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not completed:
+                    cancel_pending(f"parallel task timed out after {budget:g}s")
+                    break
+                for future in completed:
+                    pending.discard(future)
+                    name = future_map[future]
+                    if name in errors or name in results:
+                        continue
+                    try:
+                        results[name] = future.result()
+                    except TimeoutError:
+                        errors[name] = MySearchError(
+                            f"{name} task timed out within {budget:g}s parallel budget"
+                        )
+                    except Exception as exc:  # pragma: no cover - network/runtime dependent
+                        errors[name] = exc
+
+                if stop_after_primary_and_verifier:
+                    primary_completed = "primary" in results or "primary" in errors
+                    verifier_succeeded = any(name != "primary" for name in results)
+                    primary_failed_with_verifier = (
+                        "primary" in errors and verifier_succeeded
+                    )
+                    if primary_completed and (
+                        len(results) >= 2 or primary_failed_with_verifier
+                    ):
+                        cancel_pending(
+                            "parallel task cancelled after primary and verifier quorum"
+                        )
+                        break
+        finally:
+            if temporary_executor is not None:
+                temporary_executor.shutdown(wait=False, cancel_futures=True)
         return results, errors
 
     def _raise_parallel_error(self, errors: dict[str, Exception], task_name: str) -> None:
@@ -981,9 +1047,11 @@ class MySearchClient:
                         to_date=to_date,
                         include_x_images=include_x_images,
                         include_x_videos=include_x_videos,
+                        timeout_seconds=HYBRID_SOCIAL_TIMEOUT_SECONDS,
                     ),
                 },
                 max_workers=2,
+                timeout_seconds=HYBRID_SOCIAL_TIMEOUT_SECONDS,
             )
             if "web" in parallel_errors and "social" in parallel_errors:
                 self._raise_parallel_error(parallel_errors, "web")
@@ -5987,11 +6055,21 @@ class MySearchClient:
         policy: SearchRoutePolicy,
     ) -> tuple[ProviderName, list[str] | None]:
         ordered: list[ProviderName] = [policy.provider, *policy.fallback_chain]
+        provider_configs = {
+            provider_name: self._provider_config_for_name(provider_name)
+            for provider_name in ordered
+        }
+        probe_results, _ = self._execute_parallel(
+            {
+                provider_name: lambda config=provider_configs[provider_name]: self._provider_live_status(config)
+                for provider_name in ordered
+            },
+            max_workers=len(ordered),
+        )
         healthy: list[ProviderName] = []
         degraded: list[ProviderName] = []
         for provider_name in ordered:
-            config = self._provider_config_for_name(provider_name)
-            status = self._provider_live_status(config)
+            status = probe_results.get(provider_name)
             if status is None or status == "auth_error":
                 continue
             if status == "ok":
@@ -8045,6 +8123,9 @@ class MySearchClient:
         from_date: str | None = None,
         to_date: str | None = None,
     ) -> dict[str, Any]:
+        verify_timeout = (
+            OPTIONAL_VERIFY_TIMEOUT_SECONDS if strategy == "verify" else None
+        )
         if decision.provider == "tavily":
             tasks = {
                 "primary": lambda: self._search_tavily(
@@ -8057,6 +8138,7 @@ class MySearchClient:
                     exclude_domains=exclude_domains,
                     from_date=from_date,
                     to_date=to_date,
+                    timeout_seconds=verify_timeout,
                 ),
                 "secondary": lambda: self._search_firecrawl(
                     query=query,
@@ -8067,6 +8149,7 @@ class MySearchClient:
                     exclude_domains=exclude_domains,
                     from_date=from_date,
                     to_date=to_date,
+                    timeout_seconds=verify_timeout,
                 ),
             }
         else:
@@ -8080,6 +8163,7 @@ class MySearchClient:
                     exclude_domains=exclude_domains,
                     from_date=from_date,
                     to_date=to_date,
+                    timeout_seconds=verify_timeout,
                 ),
                 "secondary": lambda: self._search_tavily(
                     query=query,
@@ -8092,6 +8176,7 @@ class MySearchClient:
                     days=self._infer_tavily_days(intent, from_date),
                     from_date=from_date,
                     to_date=to_date,
+                    timeout_seconds=verify_timeout,
                 ),
             }
 
@@ -8107,9 +8192,15 @@ class MySearchClient:
                 strategy=strategy,
                 from_date=from_date,
                 to_date=to_date,
+                timeout_seconds=verify_timeout,
             )
 
-        blended_results, blended_errors = self._execute_parallel(tasks, max_workers=len(tasks))
+        blended_results, blended_errors = self._execute_parallel(
+            tasks,
+            max_workers=len(tasks),
+            timeout_seconds=verify_timeout,
+            stop_after_primary_and_verifier=strategy == "verify",
+        )
         primary_failed = "primary" in blended_errors
         secondary_failed = "secondary" in blended_errors
         exa_supplement = blended_results.get("exa_supplement")
@@ -8190,7 +8281,7 @@ class MySearchClient:
         if exa_supplement:
             providers_consulted.append("exa")
 
-        if secondary_result:
+        if secondary_result or (exa_supplement and exa_supplement.get("results")):
             verification = "cross-provider"
         elif secondary_error:
             verification = "single-provider-secondary-failed"
@@ -8229,6 +8320,7 @@ class MySearchClient:
         days: int | None = None,
         from_date: str | None = None,
         to_date: str | None = None,
+        timeout_seconds: int | None = None,
         _skip_domain_fallback: bool = False,
     ) -> dict[str, Any]:
         include_domains = [item.strip() for item in (include_domains or []) if item and item.strip()]
@@ -8246,6 +8338,7 @@ class MySearchClient:
             days=days,
             from_date=from_date,
             to_date=to_date,
+            timeout_seconds=timeout_seconds,
         )
         if response.get("results") or not include_domains:
             return response
@@ -8552,6 +8645,7 @@ class MySearchClient:
         exclude_domains: list[str] | None,
         from_date: str | None = None,
         to_date: str | None = None,
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         include_domains = [item.strip() for item in (include_domains or []) if item and item.strip()]
         exclude_domains = [item.strip() for item in (exclude_domains or []) if item and item.strip()]
@@ -8570,6 +8664,7 @@ class MySearchClient:
                 exclude_domains=None,
                 from_date=from_date,
                 to_date=to_date,
+                timeout_seconds=timeout_seconds,
             )
             if native_result.get("results"):
                 route_debug = dict(native_result.get("route_debug") or {})
@@ -8661,6 +8756,7 @@ class MySearchClient:
             exclude_domains=exclude_domains,
             from_date=from_date,
             to_date=to_date,
+            timeout_seconds=timeout_seconds,
         )
 
     def _search_firecrawl_domain_fallback(
@@ -8782,6 +8878,7 @@ class MySearchClient:
         exclude_domains: list[str] | None = None,
         from_date: str | None = None,
         to_date: str | None = None,
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         provider = self.config.firecrawl
         key = self._get_key_or_raise(provider)
@@ -8817,6 +8914,7 @@ class MySearchClient:
             path=provider.path("search"),
             payload=payload,
             key=key.key,
+            timeout_seconds=timeout_seconds,
         )
         data = response.get("data") or {}
         if not isinstance(data, dict):
@@ -9082,6 +9180,7 @@ class MySearchClient:
         to_date: str | None = None,
         include_x_images: bool = False,
         include_x_videos: bool = False,
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         provider = self.config.xai
         if provider.search_mode == "compatible":
@@ -9095,6 +9194,7 @@ class MySearchClient:
                 to_date=to_date,
                 include_x_images=include_x_images,
                 include_x_videos=include_x_videos,
+                timeout_seconds=timeout_seconds,
             )
 
         key = self._get_key_or_raise(provider)
@@ -9117,6 +9217,7 @@ class MySearchClient:
             path=provider.path("responses"),
             payload=payload,
             key=key.key,
+            timeout_seconds=timeout_seconds,
         )
         text = self._extract_xai_output_text(response)
         citations = self._extract_xai_citations(response)
@@ -9154,6 +9255,7 @@ class MySearchClient:
         to_date: str | None,
         include_x_images: bool,
         include_x_videos: bool,
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         provider = self.config.xai
         if "x" not in sources:
@@ -9223,9 +9325,13 @@ class MySearchClient:
             )
 
         retry_attempts = 3
-        total_social_timeout = max(
+        configured_social_timeout = max(
             30,
             int(getattr(self.config, "xai_social_timeout_seconds", 120) or 120),
+        )
+        total_social_timeout = min(
+            configured_social_timeout,
+            max(5, int(timeout_seconds)) if timeout_seconds is not None else configured_social_timeout,
         )
         social_start = time.monotonic()
         social_fallback_reserve = max(15, min(30, total_social_timeout // 4 or 15))
