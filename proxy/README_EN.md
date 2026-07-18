@@ -68,11 +68,10 @@ So it is a real backend for search agents, not only a UI for manual ops.
 
 If your X / Social layer comes from `grok2api`, the console can:
 
-- prefer `/admin/api/config`
-- prefer `/admin/api/tokens`
-- fall back to `/v1/admin/*` and `/api/v1/admin/*` when needed
-- inherit `app.api_key`
-- display token state in the same workspace
+- log in through the v3 `/api/admin/v1/auth/login` contract
+- read v3 account availability and dashboard request statistics
+- keep `/admin/api/config`, `/admin/api/tokens`, and their fallback paths for v2-compatible deployments
+- display v3 account state or legacy token state in the same workspace
 
 That is much cleaner than keeping a separate social script on the side.
 
@@ -299,6 +298,8 @@ ADMIN_PASSWORD=<generate-a-strong-password>
 SOCIAL_GATEWAY_UPSTREAM_BASE_URL=https://api.x.ai/v1
 SOCIAL_GATEWAY_UPSTREAM_RESPONSES_PATH=/responses
 SOCIAL_GATEWAY_ADMIN_BASE_URL=https://media.example.com
+SOCIAL_GATEWAY_ADMIN_USERNAME=
+SOCIAL_GATEWAY_ADMIN_PASSWORD=
 SOCIAL_GATEWAY_ADMIN_APP_KEY=
 SOCIAL_GATEWAY_ADMIN_VERIFY_PATH=/v1/admin/verify
 SOCIAL_GATEWAY_ADMIN_CONFIG_PATH=/admin/api/config
@@ -339,6 +340,9 @@ SOCIAL_GATEWAY_UPSTREAM_BASE_URL=https://media.example.com/v1
 SOCIAL_GATEWAY_UPSTREAM_API_KEY=g2a_your_client_key
 SOCIAL_GATEWAY_MODEL=grok-4.20-0309
 SOCIAL_GATEWAY_FALLBACK_MODEL=grok-4.3
+SOCIAL_GATEWAY_ADMIN_BASE_URL=https://media.example.com
+SOCIAL_GATEWAY_ADMIN_USERNAME=admin
+SOCIAL_GATEWAY_ADMIN_PASSWORD=YOUR_GROK2API_ADMIN_PASSWORD
 ```
 
 The inference endpoint remains `POST /v1/responses`. The old

@@ -101,8 +101,10 @@
 
 - 上游 base URL 管理
 - gateway token 管理
-- 兼容 admin API 对接
-- token 状态展示
+- grok2api v3 管理员会话与 v2 legacy app key 对接
+- v3 账号可用性、请求统计与 v2 token 状态展示
+
+grok2api v3 的推理与管理凭据相互独立：`g2a_` client key 调用 `POST /v1/responses`；管理员用户名/密码只用于登录 `/api/admin/v1/auth/login` 并读取 `/accounts/summary`、`/dashboard`，不能替代 client key。
 
 ## 当前推荐用法
 

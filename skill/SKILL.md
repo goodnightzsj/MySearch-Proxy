@@ -465,7 +465,7 @@ MySearch 会自动回退到 `Tavily extract`。
 - `official`：适合官方 xAI，或真正支持 `x_search` / `web_search` 的兼容后端
 - `compatible`：适合 `grok2api` 这类只提供 `/responses` 的兼容网关
 - `compatible` 模式下，真正的 X 结果要来自 `mysearch.social_gateway` 这类 social search gateway
-- 如果 social gateway 前面还有一层 proxy，可以优先用“grok2api admin 自动继承”模式，避免重复维护 `SOCIAL_GATEWAY_UPSTREAM_API_KEY` / `SOCIAL_GATEWAY_TOKEN`
+- 如果 social gateway 前面还有一层 proxy，grok2api v3 仍必须显式维护 `g2a_` 推理 client key；管理员用户名/密码只读取账号与请求统计。只有 v2-compatible 才能通过 legacy app key 自动继承。
 - `MYSEARCH_XAI_SOCIAL_BASE_URL` 用来单独指定 social gateway 根地址；`MySearch` 默认会自动追加 `/social/search`
 
 ## 什么时候强制指定 provider

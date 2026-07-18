@@ -665,10 +665,14 @@ function renderSettingsSummaries(settings = latestSettings) {
 
   const socialSummary = document.getElementById('settings-social-summary');
   if (socialSummary) {
+    const adminLabel = social.admin_connected
+      ? `已连接 v${social.admin_api_version || '?'}`
+      : (social.admin_auth_mode === 'v3_credentials' ? 'v3 待验证' : '未连接');
     socialSummary.innerHTML = [
       summaryCard('工作模式', socialModeLabel(social.mode || 'manual'), social.admin_connected ? '后台已连通' : '可手动覆写上游'),
       summaryCard('Token 来源', socialTokenSourceLabel(social.token_source || ''), social.gateway_token_configured ? '客户端 token 已配置' : '可直接复用统一 token'),
       summaryCard('默认模型', social.model || 'grok-4.20-0309', social.fallback_model ? `Fallback ${social.fallback_model}` : '未配置 fallback'),
+      summaryCard('管理 API', adminLabel, social.admin_username || '未配置管理员用户名'),
     ].join('');
   }
 }
@@ -909,6 +913,8 @@ async function migrateStoredPasswordIfNeeded() {
 }
 
 function socialModeLabel(mode) {
+  if (mode === 'v3-managed') return 'v3 管理 + 独立推理';
+  if (mode === 'v3-observe') return '仅 v3 管理统计';
   if (mode === 'admin-auto') return '后台自动继承';
   if (mode === 'hybrid') return '后台继承 + 手动覆写';
   return '手动模式';
@@ -936,8 +942,10 @@ function socialTokenSourceLabel(source) {
 }
 
 function socialStatusLabel(social) {
-  if (social?.admin_connected) return '后台已接通';
-  if (social?.upstream_key_configured) return '已可转发搜索';
+  const state = getSocialUpstreamState(social || {});
+  if (state.canProxySearch && state.adminConnected) return '推理与管理均已接通';
+  if (state.canProxySearch) return '已可转发搜索';
+  if (state.adminConnected) return '管理已接通，推理待配置';
   return '等待配置';
 }
 
@@ -1176,11 +1184,11 @@ function getQuickstartProviderCards(services = latestServices, social = latestSo
     });
   });
 
-  if (social?.admin_connected) {
+  if (socialState.canProxySearch && social?.admin_connected) {
     cards.push({
       label: 'Social / X',
       tone: 'ok',
-      title: '后台自动继承',
+      title: social?.admin_api_version === 'v3' ? 'v3 管理统计已连接' : 'v2 后台自动继承',
       desc: `${socialTokenSourceLabel(social?.token_source || '')} · /social/search 已就绪`,
     });
   } else if (socialState.canProxySearch) {
@@ -1189,6 +1197,13 @@ function getQuickstartProviderCards(services = latestServices, social = latestSo
       tone: 'warn',
       title: '已可转发搜索',
       desc: `上游 key ${fmtNum(socialState.upstreamApiKeyCount)} · 客户端 token ${fmtNum(socialState.acceptedTokenCount)} · 后台统计未接通`,
+    });
+  } else if (social?.admin_connected) {
+    cards.push({
+      label: 'Social / X',
+      tone: 'danger',
+      title: '管理已连接，推理待配置',
+      desc: '补充 grok2api v3 g2a_ client key 后，/social/search 才会就绪',
     });
   } else {
     cards.push({
@@ -1228,6 +1243,22 @@ function getWorkspaceSnapshot(service, services, social) {
     const stats = social?.stats || {};
     const socialState = getSocialUpstreamState(social || {});
     const hasFullStats = socialState.level === 'full';
+    const isV3Admin = social?.admin_api_version === 'v3' || stats.schema === 'grok2api_v3_accounts';
+    if (hasFullStats && isV3Admin) {
+      return {
+        keysTotal: Number(stats.account_total || 0),
+        keysActive: Number(stats.account_available || 0),
+        tokensCount: socialState.acceptedTokenCount,
+        todayCount: Number(stats.requests_24h || 0),
+        remaining: null,
+        remainingLabel: '24h 请求',
+        primaryMetricLabel: '可用账号',
+        primaryMetricValue: Number(stats.account_available || 0),
+        quaternaryMetricLabel: '24h 请求',
+        quaternaryMetricValue: Number(stats.requests_24h || 0),
+        modeLabel: socialModeLabel(social?.mode || 'manual'),
+      };
+    }
     return {
       keysTotal: hasFullStats ? Number(stats.token_total || 0) : socialState.acceptedTokenCount,
       keysActive: hasFullStats ? Number(stats.token_normal || 0) : socialState.upstreamApiKeyCount,
@@ -1284,11 +1315,14 @@ function workspaceSignal(service, services, social) {
   const meta = WORKSPACE_META[service] || {};
 
   if (service === 'social') {
-    if (!(social?.admin_connected || social?.upstream_key_configured)) {
+    const socialState = getSocialUpstreamState(social || {});
+    if (!socialState.canProxySearch) {
       return {
         tone: 'danger',
-        label: '待配置',
-        summary: `${meta.label} 还没有接通上游兼容路由。`,
+        label: socialState.adminConnected ? '推理待配置' : '待配置',
+        summary: socialState.adminConnected
+          ? `${meta.label} 管理统计已连接，但还缺少可用推理凭据。`
+          : `${meta.label} 还没有接通上游兼容路由。`,
         snapshot,
       };
     }
@@ -1399,6 +1433,7 @@ function renderHeroFocus(services, social) {
 function buildSocialProxyEnv(social) {
   const baseUrl = social.upstream_base_url || 'https://media.example.com/v1';
   const adminBaseUrl = social.admin_base_url || baseUrl.replace(/\/v1$/, '');
+  const adminUsername = social.admin_username || 'admin';
   const model = social.model || 'grok-4.20-0309';
   const fallbackModel = social.fallback_model || 'grok-4.3';
   return `# grok2api v3：在客户端密钥页面创建 g2a_ key
@@ -1407,8 +1442,12 @@ SOCIAL_GATEWAY_UPSTREAM_API_KEY=YOUR_GROK2API_G2A_CLIENT_KEY
 SOCIAL_GATEWAY_MODEL=${model}
 SOCIAL_GATEWAY_FALLBACK_MODEL=${fallbackModel}
 
+# 可选：接通 grok2api v3 管理统计
+SOCIAL_GATEWAY_ADMIN_BASE_URL=${adminBaseUrl}
+SOCIAL_GATEWAY_ADMIN_USERNAME=${adminUsername}
+SOCIAL_GATEWAY_ADMIN_PASSWORD=YOUR_GROK2API_ADMIN_PASSWORD
+
 # 仅 grok2api v2-compatible legacy 部署需要后台 app_key 自动继承
-# SOCIAL_GATEWAY_ADMIN_BASE_URL=${adminBaseUrl}
 # SOCIAL_GATEWAY_ADMIN_APP_KEY=YOUR_GROK2API_V2_APP_KEY
 # 可选：单独保护 /social/search；留空时复用 Proxy 通用 token
 # SOCIAL_GATEWAY_TOKEN=`;
@@ -1416,7 +1455,7 @@ SOCIAL_GATEWAY_FALLBACK_MODEL=${fallbackModel}
 
 function buildSocialMySearchEnv(social) {
   const baseUrl = location.origin;
-  const socialReady = social?.admin_connected || social?.upstream_key_configured;
+  const socialReady = getSocialUpstreamState(social || {}).canProxySearch;
   return `# 推荐：直接用 MySearch 通用 token，一次接上 Tavily / Firecrawl / Exa / Social
 MYSEARCH_PROXY_BASE_URL=${baseUrl}
 MYSEARCH_PROXY_API_KEY=YOUR_MYSEARCH_PROXY_TOKEN
@@ -1436,7 +1475,7 @@ function buildMySearchEnv(mysearch, social) {
   const routeCards = getQuickstartProviderCards(latestServices, social || {});
   const readyProviders = routeCards.filter((card) => card.tone === 'ok').map((card) => card.label);
   const pendingProviders = routeCards.filter((card) => card.tone !== 'ok').map((card) => `${card.label}: ${card.title}`);
-  const socialReady = social?.admin_connected || social?.upstream_key_configured;
+  const socialReady = getSocialUpstreamState(social || {}).canProxySearch;
   return `# 最省事的接法：只填这两项，MySearch 会默认走当前 proxy
 MYSEARCH_PROXY_BASE_URL=${baseUrl}
 MYSEARCH_PROXY_API_KEY=${token}
@@ -1473,6 +1512,7 @@ cp mysearch/.env.example mysearch/.env
 
 function renderSocialBoard(social) {
   const stats = social?.stats || {};
+  const isV3Admin = social?.admin_api_version === 'v3' || stats.schema === 'grok2api_v3_accounts';
   const socialState = getSocialUpstreamState(social || {});
   const mode = socialModeLabel(social?.mode || 'manual');
   const statusText = socialStatusLabel(social);
@@ -1481,11 +1521,13 @@ function renderSocialBoard(social) {
   const videoValue = stats.video_remaining === null
     ? '<div class="value muted is-text">无法统计</div>'
     : `<div class="value muted">${fmtNum(stats.video_remaining)}</div>`;
-  let foot = '现在还没有连上 Social / X 上游。补齐 grok2api 后台地址和 app key，或者手动填写上游 key 后，这里会开始显示完整状态。';
+  let foot = '现在还没有连上 Social / X 上游。v3 请补齐 g2a_ client key；如需管理统计，再填写后台管理员账号。';
   if (social?.admin_connected) {
-    foot = '当前通过 grok2api 后台自动同步 token 状态和剩余额度。对外仍然统一提供 MySearch 的 /social/search 结果结构。';
+    foot = isV3Admin
+      ? '当前通过 grok2api v3 管理 API 同步账号状态与请求统计；推理仍独立使用 g2a_ client key。'
+      : '当前通过 legacy v2 后台同步 token 状态和剩余额度。对外仍统一提供 /social/search 结果结构。';
   } else if (social?.upstream_key_configured) {
-    foot = '当前已经能转发 Social 搜索，但还没有连上后台统计。补上 grok2api app key 后，这里会显示完整 token 状态。';
+    foot = '当前已经能转发 Social 搜索，但还没有管理统计。v3 请补管理员用户名和密码；v2-compatible 才使用 app key。';
   }
   const errorLine = social?.error
     ? `<div class="social-board-foot is-error">最近错误：${escapeHtml(social.error)}</div>`
@@ -1546,17 +1588,32 @@ function renderSocialBoard(social) {
     return;
   }
 
-  document.getElementById('social-board').innerHTML = `
-    <div class="social-board-top">
-      <div>
-        <div class="social-board-kicker">Social / X 状态</div>
-        <div class="social-board-title">Social / X Router</div>
+  const metricGrid = isV3Admin ? `
+      <div class="social-metric">
+        <div class="label">账号总数</div>
+        <div class="value">${fmtNum(stats.account_total || 0)}</div>
       </div>
-    </div>
-    <div class="social-board-desc">
-      这里看的是 MySearch 的 Social / X 路由运行面。底层可以接 grok2api，也可以兼容别的 xAI-compatible 上游，但对外始终是一套统一结果结构。
-    </div>
-    <div class="social-board-grid">
+      <div class="social-metric">
+        <div class="label">账号可用</div>
+        <div class="value ok">${fmtNum(stats.account_available || 0)}</div>
+      </div>
+      <div class="social-metric">
+        <div class="label">恢复中</div>
+        <div class="value warn">${fmtNum(stats.account_recovering || 0)}</div>
+      </div>
+      <div class="social-metric">
+        <div class="label">需要处理</div>
+        <div class="value danger">${fmtNum(stats.account_attention || 0)}</div>
+      </div>
+      <div class="social-metric">
+        <div class="label">24h 请求</div>
+        <div class="value info">${fmtNum(stats.requests_24h || 0)}</div>
+      </div>
+      <div class="social-metric">
+        <div class="label">历史请求</div>
+        <div class="value">${fmtNum(stats.total_calls || 0)}</div>
+      </div>
+    ` : `
       <div class="social-metric">
         <div class="label">Token 总数</div>
         <div class="value">${fmtNum(stats.token_total || 0)}</div>
@@ -1589,6 +1646,20 @@ function renderSocialBoard(social) {
         <div class="label">总调用次数</div>
         <div class="value">${fmtNum(stats.total_calls || 0)}</div>
       </div>
+    `;
+
+  document.getElementById('social-board').innerHTML = `
+    <div class="social-board-top">
+      <div>
+        <div class="social-board-kicker">Social / X 状态</div>
+        <div class="social-board-title">Social / X Router</div>
+      </div>
+    </div>
+    <div class="social-board-desc">
+      ${isV3Admin ? '这里展示 grok2api v3 账号可用性和请求统计；额度口径由上游账号类型决定，不再套用旧 token quota 字段。' : '这里展示 legacy token 池状态；对外仍是一套统一的 Social / X 结果结构。'}
+    </div>
+    <div class="social-board-grid">
+      ${metricGrid}
     </div>
     <div class="social-board-summary">
       <div class="social-board-summary-item">
@@ -1627,7 +1698,9 @@ function renderSocialIntegration(social) {
   const adminBase = social?.admin_base_url || '未设置';
   let note = 'grok2api v3 请填写 /v1 上游地址和管理端创建的 g2a_ client key。';
   if (social?.admin_connected) {
-    note = '当前 legacy v2 后台自动继承已连通；v3 部署应改用独立 g2a_ client key。';
+    note = social?.admin_api_version === 'v3'
+      ? 'v3 管理统计已连通；推理继续使用独立 g2a_ client key，不复用管理员会话。'
+      : '当前 legacy v2 后台自动继承已连通；推理凭据来自旧 app key 合同。';
   } else if (social?.upstream_key_configured) {
     note = '当前上游调用凭据已配置，可以直接使用 /social/search。';
   }
@@ -1641,7 +1714,7 @@ function renderSocialIntegration(social) {
       </div>
       <span class="detail-pill">摘要优先</span>
     </div>
-    <p class="desc">grok2api v3 使用独立的 g2a_ client key 调用 /v1/responses；后台 app key 自动继承仅保留给 v2-compatible legacy 部署。</p>
+    <p class="desc">grok2api v3 使用独立的 g2a_ client key 调用 /v1/responses，并通过 /api/admin/v1 管理会话读取账号和请求统计；旧 app key 仅保留给 v2-compatible 部署。</p>
     <div class="integration-summary integration-summary-compact">
       <div class="integration-summary-item">
         <div class="label">当前状态</div>
@@ -1698,7 +1771,7 @@ function renderSocialIntegration(social) {
       </div>
     </div>
     <div class="code-toolbar">
-      <div class="endpoint">Proxy 端环境变量。通常只要复制这一段，再补你自己的 grok2api app key。</div>
+      <div class="endpoint">Proxy 端环境变量。先补 g2a_ client key；需要管理统计时再补管理员密码。</div>
       <button class="btn btn-sm" type="button" onclick="copyCode('social-proxy-env', this)">复制 Proxy 配置</button>
     </div>
     <pre class="code-block mono" id="social-proxy-env"></pre>
@@ -1956,6 +2029,7 @@ function collectSocialSettingsForm() {
     upstream_base_url: document.getElementById('settings-social-upstream-base-url').value.trim(),
     upstream_responses_path: document.getElementById('settings-social-upstream-responses-path').value.trim(),
     admin_base_url: document.getElementById('settings-social-admin-base-url').value.trim(),
+    admin_username: document.getElementById('settings-social-admin-username').value.trim(),
     admin_verify_path: document.getElementById('settings-social-admin-verify-path').value.trim(),
     admin_config_path: document.getElementById('settings-social-admin-config-path').value.trim(),
     admin_tokens_path: document.getElementById('settings-social-admin-tokens-path').value.trim(),
@@ -1966,10 +2040,12 @@ function collectSocialSettingsForm() {
   };
 
   const adminAppKey = document.getElementById('settings-social-admin-app-key').value.trim();
+  const adminPassword = document.getElementById('settings-social-admin-password').value.trim();
   const upstreamApiKey = document.getElementById('settings-social-upstream-api-key').value.trim();
   const gatewayToken = document.getElementById('settings-social-gateway-token').value.trim();
 
   if (adminAppKey) body.admin_app_key = adminAppKey;
+  if (adminPassword) body.admin_password = adminPassword;
   if (upstreamApiKey) body.upstream_api_key = upstreamApiKey;
   if (gatewayToken) body.gateway_token = gatewayToken;
   return body;
@@ -2255,6 +2331,7 @@ function fillSettingsForm(settings) {
   document.getElementById('settings-social-upstream-base-url').value = social.upstream_base_url || '';
   document.getElementById('settings-social-upstream-responses-path').value = social.upstream_responses_path || '/responses';
   document.getElementById('settings-social-admin-base-url').value = social.admin_base_url || '';
+  document.getElementById('settings-social-admin-username').value = social.admin_username || '';
   document.getElementById('settings-social-admin-verify-path').value = social.admin_verify_path || '/v1/admin/verify';
   document.getElementById('settings-social-admin-config-path').value = social.admin_config_path || '/admin/api/config';
   document.getElementById('settings-social-admin-tokens-path').value = social.admin_tokens_path || '/admin/api/tokens';
@@ -2264,11 +2341,14 @@ function fillSettingsForm(settings) {
   document.getElementById('settings-social-fallback-min-results').value = String(social.fallback_min_results || 3);
 
   document.getElementById('settings-social-admin-app-key').value = '';
+  document.getElementById('settings-social-admin-password').value = '';
   document.getElementById('settings-social-upstream-api-key').value = '';
   document.getElementById('settings-social-gateway-token').value = '';
 
   document.getElementById('settings-social-admin-app-key-hint').textContent =
     describeConfiguredSecret(social.admin_app_key_masked, social.admin_app_key_configured);
+  document.getElementById('settings-social-admin-password-hint').textContent =
+    describeConfiguredSecret(social.admin_password_masked, social.admin_password_configured);
   document.getElementById('settings-social-upstream-api-key-hint').textContent =
     describeConfiguredSecret(social.upstream_api_key_masked, social.upstream_api_key_configured);
   document.getElementById('settings-social-gateway-token-hint').textContent =
@@ -2279,7 +2359,8 @@ function fillSettingsForm(settings) {
     social.model ? `主模型：${social.model}` : '',
     social.fallback_model ? `Fallback：${social.fallback_model} (< ${social.fallback_min_results || 3})` : '',
     social.token_source ? `Token 来源：${social.token_source}` : '',
-    social.admin_connected ? '后台连通正常' : '',
+    social.admin_connected ? `后台连通正常（v${social.admin_api_version || '?'}）` : '',
+    social.admin_auth_mode === 'v3_credentials' ? `管理员：${social.admin_username || '未命名'}` : '',
   ].filter(Boolean);
   if (social.error) {
     bits.push(`最近错误：${social.error}`);
@@ -3117,16 +3198,22 @@ function renderOverview(service, payload) {
 
 function renderSocialWorkspace(social) {
   const stats = social?.stats || {};
+  const isV3Admin = social?.admin_api_version === 'v3' || stats.schema === 'grok2api_v3_accounts';
   const socialState = getSocialUpstreamState(social || {});
   const mode = socialModeLabel(social?.mode || 'manual');
   const source = socialTokenSourceLabel(social?.token_source || '');
   const syncLine = socialState.level === 'full'
-    ? [
+    ? (isV3Admin ? [
+      mode,
+      `账号 ${fmtNum(stats.account_available || 0)} / ${fmtNum(stats.account_total || 0)}`,
+      `24h 请求 ${fmtNum(stats.requests_24h || 0)}`,
+      `历史请求 ${fmtNum(stats.total_calls || 0)}`,
+    ] : [
       mode,
       `Token ${fmtNum(stats.token_total || 0)}`,
       `Chat ${fmtNum(stats.chat_remaining || 0)}`,
       `总调用 ${fmtNum(stats.total_calls || 0)}`,
-    ].join(' · ')
+    ]).join(' · ')
     : [
       mode,
       `上游 key ${fmtNum(socialState.upstreamApiKeyCount)}`,
@@ -3160,6 +3247,32 @@ function renderSocialWorkspace(social) {
         <div class="label">Token 来源</div>
         <div class="value">${escapeHtml(source)}</div>
         <div class="hint">${escapeHtml(socialState.detail || '当前只有基础接线可视化，完整 token 统计需要后台 tokens 面板。')}</div>
+      </div>
+    `;
+    return;
+  }
+
+  if (isV3Admin) {
+    document.getElementById('overview-social').innerHTML = `
+      <div class="stat-box">
+        <div class="label">工作模式</div>
+        <div class="value">${escapeHtml(mode)}</div>
+        <div class="hint">v3 管理统计与 g2a_ 推理凭据相互独立</div>
+      </div>
+      <div class="stat-box">
+        <div class="label">账号可用 / 总数</div>
+        <div class="value">${fmtNum(stats.account_available || 0)} <span class="muted">/ ${fmtNum(stats.account_total || 0)}</span></div>
+        <div class="hint">恢复中 ${fmtNum(stats.account_recovering || 0)} · 需处理 ${fmtNum(stats.account_attention || 0)}</div>
+      </div>
+      <div class="stat-box">
+        <div class="label">24h 请求</div>
+        <div class="value">${fmtNum(stats.requests_24h || 0)}</div>
+        <div class="hint">成功 ${fmtNum(stats.successful_requests_24h || 0)} · 失败 ${fmtNum(stats.failed_requests_24h || 0)}</div>
+      </div>
+      <div class="stat-box">
+        <div class="label">鉴权分工</div>
+        <div class="value">v3 管理员会话</div>
+        <div class="hint">推理仍使用 ${escapeHtml(source)}</div>
       </div>
     `;
     return;
