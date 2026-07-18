@@ -1,7 +1,7 @@
 ## Loop 11 Fixes And Validation
 
 - Date: 2026-07-18
-- Status: `14badab` runtime deployed; postdeploy findings fixed locally; final candidate release and comparison pending.
+- Status: `30153c1` pushed; first 84-column comparison complete; follow-up runtime fixes validated locally; release and comparison pending.
 
 ## Fixes
 
@@ -18,6 +18,10 @@
 - Treat requested content without any returned content as an enrichment failure. Continue the fallback chain, but preserve the successful discovery result with explicit evidence if enrichment remains unavailable.
 - Preserve meaningful arXiv titles across canonical URL merge and rerun hCaptcha trailing-widget cleanup after language-block removal.
 - Added explicit expected-answer evidence with boundary/negation-safe matching, and synchronized input contract fields during partial reruns.
+- Run strict domain-filtered docs through the bounded verify blend, while keeping Tavily on fast discovery and reserving requested-content retrieval for Firecrawl/Exa verifiers.
+- Ask Tavily and Exa verifier branches for content when a Firecrawl-primary blend requests content, and prefer Exa before Firecrawl in the changelog fallback chain.
+- Add the exact Playwright `test.step` canonical anchor and remove only fully identified embedded Cloudflare challenge blocks without truncating surrounding content.
+- Check official Oscars/Grammys HTML before provider extraction so a slow extraction path cannot hide a directly available event answer.
 
 ## Local Validation
 
@@ -30,6 +34,7 @@
 - Browser smoke at 320, 375, 768, and 1440 CSS pixels: no page-level horizontal overflow, duplicate IDs, broken `aria-controls`, unlabeled visible inputs, or nameless visible buttons.
 - Keyboard smoke: workspace/settings/radiogroup arrow navigation passed; detail drawer, settings modal, and nested confirmation dialog inert/focus behavior passed.
 - Light, dark, desktop, mobile, and `/mysearch` page screenshots were captured under `/tmp` for visual inspection.
+- Follow-up validation: `python -m pytest -q tests/test_clients.py` passed 373 tests; `python -m unittest discover -s tests` passed 661 tests; runtime sync, `py_compile`, and `git diff --check` passed.
 
 ## Release And Deploy Verification
 
@@ -40,8 +45,9 @@
 - Live authenticated browser smoke passed at 375px and 1440px with no horizontal overflow or duplicate IDs; settings overlay background inertness and `aria-modal` passed.
 - Commit `14badab` was pushed; Docker workflow `29637368712` succeeded; the remote container reports image revision `14badabf9674a0e6b821cb337cfda487ad881df6`.
 - The complete 41-row postdeploy run had no structural failures, but its 81-column output is retained only as an intermediate artifact because the findings above changed both runtime and scorer contracts.
+- The first 84-column run on `30153c1` captured all 41 unique rows with no structural failure, timeout, empty result, or row error and a 39-2 row win count for MySearch. Six MySearch budget overruns and the content/canonical issues above make it an intermediate artifact rather than a convergence result.
 
 ## Pending Gates
 
-- Commit and push the final runtime/runner follow-up, wait for Docker CI, and redeploy because runtime files changed.
+- Commit and push the latest runtime follow-up, wait for Docker CI, and redeploy because runtime files changed.
 - Run a fresh full 41-row comparison under the final 84-column Loop 11 contract, record the runner commit/schema, and update convergence.

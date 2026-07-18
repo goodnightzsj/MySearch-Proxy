@@ -19,6 +19,8 @@
 11. Hybrid timeout handling did not cover the xAI unified branch or the full Tavily/Exa social fallback deadline. A proposed pure-Social 20-second cap would also have contradicted the existing configurable 120-second contract, so the cap is restricted to Hybrid while the Social benchmark cold-start budget is 30 seconds.
 12. The benchmark inferred no semantic correctness, allowing Tavily's stale Python `3.14.3` answer to beat MySearch's verified `3.14.6`. The follow-up contract adds an explicit expected-answer field, but only uses boundary- and negation-safe matching for freshness; it does not manufacture authority from answer text.
 13. Partial reruns could retain a stale expected-answer value in output rows while rescoring with the current input matrix. Input-owned contract fields now synchronize before every score pass.
+14. The first complete 84-column run on `30153c1` captured 41/41 rows without structural failures, but six MySearch rows exceeded their latency budgets. Strict domain-filtered docs still waited on heavy sequential content enrichment, and changelog enrichment tried Firecrawl before the lower-latency Exa fallback.
+15. The same run showed `pdf-02` returning no verifier content, `longtail-academic-01` retaining an embedded Cloudflare challenge block, `docs-01` preferring the broad Playwright `TestStep` class over the exact `test.step` anchor, and `news-01` attempting provider extraction before direct official award HTML.
 
 ## Severity And Outcome
 
@@ -26,4 +28,5 @@
 - Findings 5-7 are actionable console runtime and accessibility issues requested by the user for the same release.
 - Finding 8 is an actionable credential-handling issue in the benchmark transport and invalidated the first post-deploy comparison attempt.
 - Findings 9-13 are actionable runtime and benchmark-integrity issues discovered by the complete postdeploy pass and release review. The 73-column `final` and 81-column `postdeploy` CSVs are historical intermediates, not the final Loop 11 result.
+- Findings 14-15 are actionable runtime issues discovered by the first structurally valid 84-column comparison. That `30153c1` artifact is complete evidence, but it cannot close Loop 11 because its findings required another runtime release.
 - Loop 11 is not a clean loop even after these fixes pass validation.

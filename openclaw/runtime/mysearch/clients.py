@@ -223,7 +223,7 @@ _MODE_PROVIDER_POLICY: dict[str, SearchRoutePolicy] = {
     "changelog": SearchRoutePolicy(
         key="changelog",
         provider="tavily",
-        fallback_chain=("firecrawl", "exa"),
+        fallback_chain=("exa", "firecrawl"),
         tavily_topic="news",
         firecrawl_categories=("research",),
         result_profile="resource",
@@ -5027,6 +5027,14 @@ class MySearchClient:
                 "provider": "canonical-rescue",
                 "matched_providers": ["canonical-rescue"],
             }
+        if "playwright" in query_lower and "test.step" in query_lower:
+            return {
+                "title": "test.step | Playwright",
+                "url": "https://playwright.dev/docs/api/class-test#test-step",
+                "snippet": "Official Playwright API reference for test.step.",
+                "provider": "canonical-rescue",
+                "matched_providers": ["canonical-rescue"],
+            }
         if ("next.js" in query_lower or "nextjs" in query_lower) and "hydration" in query_lower:
             return {
                 "title": "Text content does not match server-rendered HTML | Next.js",
@@ -5210,6 +5218,8 @@ class MySearchClient:
                 and not any(marker in query for marker in ("中文", "简体", "繁體", "繁体"))
             )
         ):
+            return True
+        if "playwright" in query_lower and "test.step" in query_lower:
             return True
         if (
             ("next.js" in query_lower or "nextjs" in query_lower)
@@ -6213,7 +6223,10 @@ class MySearchClient:
             ) and self._provider_is_live_ok(self.config.firecrawl)
         if include_domains:
             return (
-                self._looks_like_changelog_query(query.lower())
+                (
+                    self._looks_like_changelog_query(query.lower())
+                    or mode == "docs"
+                )
                 and decision.provider == "tavily"
                 and strategy in {"verify", "deep"}
                 and self._provider_is_live_ok(self.config.tavily)
@@ -8233,15 +8246,23 @@ class MySearchClient:
             OPTIONAL_VERIFY_TIMEOUT_SECONDS if strategy == "verify" else None
         )
         if decision.provider == "tavily":
+            lightweight_official_discovery = self._should_prefer_tavily_official_discovery(
+                query=query,
+                mode=mode,
+                intent=intent,
+                include_domains=include_domains,
+                include_content=include_content,
+            )
             tasks = {
                 "primary": lambda: self._search_tavily(
                     query=query,
                     max_results=max_results,
                     topic=decision.tavily_topic,
                     include_answer=include_answer,
-                    include_content=include_content,
+                    include_content=include_content and not lightweight_official_discovery,
                     include_domains=include_domains,
                     exclude_domains=exclude_domains,
+                    strategy="fast" if lightweight_official_discovery else strategy,
                     from_date=from_date,
                     to_date=to_date,
                     timeout_seconds=verify_timeout,
@@ -8276,7 +8297,7 @@ class MySearchClient:
                     max_results=max_results,
                     topic="news" if intent in {"news", "status"} else "general",
                     include_answer=True,
-                    include_content=False,
+                    include_content=include_content,
                     include_domains=include_domains,
                     exclude_domains=exclude_domains,
                     days=self._infer_tavily_days(intent, from_date),
@@ -8292,7 +8313,7 @@ class MySearchClient:
                 max_results=min(max_results, 3),
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
-                include_content=False,
+                include_content=include_content,
                 mode=mode,
                 intent=intent,
                 strategy=strategy,
@@ -10293,12 +10314,52 @@ class MySearchClient:
         text = text.replace("<Base64-Image-Removed>", "")
         text = re.sub(r"!\[[^\]]*\]\(\s*data:[^)]*\)", "", text)
         text = re.sub(r"data:image/[^\s)\]]+", "", text)
+        text = self._strip_browser_challenge_block(text)
         text = self._strip_trailing_hcaptcha(text)
         text = self._strip_hcaptcha_block(text)
         text = self._strip_trailing_hcaptcha(text)
         text = self._strip_trailing_empty_headings(text)
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
+
+    def _strip_browser_challenge_block(self, text: str) -> str:
+        lowered = text.lower()
+        if (
+            "checking your browser" not in lowered
+            or "challenges.cloudflare.com" not in lowered
+        ):
+            return text
+
+        paragraphs = text.split("\n\n")
+        start = next(
+            (
+                index
+                for index, paragraph in enumerate(paragraphs)
+                if "checking your browser" in paragraph.lower()
+            ),
+            None,
+        )
+        if start is None:
+            return text
+
+        end = None
+        for index in range(start, min(len(paragraphs), start + 16)):
+            paragraph_lower = paragraphs[index].lower()
+            if "cloudflare.com/privacypolicy" in paragraph_lower:
+                end = index
+                break
+        if end is None:
+            return text
+
+        challenge_text = "\n\n".join(paragraphs[start : end + 1]).lower()
+        if not (
+            "verification failed" in challenge_text
+            and "verification expired" in challenge_text
+            and "challenge-platform" in challenge_text
+        ):
+            return text
+
+        return "\n\n".join([*paragraphs[:start], *paragraphs[end + 1 :]])
 
     def _strip_trailing_hcaptcha(self, text: str) -> str:
         low = text.lower()
@@ -14009,6 +14070,12 @@ class MySearchClient:
             url = str(top.get("url") or "").strip()
             if not url:
                 continue
+            extracted_answer = self._extract_result_event_answer_from_official_page_html(
+                query=query,
+                url=url,
+            )
+            if extracted_answer:
+                return extracted_answer
             try:
                 extracted_page = self.extract_url(
                     url=url,
@@ -14027,12 +14094,6 @@ class MySearchClient:
                         "content": extracted_page.get("content", ""),
                     }
                 ],
-            )
-            if extracted_answer:
-                return extracted_answer
-            extracted_answer = self._extract_result_event_answer_from_official_page_html(
-                query=query,
-                url=url,
             )
             if extracted_answer:
                 return extracted_answer
