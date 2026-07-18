@@ -62,6 +62,7 @@ FIELDNAMES = [
     "active_dimensions",
     "run_status",
     "latency_budget_ms",
+    "expected_answer_patterns",
     "mysearch_tool",
     "mysearch_mode",
     "mysearch_provider_trace",
@@ -72,6 +73,7 @@ FIELDNAMES = [
     "mysearch_content_item_count",
     "mysearch_content_noise_hits",
     "mysearch_published_date_count",
+    "mysearch_expected_answer_match",
     "mysearch_official_mode",
     "mysearch_conflicts",
     "mysearch_latency_ms",
@@ -95,6 +97,7 @@ FIELDNAMES = [
     "tavily_content_item_count",
     "tavily_content_noise_hits",
     "tavily_published_date_count",
+    "tavily_expected_answer_match",
     "tavily_latency_ms",
     "tavily_repeat_variance",
     "tavily_repeat_observations",
@@ -1596,6 +1599,39 @@ def _efficiency_score(
     return _clamp_score(3.0 + (1.0 - ratio) * 2.0), False
 
 
+def _summary_matches_expected_answer(summary: str, patterns: list[str]) -> bool:
+    normalized_summary = summary.lower()
+    for raw_pattern in patterns:
+        pattern = raw_pattern.strip().lower()
+        if not pattern:
+            continue
+        escaped = re.escape(pattern)
+        if re.fullmatch(r"\d+(?:\.\d+)+", pattern):
+            matcher = re.compile(rf"(?<![\w.])v?{escaped}(?!\w)")
+        else:
+            matcher = re.compile(rf"(?<!\w){escaped}(?!\w)")
+        for match in matcher.finditer(normalized_summary):
+            before = normalized_summary[max(0, match.start() - 64) : match.start()]
+            after = normalized_summary[match.end() : match.end() + 48]
+            negated_before = re.search(
+                r"(?:\bnot|\bnever|\bno longer|\bisn't|\baren't|\bwasn't|\bweren't|"
+                r"\bis not|\bare not|\bwas not|\bwere not)\s+(?:the\s+)?$",
+                before,
+            ) or re.search(
+                r"\b(?:not|no longer)\s+(?:the\s+)?(?:latest|current|stable|correct)"
+                r"(?:\s+\w+){0,3}\s*[:=]?\s*$",
+                before,
+            )
+            negated_after = re.match(
+                r"\s*(?:(?:is|was|are|were)\s+)?(?:not\b|no longer\b|outdated\b|"
+                r"obsolete\b|stale\b|incorrect\b|wrong\b)",
+                after,
+            )
+            if not negated_before and not negated_after:
+                return True
+    return False
+
+
 def _score_provider(
     input_row: dict[str, str],
     row: dict[str, object],
@@ -1614,6 +1650,13 @@ def _score_provider(
         input_row.get("benchmark_id", ""), []
     )
     expected_url_patterns = [value.lower() for value in parse_pipe_list(input_row.get("expected_url_patterns", ""))]
+    expected_answer_patterns = [
+        value.lower() for value in parse_pipe_list(input_row.get("expected_answer_patterns", ""))
+    ]
+    expected_answer_match = _summary_matches_expected_answer(summary, expected_answer_patterns)
+    row[f"{prefix}_expected_answer_match"] = (
+        expected_answer_match if expected_answer_patterns else ""
+    )
     exclude_domains = parse_pipe_list(input_row.get("exclude_domains", ""))
     compliant_count = sum(_url_satisfies_constraints(url, include_domains, exclude_domains) for url in urls)
     constraint_ratio = compliant_count / len(urls) if urls else 0.0
@@ -1687,7 +1730,10 @@ def _score_provider(
 
     published_date_count = _as_float(row.get(f"{prefix}_published_date_count"))
     has_explicit_date = bool(re.search(r"\b20\d{2}(?:[-/]\d{1,2})?\b", summary))
-    freshness_signal = 5.0 if published_date_count else 4.0 if has_explicit_date else 2.5
+    if expected_answer_patterns:
+        freshness_signal = 5.0 if expected_answer_match else 0.0
+    else:
+        freshness_signal = 5.0 if published_date_count else 4.0 if has_explicit_date else 2.5
     site_coverage = 2.0 + min(2.0, citation_count / 3.0) + min(1.0, domain_count / 2.0)
     traceability = 1.5 + (1.5 if trace else 0.0) + min(1.5, citation_count / 3.0) + (0.5 if urls else 0.0)
 
@@ -1749,9 +1795,14 @@ def score_output_row(input_row: dict[str, str], row: dict[str, object]) -> dict[
         else:
             winner = "tie"
         row["winner"] = winner
+        semantic_note = (
+            "semantic correctness used only the explicit expected-answer contract"
+            if parse_pipe_list(input_row.get("expected_answer_patterns", ""))
+            else "semantic correctness was not inferred"
+        )
         row["winner_reason"] = (
             f"observable contract score: mysearch={totals['mysearch']:.2f}, "
-            f"tavily={totals['tavily']:.2f}; semantic correctness was not inferred"
+            f"tavily={totals['tavily']:.2f}; {semantic_note}"
         )
     else:
         row["winner"] = "incomplete"
@@ -1770,6 +1821,20 @@ def load_existing_rows(path: Path) -> tuple[list[str], dict[str, dict[str, str]]
     return [row["benchmark_id"] for row in rows], normalized
 
 
+def sync_input_contract(row: dict[str, object], input_row: dict[str, str]) -> None:
+    row.update(
+        {
+            "benchmark_id": input_row["benchmark_id"],
+            "domain": input_row["domain"],
+            "query": input_row["query"],
+            "prompt_variant": input_row["prompt_variant"],
+            "active_dimensions": active_dimensions(input_row),
+            "latency_budget_ms": input_row.get("latency_budget_ms", "") or "",
+            "expected_answer_patterns": input_row.get("expected_answer_patterns", "") or "",
+        }
+    )
+
+
 def build_output_row(
     input_row: dict[str, str],
     item: dict[str, str],
@@ -1784,13 +1849,7 @@ def build_output_row(
         row.update(existing)
     row.update(
         {
-            "benchmark_id": input_row["benchmark_id"],
-            "domain": input_row["domain"],
-            "query": input_row["query"],
-            "prompt_variant": input_row["prompt_variant"],
             "run_date": date.today().isoformat(),
-            "active_dimensions": active_dimensions(input_row),
-            "latency_budget_ms": input_row.get("latency_budget_ms", ""),
             "mysearch_tool": item.get("mysearch_tool", ""),
             "mysearch_mode": item.get("mysearch_mode", ""),
             "tavily_tool": item.get("tavily_tool", ""),
@@ -1802,6 +1861,7 @@ def build_output_row(
         if preserve_tavily and key.startswith("tavily_") and value in {"", None, False, 0, "0"}:
             continue
         row[key] = value
+    sync_input_contract(row, input_row)
 
     mysearch_raw = item.get("mysearch_raw", "")
     tavily_raw = item.get("tavily_raw", "")
@@ -1877,6 +1937,7 @@ def merge_output_rows(
     output_rows = []
     for benchmark_id in ordered_ids:
         row = merged[benchmark_id]
+        sync_input_contract(row, input_row_map[benchmark_id])
         score_output_row(input_row_map[benchmark_id], row)
         output_rows.append(row)
     return output_rows

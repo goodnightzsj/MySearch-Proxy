@@ -131,6 +131,40 @@ class ExtractContentCleanupTests(unittest.TestCase):
         self.assertNotIn("### Filters", cleaned)
         self.assertNotIn("Ask AI", cleaned)
 
+    def test_cleanup_rechecks_trailing_widget_after_language_block_removal(self) -> None:
+        client = MySearchClient()
+        known_languages = "\n\n".join(sorted(client._HCAPTCHA_LANGUAGES)[:60])
+        variant_languages = "\n\n".join(
+            ["Galacian", "Gujurati", "Kirghiz", "Oriya", "Teluga"]
+        )
+        dirty = (
+            "# Learn\n\n"
+            "Official tutorial content that must survive the cleanup pass. "
+            "This section explains the supported learning path, introduces the core "
+            "concepts, and links readers to the next chapters without including any "
+            "verification-widget instructions.\n\n"
+            "Back to top\n\n"
+            "### Filters\n\n"
+            "#### Tags\n\n"
+            "Ask AI\n\n"
+            "hCaptcha\n\n"
+            "'I am human', Select in order to trigger the challenge, or to bypass "
+            "it if you have an accessibility cookie\n\n"
+            + known_languages
+            + "\n\n"
+            + variant_languages
+        )
+
+        cleaned = client._clean_extract_content(dirty)
+
+        self.assertIn("Official tutorial content", cleaned)
+        self.assertNotIn("hCaptcha", cleaned)
+        self.assertNotIn("Galacian", cleaned)
+        self.assertNotIn("Teluga", cleaned)
+        self.assertNotIn("### Filters", cleaned)
+        self.assertNotIn("Ask AI", cleaned)
+        self.assertNotIn("Select in order to trigger the challenge", cleaned)
+
 
 class FirecrawlMapCrawlTests(unittest.TestCase):
     def test_map_site_builds_request_and_parses_links(self) -> None:

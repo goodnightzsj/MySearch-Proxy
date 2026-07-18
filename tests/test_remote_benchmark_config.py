@@ -54,6 +54,8 @@ class RemoteBenchmarkConfigTests(unittest.TestCase):
             self.assertIn(f"{provider}_repeat_observations", run_remote_mcp_benchmark.FIELDNAMES)
             self.assertIn(f"{provider}_content_char_count", run_remote_mcp_benchmark.FIELDNAMES)
             self.assertIn(f"{provider}_content_noise_hits", run_remote_mcp_benchmark.FIELDNAMES)
+            self.assertIn(f"{provider}_expected_answer_match", run_remote_mcp_benchmark.FIELDNAMES)
+        self.assertIn("expected_answer_patterns", run_remote_mcp_benchmark.FIELDNAMES)
         self.assertNotIn("mysearch_accuracy_score", run_remote_mcp_benchmark.FIELDNAMES)
         self.assertNotIn("tavily_richness_score", run_remote_mcp_benchmark.FIELDNAMES)
 
@@ -989,6 +991,97 @@ Authorization = "Bearer th-from-http-headers"
 
         self.assertEqual(row["mysearch_authority_precision_score"], 4.0)
         self.assertEqual(row["tavily_authority_precision_score"], 5.0)
+
+    def test_explicit_expected_answer_contract_rejects_stale_factual_summary(self) -> None:
+        input_row = {
+            "benchmark_id": "python-version",
+            "query": "what is the latest stable version of Python",
+            "domain": "Facts",
+            "prompt_variant": "baseline",
+            "expected_answer_patterns": "3.14.6",
+            "primary_dimensions": "authority_precision|freshness_signal",
+            "secondary_dimensions": "traceability|resilience",
+            "latency_budget_ms": "15000",
+            "notes": "",
+        }
+        item = {
+            "benchmark_id": "python-version",
+            "run_status": "captured",
+            "mysearch_tool": "search",
+            "mysearch_mode": "web",
+            "mysearch_summary": "The latest stable version of Python is 3.14.6.",
+            "mysearch_top_urls": "https://www.python.org/downloads/",
+            "mysearch_citation_count": 1,
+            "mysearch_empty_result": False,
+            "tavily_tool": "tavily_search",
+            "tavily_summary": "As of February 2026, Python 3.14.3 is latest.",
+            "tavily_top_urls": "https://example.com/stale-python-version",
+            "tavily_citation_count": 1,
+            "tavily_empty_result": False,
+        }
+
+        row = run_remote_mcp_benchmark.build_output_row(input_row, item, Path("raw"))
+
+        self.assertTrue(row["mysearch_expected_answer_match"])
+        self.assertFalse(row["tavily_expected_answer_match"])
+        self.assertEqual(row["mysearch_authority_precision_score"], 3.0)
+        self.assertEqual(row["mysearch_freshness_signal_score"], 5.0)
+        self.assertEqual(row["tavily_freshness_signal_score"], 0.0)
+        self.assertEqual(row["winner"], "mysearch")
+        self.assertIn("explicit expected-answer contract", row["winner_reason"])
+
+    def test_expected_answer_contract_respects_boundaries_and_negation(self) -> None:
+        matcher = run_remote_mcp_benchmark._summary_matches_expected_answer
+
+        self.assertTrue(matcher("Python v3.14.6 is the latest stable release.", ["3.14.6"]))
+        self.assertFalse(matcher("Python 3.14.60 is the latest stable release.", ["3.14.6"]))
+        self.assertFalse(matcher("Python 3.14.6 is not the latest stable release.", ["3.14.6"]))
+        self.assertFalse(matcher("The latest stable version is not 3.14.6.", ["3.14.6"]))
+
+    def test_partial_merge_syncs_current_expected_answer_contract(self) -> None:
+        input_row = {
+            "benchmark_id": "python-version",
+            "query": "what is the latest stable version of Python",
+            "domain": "Facts",
+            "prompt_variant": "baseline",
+            "expected_answer_patterns": "3.14.6",
+            "primary_dimensions": "freshness_signal",
+            "secondary_dimensions": "traceability",
+            "latency_budget_ms": "15000",
+            "notes": "",
+        }
+        existing = {key: "" for key in run_remote_mcp_benchmark.FIELDNAMES}
+        existing.update(
+            {
+                "benchmark_id": "python-version",
+                "run_status": "captured",
+                "expected_answer_patterns": "3.14.5",
+                "mysearch_tool": "search",
+                "mysearch_summary": "Python 3.14.6 is the latest stable release.",
+                "mysearch_top_urls": "https://www.python.org/downloads/",
+                "mysearch_citation_count": "1",
+                "mysearch_empty_result": "False",
+                "tavily_tool": "tavily_search",
+                "tavily_summary": "Python 3.14.3 is the latest stable release.",
+                "tavily_top_urls": "https://example.com/stale",
+                "tavily_citation_count": "1",
+                "tavily_empty_result": "False",
+            }
+        )
+
+        rows = run_remote_mcp_benchmark.merge_output_rows(
+            [input_row],
+            [],
+            [],
+            Path("raw"),
+            existing_order=["python-version"],
+            existing_rows={"python-version": existing},
+            preserve_tavily=False,
+        )
+
+        self.assertEqual(rows[0]["expected_answer_patterns"], "3.14.6")
+        self.assertTrue(rows[0]["mysearch_expected_answer_match"])
+        self.assertFalse(rows[0]["tavily_expected_answer_match"])
 
     def test_build_output_row_clears_stale_structural_failure_on_normal_rerun(self) -> None:
         input_row = {
