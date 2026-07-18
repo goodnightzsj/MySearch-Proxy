@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import json
 import logging
@@ -10,6 +11,7 @@ import os
 import re
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
@@ -114,6 +116,9 @@ ADMIN_TOKENS_PATH = _normalize_path(
     "/admin/api/tokens",
 )
 ADMIN_APP_KEY = _env_str("SOCIAL_GATEWAY_ADMIN_APP_KEY")
+ADMIN_USERNAME = _env_str("SOCIAL_GATEWAY_ADMIN_USERNAME")
+ADMIN_PASSWORD = _env_str("SOCIAL_GATEWAY_ADMIN_PASSWORD")
+V3_ADMIN_PREFIX = "/api/admin/v1"
 try:
     CACHE_TTL_SECONDS = max(5, int(_env_str("SOCIAL_GATEWAY_CACHE_TTL_SECONDS", "60")))
 except (TypeError, ValueError):
@@ -137,6 +142,13 @@ http_client = httpx.AsyncClient(
 state_cache: dict[str, Any] = {"expires_at": 0.0, "value": None}
 state_lock: asyncio.Lock | None = None
 state_lock_loop: asyncio.AbstractEventLoop | None = None
+admin_session_cache: dict[str, Any] = {
+    "fingerprint": "",
+    "access_token": "",
+    "expires_at": 0.0,
+}
+admin_session_lock: asyncio.Lock | None = None
+admin_session_lock_loop: asyncio.AbstractEventLoop | None = None
 
 
 def get_state_lock() -> asyncio.Lock:
@@ -146,6 +158,15 @@ def get_state_lock() -> asyncio.Lock:
         state_lock = asyncio.Lock()
         state_lock_loop = loop
     return state_lock
+
+
+def get_admin_session_lock() -> asyncio.Lock:
+    global admin_session_lock, admin_session_lock_loop
+    loop = asyncio.get_running_loop()
+    if admin_session_lock is None or admin_session_lock_loop is not loop:
+        admin_session_lock = asyncio.Lock()
+        admin_session_lock_loop = loop
+    return admin_session_lock
 
 
 @asynccontextmanager
@@ -333,7 +354,73 @@ def build_social_token_stats(tokens_payload: Any) -> dict[str, Any]:
     return stats
 
 
+def build_v3_account_stats(
+    summary_payload: dict[str, Any],
+    dashboard_payload: dict[str, Any],
+) -> dict[str, Any]:
+    resources = dashboard_payload.get("resources")
+    if not isinstance(resources, dict):
+        resources = {}
+    usage = dashboard_payload.get("usage")
+    if not isinstance(usage, dict):
+        usage = {}
+    providers = summary_payload.get("providers")
+    if not isinstance(providers, dict):
+        providers = {}
+
+    total = max(0, _parse_int(summary_payload.get("total")))
+    available = max(0, _parse_int(summary_payload.get("available")))
+    recovering = max(0, _parse_int(summary_payload.get("recovering")))
+    attention = max(0, _parse_int(summary_payload.get("attention")))
+    pools: list[dict[str, Any]] = []
+    for provider_name, provider_payload in providers.items():
+        if not isinstance(provider_payload, dict):
+            continue
+        provider_total = max(0, _parse_int(provider_payload.get("total")))
+        provider_available = max(0, _parse_int(provider_payload.get("available")))
+        pools.append(
+            {
+                "pool": str(provider_name),
+                "count": provider_total,
+                "active": provider_available,
+                "cooling": 0,
+                "invalid": max(0, provider_total - provider_available),
+            }
+        )
+
+    stats = build_empty_social_stats()
+    stats.update(
+        {
+            "schema": "grok2api_v3_accounts",
+            "token_total": total,
+            "token_normal": available,
+            "token_limited": recovering,
+            "token_invalid": attention,
+            "chat_remaining": None,
+            "image_remaining": None,
+            "total_calls": max(0, _parse_int(resources.get("allTimeRequests"))),
+            "requests_24h": max(0, _parse_int(usage.get("requests"))),
+            "successful_requests_24h": max(
+                0,
+                _parse_int(usage.get("successfulRequests")),
+            ),
+            "failed_requests_24h": max(0, _parse_int(usage.get("failedRequests"))),
+            "account_total": total,
+            "account_available": available,
+            "account_recovering": recovering,
+            "account_attention": attention,
+            "pool_count": len(pools),
+            "pools": sorted(pools, key=lambda item: item["pool"]),
+        }
+    )
+    return stats
+
+
 def build_gateway_mode(state: dict[str, Any]) -> str:
+    if state.get("admin_api_version") == "v3":
+        if state["manual_upstream_key"] or state["manual_gateway_token"]:
+            return "v3-managed"
+        return "v3-observe"
     if state["admin_connected"] and (state["manual_upstream_key"] or state["manual_gateway_token"]):
         return "hybrid"
     if state["admin_connected"]:
@@ -372,6 +459,136 @@ async def fetch_admin_json(path: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise RuntimeError(f"{path} -> expected JSON object")
     return payload
+
+
+class AdminUnauthorizedError(RuntimeError):
+    pass
+
+
+def _admin_error_detail(path: str, response: httpx.Response, payload: Any) -> str:
+    detail = ""
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            detail = str(error.get("message") or error.get("code") or "")
+        if not detail:
+            detail = str(payload.get("detail") or payload.get("message") or "")
+    if not detail:
+        detail = response.text.strip()[:240] or f"HTTP {response.status_code}"
+    return f"{path} -> {detail}"
+
+
+def _admin_session_fingerprint() -> str:
+    raw = "\0".join((ADMIN_BASE_URL, ADMIN_USERNAME, ADMIN_PASSWORD))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def clear_admin_session(fingerprint: str = "") -> None:
+    if fingerprint and admin_session_cache.get("fingerprint") != fingerprint:
+        return
+    admin_session_cache.update(
+        {"fingerprint": "", "access_token": "", "expires_at": 0.0}
+    )
+
+
+async def get_v3_admin_access_token() -> str:
+    if not ADMIN_USERNAME or not ADMIN_PASSWORD:
+        raise RuntimeError("grok2api v3 admin username and password are required")
+    fingerprint = _admin_session_fingerprint()
+    now = time.time()
+    if (
+        admin_session_cache.get("fingerprint") == fingerprint
+        and admin_session_cache.get("access_token")
+        and admin_session_cache.get("expires_at", 0) > now + 30
+    ):
+        return str(admin_session_cache["access_token"])
+
+    async with get_admin_session_lock():
+        now = time.time()
+        if (
+            admin_session_cache.get("fingerprint") == fingerprint
+            and admin_session_cache.get("access_token")
+            and admin_session_cache.get("expires_at", 0) > now + 30
+        ):
+            return str(admin_session_cache["access_token"])
+
+        path = f"{V3_ADMIN_PREFIX}/auth/login"
+        response = await http_client.post(
+            f"{ADMIN_BASE_URL}{path}",
+            json={"username": ADMIN_USERNAME, "password": ADMIN_PASSWORD},
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            payload = response.json()
+        except Exception:
+            payload = None
+        if response.status_code >= 400:
+            raise RuntimeError(_admin_error_detail(path, response, payload))
+        data = payload.get("data") if isinstance(payload, dict) else None
+        tokens = data.get("tokens") if isinstance(data, dict) else None
+        access_token = tokens.get("accessToken") if isinstance(tokens, dict) else ""
+        if not isinstance(access_token, str) or not access_token.strip():
+            raise RuntimeError(f"{path} -> access token missing from response")
+
+        expires_at = now + 600
+        expires_text = tokens.get("accessTokenExpiresAt") if isinstance(tokens, dict) else ""
+        if isinstance(expires_text, str) and expires_text.strip():
+            try:
+                parsed = datetime.fromisoformat(expires_text.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                expires_at = parsed.timestamp()
+            except ValueError:
+                pass
+        admin_session_cache.update(
+            {
+                "fingerprint": fingerprint,
+                "access_token": access_token.strip(),
+                "expires_at": expires_at,
+            }
+        )
+        return access_token.strip()
+
+
+async def fetch_v3_admin_json(path: str, access_token: str) -> dict[str, Any]:
+    response = await http_client.get(
+        f"{ADMIN_BASE_URL}{path}",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    try:
+        payload = response.json()
+    except Exception:
+        payload = None
+    if response.status_code == 401:
+        raise AdminUnauthorizedError(_admin_error_detail(path, response, payload))
+    if response.status_code >= 400:
+        raise RuntimeError(_admin_error_detail(path, response, payload))
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{path} -> expected data object")
+    return data
+
+
+async def fetch_v3_admin_state() -> tuple[dict[str, Any], dict[str, Any]]:
+    fingerprint = _admin_session_fingerprint()
+    for attempt in range(2):
+        access_token = await get_v3_admin_access_token()
+        try:
+            return await asyncio.gather(
+                fetch_v3_admin_json(
+                    f"{V3_ADMIN_PREFIX}/accounts/summary",
+                    access_token,
+                ),
+                fetch_v3_admin_json(
+                    f"{V3_ADMIN_PREFIX}/dashboard?period=24h&timezone=UTC",
+                    access_token,
+                ),
+            )
+        except AdminUnauthorizedError:
+            clear_admin_session(fingerprint)
+            if attempt:
+                raise
+    raise RuntimeError("grok2api v3 admin authentication failed")
 
 
 def build_admin_path_candidates(path: str, *, kind: str) -> list[str]:
@@ -448,6 +665,19 @@ async def resolve_gateway_state(force: bool = False) -> dict[str, Any]:
         if not force and cached and state_cache.get("expires_at", 0) > now:
             return cached
 
+        has_admin_username = bool(ADMIN_USERNAME)
+        has_admin_password = bool(ADMIN_PASSWORD)
+        v3_admin_configured = has_admin_username and has_admin_password
+        legacy_admin_configured = bool(ADMIN_APP_KEY)
+        if v3_admin_configured:
+            admin_auth_mode = "v3_credentials"
+        elif has_admin_username or has_admin_password:
+            admin_auth_mode = "v3_credentials_incomplete"
+        elif legacy_admin_configured:
+            admin_auth_mode = "legacy_app_key"
+        else:
+            admin_auth_mode = "not_configured"
+
         state = {
             "upstream_base_url": UPSTREAM_BASE_URL,
             "upstream_responses_path": UPSTREAM_RESPONSES_PATH,
@@ -462,8 +692,12 @@ async def resolve_gateway_state(force: bool = False) -> dict[str, Any]:
             "admin_api_keys": [],
             "resolved_upstream_api_key": "",
             "stats": build_empty_social_stats(),
-            "admin_configured": bool(ADMIN_BASE_URL and ADMIN_APP_KEY),
+            "admin_configured": bool(
+                ADMIN_BASE_URL and (v3_admin_configured or legacy_admin_configured)
+            ),
             "admin_connected": False,
+            "admin_auth_mode": admin_auth_mode,
+            "admin_api_version": "",
             "token_source": "not_configured",
             "error": "",
             "mode": "manual",
@@ -473,7 +707,17 @@ async def resolve_gateway_state(force: bool = False) -> dict[str, Any]:
             "fallback_min_results": FALLBACK_MIN_RESULTS,
         }
 
-        if state["admin_configured"]:
+        if admin_auth_mode == "v3_credentials_incomplete":
+            state["error"] = "grok2api v3 admin username and password must both be configured"
+        elif v3_admin_configured and ADMIN_BASE_URL:
+            try:
+                admin_summary, admin_dashboard = await fetch_v3_admin_state()
+                state["admin_connected"] = True
+                state["admin_api_version"] = "v3"
+                state["stats"] = build_v3_account_stats(admin_summary, admin_dashboard)
+            except Exception as exc:
+                state["error"] = str(exc)
+        elif legacy_admin_configured and ADMIN_BASE_URL:
             try:
                 (admin_config, resolved_config_path), (admin_tokens, resolved_tokens_path) = await asyncio.gather(
                     fetch_admin_json_with_fallback(ADMIN_CONFIG_PATH, kind="config"),
@@ -483,6 +727,7 @@ async def resolve_gateway_state(force: bool = False) -> dict[str, Any]:
                 state["admin_tokens_path"] = resolved_tokens_path
                 admin_api_keys = extract_admin_api_keys(admin_config)
                 state["admin_connected"] = True
+                state["admin_api_version"] = "v2"
                 state["admin_api_keys"] = admin_api_keys
                 if not state["upstream_api_keys"]:
                     state["upstream_api_keys"] = admin_api_keys
@@ -1183,6 +1428,8 @@ async def _build_health_payload() -> dict[str, Any]:
         "token_source": state["token_source"],
         "admin_configured": state["admin_configured"],
         "admin_connected": state["admin_connected"],
+        "admin_auth_mode": state["admin_auth_mode"],
+        "admin_api_version": state["admin_api_version"],
         "accepted_token_count": len(state["accepted_tokens"]),
         "upstream_api_key_count": len(state["upstream_api_keys"]),
         "token_configured": bool(state["accepted_tokens"]),

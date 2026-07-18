@@ -101,6 +101,38 @@ class _FakeGetClient:
         return response
 
 
+class _FakeAdminV3Client:
+    def __init__(self, responses: dict[str, _FakeResponse]) -> None:
+        self._responses = dict(responses)
+        self.calls: list[dict[str, object]] = []
+
+    async def post(
+        self,
+        url: str,
+        json: dict[str, object],
+        headers: dict[str, str],
+        timeout: object | None = None,
+    ) -> _FakeResponse:
+        self.calls.append(
+            {"method": "POST", "url": url, "json": json, "headers": headers, "timeout": timeout}
+        )
+        return self._responses.get(
+            url,
+            _FakeResponse(404, {"error": {"message": "Not Found"}}, "Not Found"),
+        )
+
+    async def get(
+        self,
+        url: str,
+        headers: dict[str, str],
+    ) -> _FakeResponse:
+        self.calls.append({"method": "GET", "url": url, "headers": headers})
+        return self._responses.get(
+            url,
+            _FakeResponse(404, {"error": {"message": "Not Found"}}, "Not Found"),
+        )
+
+
 class _FakeRequest:
     def __init__(self, body: dict[str, object]) -> None:
         self._body = body
@@ -390,6 +422,130 @@ class SocialFallbackRouteTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SocialAdminCompatibilityTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _v3_responses(base_url: str) -> dict[str, _FakeResponse]:
+        return {
+            f"{base_url}/api/admin/v1/auth/login": _FakeResponse(
+                200,
+                {
+                    "data": {
+                        "tokens": {
+                            "accessToken": "admin-jwt",
+                            "accessTokenExpiresAt": "2099-01-01T00:00:00Z",
+                        }
+                    }
+                },
+            ),
+            f"{base_url}/api/admin/v1/accounts/summary": _FakeResponse(
+                200,
+                {
+                    "data": {
+                        "total": 6,
+                        "available": 4,
+                        "recovering": 1,
+                        "attention": 1,
+                        "providers": {
+                            "grok_build": {"total": 4, "available": 3},
+                            "grok_web": {"total": 2, "available": 1},
+                        },
+                    }
+                },
+            ),
+            f"{base_url}/api/admin/v1/dashboard?period=24h&timezone=UTC": _FakeResponse(
+                200,
+                {
+                    "data": {
+                        "resources": {"allTimeRequests": 37},
+                        "usage": {
+                            "requests": 9,
+                            "successfulRequests": 8,
+                            "failedRequests": 1,
+                        },
+                    }
+                },
+            ),
+        }
+
+    async def test_proxy_server_uses_grok2api_v3_admin_contract(self) -> None:
+        base_url = "http://example.test:8000"
+        fake_client = _FakeAdminV3Client(self._v3_responses(base_url))
+        original_http_client = proxy_server.http_client
+        proxy_server.http_client = fake_client
+        proxy_server._clear_social_admin_session()
+        config = {
+            "upstream_base_url": f"{base_url}/v1",
+            "upstream_responses_path": "/responses",
+            "admin_base_url": base_url,
+            "admin_verify_path": "/v1/admin/verify",
+            "admin_config_path": "/admin/api/config",
+            "admin_tokens_path": "/admin/api/tokens",
+            "admin_username": "admin",
+            "admin_password": "password123",
+            "admin_app_key": "legacy-key-must-not-win",
+            "upstream_api_key": "g2a-client-key",
+            "gateway_token": "client-token",
+            "model": "grok-4.20-0309",
+            "fallback_model": "grok-4.3",
+            "fallback_min_results": 3,
+            "cache_ttl_seconds": 60,
+        }
+        try:
+            state = await proxy_server.resolve_social_gateway_state_for_config(config)
+        finally:
+            proxy_server.http_client = original_http_client
+            proxy_server._clear_social_admin_session()
+
+        self.assertTrue(state["admin_connected"])
+        self.assertEqual(state["admin_auth_mode"], "v3_credentials")
+        self.assertEqual(state["admin_api_version"], "v3")
+        self.assertEqual(state["mode"], "v3-managed")
+        self.assertEqual(state["stats"]["account_total"], 6)
+        self.assertEqual(state["stats"]["account_available"], 4)
+        self.assertEqual(state["stats"]["requests_24h"], 9)
+        self.assertEqual(state["stats"]["total_calls"], 37)
+        called_urls = {str(item["url"]) for item in fake_client.calls}
+        self.assertIn(f"{base_url}/api/admin/v1/auth/login", called_urls)
+        self.assertNotIn(f"{base_url}/admin/api/config", called_urls)
+
+    async def test_standalone_gateway_uses_v3_session_cache(self) -> None:
+        base_url = "http://example.test:8000"
+        fake_client = _FakeAdminV3Client(self._v3_responses(base_url))
+        original_values = {
+            "http_client": social_gateway.http_client,
+            "admin_base_url": social_gateway.ADMIN_BASE_URL,
+            "admin_username": social_gateway.ADMIN_USERNAME,
+            "admin_password": social_gateway.ADMIN_PASSWORD,
+            "admin_app_key": social_gateway.ADMIN_APP_KEY,
+        }
+        social_gateway.http_client = fake_client
+        social_gateway.ADMIN_BASE_URL = base_url
+        social_gateway.ADMIN_USERNAME = "admin"
+        social_gateway.ADMIN_PASSWORD = "password123"
+        social_gateway.ADMIN_APP_KEY = "legacy-key-must-not-win"
+        social_gateway.clear_admin_session()
+        social_gateway.state_cache.update({"value": None, "expires_at": 0.0})
+        try:
+            first = await social_gateway.resolve_gateway_state(force=True)
+            second = await social_gateway.resolve_gateway_state(force=True)
+        finally:
+            social_gateway.http_client = original_values["http_client"]
+            social_gateway.ADMIN_BASE_URL = original_values["admin_base_url"]
+            social_gateway.ADMIN_USERNAME = original_values["admin_username"]
+            social_gateway.ADMIN_PASSWORD = original_values["admin_password"]
+            social_gateway.ADMIN_APP_KEY = original_values["admin_app_key"]
+            social_gateway.clear_admin_session()
+            social_gateway.state_cache.update({"value": None, "expires_at": 0.0})
+
+        self.assertTrue(first["admin_connected"])
+        self.assertEqual(first["admin_api_version"], "v3")
+        self.assertEqual(second["stats"]["account_attention"], 1)
+        login_calls = [
+            item
+            for item in fake_client.calls
+            if item["method"] == "POST" and str(item["url"]).endswith("/auth/login")
+        ]
+        self.assertEqual(len(login_calls), 1)
+
     async def test_social_gateway_falls_back_to_latest_admin_paths(self) -> None:
         original_http_client = social_gateway.http_client
         social_gateway.state_cache["value"] = None

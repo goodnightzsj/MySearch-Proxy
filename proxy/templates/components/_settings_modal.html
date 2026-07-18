@@ -155,9 +155,10 @@
       <div class="settings-panel-grid">
         <div class="settings-panel-aside">
           <h3>Social / X / grok2api</h3>
-          <p>grok2api v3 请填写 `/v1` 上游地址和管理端创建的 `g2a_` client key；`app_key` 仅用于 v2-compatible legacy 部署。</p>
+          <p>grok2api v3 的推理和管理是两套凭据：`g2a_` client key 调用 `/v1/responses`，管理员账号读取账号与请求统计。</p>
           <div class="settings-note-list">
-            <div class="settings-note">v3 推理凭据与管理员会话分离，必须显式配置 client key。</div>
+            <div class="settings-note">v3 管理入口固定为 `/api/admin/v1`，控制台会自动登录并缓存短期会话。</div>
+            <div class="settings-note">旧 app key 与 `config/tokens` 路径只保留给 v2-compatible 部署。</div>
             <div class="settings-note">这里只管理兼容 Social/X 路由，不影响其他 provider。</div>
           </div>
           <div class="settings-secret-meta" id="settings-social-meta"></div>
@@ -190,7 +191,20 @@
               <div class="settings-field">
                 <label for="settings-social-admin-base-url">后台管理地址</label>
                 <input type="text" id="settings-social-admin-base-url" placeholder="https://media.example.com">
-                <div class="hint">仅 v2-compatible legacy 部署用于读取旧 `config` 和 `tokens`。</div>
+                <div class="hint">填写主机根地址，不要附加 `/v1` 或 `/api/admin/v1`。</div>
+              </div>
+              <div class="settings-field">
+                <label for="settings-social-admin-username">v3 管理员用户名</label>
+                <input type="text" id="settings-social-admin-username" autocomplete="username" placeholder="admin">
+                <div class="hint">用于 `POST /api/admin/v1/auth/login`，不是 client key 名称。</div>
+              </div>
+              <div class="settings-field">
+                <label for="settings-social-admin-password">v3 管理员密码</label>
+                <div class="input-reveal-wrap">
+                  <input type="password" id="settings-social-admin-password" autocomplete="current-password" placeholder="留空表示保持当前值">
+                  <button type="button" class="input-reveal-btn" aria-label="显示密码" aria-pressed="false" data-reveal-target="settings-social-admin-password"><span class="reveal-icon" aria-hidden="true">👁</span></button>
+                </div>
+                <div class="hint" id="settings-social-admin-password-hint">未配置</div>
               </div>
               <div class="settings-field">
                 <label for="settings-social-admin-app-key">Legacy v2 后台 app key</label>
@@ -219,7 +233,7 @@
             </div>
 
             <details class="settings-advanced">
-              <summary>高级路径和缓存</summary>
+              <summary>Legacy v2 路径和高级缓存</summary>
               <div class="settings-fields">
                 <div class="settings-field">
                   <label for="settings-social-upstream-responses-path">Responses Path</label>
@@ -252,8 +266,8 @@
 
             <div class="settings-footer">
               <div class="settings-footer-copy">
-                <strong>优先维护后台接线，再看高级路径。</strong>
-                <span>保存后会刷新 Social 工作台状态、token 来源和兼容路由摘要。</span>
+                <strong>v3 管理凭据只读取统计，不能代替推理 client key。</strong>
+                <span>保存后会刷新 Social 工作台、账号可用性、请求统计和兼容路由摘要。</span>
               </div>
               <div class="settings-footer-actions">
                 <button type="button" class="btn btn-soft" onclick="testSocialSettings(this)">测试当前连接</button>

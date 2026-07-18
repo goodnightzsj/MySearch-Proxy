@@ -20,8 +20,12 @@ class ProxySocialConsoleTests(unittest.TestCase):
         self.assertNotIn("grok-4.20-0309-non-reasoning", rendered)
         self.assertNotIn("grok-4.3-beta", rendered)
         self.assertIn("SOCIAL_GATEWAY_UPSTREAM_API_KEY=YOUR_GROK2API_G2A_CLIENT_KEY", javascript)
+        self.assertIn("SOCIAL_GATEWAY_ADMIN_USERNAME=${adminUsername}", javascript)
+        self.assertIn("SOCIAL_GATEWAY_ADMIN_PASSWORD=YOUR_GROK2API_ADMIN_PASSWORD", javascript)
         self.assertNotIn("\nSOCIAL_GATEWAY_ADMIN_APP_KEY=YOUR_GROK2API_APP_KEY", javascript)
         self.assertIn("# SOCIAL_GATEWAY_ADMIN_APP_KEY=YOUR_GROK2API_V2_APP_KEY", javascript)
+        self.assertIn('id="settings-social-admin-username"', settings)
+        self.assertIn('id="settings-social-admin-password"', settings)
 
     def test_console_uses_operations_first_workspace_shell(self) -> None:
         javascript = (REPO_ROOT / "proxy/static/js/console.js").read_text(encoding="utf-8")

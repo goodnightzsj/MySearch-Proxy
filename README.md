@@ -121,7 +121,8 @@ provider。
   - `social/search` 现在支持主模型结果过少或上游报错时自动 fallback。
   - 返回里新增 `route` 元信息，能直接看到实际选中的模型、fallback 是否触发，以及每轮尝试结果数。
   - 推荐线上配置改为：主模型 `grok-4.20-0309`，fallback `grok-4.3`，阈值 `3`。
-  - `grok2api` v3 继续使用 `POST /v1/responses`，但调用凭据改为管理端创建的 `g2a_` client key；旧 `/admin/api/config`、`/admin/api/tokens` 自动继承只适用于 v2 兼容部署。
+  - `grok2api` v3 继续使用 `POST /v1/responses`，并保留 `POST /v1/chat/completions`、`POST /v1/messages`；推理使用管理端创建的 `g2a_` client key。
+  - v3 管理统计改为 `POST /api/admin/v1/auth/login` 获取短期 JWT，再读取 `/accounts/summary` 与 `/dashboard`；旧 `/admin/api/config`、`/admin/api/tokens` 仅适用于 v2-compatible 部署。
 
 - Grok 模型自定义清单：
   - `grok2api` v3 会按账号能力动态同步模型；本项目保留一组已验证的兼容默认值，并允许用 env 覆盖。

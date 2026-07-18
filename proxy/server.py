@@ -462,6 +462,9 @@ SOCIAL_GATEWAY_ADMIN_TOKENS_PATH = _normalize_path(
     "/admin/api/tokens",
 )
 SOCIAL_GATEWAY_ADMIN_APP_KEY = os.environ.get("SOCIAL_GATEWAY_ADMIN_APP_KEY", "").strip()
+SOCIAL_GATEWAY_ADMIN_USERNAME = os.environ.get("SOCIAL_GATEWAY_ADMIN_USERNAME", "").strip()
+SOCIAL_GATEWAY_ADMIN_PASSWORD = os.environ.get("SOCIAL_GATEWAY_ADMIN_PASSWORD", "").strip()
+SOCIAL_GATEWAY_V3_ADMIN_PREFIX = "/api/admin/v1"
 try:
     SOCIAL_GATEWAY_CACHE_TTL_SECONDS = max(
         5,
@@ -526,23 +529,53 @@ app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__
 templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
 http_client = httpx.AsyncClient(timeout=httpx.Timeout(max(120, SOCIAL_GATEWAY_TIMEOUT_SECONDS), connect=10.0), limits=httpx.Limits(max_connections=20, max_keepalive_connections=10))
 social_gateway_state_cache = {"expires_at": 0.0, "value": None}
-social_gateway_state_lock = asyncio.Lock()
+social_gateway_state_lock = None
+social_gateway_state_lock_loop = None
+social_admin_session_cache = {"fingerprint": "", "access_token": "", "expires_at": 0.0}
+social_admin_session_lock = None
+social_admin_session_lock_loop = None
 stats_payload_cache = {"expires_at": 0.0, "value": None}
-stats_payload_lock = asyncio.Lock()
+stats_payload_lock = None
+stats_payload_lock_loop = None
 background_sync_tasks = {}
 background_sync_last_started = {}
-background_sync_lock = asyncio.Lock()
+background_sync_lock = None
+background_sync_lock_loop = None
 
 
 def get_social_gateway_state_lock():
+    global social_gateway_state_lock, social_gateway_state_lock_loop
+    loop = asyncio.get_running_loop()
+    if social_gateway_state_lock is None or social_gateway_state_lock_loop is not loop:
+        social_gateway_state_lock = asyncio.Lock()
+        social_gateway_state_lock_loop = loop
     return social_gateway_state_lock
 
 
+def get_social_admin_session_lock():
+    global social_admin_session_lock, social_admin_session_lock_loop
+    loop = asyncio.get_running_loop()
+    if social_admin_session_lock is None or social_admin_session_lock_loop is not loop:
+        social_admin_session_lock = asyncio.Lock()
+        social_admin_session_lock_loop = loop
+    return social_admin_session_lock
+
+
 def get_stats_payload_lock():
+    global stats_payload_lock, stats_payload_lock_loop
+    loop = asyncio.get_running_loop()
+    if stats_payload_lock is None or stats_payload_lock_loop is not loop:
+        stats_payload_lock = asyncio.Lock()
+        stats_payload_lock_loop = loop
     return stats_payload_lock
 
 
 def get_background_sync_lock():
+    global background_sync_lock, background_sync_lock_loop
+    loop = asyncio.get_running_loop()
+    if background_sync_lock is None or background_sync_lock_loop is not loop:
+        background_sync_lock = asyncio.Lock()
+        background_sync_lock_loop = loop
     return background_sync_lock
 
 
@@ -599,6 +632,7 @@ def get_token_service(service_value, default="tavily"):
 def reset_social_gateway_cache():
     social_gateway_state_cache["expires_at"] = 0.0
     social_gateway_state_cache["value"] = None
+    _clear_social_admin_session()
 
 
 def reset_stats_cache():
@@ -688,6 +722,14 @@ def get_runtime_social_config():
         "admin_app_key": get_setting_text(
             "social_admin_app_key",
             SOCIAL_GATEWAY_ADMIN_APP_KEY,
+        ),
+        "admin_username": get_setting_text(
+            "social_admin_username",
+            SOCIAL_GATEWAY_ADMIN_USERNAME,
+        ),
+        "admin_password": get_setting_text(
+            "social_admin_password",
+            SOCIAL_GATEWAY_ADMIN_PASSWORD,
         ),
         "cache_ttl_seconds": cache_ttl_seconds,
     }
@@ -802,6 +844,7 @@ def build_candidate_social_config(body):
     text_fields = {
         "upstream_base_url": "upstream_base_url",
         "admin_base_url": "admin_base_url",
+        "admin_username": "admin_username",
         "model": "model",
         "fallback_model": "fallback_model",
     }
@@ -813,6 +856,7 @@ def build_candidate_social_config(body):
     }
     secret_fields = {
         "admin_app_key": "admin_app_key",
+        "admin_password": "admin_password",
         "upstream_api_key": "upstream_api_key",
         "gateway_token": "gateway_token",
     }
@@ -1165,7 +1209,65 @@ def build_social_token_stats(tokens_payload):
     return stats
 
 
+def build_social_v3_account_stats(summary_payload, dashboard_payload):
+    summary = summary_payload if isinstance(summary_payload, dict) else {}
+    dashboard = dashboard_payload if isinstance(dashboard_payload, dict) else {}
+    resources = dashboard.get("resources") if isinstance(dashboard.get("resources"), dict) else {}
+    usage = dashboard.get("usage") if isinstance(dashboard.get("usage"), dict) else {}
+    providers = summary.get("providers") if isinstance(summary.get("providers"), dict) else {}
+
+    total = int(parse_usage_number(summary.get("total")) or 0)
+    available = int(parse_usage_number(summary.get("available")) or 0)
+    recovering = int(parse_usage_number(summary.get("recovering")) or 0)
+    attention = int(parse_usage_number(summary.get("attention")) or 0)
+    pools = []
+    for provider_name, provider_payload in providers.items():
+        if not isinstance(provider_payload, dict):
+            continue
+        provider_total = int(parse_usage_number(provider_payload.get("total")) or 0)
+        provider_available = int(parse_usage_number(provider_payload.get("available")) or 0)
+        pools.append(
+            {
+                "pool": str(provider_name),
+                "count": provider_total,
+                "active": provider_available,
+                "cooling": 0,
+                "invalid": max(0, provider_total - provider_available),
+            }
+        )
+
+    stats = build_empty_social_stats()
+    stats.update(
+        {
+            "schema": "grok2api_v3_accounts",
+            "token_total": total,
+            "token_normal": available,
+            "token_limited": recovering,
+            "token_invalid": attention,
+            "chat_remaining": None,
+            "image_remaining": None,
+            "total_calls": int(parse_usage_number(resources.get("allTimeRequests")) or 0),
+            "requests_24h": int(parse_usage_number(usage.get("requests")) or 0),
+            "successful_requests_24h": int(
+                parse_usage_number(usage.get("successfulRequests")) or 0
+            ),
+            "failed_requests_24h": int(parse_usage_number(usage.get("failedRequests")) or 0),
+            "account_total": total,
+            "account_available": available,
+            "account_recovering": recovering,
+            "account_attention": attention,
+            "pool_count": len(pools),
+            "pools": sorted(pools, key=lambda item: item["pool"]),
+        }
+    )
+    return stats
+
+
 def build_social_gateway_mode(state):
+    if state.get("admin_api_version") == "v3":
+        if state["manual_upstream_key"] or state["manual_gateway_token"]:
+            return "v3-managed"
+        return "v3-observe"
     if state["admin_connected"] and (state["manual_upstream_key"] or state["manual_gateway_token"]):
         return "hybrid"
     if state["admin_connected"]:
@@ -1189,7 +1291,10 @@ def build_social_upstream_visibility(state):
     can_proxy_search = bool(state.get("resolved_upstream_api_key") and state.get("accepted_tokens"))
     if state.get("admin_connected"):
         level = "full"
-        detail = "已通过后台 admin 接口拉取配置与 token 池，可展示完整上游 token 统计。"
+        if state.get("admin_api_version") == "v3":
+            detail = "已连接 grok2api v3 管理 API，可展示账号可用性与请求统计。"
+        else:
+            detail = "已通过 legacy admin 接口拉取配置与 token 池，可展示完整上游 token 统计。"
     elif can_proxy_search:
         level = "basic"
         detail = "当前只拿到了基础接线信息，可确认上游 key 与客户端 token 数量，但还没有后台 token 详情。"
@@ -1231,6 +1336,151 @@ async def fetch_social_admin_json(config, path):
     if not isinstance(payload, dict):
         raise RuntimeError(f"{path} -> expected JSON object")
     return payload
+
+
+class SocialAdminUnauthorizedError(RuntimeError):
+    pass
+
+
+def _social_admin_error_detail(path, response, payload):
+    detail = ""
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            detail = str(error.get("message") or error.get("code") or "")
+        if not detail:
+            detail = str(payload.get("detail") or payload.get("message") or "")
+    if not detail:
+        detail = response.text.strip()[:240] or f"HTTP {response.status_code}"
+    return f"{path} -> {detail}"
+
+
+def _social_admin_session_fingerprint(config):
+    raw = "\0".join(
+        (
+            str(config.get("admin_base_url") or ""),
+            str(config.get("admin_username") or ""),
+            str(config.get("admin_password") or ""),
+        )
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _clear_social_admin_session(fingerprint=""):
+    if fingerprint and social_admin_session_cache.get("fingerprint") != fingerprint:
+        return
+    social_admin_session_cache.update(
+        {"fingerprint": "", "access_token": "", "expires_at": 0.0}
+    )
+
+
+async def get_social_admin_v3_access_token(config):
+    if not config.get("admin_username") or not config.get("admin_password"):
+        raise RuntimeError("grok2api v3 admin username and password are required")
+
+    fingerprint = _social_admin_session_fingerprint(config)
+    now = time.time()
+    if (
+        social_admin_session_cache.get("fingerprint") == fingerprint
+        and social_admin_session_cache.get("access_token")
+        and social_admin_session_cache.get("expires_at", 0) > now + 30
+    ):
+        return social_admin_session_cache["access_token"]
+
+    async with get_social_admin_session_lock():
+        now = time.time()
+        if (
+            social_admin_session_cache.get("fingerprint") == fingerprint
+            and social_admin_session_cache.get("access_token")
+            and social_admin_session_cache.get("expires_at", 0) > now + 30
+        ):
+            return social_admin_session_cache["access_token"]
+
+        path = f"{SOCIAL_GATEWAY_V3_ADMIN_PREFIX}/auth/login"
+        response = await http_client.post(
+            f"{config['admin_base_url']}{path}",
+            json={
+                "username": config["admin_username"],
+                "password": config["admin_password"],
+            },
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            payload = response.json()
+        except Exception:
+            payload = None
+        if response.status_code >= 400:
+            raise RuntimeError(_social_admin_error_detail(path, response, payload))
+        data = payload.get("data") if isinstance(payload, dict) else None
+        tokens = data.get("tokens") if isinstance(data, dict) else None
+        access_token = tokens.get("accessToken") if isinstance(tokens, dict) else ""
+        if not isinstance(access_token, str) or not access_token.strip():
+            raise RuntimeError(f"{path} -> access token missing from response")
+
+        expires_at = now + 600
+        expires_text = tokens.get("accessTokenExpiresAt") if isinstance(tokens, dict) else ""
+        if isinstance(expires_text, str) and expires_text.strip():
+            try:
+                parsed = datetime.fromisoformat(expires_text.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                expires_at = parsed.timestamp()
+            except ValueError:
+                pass
+        social_admin_session_cache.update(
+            {
+                "fingerprint": fingerprint,
+                "access_token": access_token.strip(),
+                "expires_at": expires_at,
+            }
+        )
+        return access_token.strip()
+
+
+async def fetch_social_admin_v3_json(config, path, access_token):
+    response = await http_client.get(
+        f"{config['admin_base_url']}{path}",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    try:
+        payload = response.json()
+    except Exception:
+        payload = None
+    if response.status_code == 401:
+        raise SocialAdminUnauthorizedError(
+            _social_admin_error_detail(path, response, payload)
+        )
+    if response.status_code >= 400:
+        raise RuntimeError(_social_admin_error_detail(path, response, payload))
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{path} -> expected data object")
+    return data
+
+
+async def fetch_social_admin_v3_state(config):
+    fingerprint = _social_admin_session_fingerprint(config)
+    for attempt in range(2):
+        access_token = await get_social_admin_v3_access_token(config)
+        try:
+            summary, dashboard = await asyncio.gather(
+                fetch_social_admin_v3_json(
+                    config,
+                    f"{SOCIAL_GATEWAY_V3_ADMIN_PREFIX}/accounts/summary",
+                    access_token,
+                ),
+                fetch_social_admin_v3_json(
+                    config,
+                    f"{SOCIAL_GATEWAY_V3_ADMIN_PREFIX}/dashboard?period=24h&timezone=UTC",
+                    access_token,
+                ),
+            )
+            return summary, dashboard
+        except SocialAdminUnauthorizedError:
+            _clear_social_admin_session(fingerprint)
+            if attempt:
+                raise
+    raise RuntimeError("grok2api v3 admin authentication failed")
 
 
 def build_social_admin_path_candidates(path, *, kind):
@@ -1294,6 +1544,19 @@ async def fetch_social_admin_json_with_fallback(config, path, *, kind):
 
 
 async def resolve_social_gateway_state_for_config(config):
+    has_admin_username = bool(config.get("admin_username"))
+    has_admin_password = bool(config.get("admin_password"))
+    v3_admin_configured = has_admin_username and has_admin_password
+    legacy_admin_configured = bool(config.get("admin_app_key"))
+    if v3_admin_configured:
+        admin_auth_mode = "v3_credentials"
+    elif has_admin_username or has_admin_password:
+        admin_auth_mode = "v3_credentials_incomplete"
+    elif legacy_admin_configured:
+        admin_auth_mode = "legacy_app_key"
+    else:
+        admin_auth_mode = "not_configured"
+
     state = {
         "upstream_base_url": config["upstream_base_url"],
         "upstream_responses_path": config["upstream_responses_path"],
@@ -1301,8 +1564,12 @@ async def resolve_social_gateway_state_for_config(config):
         "admin_verify_path": config["admin_verify_path"],
         "admin_config_path": config["admin_config_path"],
         "admin_tokens_path": config["admin_tokens_path"],
-        "admin_configured": bool(config["admin_base_url"] and config["admin_app_key"]),
+        "admin_configured": bool(
+            config["admin_base_url"] and (v3_admin_configured or legacy_admin_configured)
+        ),
         "admin_connected": False,
+        "admin_auth_mode": admin_auth_mode,
+        "admin_api_version": "",
         "manual_upstream_key": bool(config["upstream_api_key"]),
         "manual_gateway_token": bool(config["gateway_token"]),
         "upstream_api_keys": parse_secret_values(config["upstream_api_key"]),
@@ -1320,7 +1587,20 @@ async def resolve_social_gateway_state_for_config(config):
         "error": "",
     }
 
-    if state["admin_configured"]:
+    if admin_auth_mode == "v3_credentials_incomplete":
+        state["error"] = "grok2api v3 admin username and password must both be configured"
+    elif v3_admin_configured and config["admin_base_url"]:
+        try:
+            admin_summary, admin_dashboard = await fetch_social_admin_v3_state(config)
+            state["admin_connected"] = True
+            state["admin_api_version"] = "v3"
+            state["stats"] = build_social_v3_account_stats(
+                admin_summary,
+                admin_dashboard,
+            )
+        except Exception as exc:
+            state["error"] = str(exc)
+    elif legacy_admin_configured and config["admin_base_url"]:
         try:
             (admin_config, resolved_config_path), (admin_tokens, resolved_tokens_path) = await asyncio.gather(
                 fetch_social_admin_json_with_fallback(config, config["admin_config_path"], kind="config"),
@@ -1330,6 +1610,7 @@ async def resolve_social_gateway_state_for_config(config):
             state["admin_tokens_path"] = resolved_tokens_path
             app_api_keys = extract_social_admin_api_keys(admin_config)
             state["admin_connected"] = True
+            state["admin_api_version"] = "v2"
             state["admin_api_keys"] = app_api_keys
             if not state["upstream_api_keys"]:
                 state["upstream_api_keys"] = app_api_keys
@@ -1881,6 +2162,8 @@ async def build_social_dashboard():
         "admin_base_url": state["admin_base_url"],
         "admin_configured": state["admin_configured"],
         "admin_connected": state["admin_connected"],
+        "admin_auth_mode": state["admin_auth_mode"],
+        "admin_api_version": state["admin_api_version"],
         "upstream_key_configured": bool(state["resolved_upstream_api_key"]),
         "client_auth_configured": bool(state["accepted_tokens"]),
         "accepted_token_count": len(state["accepted_tokens"]),
@@ -1922,12 +2205,15 @@ async def build_settings_payload():
             "admin_verify_path": config["admin_verify_path"],
             "admin_config_path": config["admin_config_path"],
             "admin_tokens_path": config["admin_tokens_path"],
+            "admin_username": config["admin_username"],
             "model": config["model"],
             "fallback_model": config["fallback_model"],
             "fallback_min_results": config["fallback_min_results"],
             "cache_ttl_seconds": config["cache_ttl_seconds"],
             "admin_app_key_configured": bool(config["admin_app_key"]),
             "admin_app_key_masked": mask_secret(config["admin_app_key"]),
+            "admin_password_configured": bool(config["admin_password"]),
+            "admin_password_masked": mask_secret(config["admin_password"]),
             "upstream_api_key_configured": bool(config["upstream_api_key"]),
             "upstream_api_key_masked": mask_secret(config["upstream_api_key"]),
             "gateway_token_configured": bool(config["gateway_token"]),
@@ -1935,6 +2221,8 @@ async def build_settings_payload():
             "mode": state["mode"],
             "token_source": state["token_source"],
             "admin_connected": state["admin_connected"],
+            "admin_auth_mode": state["admin_auth_mode"],
+            "admin_api_version": state["admin_api_version"],
             "error": state["error"],
         }
     }
@@ -2818,6 +3106,8 @@ def _build_social_health_payload(state):
         "token_source": state["token_source"],
         "admin_configured": state["admin_configured"],
         "admin_connected": state["admin_connected"],
+        "admin_auth_mode": state["admin_auth_mode"],
+        "admin_api_version": state["admin_api_version"],
         "accepted_token_count": len(state["accepted_tokens"]),
         "token_configured": bool(state["accepted_tokens"]),
         "upstream_key_configured": bool(state["resolved_upstream_api_key"]),
@@ -3053,7 +3343,10 @@ async def test_social_settings(request: Request, _=Depends(verify_admin)):
     request_target = f"{state['upstream_base_url']}{state['upstream_responses_path']}"
     detail = ""
     if state["admin_connected"]:
-        detail = "后台已连通，并成功拉取配置与 token 池。"
+        if state["admin_api_version"] == "v3":
+            detail = "grok2api v3 后台已连通，并成功拉取账号与请求统计。"
+        else:
+            detail = "legacy v2 后台已连通，并成功拉取配置与 token 池。"
     elif state["resolved_upstream_api_key"]:
         detail = "已检测到可用上游 key，但当前未通过后台接口补充更多 token 元数据。"
     elif state["error"]:
@@ -3062,9 +3355,13 @@ async def test_social_settings(request: Request, _=Depends(verify_admin)):
         detail = "当前没有解析到可用上游 key 或客户端 token。"
     ok = bool(state["resolved_upstream_api_key"] and state["accepted_tokens"])
     if state["admin_connected"]:
-        auth_source = "grok2api 后台自动继承"
+        auth_source = (
+            "grok2api v3 管理员会话"
+            if state["admin_api_version"] == "v3"
+            else "grok2api v2 legacy app key"
+        )
         status_label = "后台已连通"
-        recommendation = "当前后台自动继承正常，可以直接下发 MySearch 通用 token。"
+        recommendation = "后台统计链路正常；推理仍使用独立 g2a_ client key。"
     elif ok:
         auth_source = state["token_source"] or "手动上游 key + 客户端 token"
         status_label = "已解析到可用凭证"
@@ -3072,12 +3369,14 @@ async def test_social_settings(request: Request, _=Depends(verify_admin)):
     else:
         auth_source = state["token_source"] or "未解析到可用鉴权"
         status_label = "诊断失败"
-        recommendation = "优先检查 grok2api 后台地址与 app key；如果没有后台，再补手动上游 key 和客户端 token。"
+        recommendation = "v3 请检查后台地址、管理员用户名和密码；推理链路另行检查 g2a_ client key。"
     return {
         "ok": ok,
         "mode": state["mode"],
         "token_source": state["token_source"],
         "admin_connected": state["admin_connected"],
+        "admin_auth_mode": state["admin_auth_mode"],
+        "admin_api_version": state["admin_api_version"],
         "upstream_base_url": state["upstream_base_url"],
         "upstream_responses_path": state["upstream_responses_path"],
         "accepted_token_count": len(state["accepted_tokens"]),
@@ -3158,6 +3457,7 @@ async def update_social_settings(request: Request, _=Depends(verify_admin)):
         "upstream_base_url": "social_upstream_base_url",
         "upstream_responses_path": "social_upstream_responses_path",
         "admin_base_url": "social_admin_base_url",
+        "admin_username": "social_admin_username",
         "admin_verify_path": "social_admin_verify_path",
         "admin_config_path": "social_admin_config_path",
         "admin_tokens_path": "social_admin_tokens_path",
@@ -3166,6 +3466,7 @@ async def update_social_settings(request: Request, _=Depends(verify_admin)):
     }
     secret_fields = {
         "admin_app_key": "social_admin_app_key",
+        "admin_password": "social_admin_password",
         "upstream_api_key": "social_upstream_api_key",
         "gateway_token": "social_gateway_token",
     }
