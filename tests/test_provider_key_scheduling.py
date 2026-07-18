@@ -1347,6 +1347,10 @@ class ProxyForwardingSchedulingTests(unittest.IsolatedAsyncioTestCase):
             self.server,
             "resolve_social_gateway_state",
             new=AsyncMock(return_value=state),
+        ), patch.object(
+            self.server.db,
+            "get_token_by_value",
+            return_value=None,
         ), patch.object(self.server.db, "log_usage"), patch.object(
             self.server.http_client,
             "post",
