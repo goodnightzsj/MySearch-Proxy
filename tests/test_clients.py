@@ -745,7 +745,8 @@ class MySearchClientTests(unittest.TestCase):
 
     def test_apply_result_event_answer_override_falls_back_to_official_award_page_html(self) -> None:
         client = MySearchClient()
-        client.extract_url = lambda **_: {"content": ""}  # type: ignore[method-assign]
+        extraction_calls: list[str] = []
+        client.extract_url = lambda **kwargs: extraction_calls.append(kwargs["url"])  # type: ignore[method-assign]
         client._request_text = lambda **_: (  # type: ignore[method-assign]
             200,
             """
@@ -778,6 +779,7 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(result["answer"], "Best Picture winner: One Battle After Another")
         self.assertEqual(result["evidence"]["answer_source"], "result-event-extraction")
+        self.assertEqual(extraction_calls, [])
 
     def test_apply_result_event_answer_override_extracts_best_actor_from_headline_style_result(self) -> None:
         client = MySearchClient()
@@ -2760,6 +2762,7 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(policy.key, "changelog")
         self.assertEqual(policy.provider, "tavily")
+        self.assertEqual(policy.fallback_chain, ("exa", "firecrawl"))
         self.assertEqual(policy.tavily_topic, "news")
         self.assertEqual(policy.firecrawl_categories, ("research",))
         self.assertTrue(policy.allow_exa_rescue)
@@ -2826,6 +2829,23 @@ class MySearchClientTests(unittest.TestCase):
             mode="docs",
             intent="resource",
             include_domains=["nextjs.org"],
+        )
+
+        self.assertTrue(should_blend)
+
+    def test_strict_docs_query_allows_bounded_provider_blend(self) -> None:
+        client = MySearchClient()
+        client._provider_is_live_ok = lambda provider: True  # type: ignore[method-assign]
+
+        should_blend = client._should_blend_web_providers(
+            query="OpenAI Responses API docs official",
+            requested_provider="auto",
+            decision=RouteDecision(provider="tavily", reason="test", result_profile="resource"),
+            sources=["web"],
+            strategy="verify",
+            mode="docs",
+            intent="resource",
+            include_domains=["openai.com"],
         )
 
         self.assertTrue(should_blend)
@@ -5072,6 +5092,98 @@ class MySearchClientTests(unittest.TestCase):
         self.assertIn(reddit_url, [item["url"] for item in result["results"][1:]])
         self.assertIn(arxiv_url, [item["url"] for item in result["results"][1:]])
 
+    def test_docs_blend_keeps_tavily_lightweight_and_fetches_verifier_content(self) -> None:
+        client = MySearchClient()
+        captured: dict[str, dict[str, object]] = {}
+        client._provider_can_serve = lambda provider: provider.name == "tavily"  # type: ignore[method-assign]
+        client._execute_parallel = lambda tasks, **_: (  # type: ignore[method-assign]
+            {name: task() for name, task in tasks.items()},
+            {},
+        )
+
+        def payload(provider: str, content: str) -> dict[str, object]:
+            url = "https://playwright.dev/docs/api/class-test#test-step"
+            return {
+                "provider": provider,
+                "answer": "",
+                "results": [{"title": "test.step", "url": url, "content": content}],
+                "citations": [{"title": "test.step", "url": url}],
+            }
+
+        def fake_tavily(**kwargs):  # type: ignore[no-untyped-def]
+            captured["tavily"] = kwargs
+            return payload("tavily", "")
+
+        def fake_firecrawl(**kwargs):  # type: ignore[no-untyped-def]
+            captured["firecrawl"] = kwargs
+            return payload("firecrawl", "Official API details")
+
+        client._search_tavily = fake_tavily  # type: ignore[method-assign]
+        client._search_firecrawl = fake_firecrawl  # type: ignore[method-assign]
+
+        result = client._search_web_blended(
+            query="Playwright test.step docs",
+            mode="docs",
+            intent="resource",
+            strategy="verify",
+            decision=RouteDecision(provider="tavily", reason="test", result_profile="resource"),
+            max_results=5,
+            include_content=True,
+            include_answer=False,
+            include_domains=["playwright.dev"],
+            exclude_domains=None,
+        )
+
+        self.assertFalse(captured["tavily"]["include_content"])
+        self.assertEqual(captured["tavily"]["strategy"], "fast")
+        self.assertTrue(captured["firecrawl"]["include_content"])
+        self.assertEqual(result["results"][0]["content"], "Official API details")
+
+    def test_firecrawl_blend_requests_content_from_tavily_and_exa_verifiers(self) -> None:
+        client = MySearchClient()
+        captured: dict[str, dict[str, object]] = {}
+        client._provider_can_serve = lambda provider: provider.name == "exa"  # type: ignore[method-assign]
+        client._execute_parallel = lambda tasks, **_: (  # type: ignore[method-assign]
+            {name: task() for name, task in tasks.items()},
+            {},
+        )
+
+        def payload(provider: str) -> dict[str, object]:
+            url = f"https://arxiv.org/abs/{provider}"
+            return {
+                "provider": provider,
+                "answer": "",
+                "results": [{"title": provider, "url": url, "content": provider}],
+                "citations": [{"title": provider, "url": url}],
+            }
+
+        def capture(provider: str):  # type: ignore[no-untyped-def]
+            def run(**kwargs):  # type: ignore[no-untyped-def]
+                captured[provider] = kwargs
+                return payload(provider)
+
+            return run
+
+        client._search_firecrawl = capture("firecrawl")  # type: ignore[method-assign]
+        client._search_tavily = capture("tavily")  # type: ignore[method-assign]
+        client._search_exa = capture("exa")  # type: ignore[method-assign]
+
+        client._search_web_blended(
+            query="Qwen3 technical report pdf",
+            mode="pdf",
+            intent="resource",
+            strategy="verify",
+            decision=RouteDecision(provider="firecrawl", reason="test", result_profile="resource"),
+            max_results=5,
+            include_content=True,
+            include_answer=False,
+            include_domains=["arxiv.org"],
+            exclude_domains=None,
+        )
+
+        self.assertTrue(captured["tavily"]["include_content"])
+        self.assertTrue(captured["exa"]["include_content"])
+
     def test_docs_blended_search_prioritizes_include_domains(self) -> None:
         client = MySearchClient()
         official_url = "https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering"
@@ -5460,9 +5572,15 @@ class MySearchClientTests(unittest.TestCase):
             include_answer=False,
         )
 
-        self.assertEqual(result["results"][0]["url"], "https://playwright.dev/docs/api/class-test")
-        self.assertEqual(result["citations"][0]["url"], "https://playwright.dev/docs/api/class-test")
-        self.assertEqual(result["evidence"]["official_source_count"], 1)
+        self.assertEqual(
+            result["results"][0]["url"],
+            "https://playwright.dev/docs/api/class-test#test-step",
+        )
+        self.assertEqual(
+            result["citations"][0]["url"],
+            "https://playwright.dev/docs/api/class-test#test-step",
+        )
+        self.assertEqual(result["evidence"]["official_source_count"], 2)
         self.assertEqual(result["evidence"]["confidence"], "high")
         self.assertNotIn("mixed-official-and-third-party", result["evidence"]["conflicts"])
 
@@ -5512,11 +5630,17 @@ class MySearchClientTests(unittest.TestCase):
             include_answer=False,
         )
 
-        self.assertEqual(len(result["results"]), 1)
-        self.assertEqual(result["results"][0]["url"], "https://playwright.dev/docs/api/class-test")
+        self.assertEqual(len(result["results"]), 2)
+        self.assertEqual(
+            result["results"][0]["url"],
+            "https://playwright.dev/docs/api/class-test#test-step",
+        )
+        self.assertTrue(
+            all("playwright.dev" in item["url"] for item in result["results"])
+        )
         self.assertEqual(result["evidence"]["official_mode"], "strict")
         self.assertTrue(result["evidence"]["official_filter_applied"])
-        self.assertEqual(result["evidence"]["official_source_count"], 1)
+        self.assertEqual(result["evidence"]["official_source_count"], 2)
         self.assertNotIn("mixed-official-and-third-party", result["evidence"]["conflicts"])
 
     def test_search_strict_official_mode_keeps_results_but_flags_unmet(self) -> None:
@@ -7251,6 +7375,34 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(result["results"][0]["url"], "https://playwright.dev/docs/locators")
         self.assertTrue(result["evidence"]["official_filter_applied"])
+        self.assertEqual(result["evidence"]["official_rescue_source"], "canonical-map")
+
+    def test_strict_docs_policy_injects_exact_playwright_test_step_reference(self) -> None:
+        client = MySearchClient()
+
+        result = client._apply_official_resource_policy(
+            query="Playwright test.step docs",
+            mode="docs",
+            intent="resource",
+            result={
+                "results": [
+                    {
+                        "provider": "tavily",
+                        "title": "TestStep | Playwright",
+                        "url": "https://playwright.dev/docs/api/class-teststep",
+                        "snippet": "Represents a step in a test run.",
+                    }
+                ],
+                "citations": [],
+                "evidence": {},
+            },
+            include_domains=["playwright.dev"],
+        )
+
+        self.assertEqual(
+            result["results"][0]["url"],
+            "https://playwright.dev/docs/api/class-test#test-step",
+        )
         self.assertEqual(result["evidence"]["official_rescue_source"], "canonical-map")
 
     def test_strict_docs_policy_promotes_playwright_rescue_over_generic_official_docs(self) -> None:

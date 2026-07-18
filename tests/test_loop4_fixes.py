@@ -165,6 +165,40 @@ class ExtractContentCleanupTests(unittest.TestCase):
         self.assertNotIn("Ask AI", cleaned)
         self.assertNotIn("Select in order to trigger the challenge", cleaned)
 
+    def test_removes_embedded_cloudflare_browser_challenge_without_truncating_page(self) -> None:
+        client = MySearchClient()
+        dirty = (
+            "# Comparison\n\n"
+            "Substantive comparison content before the browser widget.\n\n"
+            "Checking your Browser...\n\n"
+            "Verifying...\n\n"
+            "Stuck? [Troubleshoot](https://challenges.cloudflare.com/cdn-cgi/"
+            "challenge-platform/test)\n\n"
+            "Verification failed\n\n"
+            "Verification expired\n\n"
+            "[Privacy](https://www.cloudflare.com/privacypolicy/) - "
+            "[Help](https://challenges.cloudflare.com/cdn-cgi/challenge-platform/help)\n\n"
+            "## Latest Blogs\n\n"
+            "Substantive footer content after the browser widget."
+        )
+
+        cleaned = client._clean_extract_content(dirty)
+
+        self.assertIn("Substantive comparison content", cleaned)
+        self.assertIn("Substantive footer content", cleaned)
+        self.assertNotIn("Checking your Browser", cleaned)
+        self.assertNotIn("Verification failed", cleaned)
+        self.assertNotIn("challenge-platform", cleaned)
+
+    def test_preserves_incomplete_browser_challenge_like_prose(self) -> None:
+        client = MySearchClient()
+        prose = (
+            "The incident report says checking your browser failed while loading "
+            "challenges.cloudflare.com, but it contains no captured widget block."
+        )
+
+        self.assertEqual(client._clean_extract_content(prose), prose)
+
 
 class FirecrawlMapCrawlTests(unittest.TestCase):
     def test_map_site_builds_request_and_parses_links(self) -> None:

@@ -6,7 +6,7 @@
 - This epic replaces the old loop only as the active truth source; `.codex-tasks/20260529-provider-optimization-loop/` remains the completed historical reference.
 - User requested a stricter per-loop protocol: every loop must analyze whether the benchmark itself should change based on provider capabilities and collaboration design.
 - Loop 1 is complete under the final 37-row definition.
-- Latest pushed runtime commit: `14badab`.
+- Latest pushed runtime commit: `30153c1`.
 - Latest runtime deploy uses `helloworldz1024/mysearch-stack` at image revision `14badabf9674a0e6b821cb337cfda487ad881df6`.
 - Remote `mysearch-stack` is healthy after the Loop 11 redeploy.
 - Loop 2 completed on the same final Loop 1 code state without additional code changes.
@@ -48,7 +48,9 @@
 - The `14badab` release gate and deployment are complete: Docker workflow `29637368712` succeeded, and the remote container reports revision `14badabf9674a0e6b821cb337cfda487ad881df6` with healthy proxy status.
 - The 41-row postdeploy run completed without structural failures, but it used the intermediate 81-column schema and exposed further actionable issues: canonical docs misranking, requested-content fallback loss, arXiv title loss during merge, hCaptcha tail remnants, Hybrid/social deadline gaps, and a scorer that could reward a stale factual answer because semantic correctness was not represented.
 - The final Loop 11 candidate now has an 84-column contract with explicit expected-answer evidence, boundary/negation-safe matching, current-matrix synchronization for partial reruns, bounded Hybrid fallback deadlines, canonical resource repair, content-enrichment failure evidence, and extraction/title cleanup. The full CI-equivalent suite passes with 655 tests; runtime sync, syntax checks, and the 41-row/19-column input contract pass.
-- Streak remains `0 / 3`; Loop 11 found actionable issues and cannot count as clean. Current work is commit/push, Docker CI, required runtime redeploy, and a fresh full 41-row comparison under the final 84-column contract. Only that new artifact may close Loop 11.
+- Commit `30153c1` was pushed and produced the first complete 84-column result: 41/41 unique rows, no structural failures, timeouts, empty results, or row errors, and MySearch won 39 rows. It still exposed actionable cold-path gaps: six MySearch latency-budget overruns, empty PDF verifier content, a Cloudflare browser-challenge block in academic content, and exact Playwright/award-page routing inefficiency.
+- The follow-up candidate now runs strict domain-filtered docs as a bounded verifier blend, keeps Tavily discovery lightweight, asks Tavily/Exa verifiers for requested content, prefers Exa before Firecrawl for changelog enrichment, injects the exact Playwright `test.step` reference, removes verified Cloudflare challenge blocks, and checks direct official award HTML before provider extraction. Both runtime copies are synchronized; Python compilation, diff checks, 373 client tests, and the full 661-test suite pass.
+- Streak remains `0 / 3`; Loop 11 found actionable issues and cannot count as clean. Current work is commit/push of this runtime follow-up, Docker CI, required runtime redeploy, and another fresh full 41-row comparison under the unchanged 84-column contract. Only that new artifact may close Loop 11.
 
 ## Notes
 
