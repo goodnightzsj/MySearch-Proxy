@@ -1046,7 +1046,7 @@ def timed_tool_runs(client, tool_name, arguments, repeat_runs, latency_budget_ms
     }
 
 
-payload = json.loads(base64.b64decode(sys.argv[1]).decode())
+payload = json.loads(base64.b64decode(PAYLOAD_B64).decode())
 mysearch = None
 mysearch_init_error = ""
 try:
@@ -1222,6 +1222,7 @@ def run_remote_cases(
         "mysearch_only": mysearch_only,
     }
     payload_b64 = base64.b64encode(json.dumps(payload, ensure_ascii=False).encode()).decode()
+    remote_source = f"PAYLOAD_B64 = {payload_b64!r}\n{REMOTE_SCRIPT}"
     cmd = [
         "ssh",
         "-o",
@@ -1233,7 +1234,6 @@ def run_remote_cases(
         host,
         "python3",
         "-",
-        payload_b64,
     ]
     timeout_seconds = estimate_remote_batch_timeout_seconds(cases)
     try:
@@ -1242,7 +1242,7 @@ def run_remote_cases(
             check=False,
             capture_output=True,
             text=True,
-            input=REMOTE_SCRIPT,
+            input=remote_source,
             timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired as exc:

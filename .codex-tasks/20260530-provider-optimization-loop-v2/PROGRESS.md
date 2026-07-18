@@ -6,9 +6,9 @@
 - This epic replaces the old loop only as the active truth source; `.codex-tasks/20260529-provider-optimization-loop/` remains the completed historical reference.
 - User requested a stricter per-loop protocol: every loop must analyze whether the benchmark itself should change based on provider capabilities and collaboration design.
 - Loop 1 is complete under the final 37-row definition.
-- Latest pushed commit after Loop 8: `7ec7a62`.
-- Latest runtime deploy used the Loop 8 runtime built from commit `7ec7a62` as remote image tag `helloworldz1024/mysearch-stack:7ec7a62-local`.
-- Remote `mysearch-stack` is healthy after the Loop 8 redeploy.
+- Latest pushed runtime commit: `d5deccc`.
+- Latest runtime deploy uses `helloworldz1024/mysearch-stack` at image revision `d5deccc1a8a1ba1424bcd894df5c5d42972a34b9`.
+- Remote `mysearch-stack` is healthy after the Loop 11 redeploy.
 - Loop 2 completed on the same final Loop 1 code state without additional code changes.
 
 ## Loop State
@@ -42,8 +42,10 @@
 - Loop 10 release gate is complete: commits `19a566e` and `47b417f` were pushed, Docker workflows `29572859355` and `29574992460` succeeded, and remote `mysearch-stack` now runs `helloworldz1024/mysearch-stack:sha-47b417f` with health and MCP initialize verified.
 - Loop 10 final comparison is complete: `raw/loop10-remote-compare-final.csv` captured 41/41 unique rows with zero missing IDs, structural failures, timeouts, empty MySearch results, or row errors. All referenced raw artifacts exist, and `factual-accuracy-01` now answers Python `3.14.6`.
 - Loop 11 Inspect found benchmark-integrity gaps: the old output schema did not score the ten active dimensions, preserve per-repeat evidence, enforce latency budgets, keep trace JSON valid, or distinguish normal orchestration from actual fallback. The user also requested a complete console optimization, which exposed an overlay `inert` ancestor bug and incomplete control semantics.
-- Loop 11 local fixes are complete. The runner now emits auditable ten-dimension evidence and the console now uses an operations-first single-workspace layout with unified overlay isolation. The full local suite passes with 634 tests, and browser checks pass at 320/375/768/1440 widths.
-- Streak remains `0 / 3`; Loop 11 found actionable issues and cannot count as clean. Current work is its release/deploy gate followed by a fresh full 41-row comparison under the changed runner contract.
+- Loop 11 local fixes are complete. The runner now emits auditable ten-dimension evidence and the console now uses an operations-first single-workspace layout with unified overlay isolation. The full local suite passes with 637 tests, and browser checks pass at 320/375/768/1440 widths.
+- Loop 11 runtime release/deploy is complete: Docker workflow `29631966606` succeeded for `d5deccc`; the remote image revision, proxy health, MCP initialize, and authenticated desktop/mobile console smoke all passed.
+- The first post-deploy comparison attempt exposed a benchmark credential-handling issue: the Tavily bearer was visible in an encoded argv payload. The runner now sends the one-time script and payload through SSH stdin; 35 runner tests, a real SSH smoke, and the full 637-test suite pass. The interrupted 8-row attempt is retained as a non-final artifact.
+- Streak remains `0 / 3`; Loop 11 found actionable issues and cannot count as clean. Current work is the runner-only release gate followed by a fresh full 41-row comparison under the changed runner contract.
 
 ## Notes
 
