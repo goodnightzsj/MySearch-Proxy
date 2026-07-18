@@ -4471,7 +4471,7 @@ class MySearchClientTests(unittest.TestCase):
                 )
             return {"links": ["https://fastapi.tiangolo.com/"]}
 
-        client._request_json = fake_request_json  # type: ignore[method-assign]
+        client._request_json_once = fake_request_json  # type: ignore[method-assign]
 
         with patch("mysearch.clients.time.sleep") as sleep:
             result = client.map_site(url="https://fastapi.tiangolo.com", limit=10)
@@ -4507,7 +4507,7 @@ class MySearchClientTests(unittest.TestCase):
                 ],
             }
 
-        client._request_json = fake_request_json  # type: ignore[method-assign]
+        client._request_json_once = fake_request_json  # type: ignore[method-assign]
 
         with patch("mysearch.clients.time.sleep") as sleep:
             result = client.crawl_site(

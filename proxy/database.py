@@ -7,7 +7,7 @@ import re
 import secrets
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(__file__), "data", "proxy.db")
 _thread_local = threading.local()
@@ -35,6 +35,10 @@ KEY_USAGE_COLUMNS = {
     "usage_account_remaining": "INTEGER",
     "usage_synced_at": "TEXT",
     "usage_sync_error": "TEXT DEFAULT ''",
+    "disabled_reason": "TEXT DEFAULT ''",
+    "disabled_detail": "TEXT DEFAULT ''",
+    "disabled_at": "TEXT",
+    "schedule_until": "TEXT",
 }
 
 
@@ -261,30 +265,119 @@ def get_active_keys(service=None):
             sql += " AND active = 1"
         else:
             sql += " WHERE active = 1"
+        sql += " AND (schedule_until IS NULL OR schedule_until <= ?)"
+        params.append(datetime.now(timezone.utc).isoformat())
         sql += " ORDER BY id"
         return conn.execute(sql, params).fetchall()
     finally:
         pass  # connection reused via thread-local
 
 
-def update_key_usage(key_id, success):
+def get_next_key_schedule_delay(service=None):
+    """Return seconds until the next temporarily cooled key becomes schedulable."""
+    conn = get_conn()
+    try:
+        where_sql, params = _service_where(service)
+        now = datetime.now(timezone.utc)
+        sql = f"SELECT MIN(schedule_until) AS next_at FROM api_keys{where_sql}"
+        if where_sql:
+            sql += " AND active = 1 AND schedule_until > ?"
+        else:
+            sql += " WHERE active = 1 AND schedule_until > ?"
+        params.append(now.isoformat())
+        row = conn.execute(sql, params).fetchone()
+        raw_next = str((row["next_at"] if row else "") or "").strip()
+        if not raw_next:
+            return None
+        next_at = datetime.fromisoformat(raw_next)
+        if next_at.tzinfo is None:
+            next_at = next_at.replace(tzinfo=timezone.utc)
+        return max(0.0, (next_at - now).total_seconds())
+    except (TypeError, ValueError):
+        return None
+    finally:
+        pass  # connection reused via thread-local
+
+
+def update_key_usage(
+    key_id,
+    success,
+    *,
+    failure_kind="",
+    failure_detail="",
+    retry_after_seconds=None,
+):
     conn = get_conn()
     try:
         now = datetime.now(timezone.utc).isoformat()
         if success:
             conn.execute(
-                "UPDATE api_keys SET total_used = total_used + 1, consecutive_fails = 0, last_used_at = ? WHERE id = ?",
-                (now, key_id),
+                """
+                UPDATE api_keys
+                SET total_used = total_used + 1,
+                    consecutive_fails = 0,
+                    last_used_at = ?,
+                    disabled_reason = CASE
+                        WHEN active = 1 AND (schedule_until IS NULL OR schedule_until <= ?)
+                        THEN '' ELSE disabled_reason END,
+                    disabled_detail = CASE
+                        WHEN active = 1 AND (schedule_until IS NULL OR schedule_until <= ?)
+                        THEN '' ELSE disabled_detail END,
+                    schedule_until = CASE
+                        WHEN active = 1 AND schedule_until IS NOT NULL AND schedule_until <= ?
+                        THEN NULL ELSE schedule_until END,
+                    disabled_at = CASE
+                        WHEN active = 1 AND (schedule_until IS NULL OR schedule_until <= ?)
+                        THEN NULL ELSE disabled_at END
+                WHERE id = ?
+                """,
+                (now, now, now, now, now, key_id),
             )
         else:
+            normalized_kind = (failure_kind or "").strip().lower()
+            normalized_detail = " ".join(str(failure_detail or "").split())[:500]
             conn.execute(
                 "UPDATE api_keys SET total_failed = total_failed + 1, consecutive_fails = consecutive_fails + 1, last_used_at = ? WHERE id = ?",
                 (now, key_id),
             )
-            conn.execute(
-                "UPDATE api_keys SET active = 0 WHERE id = ? AND consecutive_fails >= 3",
-                (key_id,),
-            )
+            if normalized_kind == "rate_limited":
+                cooldown_seconds = max(1, min(86400, int(retry_after_seconds or 60)))
+                schedule_until = (
+                    datetime.now(timezone.utc) + timedelta(seconds=cooldown_seconds)
+                ).isoformat()
+                conn.execute(
+                    """
+                    UPDATE api_keys
+                    SET disabled_reason = ?,
+                        disabled_detail = ?,
+                        disabled_at = ?,
+                        schedule_until = CASE
+                            WHEN schedule_until IS NULL OR schedule_until < ?
+                            THEN ? ELSE schedule_until END
+                    WHERE id = ? AND active = 1
+                    """,
+                    (
+                        normalized_kind,
+                        normalized_detail,
+                        now,
+                        schedule_until,
+                        schedule_until,
+                        key_id,
+                    ),
+                )
+            elif normalized_kind:
+                conn.execute(
+                    """
+                    UPDATE api_keys
+                    SET active = 0,
+                        disabled_reason = ?,
+                        disabled_detail = ?,
+                        disabled_at = ?,
+                        schedule_until = NULL
+                    WHERE id = ?
+                    """,
+                    (normalized_kind, normalized_detail, now, key_id),
+                )
         conn.commit()
     finally:
         pass  # connection reused via thread-local
@@ -293,7 +386,35 @@ def update_key_usage(key_id, success):
 def toggle_key(key_id, active):
     conn = get_conn()
     try:
-        conn.execute("UPDATE api_keys SET active = ?, consecutive_fails = 0 WHERE id = ?", (active, key_id))
+        if active:
+            conn.execute(
+                """
+                UPDATE api_keys
+                SET active = 1,
+                    consecutive_fails = 0,
+                    disabled_reason = '',
+                    disabled_detail = '',
+                    disabled_at = NULL,
+                    schedule_until = NULL
+                WHERE id = ?
+                """,
+                (key_id,),
+            )
+        else:
+            now = datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                """
+                UPDATE api_keys
+                SET active = 0,
+                    consecutive_fails = 0,
+                    disabled_reason = 'manual',
+                    disabled_detail = '',
+                    disabled_at = ?,
+                    schedule_until = NULL
+                WHERE id = ?
+                """,
+                (now, key_id),
+            )
         conn.commit()
     finally:
         pass  # connection reused via thread-local
@@ -376,6 +497,24 @@ def update_key_remote_usage(
                 key_id,
             ),
         )
+        quota_exhausted = any(
+            value is not None and int(value) <= 0
+            for value in (key_remaining, account_remaining)
+        )
+        if quota_exhausted:
+            now = synced_at or datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                """
+                UPDATE api_keys
+                SET active = 0,
+                    disabled_reason = 'quota_exhausted',
+                    disabled_detail = 'provider usage sync reported no remaining quota',
+                    disabled_at = ?,
+                    schedule_until = NULL
+                WHERE id = ?
+                """,
+                (now, key_id),
+            )
         conn.commit()
     finally:
         pass  # connection reused via thread-local
@@ -384,9 +523,13 @@ def update_key_remote_usage(
 def update_key_remote_usage_error(key_id, error_message):
     conn = get_conn()
     try:
+        row = conn.execute("SELECT key FROM api_keys WHERE id = ?", (key_id,)).fetchone()
+        safe_error = str(error_message or "").strip()
+        if row and row["key"]:
+            safe_error = safe_error.replace(str(row["key"]), "<redacted>")
         conn.execute(
             "UPDATE api_keys SET usage_sync_error = ? WHERE id = ?",
-            ((error_message or "").strip(), key_id),
+            (safe_error[:200], key_id),
         )
         conn.commit()
     finally:

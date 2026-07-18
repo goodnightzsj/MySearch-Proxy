@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from dataclasses import dataclass as _dataclass
 from threading import Lock
 
@@ -39,34 +40,103 @@ class MySearchKeyRing:
             "exa": 0,
             "xai": 0,
         }
+        self._quarantined: dict[str, dict[str, dict[str, object]]] = {
+            "tavily": {},
+            "firecrawl": {},
+            "exa": {},
+            "xai": {},
+        }
+        self._generation = 0
         self.reload()
 
-    def reload(self) -> None:
+    def reload(self, *, clear_quarantine: bool = True) -> None:
         with self._lock:
+            self._generation += 1
             self._keys["tavily"] = self._load_provider(self.config.tavily)
             self._keys["firecrawl"] = self._load_provider(self.config.firecrawl)
             self._keys["exa"] = self._load_provider(self.config.exa)
             self._keys["xai"] = self._load_provider(self.config.xai)
             for provider, keys in self._keys.items():
+                if clear_quarantine:
+                    self._quarantined[provider].clear()
+                else:
+                    loaded_values = {record.key for record in keys}
+                    self._quarantined[provider] = {
+                        key: state
+                        for key, state in self._quarantined[provider].items()
+                        if key in loaded_values
+                    }
                 if self._indexes[provider] >= len(keys):
                     self._indexes[provider] = 0
 
+    @property
+    def generation(self) -> int:
+        with self._lock:
+            return self._generation
+
     def get_next(self, provider: str) -> KeyRecord | None:
         with self._lock:
-            keys = self._keys[provider]
+            keys = self._available_records_locked(provider)
             if not keys:
                 return None
-            index = self._indexes[provider]
+            index = self._indexes[provider] % len(keys)
             self._indexes[provider] = (index + 1) % len(keys)
             return keys[index]
 
     def has_provider(self, provider: str) -> bool:
         with self._lock:
+            return bool(self._available_records_locked(provider))
+
+    def has_configured_provider(self, provider: str) -> bool:
+        with self._lock:
             return bool(self._keys.get(provider))
+
+    def is_available(self, provider: str, key: str) -> bool:
+        with self._lock:
+            return any(
+                record.key == key
+                for record in self._available_records_locked(provider)
+            )
+
+    def quarantine(
+        self,
+        provider: str,
+        key: str,
+        reason: str,
+        *,
+        retry_after_seconds: int | None = None,
+    ) -> bool:
+        """Remove one credential from scheduling temporarily or until reload."""
+        with self._lock:
+            if not any(record.key == key for record in self._keys.get(provider, [])):
+                return False
+            next_state = {
+                "reason": reason.strip() or "unavailable",
+                "until": (
+                    time.monotonic() + max(1, retry_after_seconds)
+                    if retry_after_seconds is not None
+                    else None
+                ),
+            }
+            current_state = self._quarantined[provider].get(key)
+            if current_state is not None:
+                current_until = current_state.get("until")
+                next_until = next_state.get("until")
+                if current_until is None:
+                    return True
+                if next_until is not None and float(next_until) <= float(current_until):
+                    return True
+            self._quarantined[provider][key] = next_state
+            available_count = len(self._available_records_locked(provider))
+            if available_count:
+                self._indexes[provider] %= available_count
+            else:
+                self._indexes[provider] = 0
+            return True
 
     def first(self, provider: str) -> KeyRecord | None:
         with self._lock:
-            keys = self._keys.get(provider) or []
+            keys = self._available_records_locked(provider)
             if not keys:
                 return None
             return keys[0]
@@ -75,12 +145,39 @@ class MySearchKeyRing:
         with self._lock:
             result: dict[str, dict[str, object]] = {}
             for provider, keys in self._keys.items():
+                available = self._available_records_locked(provider)
+                quarantined = self._quarantined[provider]
+                unavailable_labels = [
+                    record.label for record in keys if record.key in quarantined
+                ]
                 result[provider] = {
-                    "count": len(keys),
+                    "count": len(available),
+                    "total_count": len(keys),
+                    "quarantined_count": len(quarantined),
                     "sources": sorted({key.source for key in keys}),
-                    "labels": [key.label for key in keys],
+                    "labels": [key.label for key in available],
+                    "quarantined_labels": unavailable_labels,
+                    "quarantine_reasons": sorted(
+                        {str(state.get("reason") or "unavailable") for state in quarantined.values()}
+                    ),
                 }
             return result
+
+    def _available_records_locked(self, provider: str) -> list[KeyRecord]:
+        quarantined = self._quarantined.get(provider, {})
+        now = time.monotonic()
+        expired = [
+            key
+            for key, state in quarantined.items()
+            if state.get("until") is not None and float(state["until"]) <= now
+        ]
+        for key in expired:
+            quarantined.pop(key, None)
+        return [
+            record
+            for record in self._keys.get(provider, [])
+            if record.key not in quarantined
+        ]
 
     def _load_provider(self, provider: ProviderConfig) -> list[KeyRecord]:
         loaded: list[KeyRecord] = []

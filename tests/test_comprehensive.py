@@ -1314,9 +1314,21 @@ class ErrorHandlingTests(unittest.TestCase):
         self.assertFalse(err.is_auth_error)
         self.assertIn("request failed", str(err))
 
-    def test_mysearch_http_error_403_is_auth(self) -> None:
-        err = MySearchHTTPError(provider="exa", status_code=403, detail="forbidden", url="http://a.com")
-        self.assertTrue(err.is_auth_error)
+    def test_mysearch_http_error_403_requires_credential_evidence(self) -> None:
+        policy_error = MySearchHTTPError(
+            provider="exa",
+            status_code=403,
+            detail="forbidden",
+            url="http://a.com",
+        )
+        credential_error = MySearchHTTPError(
+            provider="exa",
+            status_code=403,
+            detail="invalid api key",
+            url="http://a.com",
+        )
+        self.assertFalse(policy_error.is_auth_error)
+        self.assertTrue(credential_error.is_auth_error)
 
     def test_mysearch_http_error_402_is_plan_limit(self) -> None:
         err = MySearchHTTPError(

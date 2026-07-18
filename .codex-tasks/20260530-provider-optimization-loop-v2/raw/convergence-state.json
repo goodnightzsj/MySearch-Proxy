@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-07-18T12:16:15Z",
+  "updated_at": "2026-07-18T16:37:28Z",
   "current_loop": 11,
   "consecutive_loops_with_no_new_issues": 0,
   "stop_condition": "end after three consecutive loops with no new Critical/High/Medium/Low findings under the loop's final benchmark definition",
-  "last_new_issue": "Loop 11's first complete 84-column run on 30153c1 captured 41/41 rows without structural failures but exposed six MySearch latency-budget overruns, missing PDF verifier content, Cloudflare challenge noise, and exact docs/award cold-path inefficiency. The follow-up fixes pass 661 tests.",
+  "last_new_issue": "Loop 11's deployed 55cee0c run captured 41/41 rows under the 84-column contract with no MySearch timeout, empty result, budget overrun, or row error, but factual-accuracy-01 regressed to Python 3.14.3 despite nested official 3.14.6 evidence. Provider-key analysis also found missing per-key 429 cooldown, terminal quota/auth isolation, and manual recovery semantics across direct, Proxy, and Social paths.",
   "last_no_new_issue_loop": 9,
-  "next_step": "Commit and push the latest Loop 11 runtime follow-up, wait for Docker CI, redeploy the stack, then run a fresh full 41-row comparison under the unchanged 84-column output contract. The older 73/81-column and 30153c1 artifacts are intermediate only."
+  "next_step": "Commit and push the fully reviewed factual-answer and provider-key scheduling candidate, wait for Docker CI, redeploy the stack, then run a fresh full 41-row comparison under the unchanged 84-column output contract. The older 73/81-column, 30153c1, and 55cee0c artifacts are intermediate only."
 }

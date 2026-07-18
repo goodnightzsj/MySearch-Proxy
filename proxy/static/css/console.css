@@ -2649,6 +2649,55 @@ body.theme-dark .settings-dialog {
   font-weight: 700;
 }
 
+.settings-field .settings-clear-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-soft);
+  cursor: pointer;
+}
+
+.settings-clear-check input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.settings-key-schedule {
+  display: grid;
+  gap: 6px;
+  max-height: 176px;
+  overflow: auto;
+}
+
+.settings-key-schedule:empty {
+  display: none;
+}
+
+.settings-key-schedule-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+.settings-key-schedule-copy {
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-soft);
+  overflow-wrap: anywhere;
+}
+
+.settings-key-schedule-copy strong {
+  color: var(--text);
+}
+
 .settings-actions,
 .settings-footer-actions {
   display: flex;

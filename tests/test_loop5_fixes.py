@@ -124,7 +124,7 @@ class CrawlDepthParamTests(unittest.TestCase):
             return {"status": "completed", "total": 1, "completed": 1,
                     "data": [{"markdown": "body", "metadata": {"sourceURL": "https://s/a"}}]}
 
-        client._request_json = fake_request_json  # type: ignore[method-assign]
+        client._request_json_once = fake_request_json  # type: ignore[method-assign]
         client.crawl_site(url="https://s", limit=5, max_depth=3)
 
         post_payload = calls[0]["payload"]

@@ -69,6 +69,8 @@ SEARCH_MODES: tuple[SearchMode, ...] = (
 )
 OPTIONAL_VERIFY_TIMEOUT_SECONDS = 10
 HYBRID_SOCIAL_TIMEOUT_SECONDS = 20
+DEFAULT_KEY_COOLDOWN_SECONDS = 60
+MAX_PINNED_KEY_RETRY_DELAY_SECONDS = 120
 
 
 class MySearchError(RuntimeError):
@@ -85,20 +87,33 @@ class MySearchHTTPError(MySearchError):
         status_code: int,
         detail: Any,
         url: str,
+        retry_after_seconds: int | None = None,
+        classification_detail: Any | None = None,
     ) -> None:
         self.provider = provider
         self.status_code = status_code
         self.detail = detail
         self.url = url
+        self.retry_after_seconds = retry_after_seconds
+        self.classification_detail = (
+            detail if classification_detail is None else classification_detail
+        )
         super().__init__(self._build_message())
 
     @property
     def is_auth_error(self) -> bool:
-        return self.status_code in {401, 403}
+        return (
+            _classify_key_failure(self.status_code, self.classification_detail)
+            == "auth_rejected"
+        )
 
     @property
     def is_plan_limit_error(self) -> bool:
         return self.status_code in {402, 432}
+
+    @property
+    def key_failure_kind(self) -> str:
+        return _classify_key_failure(self.status_code, self.classification_detail)
 
     def _build_message(self) -> str:
         detail_text = _stringify_error_detail(self.detail)
@@ -121,6 +136,78 @@ def _stringify_error_detail(detail: Any) -> str:
     if isinstance(detail, (dict, list)):
         return json.dumps(detail, ensure_ascii=False)
     return str(detail).strip()
+
+
+_QUOTA_FAILURE_MARKERS = (
+    "quota_exhausted",
+    "quota exhausted",
+    "insufficient_quota",
+    "insufficient quota",
+    "credits exhausted",
+    "credit exhausted",
+    "credits limit",
+    "credit limit",
+    "exceeded your credits",
+    "no credits remaining",
+    "billing limit",
+    "usage limit",
+    "plan limit",
+    "resource_exhausted",
+)
+_AUTH_FAILURE_MARKERS = (
+    "invalid api key",
+    "invalid_api_key",
+    "api key is invalid",
+    "api key has expired",
+    "expired api key",
+    "revoked api key",
+    "invalid token",
+    "token is invalid",
+    "token has expired",
+    "expired token",
+    "revoked token",
+    "bad credentials",
+    "authentication failed",
+)
+
+
+def _classify_key_failure(status_code: int, detail: Any) -> str:
+    normalized = " ".join(_stringify_error_detail(detail).lower().split())
+    has_quota_marker = any(
+        marker in normalized for marker in _QUOTA_FAILURE_MARKERS
+    )
+    if status_code in {402, 432} or (
+        status_code in {403, 429} and has_quota_marker
+    ):
+        return "quota_exhausted"
+    if status_code == 429:
+        return "rate_limited"
+    if status_code == 401 or (
+        status_code == 403
+        and any(marker in normalized for marker in _AUTH_FAILURE_MARKERS)
+    ):
+        return "auth_rejected"
+    return ""
+
+
+def _parse_retry_after_seconds(headers: Any) -> int | None:
+    if headers is None or not hasattr(headers, "get"):
+        return None
+    raw_value = str(headers.get("retry-after") or headers.get("Retry-After") or "").strip()
+    if not raw_value:
+        return None
+    try:
+        return max(1, min(86400, math.ceil(float(raw_value))))
+    except ValueError:
+        pass
+    try:
+        retry_at = parsedate_to_datetime(raw_value)
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        seconds = math.ceil((retry_at - datetime.now(timezone.utc)).total_seconds())
+        return max(1, min(86400, seconds))
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 @dataclass(slots=True)
@@ -330,6 +417,9 @@ class MySearchClient:
                 "search_mode": cfg.search_mode,
                 "keys_file": str(cfg.keys_file or ""),
                 "available_keys": info["count"],
+                "total_keys": info.get("total_count", info["count"]),
+                "quarantined_keys": info.get("quarantined_count", 0),
+                "quarantine_reasons": info.get("quarantine_reasons", []),
                 "sources": info["sources"],
                 "live_status": status["status"],
                 "live_error": status["error"],
@@ -9851,10 +9941,34 @@ class MySearchClient:
         timeout_seconds: int | None = None,
         attempts: int = 2,
     ) -> dict[str, Any]:
+        return self._request_json_with_transient_retry_selected(
+            provider=provider,
+            method=method,
+            path=path,
+            payload=payload,
+            key=key,
+            base_url=base_url,
+            timeout_seconds=timeout_seconds,
+            attempts=attempts,
+        )[0]
+
+    def _request_json_with_transient_retry_selected(
+        self,
+        *,
+        provider: ProviderConfig,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None,
+        key: str,
+        base_url: str | None = None,
+        timeout_seconds: int | None = None,
+        attempts: int = 2,
+        allow_key_rotation: bool = True,
+    ) -> tuple[dict[str, Any], str]:
         effective_attempts = max(1, attempts)
         for attempt in range(effective_attempts):
             try:
-                return self._request_json(
+                return self._request_json_selected(
                     provider=provider,
                     method=method,
                     path=path,
@@ -9862,10 +9976,28 @@ class MySearchClient:
                     key=key,
                     base_url=base_url,
                     timeout_seconds=timeout_seconds,
+                    allow_key_rotation=allow_key_rotation,
                 )
             except MySearchError as exc:
                 if attempt < effective_attempts - 1 and self._is_retryable_transient_error(exc):
-                    time.sleep(1.5 * (attempt + 1))
+                    if (
+                        allow_key_rotation
+                        and isinstance(exc, MySearchHTTPError)
+                        and exc.status_code == 429
+                    ):
+                        raise
+                    retry_delay = 1.5 * (attempt + 1)
+                    if (
+                        not allow_key_rotation
+                        and isinstance(exc, MySearchHTTPError)
+                        and exc.status_code == 429
+                    ):
+                        retry_delay = (
+                            exc.retry_after_seconds or DEFAULT_KEY_COOLDOWN_SECONDS
+                        )
+                        if retry_delay > MAX_PINNED_KEY_RETRY_DELAY_SECONDS:
+                            raise
+                    time.sleep(retry_delay)
                     continue
                 raise
         raise AssertionError("unreachable")
@@ -10114,7 +10246,7 @@ class MySearchClient:
             # Firecrawl v2 crawl uses `maxDiscoveryDepth`; `maxDepth` is silently ignored.
             payload["maxDiscoveryDepth"] = max_depth
         payload["crawlEntireDomain"] = crawl_entire_domain
-        start = self._request_json_with_transient_retry(
+        start, selected_key = self._request_json_with_transient_retry_selected(
             provider=provider,
             method="POST",
             path=provider.path("crawl"),
@@ -10130,13 +10262,14 @@ class MySearchClient:
         status_path = f"{provider.path('crawl')}/{job_id}"
         status_payload: dict[str, Any] = start
         for _ in range(max(1, max_poll_attempts)):
-            status_payload = self._request_json_with_transient_retry(
+            status_payload = self._request_json_with_transient_retry_selected(
                 provider=provider,
                 method="GET",
                 path=status_path,
                 payload=None,
-                key=key.key,
-            )
+                key=selected_key,
+                allow_key_rotation=False,
+            )[0]
             state = str(status_payload.get("status") or "").lower()
             if state in {"completed", "failed", "cancelled"}:
                 break
@@ -12620,6 +12753,9 @@ class MySearchClient:
             "search_mode": provider.search_mode,
             "keys_file": str(provider.keys_file or ""),
             "available_keys": keyring_info["count"],
+            "total_keys": keyring_info.get("total_count", keyring_info["count"]),
+            "quarantined_keys": keyring_info.get("quarantined_count", 0),
+            "quarantine_reasons": keyring_info.get("quarantine_reasons", []),
             "sources": keyring_info["sources"],
             "live_status": status["status"],
             "live_error": status["error"],
@@ -12629,6 +12765,11 @@ class MySearchClient:
     def _get_key_or_raise(self, provider: ProviderConfig):
         record = self.keyring.get_next(provider.name)
         if record is None:
+            if self.keyring.has_configured_provider(provider.name):
+                raise MySearchError(
+                    f"{provider.name} has no available API keys; replace the key configuration "
+                    "and restart or reload MySearch before retrying"
+                )
             if provider.name == "tavily":
                 raise MySearchError(
                     "Tavily is not configured. Use "
@@ -12664,6 +12805,92 @@ class MySearchClient:
         base_url: str | None = None,
         timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
+        return self._request_json_selected(
+            provider=provider,
+            method=method,
+            path=path,
+            payload=payload,
+            key=key,
+            base_url=base_url,
+            timeout_seconds=timeout_seconds,
+        )[0]
+
+    def _request_json_selected(
+        self,
+        *,
+        provider: ProviderConfig,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None,
+        key: str,
+        base_url: str | None = None,
+        timeout_seconds: int | None = None,
+        allow_key_rotation: bool = True,
+    ) -> tuple[dict[str, Any], str]:
+        current_key = key
+        attempted_keys: set[str] = set()
+        if (
+            allow_key_rotation
+            and self.keyring.has_configured_provider(provider.name)
+            and not self.keyring.is_available(provider.name, current_key)
+        ):
+            replacement = self.keyring.get_next(provider.name)
+            if replacement is None:
+                raise MySearchError(
+                    f"{provider.name} has no available API keys; manual key action required"
+                )
+            current_key = replacement.key
+        while True:
+            try:
+                return (
+                    self._request_json_once(
+                        provider=provider,
+                        method=method,
+                        path=path,
+                        payload=payload,
+                        key=current_key,
+                        base_url=base_url,
+                        timeout_seconds=timeout_seconds,
+                    ),
+                    current_key,
+                )
+            except MySearchHTTPError as exc:
+                failure_kind = exc.key_failure_kind
+                if failure_kind and (
+                    not provider.managed_key_pool or failure_kind == "auth_rejected"
+                ):
+                    if failure_kind == "rate_limited":
+                        self.keyring.quarantine(
+                            provider.name,
+                            current_key,
+                            failure_kind,
+                            retry_after_seconds=exc.retry_after_seconds or 60,
+                        )
+                    else:
+                        self.keyring.quarantine(provider.name, current_key, failure_kind)
+                if (
+                    not failure_kind
+                    or (provider.managed_key_pool and failure_kind != "auth_rejected")
+                    or not allow_key_rotation
+                ):
+                    raise
+                attempted_keys.add(current_key)
+                replacement = self.keyring.get_next(provider.name)
+                if replacement is None or replacement.key in attempted_keys:
+                    raise
+                current_key = replacement.key
+
+    def _request_json_once(
+        self,
+        *,
+        provider: ProviderConfig,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None,
+        key: str,
+        base_url: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> dict[str, Any]:
         headers: dict[str, str] = {}
         body = dict(payload or {})
 
@@ -12680,6 +12907,7 @@ class MySearchClient:
             headers.setdefault("Content-Type", "application/json")
         effective_timeout = timeout_seconds or self.config.timeout_seconds
 
+        response_headers: Any = None
         prefer_urlopen = "unittest.mock" in type(urlopen).__module__
         if prefer_urlopen:
             request_data = None if method.upper() == "GET" else json.dumps(body).encode("utf-8")
@@ -12688,9 +12916,11 @@ class MySearchClient:
                 with urlopen(request, timeout=effective_timeout) as response:
                     raw_body = response.read()
                 status_code = getattr(response, "status", 200)
+                response_headers = getattr(response, "headers", None)
                 response_text = raw_body.decode("utf-8", errors="replace")
             except UrlHTTPError as exc:
                 status_code = int(getattr(exc, "code", 500) or 500)
+                response_headers = getattr(exc, "headers", None)
                 raw_body = exc.read() if getattr(exc, "fp", None) else b""
                 response_text = raw_body.decode("utf-8", errors="replace")
             except Exception as exc:
@@ -12705,6 +12935,7 @@ class MySearchClient:
                     timeout=effective_timeout,
                 )
                 status_code = response.status_code
+                response_headers = response.headers
                 response_text = response.text
             except httpx.TimeoutException as exc:
                 raise MySearchError(
@@ -12717,7 +12948,13 @@ class MySearchClient:
             data = json.loads(response_text)
         except ValueError as exc:
             if status_code >= 400:
-                raise MySearchError(f"HTTP {status_code}: {response_text[:300]}") from exc
+                raise MySearchHTTPError(
+                    provider=provider.name,
+                    status_code=status_code,
+                    detail=response_text[:300],
+                    url=url,
+                    retry_after_seconds=_parse_retry_after_seconds(response_headers),
+                ) from exc
             raise MySearchError(f"non-json response from {url}: {response_text[:300]}") from exc
 
         if status_code >= 400:
@@ -12734,6 +12971,8 @@ class MySearchClient:
                 status_code=status_code,
                 detail=detail,
                 url=url,
+                retry_after_seconds=_parse_retry_after_seconds(response_headers),
+                classification_detail=data,
             )
         if not isinstance(data, dict):
             raise MySearchError(f"non-dict JSON response from {provider.name}: {response_text[:200]}")
@@ -12847,6 +13086,12 @@ class MySearchClient:
         key_count: int,
     ) -> dict[str, str]:
         if key_count <= 0:
+            if self.keyring.has_configured_provider(provider.name):
+                return {
+                    "status": "key_unavailable",
+                    "error": "all configured API keys are quarantined; manual key action required",
+                    "checked_at": "",
+                }
             return {
                 "status": "not_configured",
                 "error": "",
@@ -12861,7 +13106,11 @@ class MySearchClient:
                 "checked_at": "",
             }
 
-        cache_key = f"{provider.name}:{record.label}"
+        key_fingerprint = hashlib.sha256(record.key.encode("utf-8")).hexdigest()[:12]
+        cache_key = (
+            f"{provider.name}:{record.label}:{key_fingerprint}:{key_count}:"
+            f"{self.keyring.generation}"
+        )
         with self._cache_lock:
             now = time.monotonic()
             cached = self._provider_probe_cache.get(cache_key)
@@ -12869,6 +13118,7 @@ class MySearchClient:
                 return copy.deepcopy(cached["value"])
 
         checked_at = datetime.now(timezone.utc).isoformat()
+        cache_ttl_seconds = self._provider_probe_ttl_seconds
         try:
             self._probe_provider_request(provider, record.key)
             result = {
@@ -12882,16 +13132,24 @@ class MySearchClient:
                 "error": str(exc),
                 "checked_at": checked_at,
             }
+            if exc.key_failure_kind == "rate_limited":
+                cache_ttl_seconds = min(
+                    cache_ttl_seconds,
+                    exc.retry_after_seconds or 60,
+                )
+            else:
+                cache_ttl_seconds = min(cache_ttl_seconds, 30)
         except MySearchError as exc:
             result = {
                 "status": "network_error",
                 "error": str(exc),
                 "checked_at": checked_at,
             }
+            cache_ttl_seconds = min(cache_ttl_seconds, 30)
 
         with self._cache_lock:
             self._provider_probe_cache[cache_key] = {
-                "expires_at": time.monotonic() + self._provider_probe_ttl_seconds,
+                "expires_at": time.monotonic() + cache_ttl_seconds,
                 "value": copy.deepcopy(result),
             }
         return result
@@ -13022,9 +13280,17 @@ class MySearchClient:
         return any(
             token in lowered
             for token in (
+                "http 429",
                 "http 402",
                 "http 432",
+                "rate limit",
+                "too many requests",
+                "quota_exhausted",
+                "quota exhausted",
+                "insufficient_quota",
+                "insufficient quota",
                 "credits limit",
+                "credits exhausted",
                 "credit limit",
                 "exceeded your credits",
                 "usage limit",
@@ -13036,9 +13302,10 @@ class MySearchClient:
     def _provider_can_serve(self, provider: ProviderConfig) -> bool:
         if not self.keyring.has_provider(provider.name):
             return False
-        probe = self._probe_provider_status(provider, 1)
+        key_count = int(self.keyring.describe()[provider.name]["count"])
+        probe = self._probe_provider_status(provider, key_count)
         status = str(probe.get("status") or "")
-        if status in {"", "not_configured", "auth_error"}:
+        if status in {"", "not_configured", "auth_error", "key_unavailable"}:
             return False
         if status == "http_error" and self._looks_like_provider_limit_error(
             str(probe.get("error") or "")
@@ -13049,7 +13316,8 @@ class MySearchClient:
     def _provider_live_status(self, provider: ProviderConfig) -> str | None:
         if not self.keyring.has_provider(provider.name):
             return None
-        status = self._probe_provider_status(provider, 1)
+        key_count = int(self.keyring.describe()[provider.name]["count"])
+        status = self._probe_provider_status(provider, key_count)
         return str(status.get("status") or "")
 
     def _provider_is_live_ok(self, provider: ProviderConfig) -> bool:
@@ -13828,9 +14096,15 @@ class MySearchClient:
         if not result_items:
             return result
 
+        version_evidence_items = list(result_items)
+        for branch_name in ("primary_search", "secondary_search"):
+            branch = result.get(branch_name)
+            if isinstance(branch, dict):
+                version_evidence_items.extend(list(branch.get("results") or []))
+
         extracted_answer = self._extract_software_version_answer(
             query=query,
-            results=result_items,
+            results=version_evidence_items,
         )
         if not extracted_answer:
             return result
@@ -13861,7 +14135,7 @@ class MySearchClient:
     ) -> str:
         subject = self._software_version_subject(query)
         candidates: list[tuple[int, tuple[int, int, int], int, str]] = []
-        for index, item in enumerate(results[:5]):
+        for index, item in enumerate(results):
             item_score = self._software_version_result_score(query=query, item=item)
             if item_score <= 0:
                 continue
