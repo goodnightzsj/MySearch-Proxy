@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import sys
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,6 +32,55 @@ class _FakeResponse:
 
 
 class MySearchClientTests(unittest.TestCase):
+    def test_verify_blend_returns_after_first_verifier_and_propagates_timeout(self) -> None:
+        client = MySearchClient()
+        captured_timeouts: dict[str, int | None] = {}
+        client._provider_can_serve = lambda provider: provider.name == "exa"  # type: ignore[method-assign]
+
+        def result(provider: str, url: str) -> dict[str, object]:
+            return {
+                "provider": provider,
+                "answer": "",
+                "results": [{"provider": provider, "title": provider, "url": url}],
+                "citations": [{"title": provider, "url": url}],
+            }
+
+        def search_tavily(**kwargs):  # type: ignore[no-untyped-def]
+            captured_timeouts["tavily"] = kwargs.get("timeout_seconds")
+            return result("tavily", "https://example.com/primary")
+
+        def search_firecrawl(**kwargs):  # type: ignore[no-untyped-def]
+            captured_timeouts["firecrawl"] = kwargs.get("timeout_seconds")
+            time.sleep(0.2)
+            return result("firecrawl", "https://example.com/slow")
+
+        def search_exa(**kwargs):  # type: ignore[no-untyped-def]
+            captured_timeouts["exa"] = kwargs.get("timeout_seconds")
+            return result("exa", "https://example.com/verifier")
+
+        client._search_tavily = search_tavily  # type: ignore[method-assign]
+        client._search_firecrawl = search_firecrawl  # type: ignore[method-assign]
+        client._search_exa = search_exa  # type: ignore[method-assign]
+
+        started = time.monotonic()
+        observed = client._search_web_blended(
+            query="official release notes",
+            mode="docs",
+            intent="resource",
+            strategy="verify",
+            decision=RouteDecision(provider="tavily", reason="test"),
+            max_results=5,
+            include_content=False,
+            include_answer=False,
+            include_domains=None,
+            exclude_domains=None,
+        )
+
+        self.assertLess(time.monotonic() - started, 0.15)
+        self.assertEqual(captured_timeouts, {"tavily": 10, "firecrawl": 10, "exa": 10})
+        self.assertEqual(observed["evidence"]["verification"], "cross-provider")
+        self.assertEqual(observed["evidence"]["providers_consulted"], ["tavily", "exa"])
+
     def test_parse_result_timestamp_supports_rfc822(self) -> None:
         client = MySearchClient()
 

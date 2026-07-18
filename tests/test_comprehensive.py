@@ -1663,6 +1663,45 @@ class ParallelExecutionTests(unittest.TestCase):
         self.assertIn("fail", errors)
         self.assertIsInstance(errors["fail"], ValueError)
 
+    def test_parallel_timeout_reports_named_errors_within_total_budget(self) -> None:
+        client = _make_client()
+
+        started = time.monotonic()
+        results, errors = client._execute_parallel(
+            {
+                "slow-a": lambda: time.sleep(0.2),
+                "slow-b": lambda: time.sleep(0.2),
+            },
+            max_workers=2,
+            timeout_seconds=0.02,
+        )
+
+        self.assertLess(time.monotonic() - started, 0.15)
+        self.assertEqual(results, {})
+        self.assertEqual(set(errors), {"slow-a", "slow-b"})
+        self.assertTrue(all("timed out" in str(error) for error in errors.values()))
+
+    def test_primary_and_verifier_quorum_does_not_wait_for_slow_supplement(self) -> None:
+        client = _make_client()
+
+        started = time.monotonic()
+        results, errors = client._execute_parallel(
+            {
+                "primary": lambda: "primary-result",
+                "verifier": lambda: "verifier-result",
+                "slow-supplement": lambda: (time.sleep(0.2), "late")[1],
+            },
+            max_workers=3,
+            timeout_seconds=1,
+            stop_after_primary_and_verifier=True,
+        )
+
+        self.assertLess(time.monotonic() - started, 0.15)
+        self.assertEqual(results["primary"], "primary-result")
+        self.assertEqual(results["verifier"], "verifier-result")
+        self.assertIn("slow-supplement", errors)
+        self.assertIn("quorum", str(errors["slow-supplement"]))
+
     def test_raise_parallel_error_reraises_mysearch_error(self) -> None:
         client = _make_client()
         err = MySearchError("test error")

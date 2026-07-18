@@ -57,6 +57,9 @@ jobs:
             openclaw/runtime/mysearch/clients.py \
             openclaw/runtime/mysearch/keyring.py
 
+      - name: Verify bundled runtime sync
+        run: bash scripts/check_sync.sh
+
       - name: Run frontend syntax check
         run: node --check proxy/static/js/console.js
 

@@ -52,6 +52,8 @@ class RemoteBenchmarkConfigTests(unittest.TestCase):
             self.assertIn(f"{provider}_fallback_attempted", run_remote_mcp_benchmark.FIELDNAMES)
             self.assertIn(f"{provider}_fallback_reason", run_remote_mcp_benchmark.FIELDNAMES)
             self.assertIn(f"{provider}_repeat_observations", run_remote_mcp_benchmark.FIELDNAMES)
+            self.assertIn(f"{provider}_content_char_count", run_remote_mcp_benchmark.FIELDNAMES)
+            self.assertIn(f"{provider}_content_noise_hits", run_remote_mcp_benchmark.FIELDNAMES)
         self.assertNotIn("mysearch_accuracy_score", run_remote_mcp_benchmark.FIELDNAMES)
         self.assertNotIn("tavily_richness_score", run_remote_mcp_benchmark.FIELDNAMES)
 
@@ -299,6 +301,48 @@ class RemoteBenchmarkConfigTests(unittest.TestCase):
         self.assertTrue(summarized["fallback_used"])
         self.assertEqual(summarized["fallback_reason"], "primary returned no results")
 
+    def test_summarize_does_not_turn_derived_metrics_into_provider_trace(self) -> None:
+        namespace: dict[str, object] = {}
+        helper_source = run_remote_mcp_benchmark.REMOTE_SCRIPT.split("\npayload = json.loads", 1)[0]
+        exec(helper_source, namespace)
+
+        summarized = namespace["summarize"](
+            {
+                "results": [
+                    {
+                        "url": "https://example.com/result",
+                        "content": "provider result content",
+                        "published_date": "2026-07-18",
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(summarized["provider_trace"], "")
+        self.assertEqual(summarized["published_date_count"], 1)
+
+    def test_summarize_measures_raw_content_instead_of_snippet_length(self) -> None:
+        namespace: dict[str, object] = {}
+        helper_source = run_remote_mcp_benchmark.REMOTE_SCRIPT.split("\npayload = json.loads", 1)[0]
+        exec(helper_source, namespace)
+
+        raw_content = "Canonical documentation body " * 60
+        summarized = namespace["summarize"](
+            {
+                "results": [
+                    {
+                        "url": "https://example.com/docs",
+                        "content": "short search snippet",
+                        "raw_content": raw_content,
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(summarized["content_char_count"], len(raw_content.strip()))
+        self.assertEqual(summarized["content_item_count"], 1)
+        self.assertEqual(summarized["content_noise_hits"], 0)
+
     def test_timed_tool_runs_retains_cold_and_warm_observations_and_result_stability(self) -> None:
         namespace: dict[str, object] = {}
         helper_source = run_remote_mcp_benchmark.REMOTE_SCRIPT.split("\npayload = json.loads", 1)[0]
@@ -425,6 +469,25 @@ class RemoteBenchmarkConfigTests(unittest.TestCase):
         self.assertEqual(case["mysearch_args"]["sources"], ["web", "x"])
         self.assertEqual(case["tavily_tool"], "tavily_search")
         self.assertEqual(case["latency_budget_ms"], 20000.0)
+
+    def test_build_case_requests_content_for_active_content_fidelity(self) -> None:
+        case = run_remote_mcp_benchmark.build_case(
+            {
+                "benchmark_id": "content-row",
+                "domain": "Docs",
+                "query": "OpenAI API pricing official Chinese",
+                "prompt_variant": "strict",
+                "preferred_tool": "search",
+                "mode_hint": "web",
+                "strategy_hint": "verify",
+                "primary_dimensions": "authority_precision",
+                "secondary_dimensions": "content_fidelity",
+                "repeat_runs": "1",
+            }
+        )
+
+        self.assertTrue(case["mysearch_args"]["include_content"])
+        self.assertTrue(case["tavily_args"]["include_raw_content"])
 
     def test_build_case_maps_site_mapping_tools(self) -> None:
         case = run_remote_mcp_benchmark.build_case(
@@ -889,6 +952,43 @@ Authorization = "Bearer th-from-http-headers"
         self.assertEqual(row["winner"], "tavily")
         self.assertNotEqual(row["winner"], "pending-review")
         self.assertIn("semantic correctness was not inferred", row["winner_reason"])
+
+    def test_authority_precision_requires_expected_canonical_url_at_the_top(self) -> None:
+        input_row = {
+            "benchmark_id": "official-pricing",
+            "query": "OpenAI API pricing official",
+            "domain": "Web",
+            "prompt_variant": "strict",
+            "include_domains": "openai.com",
+            "expected_url_patterns": "/api/pricing|/api/docs/pricing",
+            "strict_required": "true",
+            "primary_dimensions": "authority_precision",
+            "secondary_dimensions": "traceability",
+            "latency_budget_ms": "15000",
+            "notes": "",
+        }
+        common = {
+            "run_status": "captured",
+            "mysearch_tool": "search",
+            "mysearch_mode": "web",
+            "mysearch_citation_count": 2,
+            "mysearch_empty_result": False,
+            "tavily_tool": "tavily_search",
+            "tavily_summary": "canonical result",
+            "tavily_top_urls": "https://openai.com/api/pricing | https://openai.com/careers/pricing-strategist",
+            "tavily_citation_count": 2,
+            "tavily_empty_result": False,
+        }
+        item = {
+            **common,
+            "mysearch_summary": "domain-correct but misranked result",
+            "mysearch_top_urls": "https://openai.com/careers/pricing-strategist | https://openai.com/api/pricing",
+        }
+
+        row = run_remote_mcp_benchmark.build_output_row(input_row, item, Path("raw"))
+
+        self.assertEqual(row["mysearch_authority_precision_score"], 4.0)
+        self.assertEqual(row["tavily_authority_precision_score"], 5.0)
 
     def test_build_output_row_clears_stale_structural_failure_on_normal_rerun(self) -> None:
         input_row = {

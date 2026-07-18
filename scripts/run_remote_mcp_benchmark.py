@@ -68,6 +68,10 @@ FIELDNAMES = [
     "mysearch_summary",
     "mysearch_top_urls",
     "mysearch_citation_count",
+    "mysearch_content_char_count",
+    "mysearch_content_item_count",
+    "mysearch_content_noise_hits",
+    "mysearch_published_date_count",
     "mysearch_official_mode",
     "mysearch_conflicts",
     "mysearch_latency_ms",
@@ -87,6 +91,10 @@ FIELDNAMES = [
     "tavily_summary",
     "tavily_top_urls",
     "tavily_citation_count",
+    "tavily_content_char_count",
+    "tavily_content_item_count",
+    "tavily_content_noise_hits",
+    "tavily_published_date_count",
     "tavily_latency_ms",
     "tavily_repeat_variance",
     "tavily_repeat_observations",
@@ -393,6 +401,7 @@ def build_case(row: dict[str, str]) -> dict[str, object]:
             },
         }
 
+    content_fidelity_active = "content_fidelity" in active_dimensions(row)
     mysearch_args: dict[str, object] = {
         "query": query,
         "mode": mode,
@@ -401,7 +410,7 @@ def build_case(row: dict[str, str]) -> dict[str, object]:
         "include_answer": True,
         "include_content": parse_optional_bool(
             row.get("include_content"),
-            mode in {"docs", "github", "pdf"},
+            content_fidelity_active or mode in {"docs", "github", "pdf"},
         ),
     }
     if strict_domains:
@@ -417,7 +426,7 @@ def build_case(row: dict[str, str]) -> dict[str, object]:
         "query": query,
         "max_results": 5,
         "search_depth": map_tavily_search_depth(row),
-        "include_raw_content": False,
+        "include_raw_content": content_fidelity_active,
         "include_images": False,
         "include_image_descriptions": False,
     }
@@ -718,6 +727,58 @@ def collection_summary(blob):
     return ""
 
 
+def content_metrics(blob):
+    if not isinstance(blob, dict):
+        return {"char_count": 0, "item_count": 0, "noise_hits": 0}
+
+    values = []
+    seen = set()
+
+    def add(value):
+        if not isinstance(value, str):
+            return
+        normalized = value.strip()
+        if not normalized or normalized in seen:
+            return
+        seen.add(normalized)
+        values.append(normalized)
+
+    for key in ("content", "raw_content", "markdown", "text", "report", "research_summary"):
+        add(blob.get(key))
+    for collection_key in ("results", "pages"):
+        collection = blob.get(collection_key)
+        if not isinstance(collection, list):
+            continue
+        for item in collection:
+            if not isinstance(item, dict):
+                continue
+            raw_content = item.get("raw_content")
+            if isinstance(raw_content, str) and raw_content.strip():
+                add(raw_content)
+                continue
+            for key in ("content", "markdown", "text"):
+                add(item.get(key))
+
+    noise_markers = (
+        "hcaptcha",
+        "captcha challenge",
+        "verify you are human",
+        "checking your browser",
+        "attention required | cloudflare",
+    )
+    noise_hits = sum(
+        1
+        for value in values
+        for marker in noise_markers
+        if marker in value.lower()
+    )
+    return {
+        "char_count": sum(len(value) for value in values),
+        "item_count": len(values),
+        "noise_hits": noise_hits,
+    }
+
+
 def summarize(blob):
     if not isinstance(blob, dict):
         return {
@@ -756,6 +817,7 @@ def summarize(blob):
     fallback_attempted, fallback_used, fallback_reason = fallback_metadata(blob)
     used_orchestration = orchestration_used(blob)
     published_date_count = collect_published_date_count(blob)
+    measured_content = content_metrics(blob)
     trace_blob = {}
     for key in (
         "provider",
@@ -769,16 +831,16 @@ def summarize(blob):
     ):
         if key in blob:
             trace_blob[key] = blob[key]
-    trace_blob["orchestration_used"] = used_orchestration
-    trace_blob["fallback_attempted"] = fallback_attempted
-    trace_blob["fallback_reason"] = fallback_reason
-    trace_blob["published_date_count"] = published_date_count
     provider_trace = json.dumps(trace_blob, ensure_ascii=False) if trace_blob else ""
     return {
         "summary": summary[:500],
         "urls": urls,
         "provider_trace": provider_trace,
         "citation_count": collect_citation_count(blob),
+        "content_char_count": measured_content["char_count"],
+        "content_item_count": measured_content["item_count"],
+        "content_noise_hits": measured_content["noise_hits"],
+        "published_date_count": published_date_count,
         "official_mode": extract_official_mode(blob),
         "conflicts": collect_conflicts(blob),
         "empty_result": not urls and not summary.strip(),
@@ -983,6 +1045,9 @@ def timed_tool_runs(client, tool_name, arguments, repeat_runs, latency_budget_ms
                     "summary": summarized["summary"],
                     "urls": summarized["urls"],
                     "citation_count": summarized["citation_count"],
+                    "content_char_count": summarized["content_char_count"],
+                    "content_item_count": summarized["content_item_count"],
+                    "content_noise_hits": summarized["content_noise_hits"],
                     "empty_result": summarized["empty_result"],
                 }
             )
@@ -1026,6 +1091,10 @@ def timed_tool_runs(client, tool_name, arguments, repeat_runs, latency_budget_ms
         "urls": first_success["urls"],
         "provider_trace": first_success["provider_trace"],
         "citation_count": first_success["citation_count"],
+        "content_char_count": first_success["content_char_count"],
+        "content_item_count": first_success["content_item_count"],
+        "content_noise_hits": first_success["content_noise_hits"],
+        "published_date_count": first_success["published_date_count"],
         "official_mode": first_success["official_mode"],
         "conflicts": first_success["conflicts"],
         "empty_result": first_success["empty_result"],
@@ -1079,6 +1148,10 @@ for case in payload["cases"]:
         "mysearch_top_urls": "",
         "mysearch_provider_trace": "",
         "mysearch_citation_count": 0,
+        "mysearch_content_char_count": 0,
+        "mysearch_content_item_count": 0,
+        "mysearch_content_noise_hits": 0,
+        "mysearch_published_date_count": 0,
         "mysearch_official_mode": "",
         "mysearch_conflicts": "",
         "mysearch_latency_ms": "",
@@ -1098,6 +1171,10 @@ for case in payload["cases"]:
         "tavily_summary": "",
         "tavily_top_urls": "",
         "tavily_citation_count": 0,
+        "tavily_content_char_count": 0,
+        "tavily_content_item_count": 0,
+        "tavily_content_noise_hits": 0,
+        "tavily_published_date_count": 0,
         "tavily_latency_ms": "",
         "tavily_repeat_variance": "",
         "tavily_repeat_observations": "",
@@ -1132,6 +1209,10 @@ for case in payload["cases"]:
             row["mysearch_top_urls"] = " | ".join(observed["urls"])
             row["mysearch_provider_trace"] = observed["provider_trace"]
             row["mysearch_citation_count"] = observed["citation_count"]
+            row["mysearch_content_char_count"] = observed["content_char_count"]
+            row["mysearch_content_item_count"] = observed["content_item_count"]
+            row["mysearch_content_noise_hits"] = observed["content_noise_hits"]
+            row["mysearch_published_date_count"] = observed["published_date_count"]
             row["mysearch_official_mode"] = observed["official_mode"]
             row["mysearch_conflicts"] = " | ".join(observed["conflicts"])
             row["mysearch_latency_ms"] = observed["latency_ms"]
@@ -1168,6 +1249,10 @@ for case in payload["cases"]:
             row["tavily_summary"] = observed["summary"]
             row["tavily_top_urls"] = " | ".join(observed["urls"])
             row["tavily_citation_count"] = observed["citation_count"]
+            row["tavily_content_char_count"] = observed["content_char_count"]
+            row["tavily_content_item_count"] = observed["content_item_count"]
+            row["tavily_content_noise_hits"] = observed["content_noise_hits"]
+            row["tavily_published_date_count"] = observed["published_date_count"]
             row["tavily_latency_ms"] = observed["latency_ms"]
             row["tavily_repeat_variance"] = observed["repeat_variance"]
             row["tavily_repeat_observations"] = observed["repeat_observations"]
@@ -1528,6 +1613,7 @@ def _score_provider(
     include_domains = parse_pipe_list(input_row.get("include_domains", "")) or OFFICIAL_DOMAINS.get(
         input_row.get("benchmark_id", ""), []
     )
+    expected_url_patterns = [value.lower() for value in parse_pipe_list(input_row.get("expected_url_patterns", ""))]
     exclude_domains = parse_pipe_list(input_row.get("exclude_domains", ""))
     compliant_count = sum(_url_satisfies_constraints(url, include_domains, exclude_domains) for url in urls)
     constraint_ratio = compliant_count / len(urls) if urls else 0.0
@@ -1555,8 +1641,22 @@ def _score_provider(
         efficiency = min(efficiency, 2.0)
     row[f"{prefix}_latency_budget_exceeded"] = budget_exceeded
 
-    if include_domains:
+    canonical_matches = [
+        url
+        for url in urls
+        if any(pattern in url.lower() for pattern in expected_url_patterns)
+    ]
+    canonical_top_match = bool(
+        urls
+        and expected_url_patterns
+        and any(pattern in urls[0].lower() for pattern in expected_url_patterns)
+    )
+    if include_domains and expected_url_patterns:
+        authority = (3.0 * constraint_ratio) + (1.0 if canonical_matches else 0.0) + (1.0 if canonical_top_match else 0.0)
+    elif include_domains:
         authority = 5.0 * constraint_ratio
+    elif expected_url_patterns:
+        authority = 2.0 + (1.5 if canonical_matches else 0.0) + (1.5 if canonical_top_match else 0.0)
     else:
         authority = 2.5 + min(1.5, len(urls) * 0.5) + (0.5 if trace else 0.0)
     if strict_required and include_domains and constraint_ratio < 1.0:
@@ -1574,13 +1674,18 @@ def _score_provider(
     else:
         multi_source_fusion = 2.0
 
-    content_fidelity = 2.0
-    content_fidelity += 1.0 if len(summary) >= 80 else 0.5 if summary else 0.0
-    content_fidelity += 1.0 if len(summary) >= 250 else 0.0
-    content_fidelity += 0.5 if urls else 0.0
-    content_fidelity += 0.5 if citation_count else 0.0
+    content_char_count = max(0.0, _as_float(row.get(f"{prefix}_content_char_count")))
+    content_item_count = max(0.0, _as_float(row.get(f"{prefix}_content_item_count")))
+    content_noise_hits = max(0.0, _as_float(row.get(f"{prefix}_content_noise_hits")))
+    content_fidelity = 1.0
+    content_fidelity += 1.0 if content_char_count >= 200 else 0.5 if content_char_count > 0 else 0.0
+    content_fidelity += 1.5 if content_char_count >= 1000 else 0.75 if content_char_count >= 500 else 0.0
+    content_fidelity += 1.0 if content_item_count > 0 else 0.0
+    content_fidelity += 0.5 if content_char_count > 0 and content_noise_hits == 0 else 0.0
+    if content_noise_hits:
+        content_fidelity -= min(2.0, content_noise_hits)
 
-    published_date_count = _as_float(trace.get("published_date_count"))
+    published_date_count = _as_float(row.get(f"{prefix}_published_date_count"))
     has_explicit_date = bool(re.search(r"\b20\d{2}(?:[-/]\d{1,2})?\b", summary))
     freshness_signal = 5.0 if published_date_count else 4.0 if has_explicit_date else 2.5
     site_coverage = 2.0 + min(2.0, citation_count / 3.0) + min(1.0, domain_count / 2.0)

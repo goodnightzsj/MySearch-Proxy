@@ -12,7 +12,7 @@ import re
 import sys
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass as _dataclass
 from datetime import date, datetime, time as dt_time, timezone
 from email.utils import parsedate_to_datetime
@@ -67,6 +67,8 @@ SEARCH_MODES: tuple[SearchMode, ...] = (
     "github",
     "pdf",
 )
+OPTIONAL_VERIFY_TIMEOUT_SECONDS = 10
+HYBRID_SOCIAL_TIMEOUT_SECONDS = 20
 
 
 class MySearchError(RuntimeError):
@@ -275,7 +277,7 @@ class MySearchClient:
             "social_unavailable": {"hits": 0, "misses": 0},
         }
         self._cache_max_entries = 256
-        self._provider_probe_ttl_seconds = 300
+        self._provider_probe_ttl_seconds = 1800
         self._provider_probe_cache: dict[str, dict[str, Any]] = {}
         self._http = httpx.Client(
             timeout=httpx.Timeout(self.config.timeout_seconds, connect=10.0),
@@ -457,6 +459,8 @@ class MySearchClient:
         tasks: dict[str, Callable[[], Any]],
         *,
         max_workers: int | None = None,
+        timeout_seconds: float | None = None,
+        stop_after_primary_and_verifier: bool = False,
     ) -> tuple[dict[str, Any], dict[str, Exception]]:
         if not tasks:
             return {}, {}
@@ -470,15 +474,77 @@ class MySearchClient:
 
         results: dict[str, Any] = {}
         errors: dict[str, Exception] = {}
+        worker_count = max(1, min(max_workers or self.config.max_parallel_workers, len(tasks)))
+        executor = self._executor
+        temporary_executor: ThreadPoolExecutor | None = None
+        if max_workers is not None:
+            temporary_executor = ThreadPoolExecutor(
+                max_workers=worker_count,
+                thread_name_prefix="mysearch-branch",
+            )
+            executor = temporary_executor
         future_map: dict[Future[Any], str] = {
-            self._executor.submit(task): name
-            for name, task in tasks.items()
+            executor.submit(task): name for name, task in tasks.items()
         }
-        for future, name in future_map.items():
-            try:
-                results[name] = future.result(timeout=self.config.timeout_seconds + 5)
-            except Exception as exc:  # pragma: no cover - network/runtime dependent
-                errors[name] = exc
+        pending = set(future_map)
+        budget = max(
+            0.001,
+            float(timeout_seconds)
+            if timeout_seconds is not None
+            else float(self.config.timeout_seconds + 5),
+        )
+        deadline = time.monotonic() + budget
+
+        def cancel_pending(reason: str) -> None:
+            for pending_future in pending:
+                pending_future.cancel()
+                pending_name = future_map[pending_future]
+                errors.setdefault(pending_name, MySearchError(reason))
+
+        try:
+            while pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    cancel_pending(f"parallel task timed out after {budget:g}s")
+                    break
+                completed, _ = wait(
+                    pending,
+                    timeout=remaining,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not completed:
+                    cancel_pending(f"parallel task timed out after {budget:g}s")
+                    break
+                for future in completed:
+                    pending.discard(future)
+                    name = future_map[future]
+                    if name in errors or name in results:
+                        continue
+                    try:
+                        results[name] = future.result()
+                    except TimeoutError:
+                        errors[name] = MySearchError(
+                            f"{name} task timed out within {budget:g}s parallel budget"
+                        )
+                    except Exception as exc:  # pragma: no cover - network/runtime dependent
+                        errors[name] = exc
+
+                if stop_after_primary_and_verifier:
+                    primary_completed = "primary" in results or "primary" in errors
+                    verifier_succeeded = any(name != "primary" for name in results)
+                    primary_failed_with_verifier = (
+                        "primary" in errors and verifier_succeeded
+                    )
+                    if primary_completed and (
+                        len(results) >= 2 or primary_failed_with_verifier
+                    ):
+                        cancel_pending(
+                            "parallel task cancelled after primary and verifier quorum"
+                        )
+                        break
+        finally:
+            if temporary_executor is not None:
+                temporary_executor.shutdown(wait=False, cancel_futures=True)
         return results, errors
 
     def _raise_parallel_error(self, errors: dict[str, Exception], task_name: str) -> None:
@@ -981,9 +1047,11 @@ class MySearchClient:
                         to_date=to_date,
                         include_x_images=include_x_images,
                         include_x_videos=include_x_videos,
+                        timeout_seconds=HYBRID_SOCIAL_TIMEOUT_SECONDS,
                     ),
                 },
                 max_workers=2,
+                timeout_seconds=HYBRID_SOCIAL_TIMEOUT_SECONDS,
             )
             if "web" in parallel_errors and "social" in parallel_errors:
                 self._raise_parallel_error(parallel_errors, "web")
@@ -5987,11 +6055,21 @@ class MySearchClient:
         policy: SearchRoutePolicy,
     ) -> tuple[ProviderName, list[str] | None]:
         ordered: list[ProviderName] = [policy.provider, *policy.fallback_chain]
+        provider_configs = {
+            provider_name: self._provider_config_for_name(provider_name)
+            for provider_name in ordered
+        }
+        probe_results, _ = self._execute_parallel(
+            {
+                provider_name: lambda config=provider_configs[provider_name]: self._provider_live_status(config)
+                for provider_name in ordered
+            },
+            max_workers=len(ordered),
+        )
         healthy: list[ProviderName] = []
         degraded: list[ProviderName] = []
         for provider_name in ordered:
-            config = self._provider_config_for_name(provider_name)
-            status = self._provider_live_status(config)
+            status = probe_results.get(provider_name)
             if status is None or status == "auth_error":
                 continue
             if status == "ok":
@@ -8045,6 +8123,9 @@ class MySearchClient:
         from_date: str | None = None,
         to_date: str | None = None,
     ) -> dict[str, Any]:
+        verify_timeout = (
+            OPTIONAL_VERIFY_TIMEOUT_SECONDS if strategy == "verify" else None
+        )
         if decision.provider == "tavily":
             tasks = {
                 "primary": lambda: self._search_tavily(
@@ -8057,6 +8138,7 @@ class MySearchClient:
                     exclude_domains=exclude_domains,
                     from_date=from_date,
                     to_date=to_date,
+                    timeout_seconds=verify_timeout,
                 ),
                 "secondary": lambda: self._search_firecrawl(
                     query=query,
@@ -8067,6 +8149,7 @@ class MySearchClient:
                     exclude_domains=exclude_domains,
                     from_date=from_date,
                     to_date=to_date,
+                    timeout_seconds=verify_timeout,
                 ),
             }
         else:
@@ -8080,6 +8163,7 @@ class MySearchClient:
                     exclude_domains=exclude_domains,
                     from_date=from_date,
                     to_date=to_date,
+                    timeout_seconds=verify_timeout,
                 ),
                 "secondary": lambda: self._search_tavily(
                     query=query,
@@ -8092,6 +8176,7 @@ class MySearchClient:
                     days=self._infer_tavily_days(intent, from_date),
                     from_date=from_date,
                     to_date=to_date,
+                    timeout_seconds=verify_timeout,
                 ),
             }
 
@@ -8107,9 +8192,15 @@ class MySearchClient:
                 strategy=strategy,
                 from_date=from_date,
                 to_date=to_date,
+                timeout_seconds=verify_timeout,
             )
 
-        blended_results, blended_errors = self._execute_parallel(tasks, max_workers=len(tasks))
+        blended_results, blended_errors = self._execute_parallel(
+            tasks,
+            max_workers=len(tasks),
+            timeout_seconds=verify_timeout,
+            stop_after_primary_and_verifier=strategy == "verify",
+        )
         primary_failed = "primary" in blended_errors
         secondary_failed = "secondary" in blended_errors
         exa_supplement = blended_results.get("exa_supplement")
@@ -8190,7 +8281,7 @@ class MySearchClient:
         if exa_supplement:
             providers_consulted.append("exa")
 
-        if secondary_result:
+        if secondary_result or (exa_supplement and exa_supplement.get("results")):
             verification = "cross-provider"
         elif secondary_error:
             verification = "single-provider-secondary-failed"
@@ -8229,6 +8320,7 @@ class MySearchClient:
         days: int | None = None,
         from_date: str | None = None,
         to_date: str | None = None,
+        timeout_seconds: int | None = None,
         _skip_domain_fallback: bool = False,
     ) -> dict[str, Any]:
         include_domains = [item.strip() for item in (include_domains or []) if item and item.strip()]
@@ -8246,6 +8338,7 @@ class MySearchClient:
             days=days,
             from_date=from_date,
             to_date=to_date,
+            timeout_seconds=timeout_seconds,
         )
         if response.get("results") or not include_domains:
             return response
@@ -8552,6 +8645,7 @@ class MySearchClient:
         exclude_domains: list[str] | None,
         from_date: str | None = None,
         to_date: str | None = None,
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         include_domains = [item.strip() for item in (include_domains or []) if item and item.strip()]
         exclude_domains = [item.strip() for item in (exclude_domains or []) if item and item.strip()]
@@ -8570,6 +8664,7 @@ class MySearchClient:
                 exclude_domains=None,
                 from_date=from_date,
                 to_date=to_date,
+                timeout_seconds=timeout_seconds,
             )
             if native_result.get("results"):
                 route_debug = dict(native_result.get("route_debug") or {})
@@ -8661,6 +8756,7 @@ class MySearchClient:
             exclude_domains=exclude_domains,
             from_date=from_date,
             to_date=to_date,
+            timeout_seconds=timeout_seconds,
         )
 
     def _search_firecrawl_domain_fallback(
@@ -8782,6 +8878,7 @@ class MySearchClient:
         exclude_domains: list[str] | None = None,
         from_date: str | None = None,
         to_date: str | None = None,
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         provider = self.config.firecrawl
         key = self._get_key_or_raise(provider)
@@ -8817,6 +8914,7 @@ class MySearchClient:
             path=provider.path("search"),
             payload=payload,
             key=key.key,
+            timeout_seconds=timeout_seconds,
         )
         data = response.get("data") or {}
         if not isinstance(data, dict):
@@ -8999,8 +9097,10 @@ class MySearchClient:
         if exa_category:
             payload["category"] = exa_category
         if include_content:
-            payload["text"] = True
-            payload["highlights"] = True
+            payload["contents"] = {
+                "text": True,
+                "highlights": True,
+            }
         if from_date:
             payload["startPublishedDate"] = from_date
         if to_date:
@@ -9080,6 +9180,7 @@ class MySearchClient:
         to_date: str | None = None,
         include_x_images: bool = False,
         include_x_videos: bool = False,
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         provider = self.config.xai
         if provider.search_mode == "compatible":
@@ -9093,6 +9194,7 @@ class MySearchClient:
                 to_date=to_date,
                 include_x_images=include_x_images,
                 include_x_videos=include_x_videos,
+                timeout_seconds=timeout_seconds,
             )
 
         key = self._get_key_or_raise(provider)
@@ -9115,6 +9217,7 @@ class MySearchClient:
             path=provider.path("responses"),
             payload=payload,
             key=key.key,
+            timeout_seconds=timeout_seconds,
         )
         text = self._extract_xai_output_text(response)
         citations = self._extract_xai_citations(response)
@@ -9152,6 +9255,7 @@ class MySearchClient:
         to_date: str | None,
         include_x_images: bool,
         include_x_videos: bool,
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         provider = self.config.xai
         if "x" not in sources:
@@ -9221,9 +9325,13 @@ class MySearchClient:
             )
 
         retry_attempts = 3
-        total_social_timeout = max(
+        configured_social_timeout = max(
             30,
             int(getattr(self.config, "xai_social_timeout_seconds", 120) or 120),
+        )
+        total_social_timeout = min(
+            configured_social_timeout,
+            max(5, int(timeout_seconds)) if timeout_seconds is not None else configured_social_timeout,
         )
         social_start = time.monotonic()
         social_fallback_reserve = max(15, min(30, total_social_timeout // 4 or 15))
@@ -9579,6 +9687,37 @@ class MySearchClient:
     def _is_retryable_transient_error(self, exc: Exception) -> bool:
         return isinstance(exc, MySearchHTTPError) and exc.status_code in {429, 502, 503, 504}
 
+    def _request_json_with_transient_retry(
+        self,
+        *,
+        provider: ProviderConfig,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None,
+        key: str,
+        base_url: str | None = None,
+        timeout_seconds: int | None = None,
+        attempts: int = 2,
+    ) -> dict[str, Any]:
+        effective_attempts = max(1, attempts)
+        for attempt in range(effective_attempts):
+            try:
+                return self._request_json(
+                    provider=provider,
+                    method=method,
+                    path=path,
+                    payload=payload,
+                    key=key,
+                    base_url=base_url,
+                    timeout_seconds=timeout_seconds,
+                )
+            except MySearchError as exc:
+                if attempt < effective_attempts - 1 and self._is_retryable_transient_error(exc):
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                raise
+        raise AssertionError("unreachable")
+
     def _search_tavily_social_fallback(
         self,
         *,
@@ -9732,12 +9871,168 @@ class MySearchClient:
         content = data.get("markdown", "")
         if not content and "json" in data:
             content = json.dumps(data["json"], ensure_ascii=False, indent=2)
+        content = self._clean_extract_content(content)
         return {
             "provider": "firecrawl",
             "transport": key.source,
             "url": metadata.get("sourceURL") or metadata.get("url") or url,
             "content": content,
             "metadata": metadata,
+        }
+
+    def map_site(
+        self,
+        *,
+        url: str,
+        limit: int = 50,
+        search: str | None = None,
+    ) -> dict[str, Any]:
+        return self._map_firecrawl(url=url, limit=limit, search=search)
+
+    def crawl_site(
+        self,
+        *,
+        url: str,
+        limit: int = 20,
+        max_depth: int | None = None,
+        crawl_entire_domain: bool = True,
+    ) -> dict[str, Any]:
+        return self._crawl_firecrawl(
+            url=url,
+            limit=limit,
+            max_depth=max_depth,
+            crawl_entire_domain=crawl_entire_domain,
+        )
+
+    def _map_firecrawl(
+        self,
+        *,
+        url: str,
+        limit: int = 50,
+        search: str | None = None,
+    ) -> dict[str, Any]:
+        provider = self.config.firecrawl
+        key = self._get_key_or_raise(provider)
+        payload: dict[str, Any] = {"url": url, "limit": limit}
+        if search:
+            payload["search"] = search
+        response = self._request_json_with_transient_retry(
+            provider=provider,
+            method="POST",
+            path=provider.path("map"),
+            payload=payload,
+            key=key.key,
+        )
+        links_raw = response.get("links") or []
+        if not isinstance(links_raw, list):
+            links_raw = []
+        links: list[dict[str, Any]] = []
+        for item in links_raw:
+            if isinstance(item, str) and item:
+                links.append({"url": item, "title": "", "description": ""})
+            elif isinstance(item, dict) and item.get("url"):
+                links.append({
+                    "url": item.get("url"),
+                    "title": item.get("title", ""),
+                    "description": item.get("description", ""),
+                })
+        return {
+            "provider": "firecrawl",
+            "transport": key.source,
+            "url": url,
+            "links": links,
+            "count": len(links),
+            "metadata": {"requested_limit": limit, "search": search or ""},
+        }
+
+    def _crawl_firecrawl(
+        self,
+        *,
+        url: str,
+        limit: int = 20,
+        max_depth: int | None = None,
+        crawl_entire_domain: bool = True,
+        poll_interval_seconds: float = 2.0,
+        max_poll_attempts: int = 30,
+    ) -> dict[str, Any]:
+        provider = self.config.firecrawl
+        key = self._get_key_or_raise(provider)
+        payload: dict[str, Any] = {"url": url, "limit": limit}
+        if max_depth is not None:
+            # Firecrawl v2 crawl uses `maxDiscoveryDepth`; `maxDepth` is silently ignored.
+            payload["maxDiscoveryDepth"] = max_depth
+        payload["crawlEntireDomain"] = crawl_entire_domain
+        start = self._request_json_with_transient_retry(
+            provider=provider,
+            method="POST",
+            path=provider.path("crawl"),
+            payload=payload,
+            key=key.key,
+        )
+        job_id = start.get("id")
+        if not job_id:
+            # Some deployments answer synchronously with the data already present.
+            return self._build_firecrawl_crawl_result(
+                url=url, limit=limit, transport=key.source, status_payload=start
+            )
+        status_path = f"{provider.path('crawl')}/{job_id}"
+        status_payload: dict[str, Any] = start
+        for _ in range(max(1, max_poll_attempts)):
+            status_payload = self._request_json_with_transient_retry(
+                provider=provider,
+                method="GET",
+                path=status_path,
+                payload=None,
+                key=key.key,
+            )
+            state = str(status_payload.get("status") or "").lower()
+            if state in {"completed", "failed", "cancelled"}:
+                break
+            time.sleep(poll_interval_seconds)
+        return self._build_firecrawl_crawl_result(
+            url=url, limit=limit, transport=key.source, status_payload=status_payload
+        )
+
+    def _build_firecrawl_crawl_result(
+        self,
+        *,
+        url: str,
+        limit: int,
+        transport: str,
+        status_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        data = status_payload.get("data")
+        if not isinstance(data, list):
+            data = []
+        pages: list[dict[str, Any]] = []
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            metadata = entry.get("metadata")
+            if not isinstance(metadata, dict):
+                metadata = {}
+            content = entry.get("markdown") or entry.get("content") or ""
+            if content:
+                content = self._clean_extract_content(content)
+            pages.append({
+                "url": metadata.get("sourceURL")
+                or metadata.get("url")
+                or entry.get("url", ""),
+                "title": metadata.get("title", ""),
+                "content": content,
+            })
+        return {
+            "provider": "firecrawl",
+            "transport": transport,
+            "url": url,
+            "status": status_payload.get("status", ""),
+            "pages": pages,
+            "count": len(pages),
+            "metadata": {
+                "requested_limit": limit,
+                "total": status_payload.get("total"),
+                "completed": status_payload.get("completed"),
+            },
         }
 
     def _extract_tavily(self, *, url: str) -> dict[str, Any]:
@@ -9838,6 +10133,168 @@ class MySearchClient:
             for candidate_ref in refs
         ]
 
+    _HCAPTCHA_LANGUAGES = frozenset({
+        "afrikaans", "albanian", "amharic", "arabic", "armenian", "azerbaijani",
+        "basque", "belarusian", "bengali", "bulgarian", "bosnian", "burmese",
+        "catalan", "cebuano", "chinese", "chinese simplified", "chinese traditional",
+        "corsican", "croatian", "czech", "danish", "dutch", "english", "esperanto",
+        "estonian", "filipino", "finnish", "french", "frisian", "galician",
+        "georgian", "german", "greek", "gujarati", "haitian creole", "hausa",
+        "hawaiian", "hebrew", "hindi", "hmong", "hungarian", "icelandic", "igbo",
+        "indonesian", "irish", "italian", "japanese", "javanese", "kannada",
+        "kazakh", "khmer", "kinyarwanda", "korean", "kurdish", "kyrgyz", "lao",
+        "latin", "latvian", "lithuanian", "luxembourgish", "macedonian",
+        "malagasy", "malay", "malayalam", "maltese", "maori", "marathi",
+        "mongolian", "nepali", "norwegian", "nyanja", "odia", "pashto", "persian",
+        "polish", "portuguese", "punjabi", "romanian", "russian", "samoan",
+        "scots gaelic", "serbian", "sesotho", "shona", "sindhi", "sinhala",
+        "slovak", "slovenian", "somali", "spanish", "sundanese", "swahili",
+        "swedish", "tagalog", "tajik", "tamil", "tatar", "telugu", "thai",
+        "turkish", "turkmen", "ukrainian", "urdu", "uyghur", "uzbek",
+        "vietnamese", "welsh", "xhosa", "yiddish", "yoruba", "zulu",
+    })
+
+    def _clean_extract_content(self, content: str) -> str:
+        if not isinstance(content, str) or not content.strip():
+            return content
+        text = content
+        text = re.sub(r"!\[[^\]]*\]\(\s*<?Base64-Image-Removed>?\s*\)", "", text)
+        text = text.replace("<Base64-Image-Removed>", "")
+        text = re.sub(r"!\[[^\]]*\]\(\s*data:[^)]*\)", "", text)
+        text = re.sub(r"data:image/[^\s)\]]+", "", text)
+        text = self._strip_trailing_hcaptcha(text)
+        text = self._strip_hcaptcha_block(text)
+        text = self._strip_trailing_empty_headings(text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    def _strip_trailing_hcaptcha(self, text: str) -> str:
+        low = text.lower()
+        if "hcaptcha" not in low:
+            return text
+        # Only act when the actual verification widget is present, not a passing
+        # mention of the word in prose.
+        if not (
+            "select in order to trigger" in low
+            or "accessibility cookie" in low
+            or "\ni am human\n" in low
+        ):
+            return text
+        paragraphs = text.split("\n\n")
+        sig_idx = None
+        for i, para in enumerate(paragraphs):
+            pl = para.strip().lower()
+            if (
+                "select in order to trigger" in pl
+                or "accessibility cookie" in pl
+                or pl == "i am human"
+            ):
+                sig_idx = i
+                break
+        if sig_idx is None:
+            return text
+        # Walk back a few paragraphs to the widget header so the cut starts at the
+        # widget, not at its accessibility sentence. Language labels vary in spelling
+        # across hCaptcha locales, so anchor on structural markers, not a name list.
+        start = sig_idx
+        for j in range(sig_idx, max(-1, sig_idx - 6), -1):
+            pj = paragraphs[j].strip().lower()
+            if pj in {"hcaptcha", "ask ai"} or pj.startswith("### filters") or pj.startswith("#### tags"):
+                start = j
+        kept = paragraphs[:start]
+        dropped = paragraphs[start:]
+        joined = "\n\n".join(kept)
+        # Safety 1: never truncate away the bulk of the document.
+        if not kept or len(joined) < len(text) * 0.3:
+            return text
+        # Safety 2: only truncate when the dropped suffix is widget-artifact
+        # dominated. A captcha trigger phrase can legitimately appear in prose
+        # (e.g. a page that is *about* hCaptcha); in that case the dropped region
+        # still holds real content and must be preserved.
+        residual_content = sum(
+            len(para.strip())
+            for para in dropped
+            if not self._is_hcaptcha_artifact_paragraph(para.strip().lower())
+        )
+        if residual_content > 80:
+            return text
+        return joined
+
+    def _is_hcaptcha_artifact_paragraph(self, p_lower: str) -> bool:
+        if not p_lower:
+            return True
+        if p_lower in self._HCAPTCHA_LANGUAGES:
+            return True
+        if p_lower in {"hcaptcha", "ask ai", "en", "verify", "i am human"}:
+            return True
+        if (
+            "select in order to trigger" in p_lower
+            or "accessibility cookie" in p_lower
+            or "hcaptcha" in p_lower
+            or p_lower.startswith("please try again")
+        ):
+            return True
+        if p_lower.startswith("### filters") or p_lower.startswith("#### tags"):
+            return True
+        # Short standalone tokens are widget chrome, not prose.
+        return len(p_lower) <= 24
+
+    def _strip_trailing_empty_headings(self, text: str) -> str:
+        # Remove dangling heading-only paragraphs left at the very end after
+        # widget removal (e.g. a lone trailing `### Filters` with no body).
+        paragraphs = text.split("\n\n")
+        while paragraphs:
+            last = paragraphs[-1].strip()
+            if last and "\n" not in last and re.match(r"^#{1,6}\s+\S", last):
+                paragraphs.pop()
+            else:
+                break
+        return "\n\n".join(paragraphs)
+
+    def _strip_hcaptcha_block(self, text: str) -> str:
+        paragraphs = text.split("\n\n")
+        total = len(paragraphs)
+        is_language = [
+            para.strip().lower() in self._HCAPTCHA_LANGUAGES for para in paragraphs
+        ]
+        artifact = re.compile(
+            r"^(hcaptcha|en|verify|ask ai|i am human|please try again.*"
+            r"|\[hcaptcha logo[^\]]*\]\([^)]*\)|.*hcaptcha\.com.*)$",
+            re.IGNORECASE | re.DOTALL,
+        )
+        remove: set[int] = set()
+        index = 0
+        while index < total:
+            if is_language[index]:
+                end = index
+                while end < total and is_language[end]:
+                    end += 1
+                # Only a long contiguous run is the hCaptcha language dropdown;
+                # a stray language name in prose never reaches this threshold.
+                if end - index >= 12:
+                    remove.update(range(index, end))
+                    back = index - 1
+                    while back >= 0 and (
+                        not paragraphs[back].strip()
+                        or artifact.match(paragraphs[back].strip())
+                    ):
+                        remove.add(back)
+                        back -= 1
+                    forward = end
+                    while forward < total and (
+                        not paragraphs[forward].strip()
+                        or artifact.match(paragraphs[forward].strip())
+                    ):
+                        remove.add(forward)
+                        forward += 1
+                index = end
+            else:
+                index += 1
+        if not remove:
+            return text
+        kept = [para for pos, para in enumerate(paragraphs) if pos not in remove]
+        return "\n\n".join(kept)
+
     def _has_meaningful_extract_content(self, result: dict[str, Any]) -> bool:
         return self._extract_quality_issue(result) is None
 
@@ -9921,7 +10378,7 @@ class MySearchClient:
             filters: dict[str, Any] = {}
             if include_domains:
                 filters["allowed_domains"] = include_domains
-            if exclude_domains:
+            elif exclude_domains:
                 filters["excluded_domains"] = exclude_domains
             if filters:
                 tool["filters"] = filters
@@ -9931,7 +10388,7 @@ class MySearchClient:
             tool = {"type": "x_search"}
             if allowed_x_handles:
                 tool["allowed_x_handles"] = allowed_x_handles
-            if excluded_x_handles:
+            elif excluded_x_handles:
                 tool["excluded_x_handles"] = excluded_x_handles
             if from_date:
                 tool["from_date"] = from_date
@@ -12535,8 +12992,17 @@ class MySearchClient:
             "breaking change", "breaking update",
             "latest version", "latest release", "latest docs",
             "latest commit", "latest tag",
+            "latest stable", "stable version", "stable release",
+            "current version", "current stable",
+            "newest version", "newest release",
         ]
-        if any(neg in query_lower for neg in tech_negatives):
+        # An explicit hard-news marker overrides the software-version whitelist, so
+        # entertainment/event queries like "Taylor Swift newest release news today"
+        # are not misclassified as non-news. Software-version queries such as
+        # "latest stable version of Python" carry no such marker, so the Loop 4 fix
+        # is preserved.
+        explicit_news = bool(re.search(r"\bnews\b", query_lower)) or "breaking news" in query_lower
+        if not explicit_news and any(neg in query_lower for neg in tech_negatives):
             return False
         en_keywords = [
             "latest",
