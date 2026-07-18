@@ -23,7 +23,7 @@
 | `proxy/templates/console.html` | Proxy 控制台壳模板 | 装配登录页、紧凑 `ops-bar`、六项 `summary-strip`、桌面 sticky Provider rail 和单活动 workspace；设置弹窗、detail drawer、确认 dialog 与 toast 作为 `#dashboard` 的同级节点托管，保证背景 inert 不会禁用 overlay 自身。移动端沿用同一语义，但摘要和 Provider 导航改为横向可滑动状态带。来源：proxy/templates/console.html |
 | `proxy/templates/mysearch.html` | MySearch 独立接入页模板 | 承载独立的 `MySearch 接入台` 页面，保留同一套登录、主题切换、设置弹窗、detail drawer、dialog 和 toast，但默认只展示统一接入配置、安装路径和通用 token 管理，不再把 provider 工作台或首页 `summary-strip` 混进这一页。来源：proxy/templates/mysearch.html:1, proxy/templates/mysearch.html:45, proxy/templates/mysearch.html:63 |
 | `proxy/templates/components/_hero.html` | 控制台状态栏组件 | 定义品牌标记、当前工作台实时状态、最近刷新时间，以及 MySearch 接入、主题和设置动作；不再承载营销型 Hero、用途卡或 Provider lane。来源：proxy/templates/components/_hero.html:1 |
-| `proxy/templates/components/_settings_modal.html` | 控制台设置组件 | 设置中心按 `Console / Tavily / Social / X` tabs 组织，每个 tab 带 `settings-summary-strip` 和 sticky footer；Tavily 工作模式使用具备 `radiogroup/radio` 语义的分段控件，并显示“当前实际”运行条。Tavily 与 Social / X footer 提供“测试当前连接”，结果通过结构化 probe 卡呈现。Social / X 明确区分 v3 `/v1` + `g2a_` 推理 client key、v3 管理员用户名/密码，以及仅用于 v2-compatible legacy 的 admin app key。来源：proxy/templates/components/_settings_modal.html |
+| `proxy/templates/components/_settings_modal.html` | 控制台设置组件 | 设置中心按 `Console / Tavily / Social / X` tabs 组织，每个 tab 带 `settings-summary-strip` 和 sticky footer；Tavily 工作模式使用具备 `radiogroup/radio` 语义的分段控件，并显示“当前实际”运行条。Tavily 与 Social / X footer 提供“测试当前连接”，结果通过结构化 probe 卡呈现。Social / X 明确区分 v3 `/v1` + `g2a_` 推理 client key、v3 管理员用户名/密码，以及仅用于 v2-compatible legacy 的 admin app key；手工 key 池会逐项显示调度状态，并允许对冷却或隔离 key 立即恢复。来源：proxy/templates/components/_settings_modal.html |
 | `proxy/static/js/console.js` | 控制台交互与渲染主入口 | 负责主题与会话状态、局部刷新、Provider 信号和摘要、workspace shell、`概览 / Token / API Key` 与 Social `状态 / 接线` tabs、Token/Key 管理、设置表单、drawer/dialog/toast 和 MySearch quickstart。`applyActiveService()` 只显示一个 Provider；`setWorkspaceTab()` 只显示当前 tab；`handleSegmentedControlKey()` 为 workspace/settings/mode/mini switches 提供方向键、Home、End 导航；`syncOverlayState()` 统一管理背景 inert、overlay 优先级与可访问状态。来源：proxy/static/js/console.js |
 | `proxy/static/css/console.css` | 控制台视觉系统入口 | 定义暖色浅色/深色 tokens、紧凑状态栏、扁平摘要带、sticky Provider rail、workspace tabs、Provider 专属强调色、设置与详情浮层、表格风险状态和响应式规则。`max-width: 720px` 时摘要与 Provider 导航横向滚动，主 workspace 保持单列且无页面横向溢出；`prefers-reduced-motion` 会关闭切换和状态动画。来源：proxy/static/css/console.css:1, proxy/static/css/console.css:236, proxy/static/css/console.css:1011, proxy/static/css/console.css:1432, proxy/static/css/console.css:3138 |
 | `proxy/database.py` | Proxy 持久化入口 | 管理 SQLite、key/token/usage/settings 表，以及 `mysp-` token 前缀。来源：proxy/database.py:11, proxy/database.py:61 |
@@ -60,20 +60,20 @@ Provider 路由补充：`mysearch/clients.py` 当前把 `news`、`award_result`�
 - `crawl_site`
   - 入口在 `mysearch/server.py:157`；走 Firecrawl `/v2/crawl` 异步任务，POST 拿 job id 后轮询 `/v2/crawl/{id}` 直到 completed，再逐页复用 extract 清洗归一成 `pages/count`。现在默认会把 `crawlEntireDomain=true` 透传给 Firecrawl，避免从深层页面起爬时只跟进更深的子路径；调用方仍可用 `crawl_entire_domain=false` 退回窄遍历。启动请求和轮询请求都会对瞬时 `429 / 502 / 503 / 504` 自动重试一次。来源：mysearch/server.py:157, mysearch/server.py:164, mysearch/clients.py:9786, mysearch/clients.py:9842, mysearch/clients.py:9858
 - `mysearch_health`
-  - 入口在 `mysearch/server.py:166`；会返回每个 provider 的 `base_url`、`paths`、`auth_mode`、`available_keys`，现在也会暴露 `provider_mode`，便于区分 Tavily 当前是 `official` 还是 `gateway`。X/Social 的 live probe 也已经分流成两套：official 先读 `status.x.ai`，状态获取失败时再回退到 `grok-4.20-fast` 的轻量 `/responses`；compatible 先读根 `/health`，必要时再回退到 `grok-4.20-fast` 的轻量 `social_search`。来源：mysearch/server.py:166, mysearch/clients.py:2717
+  - 入口在 `mysearch/server.py:166`；会返回每个 provider 的 `base_url`、`paths`、`auth_mode`、`available_keys`、`total_keys`、`quarantined_keys` 与隔离原因，也会暴露 `provider_mode`，便于区分 Tavily 当前是 `official` 还是 `gateway`。X/Social 的 live probe 也已经分流成两套：official 先读 `status.x.ai`，状态获取失败时再回退到 `grok-4.20-fast` 的轻量 `/responses`；compatible 先读根 `/health`，必要时再回退到 `grok-4.20-fast` 的轻量 `social_search`。来源：mysearch/server.py:166, mysearch/clients.py:2717
 
 ## X / Social 模型来源速查
 
 - official 正常搜索：看 `MYSEARCH_XAI_MODEL`
 - compatible 正常搜索：默认看 Proxy / social gateway 控制台里的 `social model` 与 `fallback model`
-- official health probe：先看 `status.x.ai`；只有状态获取失败或无法判定时，才固定回退到 `grok-4.20-fast`
-- compatible health probe：先看根 `/health`；只有根健康端点不可用时，才固定回退到 `grok-4.20-fast`
+- official health probe：先看 `status.x.ai`；只有状态获取失败或无法判定时，才用当前模型 registry 首项回退，内置兜底为 `grok-4.20-0309`
+- compatible health probe：先看根 `/health`；只有根健康端点不可用时，才用当前模型 registry 首项回退，内置兜底为 `grok-4.20-0309`
 
 这里要特别区分“正常搜索模型”和“health fallback 模型”：
 
 - 控制台里的 `model / fallback model` 控制 compatible `/social/search` 的正常搜索与补搜
 - `MYSEARCH_XAI_MODEL` 控制 official `/responses` 的正常搜索
-- health probe 的 `grok-4.20-fast` 只是轻量探针，不会覆盖正常搜索时的模型选择
+- health probe 的 registry 首项只是轻量探针，不会覆盖正常搜索时的模型选择
 - Proxy API
   - Tavily 走 `/api/search` 和 `/api/extract`；Firecrawl 走 `/firecrawl/v2/search` 和 `/firecrawl/v2/scrape`；Exa 走 `/exa/search`；Social 走 `/health`、`/social/health` 和 `/social/search`。其中根 `/health` 现在是 `proxy-first` 下 X compatible 健康探针的统一入口，便于把 `http://host:8000/v1`、`https://host/admin` 这类地址都裁回根目录后统一探测。来源：proxy/README.md:31, proxy/README.md:45, proxy/README.md:59, proxy/README.md:90, proxy/server.py:47
 - Settings Test API

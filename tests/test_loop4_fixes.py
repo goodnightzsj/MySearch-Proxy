@@ -217,7 +217,7 @@ class FirecrawlMapCrawlTests(unittest.TestCase):
                 ],
             }
 
-        client._request_json = fake_request_json  # type: ignore[method-assign]
+        client._request_json_once = fake_request_json  # type: ignore[method-assign]
         out = client.map_site(url="https://site", limit=10, search="docs")
 
         self.assertEqual(captured["method"], "POST")
@@ -256,7 +256,7 @@ class FirecrawlMapCrawlTests(unittest.TestCase):
                 ],
             }
 
-        client._request_json = fake_request_json  # type: ignore[method-assign]
+        client._request_json_once = fake_request_json  # type: ignore[method-assign]
         out = client.crawl_site(url="https://s", limit=5, max_depth=2)
 
         self.assertEqual(out["status"], "completed")

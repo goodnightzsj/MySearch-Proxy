@@ -346,7 +346,7 @@ function getKeyRiskScore(service, key) {
   if (String(key.usage_sync_error || '').trim()) {
     score += 500000;
   }
-  if (Number(key.active) !== 1) {
+  if (!getKeyAvailability(key).schedulable) {
     score += 300000;
   }
   if (Number.isFinite(remaining)) {
@@ -389,8 +389,12 @@ function getKeyRowClass(service, key) {
   if (String(key.usage_sync_error || '').trim()) {
     return 'is-danger';
   }
-  if (Number(key.active) !== 1) {
+  const availability = getKeyAvailability(key);
+  if (!availability.active) {
     return 'is-off';
+  }
+  if (!availability.schedulable) {
+    return 'is-warn';
   }
   const remaining = getKeyRemaining(key);
   if (Number.isFinite(remaining) && remaining <= 100) {
@@ -403,6 +407,48 @@ function getKeyRowClass(service, key) {
     return 'is-busy';
   }
   return '';
+}
+
+function getKeyAvailability(key) {
+  const active = Number(key?.active) === 1;
+  const reason = String(key?.disabled_reason || '').trim();
+  const scheduleUntil = String(key?.schedule_until || '').trim();
+  const untilMs = scheduleUntil ? Date.parse(scheduleUntil) : Number.NaN;
+  const coolingDown = active && Number.isFinite(untilMs) && untilMs > Date.now();
+  if (coolingDown) {
+    return {
+      active,
+      schedulable: false,
+      reason: reason || 'rate_limited',
+      label: '限流冷却',
+      detail: `恢复 ${formatTime(scheduleUntil)}`,
+      actionLabel: '立即恢复',
+    };
+  }
+  if (active) {
+    return {
+      active,
+      schedulable: true,
+      reason: '',
+      label: '正常',
+      detail: '可参与调度',
+      actionLabel: '禁用',
+    };
+  }
+  const labels = {
+    quota_exhausted: '额度耗尽',
+    auth_rejected: '凭证失效',
+    manual: '手动禁用',
+    repeated_failure: '连续失败',
+  };
+  return {
+    active,
+    schedulable: false,
+    reason,
+    label: labels[reason] || '禁用',
+    detail: key?.disabled_at ? `隔离 ${formatTime(key.disabled_at)}` : '不参与调度',
+    actionLabel: '启用',
+  };
 }
 
 function getFilteredTokens(service, tokens) {
@@ -465,7 +511,7 @@ function getFilteredKeys(service, keys) {
   }
 
   if (state.filter === 'active') {
-    items = items.filter((key) => Number(key.active) === 1);
+    items = items.filter((key) => getKeyAvailability(key).schedulable);
   } else if (state.filter === 'disabled') {
     items = items.filter((key) => Number(key.active) !== 1);
   } else if (state.filter === 'error') {
@@ -1011,6 +1057,16 @@ function getSocialUpstreamState(social) {
     ?? social?.accepted_token_count
     ?? 0,
   );
+  const upstreamAvailableKeyCount = Number(
+    visibility.upstream_available_key_count
+    ?? social?.upstream_available_key_count
+    ?? upstreamApiKeyCount,
+  );
+  const upstreamUnavailableKeyCount = Number(
+    visibility.upstream_unavailable_key_count
+    ?? social?.upstream_unavailable_key_count
+    ?? Math.max(0, upstreamApiKeyCount - upstreamAvailableKeyCount),
+  );
   const level = visibility.level
     || (social?.admin_connected
       ? 'full'
@@ -1025,6 +1081,11 @@ function getSocialUpstreamState(social) {
       ?? (social?.upstream_key_configured && social?.client_auth_configured),
     ),
     upstreamApiKeyCount,
+    upstreamAvailableKeyCount,
+    upstreamUnavailableKeyCount,
+    upstreamUnavailableReasons: visibility.upstream_unavailable_reasons
+      ?? social?.upstream_unavailable_reasons
+      ?? [],
     acceptedTokenCount,
     adminConnected: Boolean(visibility.admin_connected ?? social?.admin_connected),
     tokenSource: visibility.token_source || social?.token_source || 'not_configured',
@@ -1546,8 +1607,8 @@ function renderSocialBoard(social) {
       </div>
       <div class="social-board-grid">
         <div class="social-metric">
-          <div class="label">上游 Key 数</div>
-          <div class="value">${fmtNum(socialState.upstreamApiKeyCount)}</div>
+          <div class="label">可调度 Key</div>
+          <div class="value ${socialState.upstreamAvailableKeyCount ? 'ok' : 'danger'}">${fmtNum(socialState.upstreamAvailableKeyCount)} <span class="muted">/ ${fmtNum(socialState.upstreamApiKeyCount)}</span></div>
         </div>
         <div class="social-metric">
           <div class="label">客户端 Token 数</div>
@@ -1749,8 +1810,8 @@ function renderSocialIntegration(social) {
           <div class="value">${proxyConfigured ? '已拿到可用上游 key' : '尚未拿到上游 key'}</div>
         </div>
         <div class="integration-summary-item">
-          <div class="label">上游 Key 数</div>
-          <div class="value">${fmtNum(socialState.upstreamApiKeyCount)}</div>
+          <div class="label">可调度 / 隔离 Key</div>
+          <div class="value">${fmtNum(socialState.upstreamAvailableKeyCount)} / ${fmtNum(socialState.upstreamUnavailableKeyCount)}</div>
         </div>
         <div class="integration-summary-item">
           <div class="label">客户端 Token 数</div>
@@ -2043,10 +2104,12 @@ function collectSocialSettingsForm() {
   const adminPassword = document.getElementById('settings-social-admin-password').value.trim();
   const upstreamApiKey = document.getElementById('settings-social-upstream-api-key').value.trim();
   const gatewayToken = document.getElementById('settings-social-gateway-token').value.trim();
+  const clearUpstreamApiKey = document.getElementById('settings-social-clear-upstream-api-key').checked;
 
   if (adminAppKey) body.admin_app_key = adminAppKey;
   if (adminPassword) body.admin_password = adminPassword;
-  if (upstreamApiKey) body.upstream_api_key = upstreamApiKey;
+  if (clearUpstreamApiKey) body.clear_upstream_api_key = true;
+  else if (upstreamApiKey) body.upstream_api_key = upstreamApiKey;
   if (gatewayToken) body.gateway_token = gatewayToken;
   return body;
 }
@@ -2300,6 +2363,32 @@ function setTavilyMode(mode) {
   });
 }
 
+function renderSocialUpstreamKeySchedule(keys = []) {
+  const shell = document.getElementById('settings-social-upstream-key-list');
+  if (!shell) return;
+  shell.innerHTML = keys.map((key) => {
+    const reason = String(key.disabled_reason || '').trim();
+    const labels = {
+      rate_limited: '限流冷却',
+      quota_exhausted: '额度耗尽',
+      auth_rejected: '凭证失效',
+    };
+    const status = key.schedulable ? '正常' : (labels[reason] || '不可调度');
+    const recovery = key.schedule_until ? ` · ${formatTime(key.schedule_until)} 自动恢复` : '';
+    const action = key.schedulable
+      ? ''
+      : `<button class="btn btn-sm btn-soft" type="button" onclick="resumeSocialUpstreamKey('${escapeHtml(key.id)}', this)">立即恢复</button>`;
+    return `
+      <div class="settings-key-schedule-row">
+        <div class="settings-key-schedule-copy">
+          <strong>#${fmtNum(key.index)}</strong> · ${escapeHtml(key.key_masked || '')} · ${escapeHtml(status)}${escapeHtml(recovery)}
+        </div>
+        ${action}
+      </div>
+    `;
+  }).join('');
+}
+
 function fillSettingsForm(settings) {
   const tavily = settings?.tavily || {};
   const social = settings?.social || {};
@@ -2343,14 +2432,22 @@ function fillSettingsForm(settings) {
   document.getElementById('settings-social-admin-app-key').value = '';
   document.getElementById('settings-social-admin-password').value = '';
   document.getElementById('settings-social-upstream-api-key').value = '';
+  document.getElementById('settings-social-clear-upstream-api-key').checked = false;
   document.getElementById('settings-social-gateway-token').value = '';
 
   document.getElementById('settings-social-admin-app-key-hint').textContent =
     describeConfiguredSecret(social.admin_app_key_masked, social.admin_app_key_configured);
   document.getElementById('settings-social-admin-password-hint').textContent =
     describeConfiguredSecret(social.admin_password_masked, social.admin_password_configured);
-  document.getElementById('settings-social-upstream-api-key-hint').textContent =
-    describeConfiguredSecret(social.upstream_api_key_masked, social.upstream_api_key_configured);
+  const socialUpstreamKeys = Array.isArray(social.upstream_keys) ? social.upstream_keys : [];
+  const socialAvailableKeys = socialUpstreamKeys.filter((key) => key.schedulable).length;
+  const socialUnavailableReasons = [...new Set(
+    socialUpstreamKeys.map((key) => key.disabled_reason).filter(Boolean),
+  )];
+  renderSocialUpstreamKeySchedule(socialUpstreamKeys);
+  document.getElementById('settings-social-upstream-api-key-hint').textContent = social.upstream_api_key_configured
+    ? `${describeConfiguredSecret(social.upstream_api_key_masked, true)} 已配置 ${fmtNum(socialUpstreamKeys.length)} 个，当前可调度 ${fmtNum(socialAvailableKeys)} 个${socialUnavailableReasons.length ? `；隔离原因：${socialUnavailableReasons.join('、')}` : ''}。保存新 key 池会替换现有值并恢复调度。`
+    : '支持逗号分隔多个 key；健康 key 轮询，429 临时冷却，额度耗尽或失效后等待手工替换。';
   document.getElementById('settings-social-gateway-token-hint').textContent =
     describeConfiguredSecret(social.gateway_token_masked, social.gateway_token_configured);
 
@@ -3216,7 +3313,7 @@ function renderSocialWorkspace(social) {
     ]).join(' · ')
     : [
       mode,
-      `上游 key ${fmtNum(socialState.upstreamApiKeyCount)}`,
+      `上游 key ${fmtNum(socialState.upstreamAvailableKeyCount)} 可调度 / ${fmtNum(socialState.upstreamApiKeyCount)} 总数`,
       `客户端 token ${fmtNum(socialState.acceptedTokenCount)}`,
       socialState.canProxySearch ? '已可转发搜索' : '待补鉴权',
     ].join(' · ');
@@ -3234,9 +3331,9 @@ function renderSocialWorkspace(social) {
         <div class="hint">当前 Social / X 工作台的路由状态</div>
       </div>
       <div class="stat-box">
-        <div class="label">上游 Key 数</div>
-        <div class="value">${fmtNum(socialState.upstreamApiKeyCount)}</div>
-        <div class="hint">当前已解析到的上游 API key 数量</div>
+        <div class="label">可调度 Key</div>
+        <div class="value">${fmtNum(socialState.upstreamAvailableKeyCount)} <span class="muted">/ ${fmtNum(socialState.upstreamApiKeyCount)}</span></div>
+        <div class="hint">隔离 ${fmtNum(socialState.upstreamUnavailableKeyCount)}；429 自动冷却，额度或鉴权失败需手工替换</div>
       </div>
       <div class="stat-box">
         <div class="label">客户端 Token 数</div>
@@ -3377,11 +3474,12 @@ function renderPoolGlance(service, payload = {}) {
   const keyRoot = document.getElementById(`key-glance-${service}`);
   if (keyRoot) {
     const keys = payload?.keys || [];
-    const activeKeys = keys.filter((key) => Number(key.active) === 1).length;
+    const activeKeys = keys.filter((key) => getKeyAvailability(key).schedulable).length;
+    const limitedKeys = keys.filter((key) => !getKeyAvailability(key).schedulable).length;
     const syncedKeys = keys.filter((key) => Boolean(key.usage_synced_at)).length;
     const erroredKeys = keys.filter((key) => Boolean(key.usage_sync_error)).length;
     keyRoot.innerHTML = [
-      renderGlanceCard('活跃 Key', fmtNum(activeKeys), `总数 ${fmtNum(keys.length)}`),
+      renderGlanceCard('可调度 Key', fmtNum(activeKeys), `隔离 ${fmtNum(limitedKeys)} · 总数 ${fmtNum(keys.length)}`),
       renderGlanceCard('已同步', fmtNum(syncedKeys), '已有官方或账户级额度信息'),
       renderGlanceCard('同步异常', fmtNum(erroredKeys), erroredKeys ? '建议点击行检查失败原因' : '当前没有同步异常'),
     ].join('');
@@ -3398,11 +3496,12 @@ function renderTokenSummary(token) {
 }
 
 function renderKeyStatusSummary(service, key) {
-  const active = Number(key.active) === 1;
+  const availability = getKeyAvailability(key);
   const remain = key.usage_key_remaining ?? key.usage_account_remaining;
   const remainLabel = remain === null || remain === undefined ? '剩余待同步' : `剩余 ${fmtNum(remain)}`;
   return `
-    <div class="table-note"><span class="tag ${active ? 'tag-ok' : 'tag-off'}">${active ? '正常' : '禁用'}</span></div>
+    <div class="table-note"><span class="tag ${availability.schedulable ? 'tag-ok' : 'tag-off'}">${escapeHtml(availability.label)}</span></div>
+    <div class="table-note muted">${escapeHtml(availability.detail)}</div>
     <div class="table-note">${remainLabel}</div>
     <div class="table-note muted">${key.usage_synced_at ? `同步 ${formatTime(key.usage_synced_at)}` : (service === 'exa' ? '实时额度暂不可查' : '尚未同步')}</div>
   `;
@@ -3602,7 +3701,7 @@ function renderKeys(service, keys) {
   }
 
   tbody.innerHTML = filtered.map((key) => {
-    const active = Number(key.active) === 1;
+    const availability = getKeyAvailability(key);
     const rowClass = getKeyRowClass(service, key);
     return `
       <tr
@@ -3621,11 +3720,11 @@ function renderKeys(service, keys) {
         <td>${escapeHtml(key.email || '-')}</td>
         <td>${renderKeyStatusSummary(service, key)}</td>
         <td>${renderKeyUsageSummary(key)}</td>
-        <td><span class="tag ${active ? 'tag-ok' : 'tag-off'}">${active ? '正常' : '禁用'}</span></td>
+        <td><span class="tag ${availability.schedulable ? 'tag-ok' : 'tag-off'}">${escapeHtml(availability.label)}</span></td>
         <td>
           <div class="table-actions">
             <!-- r5 P0-2: 删除按钮已挪到抽屉的 Danger Zone，行内只保留启用/禁用。 -->
-            <button class="btn btn-sm" onclick="event.stopPropagation(); toggleKey('${service}', ${key.id}, ${active ? 0 : 1})">${active ? '禁用' : '启用'}</button>
+            <button class="btn btn-sm" onclick="event.stopPropagation(); toggleKey('${service}', ${key.id}, ${availability.schedulable ? 0 : 1})">${escapeHtml(availability.actionLabel)}</button>
           </div>
         </td>
       </tr>
@@ -3680,21 +3779,22 @@ function openKeyDetail(service, keyId) {
     showToast('没有找到这个 Key 的最新数据。', 'warn');
     return;
   }
-  const active = Number(key.active) === 1;
+  const availability = getKeyAvailability(key);
   const label = getServiceDisplayLabel(service);
   openDetailDrawer({
     kicker: `${label} Key`,
     title: key.email || `${label} Key #${key.id}`,
-    subtitle: `${escapeHtml(key.key_masked || key.key)} · ${active ? '当前正常' : '当前禁用'}`,
-    tone: active ? 'ok' : 'danger',
+    subtitle: `${escapeHtml(key.key_masked || key.key)} · ${escapeHtml(availability.label)}`,
+    tone: availability.schedulable ? 'ok' : 'danger',
     summaryHtml: [
-      drawerMetric('Key 状态', active ? '正常' : '禁用', `ID ${fmtNum(key.id)}`),
+      drawerMetric('Key 状态', availability.label, availability.detail),
       drawerMetric('成功调用', fmtNum(key.total_used || 0), `失败 ${fmtNum(key.total_failed || 0)}`),
       drawerMetric('最近使用', formatTime(key.last_used_at), key.usage_sync_error ? '存在同步异常' : '统计正常'),
     ].join(''),
     bodyHtml: [
       drawerSection('Key 配额', renderKeyQuota(service, key)),
       drawerSection('账户额度', renderAccountQuota(service, key)),
+      key.disabled_detail ? drawerSection('调度原因', `<div class="table-note danger">${escapeHtml(key.disabled_detail)}</div>`) : '',
       drawerSection('代理统计', `
         <div class="drawer-grid drawer-grid-compact">
           <div class="drawer-inline-card"><span>成功</span><strong>${fmtNum(key.total_used || 0)}</strong></div>
@@ -3706,7 +3806,7 @@ function openKeyDetail(service, keyId) {
     ].join(''),
     actionsHtml: [
       renderDrawerActionGroup('维护动作', `
-        <button class="btn btn-soft" type="button" onclick="closeDetailDrawer(); toggleKey('${service}', ${key.id}, ${active ? 0 : 1})">${active ? '禁用 Key' : '启用 Key'}</button>
+        <button class="btn btn-soft" type="button" onclick="closeDetailDrawer(); toggleKey('${service}', ${key.id}, ${availability.schedulable ? 0 : 1})">${escapeHtml(availability.actionLabel)} Key</button>
       `),
       renderDrawerActionGroup('危险动作', `
         <button class="btn btn-danger" type="button" onclick="closeDetailDrawer(); delKey('${service}', ${key.id})">删除 Key</button>
@@ -3934,6 +4034,23 @@ async function saveSocialSettings(event) {
     await refresh({ force: true, scope: getRefreshScopeForService('social') });
   } catch (error) {
     setStatus('settings-social-status', `保存 Social / X 设置失败：${error.message}`, true);
+  }
+}
+
+async function resumeSocialUpstreamKey(keyId, button) {
+  try {
+    await runWithBusyButton(button, {
+      busyLabel: '恢复中...',
+      successLabel: '已恢复',
+      errorLabel: '恢复失败',
+    }, async () => {
+      const payload = await api('PUT', `/api/settings/social/keys/${encodeURIComponent(keyId)}/resume`);
+      latestSettings = payload || {};
+      fillSettingsForm(latestSettings);
+    });
+    await refresh({ force: true, scope: getRefreshScopeForService('social') });
+  } catch (error) {
+    setStatus('settings-social-status', `恢复 Social / X key 失败：${error.message}`, true);
   }
 }
 

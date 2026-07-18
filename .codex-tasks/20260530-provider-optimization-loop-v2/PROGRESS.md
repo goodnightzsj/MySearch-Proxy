@@ -6,8 +6,8 @@
 - This epic replaces the old loop only as the active truth source; `.codex-tasks/20260529-provider-optimization-loop/` remains the completed historical reference.
 - User requested a stricter per-loop protocol: every loop must analyze whether the benchmark itself should change based on provider capabilities and collaboration design.
 - Loop 1 is complete under the final 37-row definition.
-- Latest pushed runtime commit: `30153c1`.
-- Latest runtime deploy uses `helloworldz1024/mysearch-stack` at image revision `14badabf9674a0e6b821cb337cfda487ad881df6`.
+- Latest pushed runtime commit: `55cee0c`.
+- Latest runtime deploy uses `helloworldz1024/mysearch-stack` at image revision `55cee0c6e8191a5bceeb5fb293c3dbed0e1b1e0a`.
 - Remote `mysearch-stack` is healthy after the Loop 11 redeploy.
 - Loop 2 completed on the same final Loop 1 code state without additional code changes.
 
@@ -50,7 +50,10 @@
 - The final Loop 11 candidate now has an 84-column contract with explicit expected-answer evidence, boundary/negation-safe matching, current-matrix synchronization for partial reruns, bounded Hybrid fallback deadlines, canonical resource repair, content-enrichment failure evidence, and extraction/title cleanup. The full CI-equivalent suite passes with 655 tests; runtime sync, syntax checks, and the 41-row/19-column input contract pass.
 - Commit `30153c1` was pushed and produced the first complete 84-column result: 41/41 unique rows, no structural failures, timeouts, empty results, or row errors, and MySearch won 39 rows. It still exposed actionable cold-path gaps: six MySearch latency-budget overruns, empty PDF verifier content, a Cloudflare browser-challenge block in academic content, and exact Playwright/award-page routing inefficiency.
 - The follow-up candidate now runs strict domain-filtered docs as a bounded verifier blend, keeps Tavily discovery lightweight, asks Tavily/Exa verifiers for requested content, prefers Exa before Firecrawl for changelog enrichment, injects the exact Playwright `test.step` reference, removes verified Cloudflare challenge blocks, and checks direct official award HTML before provider extraction. Both runtime copies are synchronized; Python compilation, diff checks, 373 client tests, and the full 661-test suite pass.
-- Streak remains `0 / 3`; Loop 11 found actionable issues and cannot count as clean. Current work is commit/push of this runtime follow-up, Docker CI, required runtime redeploy, and another fresh full 41-row comparison under the unchanged 84-column contract. Only that new artifact may close Loop 11.
+- Commit `55cee0c` was pushed, Docker workflow `29644084979` succeeded, and the immutable image was deployed. The fresh 84-column comparison captured 41/41 unique rows with no MySearch timeout, empty result, budget overrun, or row error and a 40-1 MySearch win count. Two structural failures and all three budget overruns belonged to the Tavily comparator, but `factual-accuracy-01` regressed to Python `3.14.3` despite nested official `3.14.6` evidence, so this remains a finding-discovery artifact.
+- The user added provider-key scheduling as an explicit Loop 11 resilience requirement. The current local candidate separates temporary `429` cooldown from terminal quota/auth isolation, honors numeric and HTTP-date `Retry-After`, rotates every direct provider and all Proxy key pools, preserves proxy-token/direct-key boundaries, persists SQLite and Social fingerprint schedules, lets manual enable/replace restore keys, exposes available/quarantined status in health and console, binds direct Firecrawl crawl polling to the successful creation key, and lets Proxy Firecrawl status lookup find an account-scoped job without misclassifying `403/404` as bad credentials.
+- Three independent release reviews found and the candidate now fixes cooldown downgrade races, structured error-code loss, Social fallback header assumptions, misleading schedulability filters, missing manual-key API contracts, and secret leakage through truncation or public health diagnostics. Dedicated scheduling tests pass 66 cases and the final CI-equivalent suite passes 728 tests; runtime mirrors, syntax, diff, and secret scans pass.
+- Streak remains `0 / 3`; Loop 11 found actionable issues and cannot count as clean. Current work is commit/push, Docker CI, required runtime redeploy, and another fresh full 41-row comparison under the unchanged 84-column contract. Only that new artifact may close Loop 11.
 
 ## Notes
 

@@ -162,7 +162,7 @@ class CrawlBreadthFixTests(unittest.TestCase):
                 return {"success": True, "id": "job-1"}
             return {"status": "completed", "total": 0, "completed": 0, "data": []}
 
-        client._request_json = fake_request_json  # type: ignore[method-assign]
+        client._request_json_once = fake_request_json  # type: ignore[method-assign]
         client.crawl_site(
             url="https://fastapi.tiangolo.com/tutorial/background-tasks/",
             limit=5,
@@ -185,7 +185,7 @@ class CrawlBreadthFixTests(unittest.TestCase):
                 return {"success": True, "id": "job-2"}
             return {"status": "completed", "total": 0, "completed": 0, "data": []}
 
-        client._request_json = fake_request_json  # type: ignore[method-assign]
+        client._request_json_once = fake_request_json  # type: ignore[method-assign]
         client.crawl_site(
             url="https://fastapi.tiangolo.com/tutorial/background-tasks/",
             limit=5,

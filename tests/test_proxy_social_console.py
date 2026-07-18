@@ -63,6 +63,20 @@ class ProxySocialConsoleTests(unittest.TestCase):
         self.assertIn('aria-label="搜索 ${meta.label} API Key"', javascript)
         self.assertIn('class="inline-meta-base-url"', javascript)
 
+    def test_console_exposes_social_key_recovery_and_filters_only_schedulable_keys(self) -> None:
+        javascript = (REPO_ROOT / "proxy/static/js/console.js").read_text(encoding="utf-8")
+        settings = (REPO_ROOT / "proxy/templates/components/_settings_modal.html").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            "items = items.filter((key) => getKeyAvailability(key).schedulable);",
+            javascript,
+        )
+        self.assertIn("/api/settings/social/keys/${encodeURIComponent(keyId)}/resume", javascript)
+        self.assertIn('id="settings-social-upstream-key-list"', settings)
+        self.assertIn('id="settings-social-clear-upstream-api-key"', settings)
+
 
 if __name__ == "__main__":
     unittest.main()

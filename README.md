@@ -103,7 +103,7 @@ provider。
   - Firecrawl 如果在 `site:domain query` 这一跳返回空结果，会自动做一轮无 `site:` 的 Firecrawl 检索，再在客户端按域名过滤，优先把结果留在 Firecrawl 链路里，而不是立刻退回 Tavily。
 
 - Provider 健康检查与路由自保：
-  - `health` 现在除了 `available_keys`，还会返回每个 provider 的 `live_status`、`live_error`、`last_checked_at`。
+  - `health` 现在除了 `available_keys`，还会返回 `total_keys`、`quarantined_keys`、隔离原因以及每个 provider 的 `live_status`、`live_error`、`last_checked_at`。
   - 例如 `Tavily key 已失效 / 被停用`，现在会明确显示成 `auth_error`，而不是只看起来像“有 key 可用”。
   - docs / resource / balanced 路由会跳过 `auth_error` 的 provider，不再把失效的 Tavily 当成发现阶段主路由。
   - Firecrawl 的域名 fallback 也会跳过 `auth_error` 的 Tavily，避免本来已经切开主路由，最后又在 fallback 阶段被 401 绊倒。
@@ -300,6 +300,7 @@ docker compose up -d
 负责：
 
 - Provider key 池
+- 429 临时冷却、额度/鉴权失败隔离与手工恢复
 - MySearch token 池
 - 调用统计
 - 官方额度同步

@@ -215,12 +215,17 @@
                 <div class="hint" id="settings-social-admin-app-key-hint">未配置</div>
               </div>
               <div class="settings-field">
-                <label for="settings-social-upstream-api-key">搜索上游 API key</label>
+                <label for="settings-social-upstream-api-key">搜索上游 API key 池</label>
                 <div class="input-reveal-wrap">
-                  <input type="password" id="settings-social-upstream-api-key" placeholder="留空表示保持当前值">
+                  <input type="password" id="settings-social-upstream-api-key" placeholder="g2a_key1,g2a_key2；留空保持当前值">
                   <button type="button" class="input-reveal-btn" aria-label="显示密码" aria-pressed="false" data-reveal-target="settings-social-upstream-api-key"><span class="reveal-icon" aria-hidden="true">👁</span></button>
                 </div>
-                <div class="hint" id="settings-social-upstream-api-key-hint">未配置</div>
+                <div class="hint" id="settings-social-upstream-api-key-hint">支持逗号分隔多个 key；健康 key 轮询，429 临时冷却，额度耗尽或失效后等待手工替换。</div>
+                <div class="settings-key-schedule" id="settings-social-upstream-key-list" aria-live="polite"></div>
+                <label class="settings-clear-check" for="settings-social-clear-upstream-api-key">
+                  <input type="checkbox" id="settings-social-clear-upstream-api-key">
+                  <span>保存时清空已配置的上游 key 池</span>
+                </label>
               </div>
               <div class="settings-field">
                 <label for="settings-social-gateway-token">客户端访问 token</label>
