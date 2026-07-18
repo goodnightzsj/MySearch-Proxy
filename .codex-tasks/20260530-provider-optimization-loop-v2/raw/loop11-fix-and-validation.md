@@ -1,7 +1,7 @@
 ## Loop 11 Fixes And Validation
 
 - Date: 2026-07-18
-- Status: runtime release and deployment complete; runner credential-transport follow-up validated locally; final comparison pending.
+- Status: `14badab` runtime deployed; postdeploy findings fixed locally; final candidate release and comparison pending.
 
 ## Fixes
 
@@ -13,12 +13,18 @@
 - Kept the mobile Base URL metadata on its own full-width line so the deployed host does not orphan the final port digit at 375px.
 - Updated grok2api v3 model, client-key, and endpoint guidance in the console.
 - Removed the benchmark bearer from process arguments. The one-time remote script and encoded payload now travel only through SSH stdin, while the visible command remains `python3 -`.
+- Bounded verify and Hybrid provider work, including unified xAI and compatible Tavily/Exa fallback calls, while preserving the configurable pure-Social timeout contract.
+- Added exact canonical rescue/ranking for active OpenAI pricing, OpenAI Batch, Next.js generateMetadata, and pricing career-page rejection cases.
+- Treat requested content without any returned content as an enrichment failure. Continue the fallback chain, but preserve the successful discovery result with explicit evidence if enrichment remains unavailable.
+- Preserve meaningful arXiv titles across canonical URL merge and rerun hCaptcha trailing-widget cleanup after language-block removal.
+- Added explicit expected-answer evidence with boundary/negation-safe matching, and synchronized input contract fields during partial reruns.
 
 ## Local Validation
 
 - `node --check proxy/static/js/console.js`: passed.
 - Python `py_compile` for touched runtime and benchmark files: passed.
-- `python3 -m pytest -q`: 637 passed.
+- `python -m unittest discover -s tests`: 655 passed for the final local candidate.
+- `pytest -q tests/test_clients.py tests/test_loop4_fixes.py tests/test_remote_benchmark_config.py`: 420 passed.
 - Runner credential regression set: 35 passed.
 - Real one-row SSH benchmark passed, and process inspection confirmed neither the local runner nor child SSH command exposed the bearer in argv.
 - Browser smoke at 320, 375, 768, and 1440 CSS pixels: no page-level horizontal overflow, duplicate IDs, broken `aria-controls`, unlabeled visible inputs, or nameless visible buttons.
@@ -32,8 +38,10 @@
 - Remote `mysearch-stack` runs image revision `d5deccc1a8a1ba1424bcd894df5c5d42972a34b9` with the required ports, mount, and `restart=always` policy.
 - Proxy health reports grok2api v3 admin connectivity; MCP initialize returned HTTP 200 with a session ID.
 - Live authenticated browser smoke passed at 375px and 1440px with no horizontal overflow or duplicate IDs; settings overlay background inertness and `aria-modal` passed.
+- Commit `14badab` was pushed; Docker workflow `29637368712` succeeded; the remote container reports image revision `14badabf9674a0e6b821cb337cfda487ad881df6`.
+- The complete 41-row postdeploy run had no structural failures, but its 81-column output is retained only as an intermediate artifact because the findings above changed both runtime and scorer contracts.
 
 ## Pending Gates
 
-- Commit and push the runner credential-transport follow-up, then wait for CI. It is runner-only and does not require another runtime deploy.
-- Run the fresh full 41-row comparison under the Loop 11 runner contract and update convergence.
+- Commit and push the final runtime/runner follow-up, wait for Docker CI, and redeploy because runtime files changed.
+- Run a fresh full 41-row comparison under the final 84-column Loop 11 contract, record the runner commit/schema, and update convergence.

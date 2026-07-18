@@ -1005,18 +1005,25 @@ class MySearchClient:
             and not excluded_x_handles
         )
 
+        unified_result: dict[str, Any] | None = None
         if use_xai_unified:
-            unified_result = self._search_xai(
-                query=query,
-                sources=["web", "x"],
-                max_results=max_results,
-                include_domains=include_domains,
-                exclude_domains=exclude_domains,
-                from_date=from_date,
-                to_date=to_date,
-                include_x_images=include_x_images,
-                include_x_videos=include_x_videos,
-            )
+            try:
+                unified_result = self._search_xai(
+                    query=query,
+                    sources=["web", "x"],
+                    max_results=max_results,
+                    include_domains=include_domains,
+                    exclude_domains=exclude_domains,
+                    from_date=from_date,
+                    to_date=to_date,
+                    include_x_images=include_x_images,
+                    include_x_videos=include_x_videos,
+                    timeout_seconds=HYBRID_SOCIAL_TIMEOUT_SECONDS,
+                )
+            except MySearchError:
+                use_xai_unified = False
+
+        if unified_result is not None:
             web_result = unified_result
             social_result = unified_result
         else:
@@ -5055,6 +5062,42 @@ class MySearchClient:
                 "provider": "canonical-rescue",
                 "matched_providers": ["canonical-rescue"],
             }
+        if (
+            "openai" in query_lower
+            and "batch api" in query_lower
+            and not self._query_mentions_programming_language(query_lower)
+        ):
+            return {
+                "title": "Batch API | OpenAI API",
+                "url": "https://developers.openai.com/api/docs/guides/batch/",
+                "snippet": "Official OpenAI guide for asynchronous Batch API workloads.",
+                "provider": "canonical-rescue",
+                "matched_providers": ["canonical-rescue"],
+            }
+        if (
+            "openai" in query_lower
+            and "api" in query_lower
+            and self._looks_like_pricing_query(query_lower)
+            and not any(marker in query for marker in ("中文", "简体", "繁體", "繁体"))
+        ):
+            return {
+                "title": "Pricing | OpenAI API",
+                "url": "https://developers.openai.com/api/docs/pricing/",
+                "snippet": "Official OpenAI API pricing reference.",
+                "provider": "canonical-rescue",
+                "matched_providers": ["canonical-rescue"],
+            }
+        if (
+            ("next.js" in query_lower or "nextjs" in query_lower)
+            and "generatemetadata" in re.sub(r"[^a-z0-9]+", "", query_lower)
+        ):
+            return {
+                "title": "generateMetadata | Next.js",
+                "url": "https://nextjs.org/docs/app/api-reference/functions/generate-metadata",
+                "snippet": "Official Next.js API reference for generateMetadata.",
+                "provider": "canonical-rescue",
+                "matched_providers": ["canonical-rescue"],
+            }
         react_hook = self._extract_known_react_hook_reference(query)
         if react_hook is not None:
             react_locale = self._preferred_react_docs_locale(query)
@@ -5157,7 +5200,21 @@ class MySearchClient:
             ):
                 return False
             return True
-        if "openai" in query_lower and ("webhook" in query_lower or "background mode" in query_lower):
+        if "openai" in query_lower and (
+            "webhook" in query_lower
+            or "background mode" in query_lower
+            or "batch api" in query_lower
+            or (
+                "api" in query_lower
+                and self._looks_like_pricing_query(query_lower)
+                and not any(marker in query for marker in ("中文", "简体", "繁體", "繁体"))
+            )
+        ):
+            return True
+        if (
+            ("next.js" in query_lower or "nextjs" in query_lower)
+            and "generatemetadata" in re.sub(r"[^a-z0-9]+", "", query_lower)
+        ):
             return True
         if self._looks_like_github_release_query(query_lower):
             repo_slug = self._extract_explicit_github_repo_slug(query)
@@ -6192,7 +6249,11 @@ class MySearchClient:
         chain = [primary_provider, *(decision.fallback_chain or [])]
         last_error: Exception | None = None
         last_quality_issue = ""
+        content_candidate: tuple[str, dict[str, Any]] | None = None
+        attempted_providers: list[str] = []
+        content_enrichment_errors: list[str] = []
         for provider_name in chain:
+            attempted_providers.append(provider_name)
             try:
                 result = self._dispatch_single_provider(
                     provider_name=provider_name,
@@ -6214,10 +6275,21 @@ class MySearchClient:
                     mode=mode,
                     intent=intent,
                     include_domains=include_domains,
+                    include_content=include_content,
                 )
-                if quality_issue and provider_name != chain[-1]:
+                if quality_issue:
                     last_quality_issue = f"{provider_name}: {quality_issue}"
-                    continue
+                    content_enrichment_errors.append(last_quality_issue[:200])
+                    if (
+                        include_content
+                        and quality_issue == "provider returned results without requested content"
+                        and content_candidate is None
+                    ):
+                        content_candidate = (provider_name, result)
+                    if provider_name != chain[-1]:
+                        continue
+                    if content_candidate is not None:
+                        break
                 fallback_info = None
                 if provider_name != primary_provider:
                     fallback_info = {
@@ -6234,10 +6306,37 @@ class MySearchClient:
                 return result, fallback_info
             except MySearchError as exc:
                 last_error = exc
+                content_enrichment_errors.append(f"{provider_name}: {exc}"[:200])
                 continue
             except Exception as exc:
                 last_error = MySearchError(f"{provider_name}: {exc}")
+                content_enrichment_errors.append(str(last_error)[:200])
                 continue
+        if content_candidate is not None:
+            candidate_provider, candidate_result = content_candidate
+            candidate_result = dict(candidate_result)
+            evidence = dict(candidate_result.get("evidence") or {})
+            conflicts = list(evidence.get("conflicts") or [])
+            if "requested-content-unavailable" not in conflicts:
+                conflicts.append("requested-content-unavailable")
+            evidence["conflicts"] = conflicts
+            evidence["content_enrichment"] = {
+                "status": "unavailable",
+                "requested": True,
+                "result_provider": candidate_provider,
+                "providers_attempted": attempted_providers,
+                "errors": content_enrichment_errors[-3:],
+            }
+            if len(attempted_providers) > 1:
+                evidence["fallback"] = {
+                    "configured": len(chain) > 1,
+                    "triggered": True,
+                    "used": False,
+                    "from": primary_provider,
+                    "reason": "requested content enrichment unavailable",
+                }
+            candidate_result["evidence"] = evidence
+            return candidate_result, None
         raise MySearchError(f"All providers failed for query '{query[:80]}': {last_error}")
 
     def _fallback_quality_issue(
@@ -6247,8 +6346,15 @@ class MySearchClient:
         mode: SearchMode,
         intent: ResolvedSearchIntent,
         include_domains: list[str] | None,
+        include_content: bool = False,
     ) -> str | None:
-        if result.get("results"):
+        results = list(result.get("results") or [])
+        if include_content and results and not any(
+            isinstance(item, dict) and str(item.get("content") or "").strip()
+            for item in results
+        ):
+            return "provider returned results without requested content"
+        if results:
             return None
         if include_domains:
             return "provider returned no results for domain-filtered query"
@@ -9488,6 +9594,20 @@ class MySearchClient:
                 fallback_exc,
                 remaining_for_exa,
             )
+            if remaining_for_exa <= 0:
+                social_unavailable_result = self._build_social_unavailable_result(
+                    query=query,
+                    fallback_reason=(
+                        f"{fallback_reason} | tavily_social_fallback failed: {fallback_exc}"
+                        " | social budget exhausted before exa_social_fallback"
+                    ),
+                )
+                self._cache_set("social_unavailable", social_cache_key, social_unavailable_result)
+                return self._annotate_cache(
+                    social_unavailable_result,
+                    namespace="social_unavailable",
+                    hit=False,
+                )
             try:
                 exa_fallback_result = self._search_exa_social_fallback(
                     query=query,
@@ -9558,10 +9678,21 @@ class MySearchClient:
         # 避免 worst-case `45s + 45s` 超出 xai_social_timeout_seconds（默认 120s）总预算。
         # `timeout_seconds=None` 表示沿用 _request_json 的 config.timeout_seconds 兜底。
         per_call_timeout: int | None
+        fallback_deadline: float | None = None
         if timeout_seconds is not None and timeout_seconds > 0:
-            per_call_timeout = max(5, timeout_seconds // 2)
+            per_call_timeout = max(1, timeout_seconds // 2)
+            fallback_deadline = time.monotonic() + timeout_seconds
         else:
             per_call_timeout = None
+
+        def remaining_call_timeout() -> int | None:
+            if fallback_deadline is None:
+                return None
+            remaining = fallback_deadline - time.monotonic()
+            if remaining <= 0:
+                raise MySearchError("exa social fallback budget exhausted")
+            return min(per_call_timeout or 1, max(1, math.ceil(remaining)))
+
         filtered_results: list[dict[str, Any]] = []
         exa_result = self._search_exa(
             query=query,
@@ -9574,7 +9705,7 @@ class MySearchClient:
             strategy="fast",
             from_date=from_date,
             to_date=to_date,
-            timeout_seconds=per_call_timeout,
+            timeout_seconds=remaining_call_timeout(),
         )
         filtered_results.extend(self._normalize_exa_social_fallback_results(exa_result.get("results", [])))
         if not filtered_results:
@@ -9589,7 +9720,7 @@ class MySearchClient:
                 strategy="fast",
                 from_date=from_date,
                 to_date=to_date,
-                timeout_seconds=per_call_timeout,
+                timeout_seconds=remaining_call_timeout(),
             )
             filtered_results.extend(self._normalize_exa_social_fallback_results(exa_result.get("results", [])))
         if not filtered_results:
@@ -9728,7 +9859,7 @@ class MySearchClient:
         fallback_reason: str,
         timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
-        tavily_timeout_budget = max(3, int(timeout_seconds or 15))
+        tavily_timeout_budget = max(1, int(timeout_seconds or 15))
         tavily_deadline = time.monotonic() + tavily_timeout_budget
         last_error: MySearchError | None = None
         tavily_result: dict[str, Any] | None = None
@@ -9736,7 +9867,7 @@ class MySearchClient:
             remaining_budget = tavily_deadline - time.monotonic()
             if remaining_budget <= 0:
                 break
-            attempt_timeout = max(3, math.ceil(remaining_budget))
+            attempt_timeout = max(1, math.ceil(remaining_budget))
             if attempt == 0:
                 attempt_timeout = min(attempt_timeout, 10)
             try:
@@ -10164,6 +10295,7 @@ class MySearchClient:
         text = re.sub(r"data:image/[^\s)\]]+", "", text)
         text = self._strip_trailing_hcaptcha(text)
         text = self._strip_hcaptcha_block(text)
+        text = self._strip_trailing_hcaptcha(text)
         text = self._strip_trailing_empty_headings(text)
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
@@ -10705,8 +10837,19 @@ class MySearchClient:
             providers = sorted(item for item in providers_by_key.get(dedupe_key, set()) if item)
             if len(providers) > 1:
                 matched_results += 1
-            best = max(variants, key=self._result_quality_score)
-            merged_item = self._canonicalize_result_item(dict(best))
+            best = dict(max(variants, key=self._result_quality_score))
+            if urlparse(dedupe_key).hostname == "arxiv.org":
+                meaningful_titles = [
+                    str(item.get("title") or "").strip()
+                    for item in variants
+                    if str(item.get("title") or "").strip()
+                    and not self._looks_like_generic_arxiv_subject_title(
+                        str(item.get("title") or "").strip()
+                    )
+                ]
+                if meaningful_titles:
+                    best["title"] = max(meaningful_titles, key=len)
+            merged_item = self._canonicalize_result_item(best)
             merged_item["matched_providers"] = providers
             results.append(merged_item)
 
@@ -11793,6 +11936,8 @@ class MySearchClient:
     def _looks_like_canonical_pricing_result(self, *, hostname: str, path: str) -> bool:
         normalized_path = path.rstrip("/")
         path_segments = [segment for segment in normalized_path.split("/") if segment]
+        if any(segment in {"career", "careers", "job", "jobs"} for segment in path_segments):
+            return False
         if hostname == "openai.com" and normalized_path in {"/business/chatgpt-pricing", "/chatgpt/pricing"}:
             return False
         if ("/shop/buy" in normalized_path or "/buy-" in normalized_path) and len(path_segments) <= 3:

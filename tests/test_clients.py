@@ -32,6 +32,272 @@ class _FakeResponse:
 
 
 class MySearchClientTests(unittest.TestCase):
+    def test_fast_official_hybrid_uses_hybrid_timeout_budget(self) -> None:
+        client = MySearchClient()
+        client.config.xai.search_mode = "official"
+        client._provider_can_serve = lambda provider: True  # type: ignore[method-assign]
+        captured: dict[str, object] = {}
+
+        def fake_search_xai(**kwargs):  # type: ignore[no-untyped-def]
+            captured.update(kwargs)
+            return {
+                "provider": "xai",
+                "answer": "combined answer",
+                "results": [
+                    {
+                        "provider": "xai",
+                        "title": "combined result",
+                        "url": "https://x.com/example/status/1",
+                        "content": "combined result",
+                    }
+                ],
+                "citations": [
+                    {"title": "combined result", "url": "https://x.com/example/status/1"}
+                ],
+            }
+
+        client._search_xai = fake_search_xai  # type: ignore[method-assign]
+
+        result = client._search_hybrid(
+            query="latest OpenAI status reactions",
+            mode="web",
+            resolved_intent="status",
+            resolved_strategy="fast",
+            decision=RouteDecision(provider="hybrid", reason="web+x"),
+            max_results=5,
+            include_content=False,
+            effective_include_answer=True,
+            include_domains=None,
+            exclude_domains=None,
+            allowed_x_handles=None,
+            excluded_x_handles=None,
+            from_date=None,
+            to_date=None,
+            include_x_images=False,
+            include_x_videos=False,
+        )
+
+        self.assertEqual(captured["timeout_seconds"], 20)
+        self.assertEqual(result["provider"], "hybrid")
+
+    def test_fast_official_hybrid_falls_back_when_unified_request_fails(self) -> None:
+        client = MySearchClient()
+        client.config.xai.search_mode = "official"
+        client._provider_can_serve = lambda provider: True  # type: ignore[method-assign]
+        xai_calls = 0
+
+        def fake_search_xai(**kwargs):  # type: ignore[no-untyped-def]
+            nonlocal xai_calls
+            xai_calls += 1
+            raise MySearchError("xai timeout")
+
+        client._search_xai = fake_search_xai  # type: ignore[method-assign]
+        client.search = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "tavily",
+            "answer": "web answer",
+            "results": [
+                {
+                    "provider": "tavily",
+                    "title": "web result",
+                    "url": "https://example.com/status",
+                    "content": "web result",
+                }
+            ],
+            "citations": [{"title": "web result", "url": "https://example.com/status"}],
+        }
+
+        result = client._search_hybrid(
+            query="latest OpenAI status reactions",
+            mode="web",
+            resolved_intent="status",
+            resolved_strategy="fast",
+            decision=RouteDecision(provider="hybrid", reason="web+x"),
+            max_results=5,
+            include_content=False,
+            effective_include_answer=True,
+            include_domains=None,
+            exclude_domains=None,
+            allowed_x_handles=None,
+            excluded_x_handles=None,
+            from_date=None,
+            to_date=None,
+            include_x_images=False,
+            include_x_videos=False,
+        )
+
+        self.assertEqual(xai_calls, 2)
+        self.assertEqual(result["web"]["provider"], "tavily")
+        self.assertEqual(result["social"]["provider"], "social_unavailable")
+        self.assertIn("social-search-unavailable", result["evidence"]["conflicts"])
+
+    def test_content_request_falls_back_when_discovery_has_no_content(self) -> None:
+        client = MySearchClient()
+        calls: list[str] = []
+
+        def fake_dispatch_single_provider(**kwargs):  # type: ignore[no-untyped-def]
+            provider = kwargs["provider_name"]
+            calls.append(provider)
+            content = "" if provider == "tavily" else "Canonical page body"
+            return {
+                "provider": provider,
+                "results": [
+                    {
+                        "provider": provider,
+                        "title": "Canonical docs",
+                        "url": "https://example.com/docs",
+                        "content": content,
+                    }
+                ],
+                "citations": [{"title": "Canonical docs", "url": "https://example.com/docs"}],
+            }
+
+        client._dispatch_single_provider = fake_dispatch_single_provider  # type: ignore[method-assign]
+
+        result, fallback = client._search_with_fallback(
+            primary_provider="tavily",
+            query="Example API official docs",
+            max_results=5,
+            mode="docs",
+            intent="resource",
+            decision=RouteDecision(
+                provider="tavily",
+                reason="test",
+                fallback_chain=("firecrawl", "exa"),
+            ),
+            include_answer=False,
+            include_content=True,
+            include_domains=["example.com"],
+            exclude_domains=None,
+            strategy="verify",
+        )
+
+        self.assertEqual(calls, ["tavily", "firecrawl"])
+        self.assertEqual(result["results"][0]["content"], "Canonical page body")
+        self.assertEqual(
+            fallback,
+            {
+                "from": "tavily",
+                "to": "firecrawl",
+                "reason": "tavily: provider returned results without requested content",
+            },
+        )
+
+    def test_content_enrichment_failure_preserves_discovery_result(self) -> None:
+        client = MySearchClient()
+
+        def fake_dispatch_single_provider(**kwargs):  # type: ignore[no-untyped-def]
+            provider = kwargs["provider_name"]
+            if provider == "tavily":
+                return {
+                    "provider": provider,
+                    "results": [
+                        {
+                            "provider": provider,
+                            "title": "Canonical changelog",
+                            "url": "https://example.com/changelog",
+                            "content": "",
+                        }
+                    ],
+                    "citations": [
+                        {"title": "Canonical changelog", "url": "https://example.com/changelog"}
+                    ],
+                }
+            raise MySearchError(f"{provider} unavailable")
+
+        client._dispatch_single_provider = fake_dispatch_single_provider  # type: ignore[method-assign]
+
+        result, fallback = client._search_with_fallback(
+            primary_provider="tavily",
+            query="Example release notes official",
+            max_results=5,
+            mode="docs",
+            intent="resource",
+            decision=RouteDecision(
+                provider="tavily",
+                reason="test",
+                fallback_chain=("firecrawl", "exa"),
+            ),
+            include_answer=False,
+            include_content=True,
+            include_domains=["example.com"],
+            exclude_domains=None,
+            strategy="verify",
+        )
+
+        self.assertIsNone(fallback)
+        self.assertEqual(result["results"][0]["url"], "https://example.com/changelog")
+        evidence = result["evidence"]
+        self.assertIn("requested-content-unavailable", evidence["conflicts"])
+        self.assertEqual(evidence["content_enrichment"]["status"], "unavailable")
+        self.assertEqual(
+            evidence["content_enrichment"]["providers_attempted"],
+            ["tavily", "firecrawl", "exa"],
+        )
+        self.assertTrue(evidence["fallback"]["triggered"])
+        self.assertFalse(evidence["fallback"]["used"])
+
+    def test_merge_keeps_arxiv_content_and_exact_title_from_variants(self) -> None:
+        client = MySearchClient()
+
+        merged = client._merge_search_payloads(
+            primary_result={
+                "provider": "firecrawl",
+                "results": [
+                    {
+                        "provider": "firecrawl",
+                        "title": "arXiv:2505.09388v1 [cs.CL] 14 May 2025",
+                        "url": "https://arxiv.org/pdf/2505.09388",
+                        "snippet": "PDF body",
+                        "content": "full paper content",
+                    }
+                ],
+                "citations": [],
+            },
+            secondary_result={
+                "provider": "tavily",
+                "results": [
+                    {
+                        "provider": "tavily",
+                        "title": "Qwen3 Technical Report",
+                        "url": "https://arxiv.org/abs/2505.09388",
+                        "snippet": "Abstract",
+                        "content": "",
+                    }
+                ],
+                "citations": [],
+            },
+            max_results=5,
+        )
+
+        self.assertEqual(merged["results"][0]["url"], "https://arxiv.org/abs/2505.09388")
+        self.assertEqual(merged["results"][0]["title"], "Qwen3 Technical Report")
+        self.assertEqual(merged["results"][0]["content"], "full paper content")
+
+    def test_known_canonical_rescues_cover_active_benchmark_resources(self) -> None:
+        client = MySearchClient()
+        cases = {
+            "OpenAI API pricing official": "https://developers.openai.com/api/docs/pricing/",
+            "OpenAI Batch API official": "https://developers.openai.com/api/docs/guides/batch/",
+            "Next.js generateMetadata docs": "https://nextjs.org/docs/app/api-reference/functions/generate-metadata",
+        }
+
+        for query, expected_url in cases.items():
+            with self.subTest(query=query):
+                rescue = client._build_known_canonical_resource_rescue(
+                    query=query,
+                    mode="docs",
+                    intent="resource",
+                )
+                self.assertIsNotNone(rescue)
+                self.assertEqual(rescue["url"], expected_url)
+
+        self.assertFalse(
+            client._looks_like_canonical_pricing_result(
+                hostname="openai.com",
+                path="/careers/pricing-strategist-api-san-francisco",
+            )
+        )
+
     def test_verify_blend_returns_after_first_verifier_and_propagates_timeout(self) -> None:
         client = MySearchClient()
         captured_timeouts: dict[str, int | None] = {}
@@ -13028,6 +13294,28 @@ class ExaSocialFallbackBudgetTests(unittest.TestCase):
         self.assertEqual(len(captured), 2)
         self.assertEqual(captured[0], 15)
         self.assertEqual(captured[1], 15)
+
+    def test_expired_budget_does_not_start_second_exa_call(self) -> None:
+        client = MySearchClient()
+        captured: list[int | None] = []
+
+        def fake_search_exa(**kwargs):  # type: ignore[no-untyped-def]
+            captured.append(kwargs.get("timeout_seconds"))
+            return {"results": []}
+
+        client._search_exa = fake_search_exa  # type: ignore[method-assign]
+        with patch("mysearch.clients.time.monotonic", side_effect=[0.0, 0.0, 31.0]):
+            with self.assertRaisesRegex(MySearchError, "budget exhausted"):
+                client._search_exa_social_fallback(
+                    query="test",
+                    max_results=5,
+                    fallback_reason="primary timed out",
+                    from_date=None,
+                    to_date=None,
+                    timeout_seconds=30,
+                )
+
+        self.assertEqual(captured, [15])
 
     def test_no_budget_passed_keeps_request_default(self) -> None:
         client = MySearchClient()
