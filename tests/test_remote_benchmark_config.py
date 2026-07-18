@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +16,34 @@ from scripts import run_remote_mcp_benchmark
 
 
 class RemoteBenchmarkConfigTests(unittest.TestCase):
+    def test_run_remote_cases_keeps_bearer_out_of_process_arguments(self) -> None:
+        bearer = "th-sensitive-bearer"
+        with patch.object(
+            run_remote_mcp_benchmark.subprocess,
+            "run",
+            return_value=SimpleNamespace(stdout="[]", stderr="", returncode=0),
+        ) as run:
+            result = run_remote_mcp_benchmark.run_remote_cases(
+                host="root@example.test",
+                mysearch_url="http://127.0.0.1:18000/mcp",
+                tavily_url="http://127.0.0.1:8787/mcp",
+                tavily_bearer=bearer,
+                cases=[],
+            )
+
+        self.assertEqual(result, [])
+        command = run.call_args.args[0]
+        self.assertEqual(command[-2:], ["python3", "-"])
+        self.assertNotIn(bearer, " ".join(command))
+
+        remote_source = run.call_args.kwargs["input"]
+        namespace: dict[str, object] = {}
+        exec(remote_source.splitlines()[0], namespace)
+        payload = json.loads(
+            run_remote_mcp_benchmark.base64.b64decode(namespace["PAYLOAD_B64"]).decode()
+        )
+        self.assertEqual(payload["tavily_bearer"], bearer)
+
     def test_fieldnames_use_loop9_dimensions_and_explicit_orchestration_contract(self) -> None:
         for provider in ("mysearch", "tavily"):
             for dimension in run_remote_mcp_benchmark.BENCHMARK_DIMENSIONS:
