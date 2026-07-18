@@ -149,6 +149,46 @@ class SoftwareVersionFixTests(unittest.TestCase):
 
         self.assertEqual([candidate[0] for candidate in candidates], ["3.14.6"])
 
+    def test_exact_patch_release_beats_major_only_status_page(self) -> None:
+        client = MySearchClient()
+        result = {
+            "answer": "The latest stable version of Python is 3.14.3.",
+            "results": [
+                {
+                    "title": "Python documentation by version",
+                    "url": "https://www.python.org/doc/versions",
+                    "snippet": "Release versions. Python 3.14.",
+                },
+                {
+                    "title": "The latest Python version",
+                    "url": "https://phoenixnap.com/kb/latest-python-version",
+                    "snippet": "The latest stable version of Python is 3.14.3.",
+                },
+            ],
+            "primary_search": {
+                "results": [
+                    {
+                        "title": "Download Python",
+                        "url": "https://www.python.org/downloads/",
+                        "snippet": "Download the latest version of Python. Download Python 3.14.6.",
+                    }
+                ]
+            },
+            "evidence": {},
+        }
+
+        updated = client._apply_software_version_answer_override(
+            query="what is the latest stable version of Python",
+            mode="web",
+            intent="factual",
+            result=result,
+        )
+
+        self.assertEqual(
+            updated["answer"],
+            "The latest stable version of Python is 3.14.6.",
+        )
+
 
 class CrawlBreadthFixTests(unittest.TestCase):
     def test_crawl_site_defaults_to_crawl_entire_domain(self) -> None:

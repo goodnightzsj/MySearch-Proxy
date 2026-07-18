@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-07-18T16:37:28Z",
+  "updated_at": "2026-07-18T17:47:35Z",
   "current_loop": 11,
   "consecutive_loops_with_no_new_issues": 0,
   "stop_condition": "end after three consecutive loops with no new Critical/High/Medium/Low findings under the loop's final benchmark definition",
-  "last_new_issue": "Loop 11's deployed 55cee0c run captured 41/41 rows under the 84-column contract with no MySearch timeout, empty result, budget overrun, or row error, but factual-accuracy-01 regressed to Python 3.14.3 despite nested official 3.14.6 evidence. Provider-key analysis also found missing per-key 429 cooldown, terminal quota/auth isolation, and manual recovery semantics across direct, Proxy, and Social paths.",
+  "last_new_issue": "Loop 11's revision-1e54884 run captured 41/41 rows under the 84-column contract with no structural failure, timeout, empty result, or row error, but factual-accuracy-01 still answered Python 3.14.3 despite nested official 3.14.6 evidence. Follow-up provider-key review found direct error-detail leakage, stale in-flight failure writes after manual recovery, lost Proxy-wide cooldown Retry-After, and non-finite Retry-After parsing gaps; local fixes are validated but not yet released.",
   "last_no_new_issue_loop": 9,
-  "next_step": "Commit and push the fully reviewed factual-answer and provider-key scheduling candidate, wait for Docker CI, redeploy the stack, then run a fresh full 41-row comparison under the unchanged 84-column output contract. The older 73/81-column, 30153c1, and 55cee0c artifacts are intermediate only."
+  "next_step": "Commit and push the factual-answer and provider-scheduling hardening candidate, wait for Docker CI, redeploy the stack, then run another fresh full 41-row comparison under the unchanged 84-column output contract."
 }

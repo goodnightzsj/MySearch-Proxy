@@ -105,9 +105,12 @@ class MySearchKeyRing:
         reason: str,
         *,
         retry_after_seconds: int | None = None,
+        generation: int | None = None,
     ) -> bool:
         """Remove one credential from scheduling temporarily or until reload."""
         with self._lock:
+            if generation is not None and generation != self._generation:
+                return False
             if not any(record.key == key for record in self._keys.get(provider, [])):
                 return False
             next_state = {
