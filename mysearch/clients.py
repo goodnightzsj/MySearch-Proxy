@@ -14904,6 +14904,7 @@ class MySearchClient:
         reject_substrings: list[str] | None = None,
     ) -> str:
         entity = re.sub(r"\s+", " ", value).strip(" \t\r\n-:;,.\"'“”‘’")
+        entity = re.sub(r"^[#>*`]+\s*", "", entity)
         entity = re.sub(r"^[·•]+\s*", "", entity)
         entity = re.sub(r"^(?:winner|winners)\s*[:\-]\s*", "", entity, flags=re.IGNORECASE)
         entity = re.sub(r"['’]s\s+win\b.*$", "", entity, flags=re.IGNORECASE)
