@@ -139,6 +139,9 @@ let effectiveTheme = 'light';
 let appDialogResolver = null;
 let autoThemeIntervalId = 0;
 const tableControls = { tokens: {}, keys: {} };
+const KEY_PAGE_SIZE = 20;
+const MOBILE_KEY_PAGE_SIZE = 5;
+let activeQuickstartTab = 'config';
 const overlayFocusMemory = {};
 const OVERLAY_PRIORITY = ['app-dialog', 'detail-drawer', 'settings-modal'];
 
@@ -290,9 +293,13 @@ function getTokenTableState(service) {
 
 function getKeyTableState(service) {
   if (!tableControls.keys[service]) {
-    tableControls.keys[service] = { search: '', filter: 'all', sort: 'risk' };
+    tableControls.keys[service] = { search: '', filter: 'all', sort: 'risk', page: 1 };
   }
   return tableControls.keys[service];
+}
+
+function getKeyPageSize() {
+  return window.matchMedia('(max-width: 720px)').matches ? MOBILE_KEY_PAGE_SIZE : KEY_PAGE_SIZE;
 }
 
 function parseTimeValue(value) {
@@ -1530,9 +1537,11 @@ MYSEARCH_XAI_SOCIAL_SEARCH_PATH=/social/search
 MYSEARCH_XAI_API_KEY=YOUR_MYSEARCH_PROXY_TOKEN`;
 }
 
-function buildMySearchEnv(mysearch, social) {
+function buildMySearchEnv(mysearch, social, { includeSecret = false } = {}) {
   const baseUrl = location.origin;
-  const token = mysearch?.tokens?.[0]?.token || 'YOUR_MYSEARCH_PROXY_TOKEN';
+  const token = includeSecret && mysearch?.tokens?.[0]?.token
+    ? mysearch.tokens[0].token
+    : 'YOUR_MYSEARCH_PROXY_TOKEN';
   const routeCards = getQuickstartProviderCards(latestServices, social || {});
   const readyProviders = routeCards.filter((card) => card.tone === 'ok').map((card) => card.label);
   const pendingProviders = routeCards.filter((card) => card.tone !== 'ok').map((card) => `${card.label}: ${card.title}`);
@@ -1888,8 +1897,13 @@ function renderMySearchQuickstart(mysearch, social) {
       </div>
     </div>
     <div class="service-body">
+      <div class="quickstart-tabs workspace-tabs" role="tablist" aria-label="MySearch 接入任务">
+        <button type="button" class="workspace-tab quickstart-tab is-active" id="quickstart-tab-config" role="tab" aria-selected="true" aria-controls="quickstart-panel-config" tabindex="0" data-quickstart-tab="config" onclick="setQuickstartTab('config')">配置</button>
+        <button type="button" class="workspace-tab quickstart-tab" id="quickstart-tab-install" role="tab" aria-selected="false" aria-controls="quickstart-panel-install" tabindex="-1" data-quickstart-tab="install" onclick="setQuickstartTab('install')">安装</button>
+        <button type="button" class="workspace-tab quickstart-tab" id="quickstart-tab-tokens" role="tab" aria-selected="false" aria-controls="quickstart-panel-tokens" tabindex="-1" data-quickstart-tab="tokens" onclick="setQuickstartTab('tokens')">Token</button>
+      </div>
       <div class="quickstart-grid">
-        <section class="subcard api-shell quickstart-card quickstart-primary-card">
+        <section class="subcard api-shell quickstart-card quickstart-primary-card" id="quickstart-panel-config" role="tabpanel" aria-labelledby="quickstart-tab-config" aria-hidden="false" data-quickstart-panel="config">
           <div class="quickstart-card-head">
             <div class="quickstart-card-copy">
               <div class="service-brief-note">Access Config</div>
@@ -1943,13 +1957,13 @@ function renderMySearchQuickstart(mysearch, social) {
               </div>
               <div class="code-toolbar">
                 <div class="endpoint">复制到 <span class="mono">mysearch/.env</span> 就能用。默认已经包含统一 proxy 接法。</div>
-                <button class="btn btn-sm" type="button" onclick="copyCode('mysearch-proxy-env', this)">复制 .env</button>
+                <button class="btn btn-sm" type="button" onclick="copyMySearchEnv(this)">复制含 Token 的 .env</button>
               </div>
               <pre class="code-block mono" id="mysearch-proxy-env"></pre>
             </div>
           </div>
         </section>
-        <section class="subcard api-shell quickstart-card">
+        <section class="subcard api-shell quickstart-card hidden" id="quickstart-panel-install" role="tabpanel" aria-labelledby="quickstart-tab-install" aria-hidden="true" data-quickstart-panel="install">
           <div class="quickstart-card-head">
             <div class="quickstart-card-copy">
               <div class="service-brief-note">Install Path</div>
@@ -1993,7 +2007,7 @@ function renderMySearchQuickstart(mysearch, social) {
             </div>
           </div>
         </section>
-        <section class="subcard detail-card detail-card-static" id="mysearch-token-manager">
+        <section class="subcard detail-card detail-card-static hidden" id="quickstart-panel-tokens" role="tabpanel" aria-labelledby="quickstart-tab-tokens" aria-hidden="true" data-quickstart-panel="tokens">
           <div class="detail-card-static-head">
             <div>
               <h3>MySearch 通用 Token</h3>
@@ -2007,7 +2021,7 @@ function renderMySearchQuickstart(mysearch, social) {
               <button class="btn btn-primary" type="button" onclick="createToken('mysearch', this)">创建通用 Token</button>
             </div>
             <div class="detail-glance" id="token-glance-mysearch"></div>
-            <div class="detail-caption">表格只保留摘要。点击任一行，会在右侧抽屉里查看完整 token、调用统计和维护动作。</div>
+            <div class="detail-caption">表格只保留摘要。点击任一行，可在右侧查看掩码、调用统计和维护动作；完整值仅通过复制获取。</div>
             ${renderTableLegend('token')}
             <div class="table-tools">
               <div class="table-tools-row">
@@ -2045,6 +2059,7 @@ function renderMySearchQuickstart(mysearch, social) {
   document.getElementById('mysearch-install-cmd').textContent = buildMySearchInstall();
   renderTokens('mysearch', tokens);
   renderPoolGlance('mysearch', mysearch || {});
+  setQuickstartTab(activeQuickstartTab, false);
 }
 
 async function createMySearchBootstrapToken(button) {
@@ -2064,6 +2079,7 @@ async function createMySearchBootstrapToken(button) {
   await refresh({ force: true, scope: getRefreshScopeForService('mysearch') });
   const envBlock = document.getElementById('mysearch-proxy-env');
   if (envBlock) {
+    setQuickstartTab('config', false);
     envBlock.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
 }
@@ -2693,6 +2709,7 @@ function renderServiceShells() {
                     <tbody id="keys-body-${service}"></tbody>
                   </table>
                 </div>
+                <div class="table-pagination" id="key-pagination-${service}" aria-live="polite"></div>
               </div>
           </section>
         </div>
@@ -3399,10 +3416,9 @@ function renderSocialWorkspace(social) {
   `;
 }
 
-function renderApiExample(service, tokens) {
-  const firstToken = tokens && tokens.length ? tokens[0].token : 'YOUR_PROXY_TOKEN';
+function renderApiExample(service) {
   document.getElementById(`base-url-${service}`).textContent = location.origin;
-  document.getElementById(`curl-example-${service}`).textContent = buildCurlExample(service, firstToken);
+  document.getElementById(`curl-example-${service}`).textContent = buildCurlExample(service, 'YOUR_PROXY_TOKEN');
 }
 
 function renderTokenQuota(token) {
@@ -3560,18 +3576,31 @@ function setTokenSort(service, value) {
 }
 
 function setKeySearch(service, value) {
-  getKeyTableState(service).search = value || '';
+  const state = getKeyTableState(service);
+  state.search = value || '';
+  state.page = 1;
   renderKeys(service, getServicePayload(service).keys || []);
 }
 
 function setKeyFilter(service, value) {
-  getKeyTableState(service).filter = value || 'all';
+  const state = getKeyTableState(service);
+  state.filter = value || 'all';
+  state.page = 1;
   renderKeys(service, getServicePayload(service).keys || []);
 }
 
 function setKeySort(service, value) {
-  getKeyTableState(service).sort = value || 'risk';
+  const state = getKeyTableState(service);
+  state.sort = value || 'risk';
+  state.page = 1;
   renderKeys(service, getServicePayload(service).keys || []);
+}
+
+function setKeyPage(service, page) {
+  const state = getKeyTableState(service);
+  state.page = Math.max(1, Number(page) || 1);
+  renderKeys(service, getServicePayload(service).keys || []);
+  document.getElementById(`key-search-${service}`)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
 function renderTokens(service, tokens) {
@@ -3608,16 +3637,16 @@ function renderTokens(service, tokens) {
         onclick="openTokenDetail('${service}', ${token.id})"
         onkeydown="handleTableRowKey(event, 'token', '${service}', ${token.id})"
       >
-        <td class="mono">
+        <td class="mono" data-label="Token">
           ${maskToken(token.token)}
           <div class="row-meta">点击查看详情</div>
         </td>
-        <td>${escapeHtml(token.name || '-')}</td>
-        <td>${renderTokenSummary(token)}</td>
-        <td>
+        <td data-label="名称">${escapeHtml(token.name || '-')}</td>
+        <td data-label="运行摘要">${renderTokenSummary(token)}</td>
+        <td data-label="操作">
           <div class="table-actions">
             <!-- r5 P0-2: 删除按钮已挪到抽屉的 Danger Zone（点击行展开），避免误删。 -->
-            <button class="btn btn-sm" onclick='event.stopPropagation(); copyText(${JSON.stringify(token.token)}, this)'>复制</button>
+            <button class="btn btn-sm" onclick="event.stopPropagation(); copyTokenById('${service}', ${token.id}, this)">复制</button>
           </div>
         </td>
       </tr>
@@ -3680,8 +3709,10 @@ function renderAccountQuota(service, key) {
 
 function renderKeys(service, keys) {
   const tbody = document.getElementById(`keys-body-${service}`);
+  const pagination = document.getElementById(`key-pagination-${service}`);
   syncKeyToolbar(service);
   if (!keys || keys.length === 0) {
+    if (pagination) pagination.innerHTML = '';
     tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state">
       <div class="empty-state-icon" aria-hidden="true">🔑</div>
       <strong>当前 service 还没有导入 Key</strong>
@@ -3692,6 +3723,7 @@ function renderKeys(service, keys) {
 
   const filtered = getFilteredKeys(service, keys);
   if (!filtered.length) {
+    if (pagination) pagination.innerHTML = '';
     tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state">
       <div class="empty-state-icon" aria-hidden="true">🔍</div>
       <strong>没有符合当前筛选条件的 Key</strong>
@@ -3700,7 +3732,14 @@ function renderKeys(service, keys) {
     return;
   }
 
-  tbody.innerHTML = filtered.map((key) => {
+  const state = getKeyTableState(service);
+  const pageSize = getKeyPageSize();
+  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
+  state.page = Math.min(Math.max(1, state.page || 1), pageCount);
+  const pageStart = (state.page - 1) * pageSize;
+  const visibleKeys = filtered.slice(pageStart, pageStart + pageSize);
+
+  tbody.innerHTML = visibleKeys.map((key) => {
     const availability = getKeyAvailability(key);
     const rowClass = getKeyRowClass(service, key);
     return `
@@ -3712,16 +3751,16 @@ function renderKeys(service, keys) {
         onclick="openKeyDetail('${service}', ${key.id})"
         onkeydown="handleTableRowKey(event, 'key', '${service}', ${key.id})"
       >
-        <td>${fmtNum(key.id)}</td>
-        <td class="mono">
-          ${escapeHtml(key.key_masked || key.key)}
+        <td data-label="ID">${fmtNum(key.id)}</td>
+        <td class="mono" data-label="Key">
+          ${escapeHtml(key.key_masked || maskToken(key.key))}
           <div class="row-meta">点击查看详情</div>
         </td>
-        <td>${escapeHtml(key.email || '-')}</td>
-        <td>${renderKeyStatusSummary(service, key)}</td>
-        <td>${renderKeyUsageSummary(key)}</td>
-        <td><span class="tag ${availability.schedulable ? 'tag-ok' : 'tag-off'}">${escapeHtml(availability.label)}</span></td>
-        <td>
+        <td data-label="邮箱">${escapeHtml(key.email || '-')}</td>
+        <td data-label="同步 / 状态">${renderKeyStatusSummary(service, key)}</td>
+        <td data-label="代理摘要">${renderKeyUsageSummary(key)}</td>
+        <td data-label="状态"><span class="tag ${availability.schedulable ? 'tag-ok' : 'tag-off'}">${escapeHtml(availability.label)}</span></td>
+        <td data-label="操作">
           <div class="table-actions">
             <!-- r5 P0-2: 删除按钮已挪到抽屉的 Danger Zone，行内只保留启用/禁用。 -->
             <button class="btn btn-sm" onclick="event.stopPropagation(); toggleKey('${service}', ${key.id}, ${availability.schedulable ? 0 : 1})">${escapeHtml(availability.actionLabel)}</button>
@@ -3730,7 +3769,30 @@ function renderKeys(service, keys) {
       </tr>
     `;
   }).join('');
+
+  if (pagination) {
+    pagination.innerHTML = `
+      <span class="table-pagination-count">第 ${fmtNum(state.page)} / ${fmtNum(pageCount)} 页 · 共 ${fmtNum(filtered.length)} 个 Key</span>
+      <div class="table-pagination-actions">
+        <button class="btn btn-soft btn-sm" type="button" ${state.page <= 1 ? 'disabled' : ''} onclick="setKeyPage('${service}', ${state.page - 1})">上一页</button>
+        <button class="btn btn-soft btn-sm" type="button" ${state.page >= pageCount ? 'disabled' : ''} onclick="setKeyPage('${service}', ${state.page + 1})">下一页</button>
+      </div>
+    `;
+  }
 }
+
+let lastKeyPageSize = getKeyPageSize();
+window.addEventListener('resize', () => {
+  const nextPageSize = getKeyPageSize();
+  if (nextPageSize === lastKeyPageSize) return;
+  lastKeyPageSize = nextPageSize;
+  Object.keys(tableControls.keys).forEach((service) => {
+    const tbody = document.getElementById(`keys-body-${service}`);
+    if (!tbody) return;
+    getKeyTableState(service).page = 1;
+    renderKeys(service, getServicePayload(service).keys || []);
+  });
+});
 
 function openTokenDetail(service, tokenId) {
   const payload = getServicePayload(service);
@@ -3752,7 +3814,12 @@ function openTokenDetail(service, tokenId) {
       drawerMetric('小时调用', fmtNum(stats.hour_count || 0), '当前 token 的近一小时请求量'),
     ].join(''),
     bodyHtml: [
-      drawerSection('完整 Token', `<pre class="code-block mono">${escapeHtml(token.token)}</pre>`),
+      drawerSection('访问凭据', `
+        <div class="secret-preview">
+          <code class="mono">${escapeHtml(maskToken(token.token))}</code>
+          <span>完整值默认隐藏。需要使用时，通过下方维护动作直接复制。</span>
+        </div>
+      `),
       drawerSection('配额策略', renderTokenQuota(token)),
       drawerSection('代理统计', `
         <div class="drawer-grid drawer-grid-compact">
@@ -3763,7 +3830,7 @@ function openTokenDetail(service, tokenId) {
     ].join(''),
     actionsHtml: [
       renderDrawerActionGroup('维护动作', `
-        <button class="btn btn-soft" type="button" onclick='copyText(${JSON.stringify(token.token)}, this)'>复制 Token</button>
+        <button class="btn btn-soft" type="button" onclick="copyTokenById('${service}', ${token.id}, this)">复制 Token</button>
       `),
       renderDrawerActionGroup('危险动作', `
         <button class="btn btn-danger" type="button" onclick="closeDetailDrawer(); delToken('${service}', ${token.id})">删除 Token</button>
@@ -3784,7 +3851,7 @@ function openKeyDetail(service, keyId) {
   openDetailDrawer({
     kicker: `${label} Key`,
     title: key.email || `${label} Key #${key.id}`,
-    subtitle: `${escapeHtml(key.key_masked || key.key)} · ${escapeHtml(availability.label)}`,
+    subtitle: `${escapeHtml(key.key_masked || maskToken(key.key))} · ${escapeHtml(availability.label)}`,
     tone: availability.schedulable ? 'ok' : 'danger',
     summaryHtml: [
       drawerMetric('Key 状态', availability.label, availability.detail),
@@ -3820,7 +3887,7 @@ function renderProviderWorkspace(service, servicePayload) {
   const meta = SERVICE_META[service];
   renderSyncMeta(service, payload);
   renderOverview(service, payload);
-  renderApiExample(service, payload.tokens || []);
+  renderApiExample(service);
   renderTokens(service, payload.tokens || []);
   renderKeys(service, payload.keys || []);
   renderPoolGlance(service, payload);
@@ -4203,16 +4270,24 @@ async function copyCode(elementId, button) {
   }
 }
 
-async function copyEnvAndRevealInstall(button) {
-  const envBlock = document.getElementById('mysearch-proxy-env');
-  const installBlock = document.getElementById('mysearch-install-cmd');
-  if (!envBlock) {
-    flashButtonState(button, '未找到 .env', 'error');
-    return;
-  }
+async function copyMySearchEnv(button) {
   try {
-    await writeClipboardText(envBlock.textContent);
+    const value = buildMySearchEnv(latestMySearch || {}, latestSocial || {}, { includeSecret: true });
+    await writeClipboardText(value);
+    flashButtonState(button, '已复制', 'success');
+  } catch (error) {
+    console.error('Copy failed for MySearch .env', error);
+    flashButtonState(button, '复制失败', 'error');
+  }
+}
+
+async function copyEnvAndRevealInstall(button) {
+  const installBlock = document.getElementById('mysearch-install-cmd');
+  try {
+    const value = buildMySearchEnv(latestMySearch || {}, latestSocial || {}, { includeSecret: true });
+    await writeClipboardText(value);
     if (installBlock) {
+      setQuickstartTab('install', false);
       installBlock.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
     flashButtonState(button, '已复制并定位', 'success');
@@ -4230,6 +4305,15 @@ async function copyText(value, button) {
     console.error('Copy failed for inline value', error);
     flashButtonState(button, '复制失败', 'error');
   }
+}
+
+async function copyTokenById(service, tokenId, button) {
+  const token = (getServicePayload(service)?.tokens || []).find((item) => Number(item.id) === Number(tokenId));
+  if (!token?.token) {
+    flashButtonState(button, '未找到', 'error');
+    return;
+  }
+  await copyText(token.token, button);
 }
 
 document.addEventListener('keydown', (event) => {
@@ -4313,6 +4397,24 @@ function setActiveSettingsTab(tabName) {
     const isActive = panel.dataset.settingsPanel === tabName;
     panel.classList.toggle('hidden', !isActive);
     panel.classList.toggle('is-active', isActive);
+    panel.setAttribute('aria-hidden', isActive ? 'false' : 'true');
+  });
+}
+
+function setQuickstartTab(tabName, focus = true) {
+  const allowed = ['config', 'install', 'tokens'];
+  const nextTab = allowed.includes(tabName) ? tabName : 'config';
+  activeQuickstartTab = nextTab;
+  document.querySelectorAll('.quickstart-tab').forEach((button) => {
+    const isActive = button.dataset.quickstartTab === nextTab;
+    button.classList.toggle('is-active', isActive);
+    button.setAttribute('aria-selected', isActive ? 'true' : 'false');
+    button.setAttribute('tabindex', isActive ? '0' : '-1');
+    if (isActive && focus) button.focus({ preventScroll: true });
+  });
+  document.querySelectorAll('[data-quickstart-panel]').forEach((panel) => {
+    const isActive = panel.dataset.quickstartPanel === nextTab;
+    panel.classList.toggle('hidden', !isActive);
     panel.setAttribute('aria-hidden', isActive ? 'false' : 'true');
   });
 }

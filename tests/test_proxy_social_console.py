@@ -77,6 +77,55 @@ class ProxySocialConsoleTests(unittest.TestCase):
         self.assertIn('id="settings-social-upstream-key-list"', settings)
         self.assertIn('id="settings-social-clear-upstream-api-key"', settings)
 
+    def test_console_masks_credentials_until_an_explicit_copy_action(self) -> None:
+        javascript = (REPO_ROOT / "proxy/static/js/console.js").read_text(encoding="utf-8")
+
+        self.assertIn("{ includeSecret = false }", javascript)
+        self.assertIn("buildCurlExample(service, 'YOUR_PROXY_TOKEN')", javascript)
+        self.assertIn("copyMySearchEnv(this)", javascript)
+        self.assertIn("copyTokenById('${service}', ${token.id}, this)", javascript)
+        self.assertIn("{ includeSecret: true }", javascript)
+        self.assertNotIn("copyText(${JSON.stringify(token.token)}, this)", javascript)
+        self.assertNotIn(
+            'drawerSection(\'完整 Token\', `<pre class="code-block mono">${escapeHtml(token.token)}</pre>`)',
+            javascript,
+        )
+        self.assertIn("maskToken(token.token)", javascript)
+
+    def test_settings_modal_uses_an_internal_scroll_region_without_sticky_footer(self) -> None:
+        stylesheet = (REPO_ROOT / "proxy/static/css/console.css").read_text(encoding="utf-8")
+        settings = (REPO_ROOT / "proxy/templates/components/_settings_modal.html").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("grid-template-rows: auto auto minmax(0, 1fr);", stylesheet)
+        self.assertIn("overscroll-behavior: contain;", stylesheet)
+        self.assertNotIn("position: sticky;\n  bottom: -22px;", stylesheet)
+        self.assertNotIn("settings-head-meta", settings)
+
+    def test_key_tables_paginate_and_mobile_tables_keep_field_labels(self) -> None:
+        javascript = (REPO_ROOT / "proxy/static/js/console.js").read_text(encoding="utf-8")
+        stylesheet = (REPO_ROOT / "proxy/static/css/console.css").read_text(encoding="utf-8")
+
+        self.assertIn("const KEY_PAGE_SIZE = 20;", javascript)
+        self.assertIn("const MOBILE_KEY_PAGE_SIZE = 5;", javascript)
+        self.assertIn('id="key-pagination-${service}"', javascript)
+        self.assertIn("filtered.slice(pageStart, pageStart + pageSize)", javascript)
+        self.assertIn('data-label="同步 / 状态"', javascript)
+        self.assertIn("key.key_masked || maskToken(key.key)", javascript)
+        self.assertIn(".table-pagination-actions", stylesheet)
+
+    def test_mysearch_quickstart_uses_task_tabs_and_mobile_touch_targets(self) -> None:
+        javascript = (REPO_ROOT / "proxy/static/js/console.js").read_text(encoding="utf-8")
+        stylesheet = (REPO_ROOT / "proxy/static/css/console.css").read_text(encoding="utf-8")
+
+        self.assertIn('data-quickstart-tab="config"', javascript)
+        self.assertIn('data-quickstart-tab="install"', javascript)
+        self.assertIn('data-quickstart-tab="tokens"', javascript)
+        self.assertIn("function setQuickstartTab(tabName, focus = true)", javascript)
+        self.assertIn(".access-shell-actions .user-btn", stylesheet)
+        self.assertIn("min-height: 44px;", stylesheet)
+
 
 if __name__ == "__main__":
     unittest.main()
