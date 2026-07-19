@@ -2342,6 +2342,26 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(answer, "Album of the Year winner: Bad Bunny")
 
+    def test_extract_result_event_answer_uses_markdown_link_label_for_award_entity(self) -> None:
+        client = MySearchClient()
+
+        answer = client._extract_result_event_answer(
+            query="2026 Grammy album of the year winner",
+            results=[
+                {
+                    "title": "Album Of The Year Grammy Award Winners & Nominees",
+                    "url": "https://www.grammy.com/awards/categories/album-of-the-year/",
+                    "snippet": (
+                        "[Bad Bunny](https://www.grammy.com/tag/bad-bunny/) won the 2026 "
+                        "Grammy Award for Album Of The Year with \"DeBÍ TiRAR MáS FOToS\""
+                    ),
+                    "content": "",
+                }
+            ],
+        )
+
+        self.assertEqual(answer, "Album of the Year winner: Bad Bunny")
+
     def test_extract_result_event_answer_strips_possessive_win_shell_from_award_entity(self) -> None:
         client = MySearchClient()
 

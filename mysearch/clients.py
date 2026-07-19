@@ -14659,6 +14659,13 @@ class MySearchClient:
         if not text:
             return ""
 
+        text = re.sub(
+            r"\[([^\]\n]+)\]\(https?://[^)\n]+\)",
+            r"\1",
+            text,
+            flags=re.IGNORECASE,
+        )
+
         if "best picture" in query_lower or "最佳影片" in query_lower:
             entity = self._extract_named_fact_entity(
                 text,
