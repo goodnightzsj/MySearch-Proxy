@@ -3987,31 +3987,48 @@ async function addSingleKey(service, button) {
   const input = document.getElementById(`single-key-${service}`);
   const key = input.value.trim();
   if (!key) return;
-  await runWithBusyButton(button, {
+  const result = await runWithBusyButton(button, {
     busyLabel: '添加中...',
-    successLabel: '已添加',
+    successLabel: '已处理',
     errorLabel: '添加失败',
   }, async () => {
-    await api('POST', '/api/keys', { service, key });
+    const payload = await api('POST', '/api/keys', { service, key });
     input.value = '';
+    return payload;
   });
+  showToast(describeKeyIngestionResult(result, service), result.imported ? 'success' : 'warn');
   await refresh({ force: true, scope: getRefreshScopeForService(service) });
+}
+
+function describeKeyIngestionResult(result, service) {
+  const label = SERVICE_META[service].label;
+  const parts = [
+    ['新增', Number(result.inserted || 0)],
+    ['恢复', Number(result.reactivated || 0)],
+    ['重复', Number(result.duplicates || 0)],
+    ['仍停用', Number(result.disabled || 0)],
+    ['格式无效', Number(result.invalid || 0)],
+  ].filter(([, count]) => count > 0).map(([name, count]) => `${name} ${count}`);
+  if (!parts.length) return `${label} Key 未发生变更`;
+  return `${label} Key：${parts.join('，')}`;
 }
 
 async function importKeys(service, button) {
   const textarea = document.getElementById(`import-text-${service}`);
   const text = textarea.value.trim();
   if (!text) return;
-  await runWithBusyButton(button, {
+  const result = await runWithBusyButton(button, {
     busyLabel: '导入中...',
-    successLabel: '已导入',
+    successLabel: '已处理',
     errorLabel: '导入失败',
   }, async () => {
-    const result = await api('POST', '/api/keys', { service, file: text });
+    return api('POST', '/api/keys', { service, file: text });
+  });
+  if (!(result.invalid || result.disabled)) {
     textarea.value = '';
     document.getElementById(`import-wrap-${service}`).classList.add('hidden');
-    showToast(`已导入 ${result.imported || 0} 个 ${SERVICE_META[service].label} Key`, 'success');
-  });
+  }
+  showToast(describeKeyIngestionResult(result, service), result.imported ? 'success' : 'warn');
   await refresh({ force: true, scope: getRefreshScopeForService(service) });
 }
 
