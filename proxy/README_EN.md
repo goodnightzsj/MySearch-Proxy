@@ -295,6 +295,8 @@ Baseline console config:
 
 ```env
 ADMIN_PASSWORD=<generate-a-strong-password>
+# Optional registrar-only credential for POST /api/keys.
+MYSEARCH_PROXY_KEY_UPLOAD_TOKEN=
 SOCIAL_GATEWAY_UPSTREAM_BASE_URL=https://api.x.ai/v1
 SOCIAL_GATEWAY_UPSTREAM_RESPONSES_PATH=/responses
 SOCIAL_GATEWAY_ADMIN_BASE_URL=https://media.example.com
@@ -441,6 +443,25 @@ curl http://localhost:9874/api/stats \
 curl "http://localhost:9874/api/keys?service=tavily" \
   -H "X-Admin-Password: your-admin-password"
 ```
+
+The original registrar upload contract remains available at `POST /api/keys`:
+
+```bash
+curl http://localhost:9874/api/keys \
+  -H "Content-Type: application/json" \
+  -H "X-Key-Upload-Token: your-registrar-token" \
+  -d '{"service":"firecrawl","key":"fc-...","email":"account@example.com"}'
+```
+
+Admin session/password authentication remains compatible. The scoped upload header is
+accepted only when `MYSEARCH_PROXY_KEY_UPLOAD_TOKEN` is configured and cannot access
+other admin endpoints. Batch clients can continue sending a newline-delimited string in
+`file`. Responses retain `service`, `ok` / `imported` and additionally report `inserted`,
+`reactivated`, `duplicates`, `disabled`, and `invalid`. Re-upload restores keys disabled
+by the legacy consecutive-failure policy; manual, authentication, and quota disables
+require an explicit `"reactivate": true`. Single-key uploads still accept legacy opaque
+gateway credentials, while recognizable keys from another provider are rejected; batch
+text remains provider-format filtered.
 
 ## Related docs
 

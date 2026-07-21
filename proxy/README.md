@@ -325,6 +325,12 @@ ADMIN_SESSION_MAX_AGE=2592000
 - `PUT /api/settings/social`
 - `GET /api/keys`
 - `POST /api/keys`
+  - 兼容历史注册器请求：`{"service":"firecrawl","key":"fc-...","email":"account@example.com"}`
+  - 批量导入继续使用：`{"service":"firecrawl","file":"email,password,fc-...,timestamp\\nfc-..."}`
+  - 响应保留 `service`、`ok` / `imported`，并新增 `inserted`、`reactivated`、`duplicates`、`disabled`、`invalid` 等精确统计。
+  - 历史失败阈值留下的无原因停用 Key 会在重传时恢复；`manual`、`auth_rejected`、`quota_exhausted` 默认保持停用，可传 `"reactivate": true` 显式恢复。
+  - 默认沿用管理员 session、`X-Admin-Password` 或管理员 Bearer；配置 `MYSEARCH_PROXY_KEY_UPLOAD_TOKEN` 后，注册器也可仅带 `X-Key-Upload-Token`，该 Token 不可用于其他管理 API。
+  - 单条上传保留历史 opaque gateway credential 兼容；批量文本仍按 Provider Key 格式筛选。
 - `GET /api/tokens`
 - `POST /api/tokens`
 - `POST /api/usage/sync`

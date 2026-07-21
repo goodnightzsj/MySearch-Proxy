@@ -59,6 +59,7 @@ try:
 except (TypeError, ValueError):
     ADMIN_SESSION_MAX_AGE = 2592000
 MYSEARCH_PROXY_BOOTSTRAP_TOKEN = os.environ.get("MYSEARCH_PROXY_BOOTSTRAP_TOKEN", "").strip()
+MYSEARCH_PROXY_KEY_UPLOAD_TOKEN = os.environ.get("MYSEARCH_PROXY_KEY_UPLOAD_TOKEN", "").strip()
 
 # r6 C1 / C2: 弱默认值启动告警。默认 `admin` / `change-me` / `change-me-bootstrap-token`
 # 在公网暴露的实例会被立即劫持。这里只 warn 不 fail——dev 环境仍可用，
@@ -70,6 +71,8 @@ if ADMIN_PASSWORD in _KNOWN_WEAK_PASSWORDS:
     _MYSEARCH_WEAK_DEFAULTS.append(f"ADMIN_PASSWORD={ADMIN_PASSWORD}（已知弱默认）")
 if MYSEARCH_PROXY_BOOTSTRAP_TOKEN in _KNOWN_WEAK_BOOTSTRAP_TOKENS:
     _MYSEARCH_WEAK_DEFAULTS.append("MYSEARCH_PROXY_BOOTSTRAP_TOKEN=<weak-default>（已知弱默认）")
+if MYSEARCH_PROXY_KEY_UPLOAD_TOKEN in _KNOWN_WEAK_BOOTSTRAP_TOKENS:
+    _MYSEARCH_WEAK_DEFAULTS.append("MYSEARCH_PROXY_KEY_UPLOAD_TOKEN=<weak-default>（已知弱默认）")
 if _MYSEARCH_WEAK_DEFAULTS:
     print(
         "\n!!! [MySearch Proxy security] 检测到弱默认凭证，公网暴露的实例会被劫持：\n  - "
@@ -1056,6 +1059,16 @@ def verify_admin(request: Request):
     if bearer_ok or password_ok or has_valid_admin_session(request):
         return True
     raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def verify_key_upload(request: Request):
+    expected = MYSEARCH_PROXY_KEY_UPLOAD_TOKEN.strip()
+    provided = request.headers.get("X-Key-Upload-Token", "").strip()
+    if expected and provided and hmac.compare_digest(provided, expected):
+        if expected in _KNOWN_WEAK_BOOTSTRAP_TOKENS:
+            raise HTTPException(status_code=503, detail="Key upload token uses an unsafe default")
+        return True
+    return verify_admin(request)
 
 
 def verify_mysearch_bootstrap(request: Request):
@@ -4235,7 +4248,7 @@ async def sync_usage(request: Request, _=Depends(verify_admin)):
 
 
 @app.post("/api/keys")
-async def add_keys(request: Request, _=Depends(verify_admin)):
+async def add_keys(request: Request, _=Depends(verify_key_upload)):
     try:
         body = await request.json()
     except Exception:
@@ -4243,21 +4256,65 @@ async def add_keys(request: Request, _=Depends(verify_admin)):
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Expected JSON request body")
     service = get_service(body.get("service"), default="tavily")
+    raw_reactivate = body.get("reactivate", False)
+    if isinstance(raw_reactivate, bool):
+        reactivate = raw_reactivate
+    elif isinstance(raw_reactivate, int) and raw_reactivate in {0, 1}:
+        reactivate = bool(raw_reactivate)
+    elif isinstance(raw_reactivate, str) and raw_reactivate.strip().lower() in {
+        "true",
+        "false",
+        "1",
+        "0",
+        "yes",
+        "no",
+        "on",
+        "off",
+    }:
+        reactivate = raw_reactivate.strip().lower() in {"true", "1", "yes", "on"}
+    else:
+        raise HTTPException(status_code=400, detail="'reactivate' must be a boolean")
     if "file" in body:
         file_content = body["file"]
         if not isinstance(file_content, str):
             raise HTTPException(status_code=400, detail="'file' must be a string")
-        pool.invalidate(service)
-        count = db.import_keys_from_text(file_content, service=service)
-        pool.reload(service)
+        result = db.ingest_keys_from_text(
+            file_content,
+            service=service,
+            reactivate=reactivate,
+        )
+        if result["imported"]:
+            pool.invalidate(service)
+            pool.reload(service)
         reset_stats_cache()
-        return {"imported": count, "service": service}
+        return {"ok": True, "service": service, **result}
     if "key" in body:
-        pool.invalidate(service)
-        db.add_key(body["key"], body.get("email", ""), service=service)
-        pool.reload(service)
+        try:
+            result = db.ingest_key(
+                body["key"],
+                body.get("email", ""),
+                service=service,
+                reactivate=reactivate,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        if result["inserted"] or result["reactivated"]:
+            pool.invalidate(service)
+            pool.reload(service)
         reset_stats_cache()
-        return {"ok": True, "service": service}
+        return {
+            "ok": True,
+            "service": service,
+            "id": result["id"],
+            "status": result["status"],
+            "imported": int(result["inserted"] or result["reactivated"]),
+            "inserted": int(result["inserted"]),
+            "reactivated": int(result["reactivated"]),
+            "duplicates": int(result["status"] == "duplicate"),
+            "disabled": int(result["status"] == "disabled"),
+            "invalid": 0,
+            "metadata_updated": int(result["metadata_updated"]),
+        }
     raise HTTPException(status_code=400, detail="Provide 'key' or 'file'")
 
 

@@ -212,6 +212,8 @@ python3 skill/scripts/check_mysearch.py --web-query "OpenAI latest announcements
 ```bash
 export ADMIN_PASSWORD="$(openssl rand -base64 24)"
 export MYSEARCH_PROXY_BOOTSTRAP_TOKEN="$(openssl rand -base64 32)"
+# 只有外部注册器需要：给 POST /api/keys 单独签发最小权限 Token。
+export MYSEARCH_PROXY_KEY_UPLOAD_TOKEN="$(openssl rand -base64 32)"
 
 docker run -d \
   --name mysearch-stack \
@@ -220,6 +222,7 @@ docker run -d \
   -p 8000:8000 \
   -e ADMIN_PASSWORD="$ADMIN_PASSWORD" \
   -e MYSEARCH_PROXY_BOOTSTRAP_TOKEN="$MYSEARCH_PROXY_BOOTSTRAP_TOKEN" \
+  -e MYSEARCH_PROXY_KEY_UPLOAD_TOKEN="$MYSEARCH_PROXY_KEY_UPLOAD_TOKEN" \
   -v $(pwd)/mysearch-proxy-data:/data \
   skernelx/mysearch-stack:latest
 ```

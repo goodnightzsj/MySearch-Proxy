@@ -6,6 +6,7 @@ services:
     environment:
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:?set ADMIN_PASSWORD to a strong value}
       - MYSEARCH_PROXY_DB_PATH=/data/proxy.db
+      - MYSEARCH_PROXY_KEY_UPLOAD_TOKEN=${MYSEARCH_PROXY_KEY_UPLOAD_TOKEN:-}
     volumes:
       - ./data:/data
     restart: unless-stopped

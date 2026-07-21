@@ -98,14 +98,15 @@ def init_db():
         CREATE TABLE IF NOT EXISTS api_keys (
             id INTEGER PRIMARY KEY,
             service TEXT NOT NULL DEFAULT 'tavily',
-            key TEXT UNIQUE NOT NULL,
+            key TEXT NOT NULL,
             email TEXT,
             active INTEGER DEFAULT 1,
             total_used INTEGER DEFAULT 0,
             total_failed INTEGER DEFAULT 0,
             consecutive_fails INTEGER DEFAULT 0,
             last_used_at TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(service, key)
         );
 
         CREATE TABLE IF NOT EXISTS tokens (
@@ -140,6 +141,8 @@ def init_db():
     """)
     _ensure_service_columns(conn)
     _ensure_usage_columns(conn)
+    _ensure_provider_scoped_key_uniqueness(conn)
+    _label_legacy_disabled_keys(conn)
     # 当前产品策略：关闭 token 级调用限流，统一把历史限额字段归零。
     conn.execute(
         """
@@ -182,6 +185,92 @@ def _ensure_usage_columns(conn):
     for name, definition in KEY_USAGE_COLUMNS.items():
         if name not in existing:
             conn.execute(f"ALTER TABLE api_keys ADD COLUMN {name} {definition}")
+
+
+def _unique_index_columns(conn, table_name):
+    indexes = conn.execute(f"PRAGMA index_list({table_name})").fetchall()
+    unique_columns = []
+    for index in indexes:
+        if not index["unique"]:
+            continue
+        columns = conn.execute(f"PRAGMA index_info({index['name']})").fetchall()
+        unique_columns.append(tuple(column["name"] for column in columns))
+    return unique_columns
+
+
+def _ensure_provider_scoped_key_uniqueness(conn):
+    unique_columns = _unique_index_columns(conn, "api_keys")
+    if ("service", "key") in unique_columns and ("key",) not in unique_columns:
+        return
+
+    columns = [row["name"] for row in conn.execute("PRAGMA table_info(api_keys)")]
+    quoted_columns = ", ".join(f'"{column}"' for column in columns)
+    conn.execute("SAVEPOINT migrate_api_keys_provider_scope")
+    try:
+        conn.execute("ALTER TABLE api_keys RENAME TO api_keys_legacy")
+        conn.execute(
+            """
+            CREATE TABLE api_keys (
+                id INTEGER PRIMARY KEY,
+                service TEXT NOT NULL DEFAULT 'tavily',
+                key TEXT NOT NULL,
+                email TEXT,
+                active INTEGER DEFAULT 1,
+                total_used INTEGER DEFAULT 0,
+                total_failed INTEGER DEFAULT 0,
+                consecutive_fails INTEGER DEFAULT 0,
+                last_used_at TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                usage_key_used INTEGER,
+                usage_key_limit INTEGER,
+                usage_key_remaining INTEGER,
+                usage_account_plan TEXT DEFAULT '',
+                usage_account_used INTEGER,
+                usage_account_limit INTEGER,
+                usage_account_remaining INTEGER,
+                usage_synced_at TEXT,
+                usage_sync_error TEXT DEFAULT '',
+                disabled_reason TEXT DEFAULT '',
+                disabled_detail TEXT DEFAULT '',
+                disabled_at TEXT,
+                schedule_until TEXT,
+                UNIQUE(service, key)
+            )
+            """
+        )
+        conn.execute(
+            f"INSERT INTO api_keys ({quoted_columns}) SELECT {quoted_columns} FROM api_keys_legacy"
+        )
+        conn.execute("DROP TABLE api_keys_legacy")
+        conn.execute("RELEASE SAVEPOINT migrate_api_keys_provider_scope")
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT migrate_api_keys_provider_scope")
+        conn.execute("RELEASE SAVEPOINT migrate_api_keys_provider_scope")
+        raise
+
+
+def _label_legacy_disabled_keys(conn):
+    conn.execute(
+        """
+        UPDATE api_keys
+        SET disabled_reason = 'legacy_failure_threshold',
+            disabled_detail = 'disabled by the legacy consecutive failure threshold'
+        WHERE active = 0
+          AND COALESCE(disabled_reason, '') = ''
+          AND disabled_at IS NULL
+          AND consecutive_fails >= 3
+        """
+    )
+    conn.execute(
+        """
+        UPDATE api_keys
+        SET disabled_reason = 'manual',
+            disabled_detail = 'manual disable migrated from the legacy key state'
+        WHERE active = 0
+          AND COALESCE(disabled_reason, '') = ''
+          AND disabled_at IS NULL
+        """
+    )
 
 
 def _service_where(service, normalizer=normalize_service):
@@ -228,7 +317,10 @@ def add_key(key, email="", service="tavily"):
             (service, key, email),
         )
         conn.commit()
-        return conn.execute("SELECT * FROM api_keys WHERE key = ?", (key,)).fetchone()
+        return conn.execute(
+            "SELECT * FROM api_keys WHERE service = ? AND key = ?",
+            (service, key),
+        ).fetchone()
     finally:
         pass  # connection reused via thread-local
 
@@ -440,32 +532,147 @@ def delete_key(key_id):
         pass  # connection reused via thread-local
 
 
-def import_keys_from_text(text, service="tavily"):
-    """从批量文本导入不同服务的 key。"""
+def _normalize_ingested_key(key, service):
+    if not isinstance(key, str):
+        raise ValueError("key must be a string")
+    normalized = key.strip()
+    if not normalized:
+        raise ValueError(f"invalid {service} API key")
+    for known_service, pattern in KEY_PATTERNS.items():
+        if known_service != service and re.fullmatch(pattern, normalized):
+            raise ValueError(f"invalid {service} API key")
+    # Keep the original single-key API compatible with opaque gateway credentials;
+    # batch imports remain format-filtered by ingest_keys_from_text().
+    return normalized
+
+
+def ingest_key(key, email="", service="tavily", *, reactivate=False):
     service = normalize_service(service)
-    pattern = KEY_PATTERNS[service]
-    rows = []
-    for line in text.strip().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        match = re.search(pattern, line)
-        if not match:
-            continue
-        key = match.group(1)
-        parts = line.split(",")
-        email = parts[0].strip() if len(parts) >= 2 else ""
-        rows.append((service, key, email))
-    if not rows:
-        return 0
+    normalized_key = _normalize_ingested_key(key, service)
+    if email is None:
+        normalized_email = ""
+    elif isinstance(email, str):
+        normalized_email = email.strip()
+    else:
+        raise ValueError("email must be a string")
+
     conn = get_conn()
-    before = conn.total_changes
-    conn.executemany(
+    cursor = conn.execute(
         "INSERT OR IGNORE INTO api_keys (service, key, email) VALUES (?, ?, ?)",
-        rows,
+        (service, normalized_key, normalized_email),
     )
     conn.commit()
-    return conn.total_changes - before
+    if cursor.rowcount == 1:
+        return {
+            "id": cursor.lastrowid,
+            "status": "inserted",
+            "inserted": True,
+            "reactivated": False,
+            "metadata_updated": False,
+        }
+
+    row = conn.execute(
+        "SELECT * FROM api_keys WHERE service = ? AND key = ?",
+        (service, normalized_key),
+    ).fetchone()
+    if row is None:
+        raise sqlite3.IntegrityError("key ingestion conflict did not resolve to an existing row")
+    row = dict(row)
+    disabled_reason = str(row.get("disabled_reason") or "").strip()
+    is_legacy_disabled = not row["active"] and disabled_reason in {
+        "",
+        "legacy_failure_threshold",
+    }
+    should_reactivate = bool(reactivate) and (
+        not row["active"] or disabled_reason or row.get("schedule_until")
+    )
+    should_reactivate = should_reactivate or is_legacy_disabled
+    metadata_updated = bool(normalized_email and normalized_email != (row.get("email") or ""))
+
+    updates = []
+    params = []
+    if metadata_updated:
+        updates.append("email = ?")
+        params.append(normalized_email)
+    if should_reactivate:
+        updates.extend(
+            [
+                "active = 1",
+                "consecutive_fails = 0",
+                "disabled_reason = ''",
+                "disabled_detail = ''",
+                "disabled_at = NULL",
+                "schedule_until = NULL",
+            ]
+        )
+    if updates:
+        params.extend([service, normalized_key])
+        conn.execute(
+            f"UPDATE api_keys SET {', '.join(updates)} WHERE service = ? AND key = ?",
+            params,
+        )
+        conn.commit()
+
+    if should_reactivate:
+        status = "reactivated"
+    elif not row["active"]:
+        status = "disabled"
+    else:
+        status = "duplicate"
+    return {
+        "id": row["id"],
+        "status": status,
+        "inserted": False,
+        "reactivated": should_reactivate,
+        "metadata_updated": metadata_updated,
+    }
+
+
+def ingest_keys_from_text(text, service="tavily", *, reactivate=False):
+    if not isinstance(text, str):
+        raise ValueError("file must be a string")
+    service = normalize_service(service)
+    pattern = KEY_PATTERNS[service]
+    summary = {
+        "received": 0,
+        "parsed": 0,
+        "inserted": 0,
+        "reactivated": 0,
+        "duplicates": 0,
+        "disabled": 0,
+        "invalid": 0,
+        "metadata_updated": 0,
+        "imported": 0,
+    }
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        summary["received"] += 1
+        match = re.search(pattern, line)
+        if not match:
+            summary["invalid"] += 1
+            continue
+        summary["parsed"] += 1
+        parts = line.split(",")
+        email = parts[0].strip() if len(parts) >= 2 else ""
+        result = ingest_key(
+            match.group(1),
+            email,
+            service,
+            reactivate=reactivate,
+        )
+        status_field = "duplicates" if result["status"] == "duplicate" else result["status"]
+        summary[status_field] += 1
+        if result["metadata_updated"]:
+            summary["metadata_updated"] += 1
+    summary["imported"] = summary["inserted"] + summary["reactivated"]
+    return summary
+
+
+def import_keys_from_text(text, service="tavily"):
+    """从批量文本导入不同服务的 key。"""
+    return ingest_keys_from_text(text, service=service)["imported"]
 
 
 def update_key_remote_usage(
