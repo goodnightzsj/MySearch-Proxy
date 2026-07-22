@@ -689,6 +689,11 @@ function drawerSection(title, body) {
   `;
 }
 
+function socialAdminVersionLabel(version) {
+  const normalized = String(version || '?').trim().replace(/^v/i, '');
+  return `v${normalized || '?'}`;
+}
+
 function renderSettingsSummaries(settings = latestSettings) {
   const tavily = settings?.tavily || {};
   const social = settings?.social || {};
@@ -719,7 +724,7 @@ function renderSettingsSummaries(settings = latestSettings) {
   const socialSummary = document.getElementById('settings-social-summary');
   if (socialSummary) {
     const adminLabel = social.admin_connected
-      ? `已连接 v${social.admin_api_version || '?'}`
+      ? `已连接 ${socialAdminVersionLabel(social.admin_api_version)}`
       : (social.admin_auth_mode === 'v3_credentials' ? 'v3 待验证' : '未连接');
     const mode = social.mode || 'local';
     socialSummary.innerHTML = [
@@ -2585,7 +2590,7 @@ function fillSettingsForm(settings) {
     social.model ? `主模型：${social.model}` : '',
     social.fallback_model ? `Fallback：${social.fallback_model} (< ${social.fallback_min_results || 3})` : '',
     social.token_source ? `Token 来源：${social.token_source}` : '',
-    social.admin_connected ? `后台连通正常（v${social.admin_api_version || '?'}）` : '',
+    social.admin_connected ? `后台连通正常（${socialAdminVersionLabel(social.admin_api_version)}）` : '',
     social.admin_auth_mode === 'v3_credentials' ? `管理员：${social.admin_username || '未命名'}` : '',
   ].filter(Boolean);
   if (social.error) {
