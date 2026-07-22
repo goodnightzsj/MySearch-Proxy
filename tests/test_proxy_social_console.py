@@ -85,6 +85,13 @@ class ProxySocialConsoleTests(unittest.TestCase):
         self.assertIn("function setSocialMode(mode)", javascript)
         self.assertIn("Social/X Key 池不会参与请求", javascript)
 
+    def test_console_formats_social_admin_version_once(self) -> None:
+        javascript = (REPO_ROOT / "proxy/static/js/console.js").read_text(encoding="utf-8")
+
+        self.assertIn("function socialAdminVersionLabel(version)", javascript)
+        self.assertIn(".replace(/^v/i, '')", javascript)
+        self.assertNotIn("v${social.admin_api_version", javascript)
+
     def test_console_masks_credentials_until_an_explicit_copy_action(self) -> None:
         javascript = (REPO_ROOT / "proxy/static/js/console.js").read_text(encoding="utf-8")
 
