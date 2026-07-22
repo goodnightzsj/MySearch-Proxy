@@ -26,6 +26,9 @@ class ProxySocialConsoleTests(unittest.TestCase):
         self.assertIn("# SOCIAL_GATEWAY_ADMIN_APP_KEY=YOUR_GROK2API_V2_APP_KEY", javascript)
         self.assertIn('id="settings-social-admin-username"', settings)
         self.assertIn('id="settings-social-admin-password"', settings)
+        self.assertIn('id="settings-social-mode"', settings)
+        self.assertIn('data-social-mode="local"', settings)
+        self.assertIn('data-social-mode="upstream"', settings)
 
     def test_console_uses_operations_first_workspace_shell(self) -> None:
         javascript = (REPO_ROOT / "proxy/static/js/console.js").read_text(encoding="utf-8")
@@ -75,7 +78,12 @@ class ProxySocialConsoleTests(unittest.TestCase):
         )
         self.assertIn("/api/settings/social/keys/${encodeURIComponent(keyId)}/resume", javascript)
         self.assertIn('id="settings-social-upstream-key-list"', settings)
+        self.assertIn('id="settings-social-local-key-list"', settings)
+        self.assertIn('id="settings-social-local-api-key"', settings)
         self.assertIn('id="settings-social-clear-upstream-api-key"', settings)
+        self.assertIn('id="settings-social-clear-local-api-key"', settings)
+        self.assertIn("function setSocialMode(mode)", javascript)
+        self.assertIn("Social/X Key 池不会参与请求", javascript)
 
     def test_console_masks_credentials_until_an_explicit_copy_action(self) -> None:
         javascript = (REPO_ROOT / "proxy/static/js/console.js").read_text(encoding="utf-8")

@@ -437,6 +437,16 @@ SOCIAL_GATEWAY_UPSTREAM_RESPONSES_PATH = _normalize_path(
     "/responses",
 )
 SOCIAL_GATEWAY_UPSTREAM_API_KEY = os.environ.get("SOCIAL_GATEWAY_UPSTREAM_API_KEY", "").strip()
+SOCIAL_GATEWAY_LOCAL_BASE_URL = os.environ.get(
+    "SOCIAL_GATEWAY_LOCAL_BASE_URL",
+    "https://api.x.ai/v1",
+).strip().rstrip("/")
+SOCIAL_GATEWAY_LOCAL_RESPONSES_PATH = _normalize_path(
+    os.environ.get("SOCIAL_GATEWAY_LOCAL_RESPONSES_PATH", "/responses"),
+    "/responses",
+)
+SOCIAL_GATEWAY_LOCAL_API_KEY = os.environ.get("SOCIAL_GATEWAY_LOCAL_API_KEY", "").strip()
+SOCIAL_GATEWAY_MODES = frozenset({"local", "upstream"})
 _default_model = _default_social_model()
 SOCIAL_GATEWAY_MODEL = os.environ.get("SOCIAL_GATEWAY_MODEL", "").strip() or _default_model
 SOCIAL_GATEWAY_FALLBACK_MODEL = (
@@ -677,12 +687,78 @@ def get_setting_text(key, default=""):
     return str(value).strip()
 
 
+def resolve_social_mode(
+    value,
+    *,
+    admin_username="",
+    admin_password="",
+    admin_app_key="",
+):
+    normalized = str(value or "").strip().lower()
+    if normalized in SOCIAL_GATEWAY_MODES:
+        return normalized
+    if admin_username or admin_password or admin_app_key:
+        return "upstream"
+    return "local"
+
+
 def get_runtime_social_config():
     upstream_base_url = (
         get_setting_text("social_upstream_base_url", SOCIAL_GATEWAY_UPSTREAM_BASE_URL).rstrip("/")
         or SOCIAL_GATEWAY_UPSTREAM_BASE_URL
     )
     admin_base_value = get_setting_text("social_admin_base_url", "")
+    admin_username = get_setting_text(
+        "social_admin_username",
+        SOCIAL_GATEWAY_ADMIN_USERNAME,
+    )
+    admin_password = get_setting_text(
+        "social_admin_password",
+        SOCIAL_GATEWAY_ADMIN_PASSWORD,
+    )
+    admin_app_key = get_setting_text(
+        "social_admin_app_key",
+        SOCIAL_GATEWAY_ADMIN_APP_KEY,
+    )
+    raw_mode = db.get_setting("social_mode")
+    mode = resolve_social_mode(
+        raw_mode,
+        admin_username=admin_username,
+        admin_password=admin_password,
+        admin_app_key=admin_app_key,
+    )
+    mode_source = "configured" if raw_mode is not None else f"legacy_{mode}"
+    legacy_upstream_api_key = get_setting_text(
+        "social_upstream_api_key",
+        SOCIAL_GATEWAY_UPSTREAM_API_KEY,
+    )
+    raw_local_api_key = db.get_setting("social_local_api_key")
+    if raw_local_api_key is None:
+        local_api_key = SOCIAL_GATEWAY_LOCAL_API_KEY
+        if not local_api_key and mode_source == "legacy_local":
+            local_api_key = legacy_upstream_api_key
+    else:
+        local_api_key = str(raw_local_api_key).strip()
+    raw_local_base_url = db.get_setting("social_local_base_url")
+    local_base_url = str(
+        raw_local_base_url
+        if raw_local_base_url is not None
+        else (upstream_base_url if mode_source == "legacy_local" else SOCIAL_GATEWAY_LOCAL_BASE_URL)
+    ).strip().rstrip("/") or SOCIAL_GATEWAY_LOCAL_BASE_URL
+    raw_local_responses_path = db.get_setting("social_local_responses_path")
+    local_responses_path = _normalize_path(
+        raw_local_responses_path
+        if raw_local_responses_path is not None
+        else (
+            get_setting_text(
+                "social_upstream_responses_path",
+                SOCIAL_GATEWAY_UPSTREAM_RESPONSES_PATH,
+            )
+            if mode_source == "legacy_local"
+            else SOCIAL_GATEWAY_LOCAL_RESPONSES_PATH
+        ),
+        SOCIAL_GATEWAY_LOCAL_RESPONSES_PATH,
+    )
     cache_ttl_raw = get_setting_text(
         "social_cache_ttl_seconds",
         str(SOCIAL_GATEWAY_CACHE_TTL_SECONDS),
@@ -704,6 +780,11 @@ def get_runtime_social_config():
         fallback_min_results = SOCIAL_GATEWAY_FALLBACK_MIN_RESULTS
 
     return {
+        "mode": mode,
+        "mode_source": mode_source,
+        "local_base_url": local_base_url,
+        "local_responses_path": local_responses_path,
+        "local_api_key": local_api_key,
         "upstream_base_url": upstream_base_url,
         "upstream_responses_path": _normalize_path(
             get_setting_text(
@@ -712,10 +793,7 @@ def get_runtime_social_config():
             ),
             SOCIAL_GATEWAY_UPSTREAM_RESPONSES_PATH,
         ),
-        "upstream_api_key": get_setting_text(
-            "social_upstream_api_key",
-            SOCIAL_GATEWAY_UPSTREAM_API_KEY,
-        ),
+        "upstream_api_key": legacy_upstream_api_key,
         "model": get_setting_text("social_model", SOCIAL_GATEWAY_MODEL) or SOCIAL_GATEWAY_MODEL,
         "fallback_model": (
             get_setting_text("social_fallback_model", SOCIAL_GATEWAY_FALLBACK_MODEL)
@@ -749,18 +827,9 @@ def get_runtime_social_config():
             ),
             SOCIAL_GATEWAY_ADMIN_TOKENS_PATH,
         ),
-        "admin_app_key": get_setting_text(
-            "social_admin_app_key",
-            SOCIAL_GATEWAY_ADMIN_APP_KEY,
-        ),
-        "admin_username": get_setting_text(
-            "social_admin_username",
-            SOCIAL_GATEWAY_ADMIN_USERNAME,
-        ),
-        "admin_password": get_setting_text(
-            "social_admin_password",
-            SOCIAL_GATEWAY_ADMIN_PASSWORD,
-        ),
+        "admin_app_key": admin_app_key,
+        "admin_username": admin_username,
+        "admin_password": admin_password,
         "cache_ttl_seconds": cache_ttl_seconds,
     }
 
@@ -871,7 +940,16 @@ def build_candidate_social_config(body):
     if not isinstance(body, dict):
         return config
 
+    if "mode" in body:
+        mode = str(body.get("mode") or "").strip().lower()
+        if mode not in SOCIAL_GATEWAY_MODES:
+            raise HTTPException(status_code=400, detail="mode must be 'local' or 'upstream'")
+        config["mode"] = mode
+        config["mode_source"] = "candidate"
+
     text_fields = {
+        "local_base_url": "local_base_url",
+        "local_responses_path": "local_responses_path",
         "upstream_base_url": "upstream_base_url",
         "admin_base_url": "admin_base_url",
         "admin_username": "admin_username",
@@ -885,6 +963,7 @@ def build_candidate_social_config(body):
         "admin_tokens_path": ("admin_tokens_path", SOCIAL_GATEWAY_ADMIN_TOKENS_PATH),
     }
     secret_fields = {
+        "local_api_key": "local_api_key",
         "admin_app_key": "admin_app_key",
         "admin_password": "admin_password",
         "upstream_api_key": "upstream_api_key",
@@ -910,6 +989,11 @@ def build_candidate_social_config(body):
         elif body_key in body:
             config[config_key] = str(body.get(body_key) or "").strip()
 
+    config["local_responses_path"] = _normalize_path(
+        config.get("local_responses_path"),
+        SOCIAL_GATEWAY_LOCAL_RESPONSES_PATH,
+    )
+
     if "cache_ttl_seconds" in body:
         try:
             config["cache_ttl_seconds"] = max(5, int(body.get("cache_ttl_seconds") or SOCIAL_GATEWAY_CACHE_TTL_SECONDS))
@@ -925,6 +1009,8 @@ def build_candidate_social_config(body):
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail="fallback_min_results must be an integer")
 
+    if not config["local_base_url"]:
+        config["local_base_url"] = SOCIAL_GATEWAY_LOCAL_BASE_URL
     if not config["upstream_base_url"]:
         config["upstream_base_url"] = SOCIAL_GATEWAY_UPSTREAM_BASE_URL
     if not config["admin_base_url"]:
@@ -1304,20 +1390,14 @@ def build_social_v3_account_stats(summary_payload, dashboard_payload):
 
 
 def build_social_gateway_mode(state):
-    if state.get("admin_api_version") == "v3":
-        if state["manual_upstream_key"] or state["manual_gateway_token"]:
-            return "v3-managed"
-        return "v3-observe"
-    if state["admin_connected"] and (state["manual_upstream_key"] or state["manual_gateway_token"]):
-        return "hybrid"
-    if state["admin_connected"]:
-        return "admin-auto"
-    return "manual"
+    return resolve_social_mode(state.get("mode"))
 
 
 def build_social_token_source(state):
     if state["manual_gateway_token"]:
         return "manual SOCIAL_GATEWAY_TOKEN"
+    if state.get("mode") == "local" and state.get("manual_local_key"):
+        return "SOCIAL_GATEWAY_LOCAL_API_KEY"
     if state["admin_connected"] and state["admin_api_keys"]:
         return "grok2api app.api_key"
     if state["manual_upstream_key"]:
@@ -1333,7 +1413,20 @@ def build_social_upstream_visibility(state):
     upstream_unavailable_key_count = max(0, upstream_api_key_count - upstream_available_key_count)
     accepted_token_count = len(state.get("accepted_tokens") or [])
     can_proxy_search = bool(available_upstream_api_keys and state.get("accepted_tokens"))
-    if state.get("admin_connected"):
+    if state.get("mode") == "local":
+        if can_proxy_search:
+            level = "basic"
+            detail = "当前为本地模式，仅使用本地 Social/X Key 池，不读取上游管理后台。"
+        elif upstream_api_key_count and not upstream_available_key_count:
+            level = "partial"
+            detail = "本地 Social/X Key 池已全部被限流或隔离，请等待冷却或手工替换。"
+        elif upstream_api_key_count or accepted_token_count:
+            level = "partial"
+            detail = "本地模式只解析到部分鉴权信息，尚不能稳定转发搜索。"
+        else:
+            level = "none"
+            detail = "本地模式尚未配置 Social/X Key 或客户端 token。"
+    elif state.get("admin_connected"):
         level = "full"
         if state.get("admin_api_version") == "v3":
             detail = "已连接 grok2api v3 管理 API，可展示账号可用性与请求统计。"
@@ -1608,6 +1701,12 @@ async def resolve_social_gateway_state_for_config(config):
     has_admin_password = bool(config.get("admin_password"))
     v3_admin_configured = has_admin_username and has_admin_password
     legacy_admin_configured = bool(config.get("admin_app_key"))
+    mode = resolve_social_mode(
+        config.get("mode"),
+        admin_username=config.get("admin_username"),
+        admin_password=config.get("admin_password"),
+        admin_app_key=config.get("admin_app_key"),
+    )
     if v3_admin_configured:
         admin_auth_mode = "v3_credentials"
     elif has_admin_username or has_admin_password:
@@ -1617,9 +1716,23 @@ async def resolve_social_gateway_state_for_config(config):
     else:
         admin_auth_mode = "not_configured"
 
+    if mode == "local":
+        active_base_url = config.get("local_base_url") or SOCIAL_GATEWAY_LOCAL_BASE_URL
+        active_responses_path = _normalize_path(
+            config.get("local_responses_path"),
+            SOCIAL_GATEWAY_LOCAL_RESPONSES_PATH,
+        )
+        configured_key_value = config.get("local_api_key")
+    else:
+        active_base_url = config.get("upstream_base_url")
+        active_responses_path = config.get("upstream_responses_path")
+        configured_key_value = config.get("upstream_api_key")
+
     state = {
-        "upstream_base_url": config["upstream_base_url"],
-        "upstream_responses_path": config["upstream_responses_path"],
+        "mode": mode,
+        "mode_source": config.get("mode_source") or "configured",
+        "upstream_base_url": active_base_url,
+        "upstream_responses_path": active_responses_path,
         "admin_base_url": config["admin_base_url"],
         "admin_verify_path": config["admin_verify_path"],
         "admin_config_path": config["admin_config_path"],
@@ -1630,15 +1743,15 @@ async def resolve_social_gateway_state_for_config(config):
         "admin_connected": False,
         "admin_auth_mode": admin_auth_mode,
         "admin_api_version": "",
-        "manual_upstream_key": bool(config["upstream_api_key"]),
+        "manual_local_key": bool(config.get("local_api_key")) if mode == "local" else False,
+        "manual_upstream_key": bool(config.get("upstream_api_key")) if mode == "upstream" else False,
         "manual_gateway_token": bool(config["gateway_token"]),
-        "upstream_api_keys": parse_secret_values(config["upstream_api_key"]),
+        "upstream_api_keys": parse_secret_values(configured_key_value),
         "accepted_tokens": parse_secret_values(config["gateway_token"]),
         "admin_api_keys": [],
         "resolved_upstream_api_key": "",
         "default_client_token": "",
         "token_source": "",
-        "mode": "manual",
         "model": config["model"],
         "fallback_model": config["fallback_model"],
         "fallback_min_results": config["fallback_min_results"],
@@ -1647,7 +1760,9 @@ async def resolve_social_gateway_state_for_config(config):
         "error": "",
     }
 
-    if admin_auth_mode == "v3_credentials_incomplete":
+    if mode == "local":
+        state["admin_configured"] = False
+    elif admin_auth_mode == "v3_credentials_incomplete":
         state["error"] = "grok2api v3 admin username and password must both be configured"
     elif v3_admin_configured and config["admin_base_url"]:
         try:
@@ -2242,6 +2357,7 @@ async def build_social_dashboard():
         "service": "social",
         "label": "Social / X",
         "mode": state["mode"],
+        "mode_source": state.get("mode_source") or "configured",
         "model": state["model"],
         "fallback_model": state["fallback_model"],
         "fallback_min_results": state["fallback_min_results"],
@@ -2293,6 +2409,12 @@ async def build_settings_payload():
             "local_key_count": len(tavily_active_keys),
         },
         "social": {
+            "mode": config["mode"],
+            "mode_source": config["mode_source"],
+            "local_base_url": config["local_base_url"],
+            "local_responses_path": config["local_responses_path"],
+            "local_api_key_configured": bool(config["local_api_key"]),
+            "local_api_key_masked": mask_secret(config["local_api_key"]),
             "upstream_base_url": config["upstream_base_url"],
             "upstream_responses_path": config["upstream_responses_path"],
             "admin_base_url": config["admin_base_url"],
@@ -2310,10 +2432,18 @@ async def build_settings_payload():
             "admin_password_masked": mask_secret(config["admin_password"]),
             "upstream_api_key_configured": bool(config["upstream_api_key"]),
             "upstream_api_key_masked": mask_secret(config["upstream_api_key"]),
-            "upstream_keys": _social_upstream_key_statuses(state["upstream_api_keys"]),
+            "local_keys": _social_upstream_key_statuses(
+                parse_secret_values(config["local_api_key"])
+            ),
+            "upstream_keys": _social_upstream_key_statuses(
+                state["upstream_api_keys"]
+                if state["mode"] == "upstream"
+                else parse_secret_values(config["upstream_api_key"])
+            ),
+            "active_keys": _social_upstream_key_statuses(state["upstream_api_keys"]),
+            "active_key_scope": state["mode"],
             "gateway_token_configured": bool(config["gateway_token"]),
             "gateway_token_masked": mask_secret(config["gateway_token"]),
-            "mode": state["mode"],
             "token_source": state["token_source"],
             "admin_connected": state["admin_connected"],
             "admin_auth_mode": state["admin_auth_mode"],
@@ -4026,7 +4156,11 @@ async def test_social_settings(request: Request, _=Depends(verify_admin)):
     available_upstream_keys = _available_social_upstream_keys(state["upstream_api_keys"])
     request_target = f"{state['upstream_base_url']}{state['upstream_responses_path']}"
     detail = ""
-    if state["admin_connected"]:
+    if state["mode"] == "local" and state["resolved_upstream_api_key"]:
+        detail = "本地模式已解析到可用 Key；运行时不会连接或继承上游管理后台。"
+    elif state["mode"] == "local":
+        detail = "本地模式尚未解析到可用 Key。"
+    elif state["admin_connected"]:
         if state["admin_api_version"] == "v3":
             detail = "grok2api v3 后台已连通，并成功拉取账号与请求统计。"
         else:
@@ -4038,7 +4172,15 @@ async def test_social_settings(request: Request, _=Depends(verify_admin)):
     else:
         detail = "当前没有解析到可用上游 key 或客户端 token。"
     ok = bool(available_upstream_keys and state["accepted_tokens"])
-    if state["admin_connected"]:
+    if state["mode"] == "local":
+        auth_source = state["token_source"] or "本地 Key 池"
+        status_label = "本地模式可用" if ok else "本地模式待配置"
+        recommendation = (
+            "当前仅使用本地 Social/X Key 池。"
+            if ok
+            else "请补充本地 Social/X Key 和客户端访问 token。"
+        )
+    elif state["admin_connected"]:
         auth_source = (
             "grok2api v3 管理员会话"
             if state["admin_api_version"] == "v3"
@@ -4057,6 +4199,7 @@ async def test_social_settings(request: Request, _=Depends(verify_admin)):
     return {
         "ok": ok,
         "mode": state["mode"],
+        "mode_source": state.get("mode_source") or "configured",
         "token_source": state["token_source"],
         "admin_connected": state["admin_connected"],
         "admin_auth_mode": state["admin_auth_mode"],
@@ -4142,7 +4285,21 @@ async def update_social_settings(request: Request, _=Depends(verify_admin)):
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Expected JSON request body")
 
+    candidate = build_candidate_social_config(body)
+    migrate_legacy_local_key = (
+        candidate["mode"] == "local"
+        and db.get_setting("social_mode") is None
+        and db.get_setting("social_local_api_key") is None
+        and not SOCIAL_GATEWAY_LOCAL_API_KEY
+        and bool(candidate["local_api_key"])
+    )
+
+    if "mode" in body:
+        db.set_setting("social_mode", candidate["mode"])
+
     text_fields = {
+        "local_base_url": "social_local_base_url",
+        "local_responses_path": "social_local_responses_path",
         "upstream_base_url": "social_upstream_base_url",
         "upstream_responses_path": "social_upstream_responses_path",
         "admin_base_url": "social_admin_base_url",
@@ -4154,6 +4311,7 @@ async def update_social_settings(request: Request, _=Depends(verify_admin)):
         "fallback_model": "social_fallback_model",
     }
     secret_fields = {
+        "local_api_key": "social_local_api_key",
         "admin_app_key": "social_admin_app_key",
         "admin_password": "social_admin_password",
         "upstream_api_key": "social_upstream_api_key",
@@ -4163,25 +4321,17 @@ async def update_social_settings(request: Request, _=Depends(verify_admin)):
     for field, setting_key in text_fields.items():
         if field not in body:
             continue
-        value = str(body.get(field) or "").strip()
+        value = str(candidate[field] or "").strip()
         db.set_setting(setting_key, value)
 
     if "cache_ttl_seconds" in body:
-        try:
-            cache_ttl_seconds = max(5, int(body.get("cache_ttl_seconds") or SOCIAL_GATEWAY_CACHE_TTL_SECONDS))
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=400, detail="cache_ttl_seconds must be an integer")
-        db.set_setting("social_cache_ttl_seconds", str(cache_ttl_seconds))
+        db.set_setting("social_cache_ttl_seconds", str(candidate["cache_ttl_seconds"]))
 
     if "fallback_min_results" in body:
-        try:
-            fallback_min_results = max(
-                1,
-                int(body.get("fallback_min_results") or SOCIAL_GATEWAY_FALLBACK_MIN_RESULTS),
-            )
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=400, detail="fallback_min_results must be an integer")
-        db.set_setting("social_fallback_min_results", str(fallback_min_results))
+        db.set_setting(
+            "social_fallback_min_results",
+            str(candidate["fallback_min_results"]),
+        )
 
     for field, setting_key in secret_fields.items():
         if body.get(f"clear_{field}"):
@@ -4189,13 +4339,20 @@ async def update_social_settings(request: Request, _=Depends(verify_admin)):
             continue
         if field not in body:
             continue
-        value = str(body.get(field) or "").strip()
+        value = str(candidate[field] or "").strip()
         if value:
             db.set_setting(setting_key, value)
 
+    if (
+        migrate_legacy_local_key
+        and "local_api_key" not in body
+        and not body.get("clear_local_api_key")
+    ):
+        db.set_setting("social_local_api_key", candidate["local_api_key"])
+
     clear_social_key_schedule = any(
         field in body or body.get(f"clear_{field}")
-        for field in ("upstream_api_key", "admin_app_key")
+        for field in ("mode", "local_api_key", "upstream_api_key", "admin_app_key")
     )
     reset_social_gateway_cache(clear_key_schedule=clear_social_key_schedule)
     reset_stats_cache()

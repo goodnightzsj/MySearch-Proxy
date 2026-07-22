@@ -498,7 +498,7 @@ class SocialAdminCompatibilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(state["admin_connected"])
         self.assertEqual(state["admin_auth_mode"], "v3_credentials")
         self.assertEqual(state["admin_api_version"], "v3")
-        self.assertEqual(state["mode"], "v3-managed")
+        self.assertEqual(state["mode"], "upstream")
         self.assertEqual(state["stats"]["account_total"], 6)
         self.assertEqual(state["stats"]["account_available"], 4)
         self.assertEqual(state["stats"]["requests_24h"], 9)
@@ -661,7 +661,7 @@ class SocialAdminCompatibilityTests(unittest.IsolatedAsyncioTestCase):
             proxy_server.http_client = original_http_client
 
         self.assertFalse(state["admin_connected"])
-        self.assertEqual(state["mode"], "manual")
+        self.assertEqual(state["mode"], "upstream")
         self.assertEqual(state["resolved_upstream_api_key"], "g2a-client-key")
         self.assertIn("expected JSON object", state["error"])
 
