@@ -721,11 +721,12 @@ function renderSettingsSummaries(settings = latestSettings) {
     const adminLabel = social.admin_connected
       ? `已连接 v${social.admin_api_version || '?'}`
       : (social.admin_auth_mode === 'v3_credentials' ? 'v3 待验证' : '未连接');
+    const mode = social.mode || 'local';
     socialSummary.innerHTML = [
-      summaryCard('工作模式', socialModeLabel(social.mode || 'manual'), social.admin_connected ? '后台已连通' : '可手动覆写上游'),
-      summaryCard('Token 来源', socialTokenSourceLabel(social.token_source || ''), social.gateway_token_configured ? '客户端 token 已配置' : '可直接复用统一 token'),
+      summaryCard('工作模式', socialModeLabel(mode), mode === 'local' ? '只使用本地 Social/X Key 池' : '只使用上游连接凭证'),
+      summaryCard('Key 来源', mode === 'local' ? `${fmtNum(social.local_keys?.length || 0)} 个本地 Key` : socialTokenSourceLabel(social.token_source || ''), social.admin_connected ? '上游管理后台已连通' : '按当前模式独立运行'),
       summaryCard('默认模型', social.model || 'grok-4.20-0309', social.fallback_model ? `Fallback ${social.fallback_model}` : '未配置 fallback'),
-      summaryCard('管理 API', adminLabel, social.admin_username || '未配置管理员用户名'),
+      summaryCard('上游管理', mode === 'local' ? '未参与当前路由' : adminLabel, mode === 'local' ? '切换上游模式后才会读取' : (social.admin_username || '未配置管理员用户名')),
     ].join('');
   }
 }
@@ -966,11 +967,7 @@ async function migrateStoredPasswordIfNeeded() {
 }
 
 function socialModeLabel(mode) {
-  if (mode === 'v3-managed') return 'v3 管理 + 独立推理';
-  if (mode === 'v3-observe') return '仅 v3 管理统计';
-  if (mode === 'admin-auto') return '后台自动继承';
-  if (mode === 'hybrid') return '后台继承 + 手动覆写';
-  return '手动模式';
+  return mode === 'upstream' ? '上游模式' : '本地模式';
 }
 
 function tavilyModeLabel(mode) {
@@ -989,6 +986,7 @@ function tavilyModeSourceLabel(source) {
 
 function socialTokenSourceLabel(source) {
   if (source === 'grok2api app.api_key') return '后台自动继承';
+  if (source === 'SOCIAL_GATEWAY_LOCAL_API_KEY') return '本地 Social/X Key 池';
   if (source === 'SOCIAL_GATEWAY_UPSTREAM_API_KEY') return '手动上游 API key';
   if (source === 'manual SOCIAL_GATEWAY_TOKEN') return '手动客户端 token';
   return '尚未配置';
@@ -996,6 +994,7 @@ function socialTokenSourceLabel(source) {
 
 function socialStatusLabel(social) {
   const state = getSocialUpstreamState(social || {});
+  if (social?.mode === 'local' && state.canProxySearch) return '本地模式已就绪';
   if (state.canProxySearch && state.adminConnected) return '推理与管理均已接通';
   if (state.canProxySearch) return '已可转发搜索';
   if (state.adminConnected) return '管理已接通，推理待配置';
@@ -1252,11 +1251,13 @@ function getQuickstartProviderCards(services = latestServices, social = latestSo
     });
   });
 
-  if (socialState.canProxySearch && social?.admin_connected) {
+  if (socialState.canProxySearch && (social?.mode === 'local' || social?.admin_connected)) {
     cards.push({
       label: 'Social / X',
       tone: 'ok',
-      title: social?.admin_api_version === 'v3' ? 'v3 管理统计已连接' : 'v2 后台自动继承',
+      title: social?.mode === 'local'
+        ? '本地 Key 池已就绪'
+        : (social?.admin_api_version === 'v3' ? 'v3 管理统计已连接' : 'v2 上游已连接'),
       desc: `${socialTokenSourceLabel(social?.token_source || '')} · /social/search 已就绪`,
     });
   } else if (socialState.canProxySearch) {
@@ -1324,7 +1325,7 @@ function getWorkspaceSnapshot(service, services, social) {
         primaryMetricValue: Number(stats.account_available || 0),
         quaternaryMetricLabel: '24h 请求',
         quaternaryMetricValue: Number(stats.requests_24h || 0),
-        modeLabel: socialModeLabel(social?.mode || 'manual'),
+        modeLabel: socialModeLabel(social?.mode || 'local'),
       };
     }
     return {
@@ -1338,7 +1339,7 @@ function getWorkspaceSnapshot(service, services, social) {
       primaryMetricValue: hasFullStats ? Number(stats.token_normal || 0) : socialState.upstreamApiKeyCount,
       quaternaryMetricLabel: hasFullStats ? 'Chat 剩余' : '客户端 Token',
       quaternaryMetricValue: hasFullStats ? Number(stats.chat_remaining || 0) : socialState.acceptedTokenCount,
-      modeLabel: socialModeLabel(social?.mode || 'manual'),
+      modeLabel: socialModeLabel(social?.mode || 'local'),
     };
   }
 
@@ -1499,12 +1500,26 @@ function renderHeroFocus(services, social) {
 }
 
 function buildSocialProxyEnv(social) {
-  const baseUrl = social.upstream_base_url || 'https://media.example.com/v1';
-  const adminBaseUrl = social.admin_base_url || baseUrl.replace(/\/v1$/, '');
+  const mode = social?.mode || 'local';
+  const baseUrl = mode === 'local'
+    ? (social.local_base_url || 'https://api.x.ai/v1')
+    : (social.upstream_base_url || 'https://media.example.com/v1');
+  const adminBaseUrl = social.admin_base_url || (social.upstream_base_url || baseUrl).replace(/\/v1$/, '');
   const adminUsername = social.admin_username || 'admin';
   const model = social.model || 'grok-4.20-0309';
   const fallbackModel = social.fallback_model || 'grok-4.3';
-  return `# grok2api v3：在客户端密钥页面创建 g2a_ key
+  if (mode === 'local') {
+    return `# 本地模式：只使用本地 Social/X API key 池
+SOCIAL_GATEWAY_LOCAL_BASE_URL=${baseUrl}
+SOCIAL_GATEWAY_LOCAL_RESPONSES_PATH=${social.local_responses_path || '/responses'}
+SOCIAL_GATEWAY_LOCAL_API_KEY=YOUR_XAI_API_KEY
+SOCIAL_GATEWAY_MODEL=${model}
+SOCIAL_GATEWAY_FALLBACK_MODEL=${fallbackModel}
+
+# 可选：单独保护 /social/search；留空时复用 Proxy 通用 token
+# SOCIAL_GATEWAY_TOKEN=`;
+  }
+  return `# 上游模式：在上游客户端密钥页面创建 g2a_ key
 SOCIAL_GATEWAY_UPSTREAM_BASE_URL=${baseUrl}
 SOCIAL_GATEWAY_UPSTREAM_API_KEY=YOUR_GROK2API_G2A_CLIENT_KEY
 SOCIAL_GATEWAY_MODEL=${model}
@@ -1584,15 +1599,20 @@ function renderSocialBoard(social) {
   const stats = social?.stats || {};
   const isV3Admin = social?.admin_api_version === 'v3' || stats.schema === 'grok2api_v3_accounts';
   const socialState = getSocialUpstreamState(social || {});
-  const mode = socialModeLabel(social?.mode || 'manual');
+  const localMode = social?.mode === 'local';
+  const mode = socialModeLabel(social?.mode || 'local');
   const statusText = socialStatusLabel(social);
   const tokenSource = socialTokenSourceLabel(social?.token_source || '');
   const authText = social?.client_auth_configured ? '已允许客户端调用 /social/search' : '还没有设置客户端 token';
   const videoValue = stats.video_remaining === null
     ? '<div class="value muted is-text">无法统计</div>'
     : `<div class="value muted">${fmtNum(stats.video_remaining)}</div>`;
-  let foot = '现在还没有连上 Social / X 上游。v3 请补齐 g2a_ client key；如需管理统计，再填写后台管理员账号。';
-  if (social?.admin_connected) {
+  let foot = localMode
+    ? '本地模式仅使用本地 Social/X Key 池，不连接上游管理后台。'
+    : '上游模式尚未接通。请补齐上游 client key；如需管理统计，再填写后台管理员账号。';
+  if (localMode && social?.upstream_key_configured) {
+    foot = '本地模式已接通；请求只从本地 Social/X Key 池轮询。';
+  } else if (social?.admin_connected) {
     foot = isV3Admin
       ? '当前通过 grok2api v3 管理 API 同步账号状态与请求统计；推理仍独立使用 g2a_ client key。'
       : '当前通过 legacy v2 后台同步 token 状态和剩余额度。对外仍统一提供 /social/search 结果结构。';
@@ -1612,7 +1632,7 @@ function renderSocialBoard(social) {
         </div>
       </div>
       <div class="social-board-desc">
-        当前还没有拿到完整后台 token 面板，所以这里只展示基础接线状态，而不是 token 池运行统计。
+        ${localMode ? '当前明确使用本地 Key 池，只展示本地调度和客户端鉴权状态。' : '当前还没有拿到完整后台 token 面板，所以这里只展示基础接线状态。'}
       </div>
       <div class="social-board-grid">
         <div class="social-metric">
@@ -1625,7 +1645,7 @@ function renderSocialBoard(social) {
         </div>
         <div class="social-metric">
           <div class="label">后台状态</div>
-          <div class="value muted is-text">${socialState.adminConnected ? '已接通' : '未接通'}</div>
+          <div class="value muted is-text">${localMode ? '不参与' : (socialState.adminConnected ? '已接通' : '未接通')}</div>
         </div>
         <div class="social-metric">
           <div class="label">搜索转发</div>
@@ -1758,16 +1778,23 @@ function renderSocialBoard(social) {
 
 function renderSocialIntegration(social) {
   const socialState = getSocialUpstreamState(social || {});
-  const mode = socialModeLabel(social?.mode || 'manual');
+  const localMode = social?.mode === 'local';
+  const mode = socialModeLabel(social?.mode || 'local');
   const source = socialTokenSourceLabel(social?.token_source || '');
   const proxyConfigured = Boolean(social?.upstream_key_configured);
   const clientConfigured = Boolean(social?.client_auth_configured);
   const authLabel = clientConfigured ? '已就绪' : '未配置';
   const statusLabel = socialStatusLabel(social);
-  const upstreamBase = social?.upstream_base_url || 'https://media.example.com/v1';
-  const adminBase = social?.admin_base_url || '未设置';
-  let note = 'grok2api v3 请填写 /v1 上游地址和管理端创建的 g2a_ client key。';
-  if (social?.admin_connected) {
+  const upstreamBase = localMode
+    ? (social?.local_base_url || 'https://api.x.ai/v1')
+    : (social?.upstream_base_url || 'https://media.example.com/v1');
+  const adminBase = localMode ? '当前模式不参与' : (social?.admin_base_url || '未设置');
+  let note = localMode
+    ? '本地模式使用本地 Key 池，所有上游 Admin 配置均不参与当前请求。'
+    : '上游模式请填写网关地址和可用于推理的 client key。';
+  if (localMode && social?.upstream_key_configured) {
+    note = '本地 Key 池已配置，当前请求不会读取上游管理后台。';
+  } else if (social?.admin_connected) {
     note = social?.admin_api_version === 'v3'
       ? 'v3 管理统计已连通；推理继续使用独立 g2a_ client key，不复用管理员会话。'
       : '当前 legacy v2 后台自动继承已连通；推理凭据来自旧 app key 合同。';
@@ -1784,7 +1811,7 @@ function renderSocialIntegration(social) {
       </div>
       <span class="detail-pill">摘要优先</span>
     </div>
-    <p class="desc">grok2api v3 使用独立的 g2a_ client key 调用 /v1/responses，并通过 /api/admin/v1 管理会话读取账号和请求统计；旧 app key 仅保留给 v2-compatible 部署。</p>
+    <p class="desc">${localMode ? '本地模式直接维护 Social/X Key 池；上游模式连接 grok2api 或兼容网关。两套来源互斥，不会合并调度。' : '上游模式使用独立 client key 调用 /responses，并可通过 Admin API 读取账号和请求统计。'}</p>
     <div class="integration-summary integration-summary-compact">
       <div class="integration-summary-item">
         <div class="label">当前状态</div>
@@ -1807,7 +1834,7 @@ function renderSocialIntegration(social) {
       <summary>接线详情</summary>
       <div class="integration-summary integration-summary-detail">
         <div class="integration-summary-item integration-summary-item-wide">
-          <div class="label">上游接口</div>
+          <div class="label">${localMode ? '本地接口' : '上游接口'}</div>
           <div class="value mono">${escapeHtml(upstreamBase)}</div>
         </div>
         <div class="integration-summary-item integration-summary-item-wide">
@@ -1816,7 +1843,7 @@ function renderSocialIntegration(social) {
         </div>
         <div class="integration-summary-item">
           <div class="label">接入结果</div>
-          <div class="value">${proxyConfigured ? '已拿到可用上游 key' : '尚未拿到上游 key'}</div>
+          <div class="value">${proxyConfigured ? `已拿到可用${localMode ? '本地' : '上游'} key` : `尚未拿到${localMode ? '本地' : '上游'} key`}</div>
         </div>
         <div class="integration-summary-item">
           <div class="label">可调度 / 隔离 Key</div>
@@ -2103,6 +2130,9 @@ function collectTavilySettingsForm() {
 
 function collectSocialSettingsForm() {
   const body = {
+    mode: document.getElementById('settings-social-mode').value,
+    local_base_url: document.getElementById('settings-social-local-base-url').value.trim(),
+    local_responses_path: document.getElementById('settings-social-local-responses-path').value.trim(),
     upstream_base_url: document.getElementById('settings-social-upstream-base-url').value.trim(),
     upstream_responses_path: document.getElementById('settings-social-upstream-responses-path').value.trim(),
     admin_base_url: document.getElementById('settings-social-admin-base-url').value.trim(),
@@ -2118,12 +2148,16 @@ function collectSocialSettingsForm() {
 
   const adminAppKey = document.getElementById('settings-social-admin-app-key').value.trim();
   const adminPassword = document.getElementById('settings-social-admin-password').value.trim();
+  const localApiKey = document.getElementById('settings-social-local-api-key').value.trim();
   const upstreamApiKey = document.getElementById('settings-social-upstream-api-key').value.trim();
   const gatewayToken = document.getElementById('settings-social-gateway-token').value.trim();
+  const clearLocalApiKey = document.getElementById('settings-social-clear-local-api-key').checked;
   const clearUpstreamApiKey = document.getElementById('settings-social-clear-upstream-api-key').checked;
 
   if (adminAppKey) body.admin_app_key = adminAppKey;
   if (adminPassword) body.admin_password = adminPassword;
+  if (clearLocalApiKey) body.clear_local_api_key = true;
+  else if (localApiKey) body.local_api_key = localApiKey;
   if (clearUpstreamApiKey) body.clear_upstream_api_key = true;
   else if (upstreamApiKey) body.upstream_api_key = upstreamApiKey;
   if (gatewayToken) body.gateway_token = gatewayToken;
@@ -2188,11 +2222,17 @@ function getSettingsProbeMeta(kind, payload = {}) {
 
   const requestTarget = payload.request_target || `${payload.upstream_base_url || '未配置'}${payload.upstream_responses_path || '/responses'}`;
   const authSource = payload.auth_source || payload.token_source || '未解析到可用鉴权';
-  const returnStatus = payload.status_label || (payload.admin_connected ? '后台已连通' : (payload.ok ? '已解析到可用凭证' : '诊断失败'));
+  const returnStatus = payload.status_label || (payload.mode === 'local'
+    ? (payload.ok ? '本地模式可用' : '本地模式待配置')
+    : (payload.admin_connected ? '后台已连通' : (payload.ok ? '已解析到可用凭证' : '诊断失败')));
   const failureReason = payload.ok ? '无' : (payload.failure_reason || payload.error || payload.detail || '未通过诊断');
   let recommendation = payload.recommendation || '';
   if (!recommendation) {
-    if (payload.ok && payload.admin_connected) {
+    if (payload.mode === 'local') {
+      recommendation = payload.ok
+        ? '当前仅使用本地 Social/X Key 池；上游 Admin 不参与请求。'
+        : '补充本地 Social/X Key 和客户端访问 token。';
+    } else if (payload.ok && payload.admin_connected) {
       recommendation = '当前后台自动继承正常，可以直接下发 MySearch 通用 token 给客户端。';
     } else if (payload.ok) {
       recommendation = '当前已能转发 Social / X 搜索；如果要更完整的 token 元数据，继续补 grok2api 后台。';
@@ -2204,7 +2244,7 @@ function getSettingsProbeMeta(kind, payload = {}) {
     tone: payload.ok ? 'ok' : 'error',
     title: `Social / X ${payload.ok ? '测试通过' : '测试失败'}`,
     eyebrow: 'Latest Probe',
-    pills: [socialModeLabel(payload.mode || 'manual'), socialTokenSourceLabel(payload.token_source || '')],
+    pills: [socialModeLabel(payload.mode || 'local'), socialTokenSourceLabel(payload.token_source || '')],
     items: [
       { label: '请求目标', value: requestTarget, mono: true },
       { label: '鉴权来源', value: authSource },
@@ -2379,8 +2419,51 @@ function setTavilyMode(mode) {
   });
 }
 
-function renderSocialUpstreamKeySchedule(keys = []) {
-  const shell = document.getElementById('settings-social-upstream-key-list');
+function setSocialMode(mode) {
+  const nextMode = ['local', 'upstream'].includes(mode) ? mode : 'local';
+  const input = document.getElementById('settings-social-mode');
+  if (input) input.value = nextMode;
+  document.querySelectorAll('.mode-switch-btn[data-social-mode]').forEach((button) => {
+    const active = button.dataset.socialMode === nextMode;
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-checked', active ? 'true' : 'false');
+    button.setAttribute('tabindex', active ? '0' : '-1');
+  });
+  document.querySelectorAll('[data-social-mode-field]').forEach((field) => {
+    const modes = String(field.dataset.socialModeField || '').split(/\s+/).filter(Boolean);
+    const visible = modes.includes(nextMode);
+    field.classList.toggle('hidden', !visible);
+    field.setAttribute('aria-hidden', visible ? 'false' : 'true');
+  });
+  const hint = document.getElementById('settings-social-mode-hint');
+  if (hint) {
+    hint.textContent = nextMode === 'local'
+      ? '只使用本地 Social/X Key 池；上游 Admin 配置会保持保存，但不会被调用。'
+      : '只使用上游连接凭证；本地 Social/X Key 池不会参与请求。';
+  }
+  const runtimeStrip = document.getElementById('settings-social-runtime-strip');
+  if (runtimeStrip) {
+    runtimeStrip.textContent = `当前选择：${socialModeLabel(nextMode)} · 保存后生效`;
+  }
+  const footerTitle = document.getElementById('settings-social-footer-title');
+  const footerDetail = document.getElementById('settings-social-footer-detail');
+  if (footerTitle) {
+    footerTitle.textContent = nextMode === 'local'
+      ? '本地模式只使用本地 Social/X Key 池。'
+      : '上游模式只使用上游连接凭证。';
+  }
+  if (footerDetail) {
+    footerDetail.textContent = nextMode === 'local'
+      ? '上游 Admin 配置会保留，但不会被调用；保存后刷新本地池状态。'
+      : '本地 Social/X Key 池不会参与请求；保存后刷新上游连接和管理统计。';
+  }
+}
+
+function renderSocialKeySchedule(keys = [], mode = 'upstream', active = true) {
+  const shellId = mode === 'local'
+    ? 'settings-social-local-key-list'
+    : 'settings-social-upstream-key-list';
+  const shell = document.getElementById(shellId);
   if (!shell) return;
   shell.innerHTML = keys.map((key) => {
     const reason = String(key.disabled_reason || '').trim();
@@ -2389,9 +2472,11 @@ function renderSocialUpstreamKeySchedule(keys = []) {
       quota_exhausted: '额度耗尽',
       auth_rejected: '凭证失效',
     };
-    const status = key.schedulable ? '正常' : (labels[reason] || '不可调度');
+    const status = key.schedulable
+      ? (active ? '正常' : '已保存，当前未启用')
+      : (labels[reason] || '不可调度');
     const recovery = key.schedule_until ? ` · ${formatTime(key.schedule_until)} 自动恢复` : '';
-    const action = key.schedulable
+    const action = key.schedulable || !active
       ? ''
       : `<button class="btn btn-sm btn-soft" type="button" onclick="resumeSocialUpstreamKey('${escapeHtml(key.id)}', this)">立即恢复</button>`;
     return `
@@ -2403,6 +2488,10 @@ function renderSocialUpstreamKeySchedule(keys = []) {
       </div>
     `;
   }).join('');
+}
+
+function renderSocialUpstreamKeySchedule(keys = []) {
+  renderSocialKeySchedule(keys, 'upstream', true);
 }
 
 function fillSettingsForm(settings) {
@@ -2433,6 +2522,10 @@ function fillSettingsForm(settings) {
     tavily.upstream_admin_headers_configured || tavily.upstream_admin_cookie_configured ? '已配置上游 Admin 认证' : '当前只读 public summary',
   ].filter(Boolean).join(' · ');
 
+  setSocialMode(social.mode || 'local');
+  document.getElementById('settings-social-local-base-url').value = social.local_base_url || 'https://api.x.ai/v1';
+  document.getElementById('settings-social-local-responses-path').value = social.local_responses_path || '/responses';
+  document.getElementById('settings-social-local-api-key').value = '';
   document.getElementById('settings-social-upstream-base-url').value = social.upstream_base_url || '';
   document.getElementById('settings-social-upstream-responses-path').value = social.upstream_responses_path || '/responses';
   document.getElementById('settings-social-admin-base-url').value = social.admin_base_url || '';
@@ -2448,6 +2541,7 @@ function fillSettingsForm(settings) {
   document.getElementById('settings-social-admin-app-key').value = '';
   document.getElementById('settings-social-admin-password').value = '';
   document.getElementById('settings-social-upstream-api-key').value = '';
+  document.getElementById('settings-social-clear-local-api-key').checked = false;
   document.getElementById('settings-social-clear-upstream-api-key').checked = false;
   document.getElementById('settings-social-gateway-token').value = '';
 
@@ -2455,20 +2549,39 @@ function fillSettingsForm(settings) {
     describeConfiguredSecret(social.admin_app_key_masked, social.admin_app_key_configured);
   document.getElementById('settings-social-admin-password-hint').textContent =
     describeConfiguredSecret(social.admin_password_masked, social.admin_password_configured);
+  const socialLocalKeys = Array.isArray(social.local_keys) ? social.local_keys : [];
   const socialUpstreamKeys = Array.isArray(social.upstream_keys) ? social.upstream_keys : [];
+  document.getElementById('settings-social-local-api-key-hint').textContent = social.local_api_key_configured
+    ? `${describeConfiguredSecret(social.local_api_key_masked, true)} 已配置 ${fmtNum(socialLocalKeys.length)} 个本地 key。`
+    : '支持逗号分隔多个本地 Social/X key；429 临时冷却，额度耗尽或失效后手工恢复。';
   const socialAvailableKeys = socialUpstreamKeys.filter((key) => key.schedulable).length;
   const socialUnavailableReasons = [...new Set(
     socialUpstreamKeys.map((key) => key.disabled_reason).filter(Boolean),
   )];
-  renderSocialUpstreamKeySchedule(socialUpstreamKeys);
+  renderSocialKeySchedule(socialLocalKeys, 'local', social.active_key_scope === 'local');
+  renderSocialKeySchedule(socialUpstreamKeys, 'upstream', social.active_key_scope === 'upstream');
   document.getElementById('settings-social-upstream-api-key-hint').textContent = social.upstream_api_key_configured
     ? `${describeConfiguredSecret(social.upstream_api_key_masked, true)} 已配置 ${fmtNum(socialUpstreamKeys.length)} 个，当前可调度 ${fmtNum(socialAvailableKeys)} 个${socialUnavailableReasons.length ? `；隔离原因：${socialUnavailableReasons.join('、')}` : ''}。保存新 key 池会替换现有值并恢复调度。`
-    : '支持逗号分隔多个 key；健康 key 轮询，429 临时冷却，额度耗尽或失效后等待手工替换。';
+    : '上游模式可配置多个 client key；当前模式不是上游时，这些凭证不会参与请求。';
   document.getElementById('settings-social-gateway-token-hint').textContent =
     describeConfiguredSecret(social.gateway_token_masked, social.gateway_token_configured);
 
+  const socialMode = social.mode || 'local';
+  const footerTitle = document.getElementById('settings-social-footer-title');
+  const footerDetail = document.getElementById('settings-social-footer-detail');
+  if (footerTitle) {
+    footerTitle.textContent = socialMode === 'local'
+      ? '本地模式只使用本地 Social/X Key 池。'
+      : '上游模式只使用上游连接凭证。';
+  }
+  if (footerDetail) {
+    footerDetail.textContent = socialMode === 'local'
+      ? '上游 Admin 配置会保留，但不会被调用；保存后刷新本地池状态。'
+      : '本地 Social/X Key 池不会参与请求；保存后刷新上游连接和管理统计。';
+  }
+
   const bits = [
-    `当前模式：${socialModeLabel(social.mode || 'manual')}`,
+    `当前模式：${socialModeLabel(socialMode)}`,
     social.model ? `主模型：${social.model}` : '',
     social.fallback_model ? `Fallback：${social.fallback_model} (< ${social.fallback_min_results || 3})` : '',
     social.token_source ? `Token 来源：${social.token_source}` : '',
@@ -3314,8 +3427,9 @@ function renderSocialWorkspace(social) {
   const stats = social?.stats || {};
   const isV3Admin = social?.admin_api_version === 'v3' || stats.schema === 'grok2api_v3_accounts';
   const socialState = getSocialUpstreamState(social || {});
-  const mode = socialModeLabel(social?.mode || 'manual');
+  const mode = socialModeLabel(social?.mode || 'local');
   const source = socialTokenSourceLabel(social?.token_source || '');
+  const keyScopeLabel = social?.mode === 'local' ? '本地 key' : '上游 key';
   const syncLine = socialState.level === 'full'
     ? (isV3Admin ? [
       mode,
@@ -3330,7 +3444,7 @@ function renderSocialWorkspace(social) {
     ]).join(' · ')
     : [
       mode,
-      `上游 key ${fmtNum(socialState.upstreamAvailableKeyCount)} 可调度 / ${fmtNum(socialState.upstreamApiKeyCount)} 总数`,
+      `${keyScopeLabel} ${fmtNum(socialState.upstreamAvailableKeyCount)} 可调度 / ${fmtNum(socialState.upstreamApiKeyCount)} 总数`,
       `客户端 token ${fmtNum(socialState.acceptedTokenCount)}`,
       socialState.canProxySearch ? '已可转发搜索' : '待补鉴权',
     ].join(' · ');
@@ -3348,7 +3462,7 @@ function renderSocialWorkspace(social) {
         <div class="hint">当前 Social / X 工作台的路由状态</div>
       </div>
       <div class="stat-box">
-        <div class="label">可调度 Key</div>
+        <div class="label">可调度 ${social?.mode === 'local' ? '本地 Key' : '上游 Key'}</div>
         <div class="value">${fmtNum(socialState.upstreamAvailableKeyCount)} <span class="muted">/ ${fmtNum(socialState.upstreamApiKeyCount)}</span></div>
         <div class="hint">隔离 ${fmtNum(socialState.upstreamUnavailableKeyCount)}；429 自动冷却，额度或鉴权失败需手工替换</div>
       </div>
@@ -3411,7 +3525,7 @@ function renderSocialWorkspace(social) {
     <div class="stat-box">
       <div class="label">Token 来源</div>
       <div class="value">${escapeHtml(source)}</div>
-      <div class="hint">${social?.admin_connected ? '当前已接入后台自动继承' : '当前为手动或混合模式'}</div>
+      <div class="hint">${social?.mode === 'local' ? '当前只使用本地 Key 池' : (social?.admin_connected ? '当前已接入上游管理后台' : '当前使用上游 client key')}</div>
     </div>
   `;
 }

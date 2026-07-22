@@ -102,13 +102,14 @@
 
 控制台能力：
 
-- 上游 base URL 管理
-- 上游 key 池轮询、可调度数量/隔离原因展示、单 key 立即恢复与整池替换
+- 明确选择互斥的“本地模式”或“上游模式”
+- 本地模式：独立 Base URL、Responses Path、本地 Social/X key 池轮询、可调度数量/隔离原因展示、单 key 立即恢复与整池替换
+- 上游模式：上游 Base URL、client key 池和 grok2api Admin 对接；不会读取本地模式 Key
 - gateway token 管理
 - grok2api v3 管理员会话与 v2 legacy app key 对接
 - v3 账号可用性、请求统计与 v2 token 状态展示
 
-grok2api v3 的推理与管理凭据相互独立：`g2a_` client key 调用 `POST /v1/responses`；管理员用户名/密码只用于登录 `/api/admin/v1/auth/login` 并读取 `/accounts/summary`、`/dashboard`，不能替代 client key。
+Social/X 模式保存在 Proxy 的 `settings` 表中。旧配置没有 `social_mode` 时，有 Admin 凭证默认进入上游模式，否则按本地模式兼容读取旧的 `social_upstream_api_key`。grok2api v3 的推理与管理凭据相互独立：`g2a_` client key 调用 `POST /v1/responses`；管理员用户名/密码只用于登录 `/api/admin/v1/auth/login` 并读取 `/accounts/summary`、`/dashboard`，不能替代 client key。
 
 ## 当前推荐用法
 
@@ -331,6 +332,16 @@ ADMIN_SESSION_MAX_AGE=2592000
   - 历史失败阈值留下的无原因停用 Key 会在重传时恢复；`manual`、`auth_rejected`、`quota_exhausted` 默认保持停用，可传 `"reactivate": true` 显式恢复。
   - 默认沿用管理员 session、`X-Admin-Password` 或管理员 Bearer；配置 `MYSEARCH_PROXY_KEY_UPLOAD_TOKEN` 后，注册器也可仅带 `X-Key-Upload-Token`，该 Token 不可用于其他管理 API。
   - 单条上传保留历史 opaque gateway credential 兼容；批量文本仍按 Provider Key 格式筛选。
+
+注册器使用专用上传凭证时：
+
+```bash
+curl http://localhost:9874/api/keys \
+  -H 'Content-Type: application/json' \
+  -H 'X-Key-Upload-Token: your-registrar-token' \
+  -d '{"service":"firecrawl","key":"fc-...","email":"account@example.com"}'
+```
+
 - `GET /api/tokens`
 - `POST /api/tokens`
 - `POST /api/usage/sync`

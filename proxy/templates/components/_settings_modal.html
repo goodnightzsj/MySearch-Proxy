@@ -150,11 +150,11 @@
       <div class="settings-panel-grid">
         <div class="settings-panel-aside">
           <h3>Social / X / grok2api</h3>
-          <p>grok2api v3 的推理和管理是两套凭据：<code>g2a_</code> client key 调用 <code>/v1/responses</code>，管理员账号读取账号与请求统计。</p>
+          <p>Social/X 只选择一种凭证来源：本地模式维护自己的 Key 池，上游模式连接 grok2api 或兼容网关。</p>
           <div class="settings-note-list">
-            <div class="settings-note">v3 管理入口固定为 <code>/api/admin/v1</code>，控制台会自动登录并缓存短期会话。</div>
-            <div class="settings-note">旧 app key 与 <code>config/tokens</code> 路径只保留给 v2-compatible 部署。</div>
-            <div class="settings-note">这里只管理兼容 Social/X 路由，不影响其他 provider。</div>
+            <div class="settings-note"><strong>本地模式</strong>只轮询本地 Social/X Key，不读取上游 Admin。</div>
+            <div class="settings-note"><strong>上游模式</strong>只使用上游 client key 或 Admin 返回的凭证，不读取本地池。</div>
+            <div class="settings-note">v3 管理入口固定为 <code>/api/admin/v1</code>；旧 app key 仅保留给 v2-compatible 部署。</div>
           </div>
           <div class="settings-secret-meta" id="settings-social-meta"></div>
         </div>
@@ -162,10 +162,25 @@
           <form class="settings-form" onsubmit="saveSocialSettings(event)">
             <div class="settings-summary-strip" id="settings-social-summary"></div>
             <div class="settings-fields">
-              <div class="settings-field">
-                <label for="settings-social-upstream-base-url">搜索上游 Base URL</label>
+              <div class="settings-field full-width">
+                <label for="settings-social-mode">工作模式</label>
+                <input type="hidden" id="settings-social-mode" value="local">
+                <div class="mode-switch" role="radiogroup" aria-label="Social / X 工作模式">
+                  <button type="button" class="mode-switch-btn is-active" role="radio" data-social-mode="local" aria-checked="true" tabindex="0" onclick="setSocialMode('local')">本地模式</button>
+                  <button type="button" class="mode-switch-btn" role="radio" data-social-mode="upstream" aria-checked="false" tabindex="-1" onclick="setSocialMode('upstream')">上游模式</button>
+                </div>
+                <div class="hint" id="settings-social-mode-hint">只使用本地 Social/X Key 池；上游 Admin 配置会保持保存，但不会被调用。</div>
+                <div class="mode-runtime-strip" id="settings-social-runtime-strip">当前选择：本地模式 · 保存后生效</div>
+              </div>
+              <div class="settings-field" data-social-mode-field="local">
+                <label for="settings-social-local-base-url">本地模式 Base URL</label>
+                <input type="text" id="settings-social-local-base-url" placeholder="https://api.x.ai/v1">
+                <div class="hint">本地 Key 池请求实际访问的 xAI 或兼容接口地址。</div>
+              </div>
+              <div class="settings-field" data-social-mode-field="upstream">
+                <label for="settings-social-upstream-base-url">上游模式 Base URL</label>
                 <input type="text" id="settings-social-upstream-base-url" placeholder="https://media.example.com/v1">
-                <div class="hint">真正转发 <code>/responses</code> 时使用的上游地址。</div>
+                <div class="hint">上游模式实际转发 <code>/responses</code> 时使用的网关地址。</div>
               </div>
               <div class="settings-field">
                 <label for="settings-social-model">模型</label>
@@ -183,11 +198,48 @@
                 <option value="grok-4.3">basic · 默认 fallback</option>
                 <option value="grok-4.5">advanced</option>
               </datalist>
-              <div class="settings-field">
-                <label for="settings-social-admin-base-url">后台管理地址</label>
-                <input type="text" id="settings-social-admin-base-url" placeholder="https://media.example.com">
-                <div class="hint">填写主机根地址，不要附加 <code>/v1</code> 或 <code>/api/admin/v1</code>。</div>
+              <div class="settings-field full-width" data-social-mode-field="local">
+                <label for="settings-social-local-api-key">本地 Social/X API key 池</label>
+                <div class="input-reveal-wrap">
+                  <input type="password" id="settings-social-local-api-key" placeholder="xai_key1,xai_key2；留空保持当前值">
+                  <button type="button" class="input-reveal-btn" aria-label="显示本地 Social/X key" aria-pressed="false" data-reveal-target="settings-social-local-api-key"><span class="reveal-icon" aria-hidden="true">👁</span></button>
+                </div>
+                <div class="hint" id="settings-social-local-api-key-hint">支持逗号分隔多个本地 Social/X key；健康 key 轮询，429 临时冷却，额度耗尽或失效后手工恢复。</div>
+                <div class="settings-key-schedule" id="settings-social-local-key-list" aria-live="polite"></div>
+                <label class="settings-clear-check" for="settings-social-clear-local-api-key">
+                  <input type="checkbox" id="settings-social-clear-local-api-key">
+                  <span>保存时清空本地 key 池</span>
+                </label>
               </div>
+              <div class="settings-field full-width" data-social-mode-field="upstream">
+                <label for="settings-social-upstream-api-key">上游模式 client key 池</label>
+                <div class="input-reveal-wrap">
+                  <input type="password" id="settings-social-upstream-api-key" placeholder="g2a_key1,g2a_key2；留空保持当前值">
+                  <button type="button" class="input-reveal-btn" aria-label="显示上游 client key" aria-pressed="false" data-reveal-target="settings-social-upstream-api-key"><span class="reveal-icon" aria-hidden="true">👁</span></button>
+                </div>
+                <div class="hint" id="settings-social-upstream-api-key-hint">上游模式只使用这里的 client key，或使用上游 v2 Admin 返回的 app key；不会读取本地模式 Key。</div>
+                <div class="settings-key-schedule" id="settings-social-upstream-key-list" aria-live="polite"></div>
+                <label class="settings-clear-check" for="settings-social-clear-upstream-api-key">
+                  <input type="checkbox" id="settings-social-clear-upstream-api-key">
+                  <span>保存时清空上游 client key 池</span>
+                </label>
+              </div>
+              <div class="settings-field">
+                <label for="settings-social-gateway-token">客户端访问 token</label>
+                <div class="input-reveal-wrap">
+                  <input type="password" id="settings-social-gateway-token" placeholder="留空表示保持当前值">
+                  <button type="button" class="input-reveal-btn" aria-label="显示密码" aria-pressed="false" data-reveal-target="settings-social-gateway-token"><span class="reveal-icon" aria-hidden="true">👁</span></button>
+                </div>
+                <div class="hint" id="settings-social-gateway-token-hint">未配置</div>
+              </div>
+            </div>
+
+            <div class="settings-field full-width" data-social-mode-field="upstream">
+              <label for="settings-social-admin-base-url">上游 Admin Base URL</label>
+              <input type="text" id="settings-social-admin-base-url" placeholder="https://media.example.com">
+              <div class="hint">上游模式可选；填写主机根地址，不要附加 <code>/v1</code> 或 <code>/api/admin/v1</code>。</div>
+            </div>
+            <div class="settings-fields" data-social-mode-field="upstream">
               <div class="settings-field">
                 <label for="settings-social-admin-username">v3 管理员用户名</label>
                 <input type="text" id="settings-social-admin-username" autocomplete="username" placeholder="admin">
@@ -201,7 +253,7 @@
                 </div>
                 <div class="hint" id="settings-social-admin-password-hint">未配置</div>
               </div>
-              <div class="settings-field">
+              <div class="settings-field full-width">
                 <label for="settings-social-admin-app-key">Legacy v2 后台 app key</label>
                 <div class="input-reveal-wrap">
                   <input type="password" id="settings-social-admin-app-key" placeholder="留空表示保持当前值">
@@ -209,36 +261,11 @@
                 </div>
                 <div class="hint" id="settings-social-admin-app-key-hint">未配置</div>
               </div>
-              <div class="settings-field">
-                <label for="settings-social-upstream-api-key">搜索上游 API key 池</label>
-                <div class="input-reveal-wrap">
-                  <input type="password" id="settings-social-upstream-api-key" placeholder="g2a_key1,g2a_key2；留空保持当前值">
-                  <button type="button" class="input-reveal-btn" aria-label="显示密码" aria-pressed="false" data-reveal-target="settings-social-upstream-api-key"><span class="reveal-icon" aria-hidden="true">👁</span></button>
-                </div>
-                <div class="hint" id="settings-social-upstream-api-key-hint">支持逗号分隔多个 key；健康 key 轮询，429 临时冷却，额度耗尽或失效后等待手工替换。</div>
-                <div class="settings-key-schedule" id="settings-social-upstream-key-list" aria-live="polite"></div>
-                <label class="settings-clear-check" for="settings-social-clear-upstream-api-key">
-                  <input type="checkbox" id="settings-social-clear-upstream-api-key">
-                  <span>保存时清空已配置的上游 key 池</span>
-                </label>
-              </div>
-              <div class="settings-field">
-                <label for="settings-social-gateway-token">客户端访问 token</label>
-                <div class="input-reveal-wrap">
-                  <input type="password" id="settings-social-gateway-token" placeholder="留空表示保持当前值">
-                  <button type="button" class="input-reveal-btn" aria-label="显示密码" aria-pressed="false" data-reveal-target="settings-social-gateway-token"><span class="reveal-icon" aria-hidden="true">👁</span></button>
-                </div>
-                <div class="hint" id="settings-social-gateway-token-hint">未配置</div>
-              </div>
             </div>
 
-            <details class="settings-advanced">
-              <summary>Legacy v2 路径和高级缓存</summary>
+            <details class="settings-advanced" data-social-mode-field="upstream">
+              <summary>Legacy v2 Admin 路径</summary>
               <div class="settings-fields">
-                <div class="settings-field">
-                  <label for="settings-social-upstream-responses-path">Responses Path</label>
-                  <input type="text" id="settings-social-upstream-responses-path" placeholder="/responses">
-                </div>
                 <div class="settings-field">
                   <label for="settings-social-admin-verify-path">Verify Path</label>
                   <input type="text" id="settings-social-admin-verify-path" placeholder="/v1/admin/verify">
@@ -250,6 +277,22 @@
                 <div class="settings-field">
                   <label for="settings-social-admin-tokens-path">Tokens Path</label>
                   <input type="text" id="settings-social-admin-tokens-path" placeholder="/admin/api/tokens">
+                </div>
+              </div>
+            </details>
+
+            <details class="settings-advanced">
+              <summary>Responses 路径和路由参数</summary>
+              <div class="settings-fields">
+                <div class="settings-field" data-social-mode-field="local">
+                  <label for="settings-social-local-responses-path">本地 Responses Path</label>
+                  <input type="text" id="settings-social-local-responses-path" placeholder="/responses">
+                  <div class="hint">本地模式使用的兼容 Responses 路径。</div>
+                </div>
+                <div class="settings-field" data-social-mode-field="upstream">
+                  <label for="settings-social-upstream-responses-path">上游 Responses Path</label>
+                  <input type="text" id="settings-social-upstream-responses-path" placeholder="/responses">
+                  <div class="hint">上游模式使用的 Responses 路径。</div>
                 </div>
                 <div class="settings-field full-width">
                   <label for="settings-social-cache-ttl-seconds">缓存秒数</label>
@@ -266,8 +309,8 @@
 
             <div class="settings-footer">
               <div class="settings-footer-copy">
-                <strong>v3 管理凭据只读取统计，不能代替推理 client key。</strong>
-                <span>保存后会刷新 Social 工作台、账号可用性、请求统计和兼容路由摘要。</span>
+                <strong id="settings-social-footer-title">本地模式只使用本地 Social/X Key 池。</strong>
+                <span id="settings-social-footer-detail">保存后会刷新 Social 工作台、账号可用性、请求统计和兼容路由摘要。</span>
               </div>
               <div class="settings-footer-actions">
                 <button type="button" class="btn btn-soft" onclick="testSocialSettings(this)">测试当前连接</button>

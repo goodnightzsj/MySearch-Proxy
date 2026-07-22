@@ -297,6 +297,10 @@ Baseline console config:
 ADMIN_PASSWORD=<generate-a-strong-password>
 # Optional registrar-only credential for POST /api/keys.
 MYSEARCH_PROXY_KEY_UPLOAD_TOKEN=
+# Local Social/X mode: only this local key pool is used.
+SOCIAL_GATEWAY_LOCAL_BASE_URL=https://api.x.ai/v1
+SOCIAL_GATEWAY_LOCAL_RESPONSES_PATH=/responses
+SOCIAL_GATEWAY_LOCAL_API_KEY=
 SOCIAL_GATEWAY_UPSTREAM_BASE_URL=https://api.x.ai/v1
 SOCIAL_GATEWAY_UPSTREAM_RESPONSES_PATH=/responses
 SOCIAL_GATEWAY_ADMIN_BASE_URL=https://media.example.com
@@ -312,6 +316,14 @@ SOCIAL_GATEWAY_MODEL=grok-4.20-0309
 SOCIAL_GATEWAY_FALLBACK_MODEL=grok-4.3
 SOCIAL_GATEWAY_TOKEN=
 ```
+
+Social/X uses exactly one runtime mode at a time. `local` uses the local key pool
+(`SOCIAL_GATEWAY_LOCAL_BASE_URL`, `SOCIAL_GATEWAY_LOCAL_API_KEY`) and never reads
+the upstream admin API. `upstream` uses the configured gateway/client key and may
+read grok2api admin state; it never schedules local-mode keys. Legacy deployments
+without a stored `social_mode` default to `upstream` when admin credentials exist,
+otherwise to `local` while reading the old `SOCIAL_GATEWAY_UPSTREAM_API_KEY` as a
+compatibility fallback.
 
 ### Optional `tavily-hikari` admin visibility
 
