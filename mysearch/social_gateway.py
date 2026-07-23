@@ -7,11 +7,14 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
+import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -140,6 +143,9 @@ http_client = httpx.AsyncClient(
     limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
 )
 state_cache: dict[str, Any] = {"expires_at": 0.0, "value": None}
+social_upstream_key_schedule: dict[str, dict[str, Any]] = {}
+social_upstream_key_cursor = 0
+social_upstream_key_lock = threading.Lock()
 state_lock: asyncio.Lock | None = None
 state_lock_loop: asyncio.AbstractEventLoop | None = None
 admin_session_cache: dict[str, Any] = {
@@ -1092,6 +1098,136 @@ def count_social_citations(payload: dict[str, Any] | None) -> int:
     return len((payload or {}).get("citations") or [])
 
 
+def redact_secret_text(value: Any, *secrets: Any) -> str:
+    text = str(value or "")
+    for secret in secrets:
+        normalized = str(secret or "")
+        if normalized:
+            text = text.replace(normalized, "<redacted>")
+    return text
+
+
+def _social_key_fingerprint(key: str) -> str:
+    return hashlib.sha256(str(key).encode("utf-8")).hexdigest()
+
+
+def _classify_social_key_failure(status_code: int, detail: str = "") -> str:
+    normalized = " ".join(str(detail or "").lower().split())
+    quota_markers = (
+        "quota_exhausted", "quota exhausted", "insufficient_quota", "insufficient quota",
+        "credits exhausted", "credit exhausted", "credits limit", "credit limit",
+        "exceeded your credits", "no credits remaining", "billing limit", "usage limit",
+        "plan limit", "resource_exhausted",
+    )
+    auth_markers = (
+        "invalid api key", "invalid_api_key", "api key is invalid", "api key has expired",
+        "expired api key", "revoked api key", "invalid token", "token is invalid",
+        "token has expired", "expired token", "revoked token", "bad credentials",
+        "authentication failed",
+    )
+    has_quota_marker = any(marker in normalized for marker in quota_markers)
+    if status_code in {402, 432} or (status_code in {403, 429} and has_quota_marker):
+        return "quota_exhausted"
+    if status_code == 429:
+        return "rate_limited"
+    if status_code == 401 or (status_code == 403 and any(marker in normalized for marker in auth_markers)):
+        return "auth_rejected"
+    return ""
+
+
+def _parse_retry_after_header(headers: Any) -> int | None:
+    if headers is None or not hasattr(headers, "get"):
+        return None
+    raw_retry_after = str(headers.get("retry-after") or "").strip()
+    if not raw_retry_after:
+        return None
+    try:
+        return max(1, min(86400, math.ceil(float(raw_retry_after))))
+    except (TypeError, ValueError, OverflowError):
+        pass
+    try:
+        retry_at = parsedate_to_datetime(raw_retry_after)
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        return max(
+            1,
+            min(86400, math.ceil((retry_at - datetime.now(timezone.utc)).total_seconds())),
+        )
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _available_social_upstream_keys(keys: list[str] | None) -> list[str]:
+    now = time.time()
+    available: list[str] = []
+    with social_upstream_key_lock:
+        for key in unique_preserve_order(keys or []):
+            fingerprint = _social_key_fingerprint(key)
+            schedule = social_upstream_key_schedule.get(fingerprint)
+            if schedule and schedule.get("until") is not None:
+                try:
+                    if float(schedule["until"]) <= now:
+                        social_upstream_key_schedule.pop(fingerprint, None)
+                        schedule = None
+                except (TypeError, ValueError):
+                    social_upstream_key_schedule.pop(fingerprint, None)
+                    schedule = None
+            if schedule is None:
+                available.append(key)
+    return available
+
+
+def _ordered_social_upstream_keys(keys: list[str] | None) -> list[str]:
+    global social_upstream_key_cursor
+    available = _available_social_upstream_keys(keys)
+    if len(available) <= 1:
+        return available
+    with social_upstream_key_lock:
+        start = social_upstream_key_cursor % len(available)
+        social_upstream_key_cursor = (start + 1) % len(available)
+    return available[start:] + available[:start]
+
+
+def _schedule_social_upstream_key(
+    key: str,
+    failure_kind: str,
+    retry_after_seconds: int | None = None,
+) -> None:
+    with social_upstream_key_lock:
+        social_upstream_key_schedule[_social_key_fingerprint(key)] = {
+            "reason": failure_kind,
+            "until": (
+                time.time() + max(1, int(retry_after_seconds or 60))
+                if failure_kind == "rate_limited"
+                else None
+            ),
+        }
+
+
+def _social_upstream_pool_failure(keys: list[str] | None) -> tuple[str, int | None]:
+    fingerprints = {_social_key_fingerprint(key) for key in unique_preserve_order(keys or [])}
+    now = time.time()
+    with social_upstream_key_lock:
+        states = [
+            state
+            for fingerprint, state in social_upstream_key_schedule.items()
+            if fingerprint in fingerprints
+        ]
+    delays = [
+        max(1, math.ceil(float(state["until"]) - now))
+        for state in states
+        if state.get("reason") == "rate_limited" and state.get("until") is not None
+    ]
+    if delays:
+        return "rate_limited", min(delays)
+    terminal = [
+        str(state.get("reason") or "")
+        for state in states
+        if state.get("reason") in {"quota_exhausted", "auth_rejected"}
+    ]
+    return (terminal[0], None) if terminal else ("", None)
+
+
 def build_social_attempt_summary(
     model: str,
     ok: bool,
@@ -1100,6 +1236,8 @@ def build_social_attempt_summary(
     error: str = "",
     status_code: int | None = None,
     latency_ms: int | None = None,
+    failure_kind: str = "",
+    retry_after_seconds: int | None = None,
 ) -> dict[str, Any]:
     attempt: dict[str, Any] = {
         "model": model,
@@ -1110,6 +1248,10 @@ def build_social_attempt_summary(
     }
     if latency_ms is not None:
         attempt["latency_ms"] = latency_ms
+    if failure_kind:
+        attempt["failure_kind"] = failure_kind
+    if retry_after_seconds is not None:
+        attempt["retry_after_seconds"] = retry_after_seconds
     if error:
         attempt["error"] = error
     if response is not None:
@@ -1194,6 +1336,10 @@ def build_social_route_metadata(
         }
         if item.get("latency_ms") is not None:
             route_item["latency_ms"] = item["latency_ms"]
+        if item.get("failure_kind"):
+            route_item["failure_kind"] = item["failure_kind"]
+        if item.get("retry_after_seconds") is not None:
+            route_item["retry_after_seconds"] = item["retry_after_seconds"]
         if item.get("error"):
             route_item["error"] = item["error"]
         route_attempts.append(route_item)
@@ -1249,6 +1395,7 @@ def attach_social_route_metadata(
 def extract_social_upstream_error(
     upstream_body: dict[str, Any] | Any,
     fallback_detail: str = "Social search failed",
+    *secrets: Any,
 ) -> str:
     detail = ""
     if isinstance(upstream_body, dict):
@@ -1259,7 +1406,7 @@ def extract_social_upstream_error(
             detail = upstream_body.get("detail") or ""
     if not detail:
         detail = fallback_detail
-    return str(detail)[:300]
+    return redact_secret_text(detail, *secrets)[:300]
 
 
 async def execute_social_search_attempt(
@@ -1270,46 +1417,133 @@ async def execute_social_search_attempt(
     max_results: int,
 ) -> dict[str, Any]:
     upstream_payload, _ = build_upstream_payload(body, model=model)
-    start = time.monotonic()
-    try:
-        response = await http_client.post(
-            f"{state['upstream_base_url']}{state['upstream_responses_path']}",
-            json=upstream_payload,
-            headers={"Authorization": f"Bearer {state['resolved_upstream_api_key']}"},
+    configured_keys = state.get("upstream_api_keys") or [state.get("resolved_upstream_api_key")]
+    upstream_keys = _ordered_social_upstream_keys(configured_keys)
+    if not upstream_keys:
+        failure_kind, retry_after_seconds = _social_upstream_pool_failure(configured_keys)
+        if failure_kind == "rate_limited":
+            return build_social_attempt_summary(
+                model,
+                False,
+                error="All social upstream API keys are rate limited",
+                status_code=429,
+                latency_ms=0,
+                failure_kind=failure_kind,
+                retry_after_seconds=retry_after_seconds,
+            )
+        return build_social_attempt_summary(
+            model,
+            False,
+            error="All social upstream API keys are unavailable; manual key action required",
+            status_code=503,
+            latency_ms=0,
+            failure_kind=failure_kind,
         )
-    except Exception as exc:
+
+    last_key_failure: dict[str, Any] | None = None
+    last_key_failure_kind = ""
+    rate_limit_failure: dict[str, Any] | None = None
+    for upstream_key in upstream_keys:
+        start = time.monotonic()
+        try:
+            response = await http_client.post(
+                f"{state['upstream_base_url']}{state['upstream_responses_path']}",
+                json=upstream_payload,
+                headers={"Authorization": f"Bearer {upstream_key}"},
+            )
+        except Exception:
+            latency_ms = int((time.monotonic() - start) * 1000)
+            logger.warning("social search upstream request failed")
+            return build_social_attempt_summary(
+                model,
+                False,
+                error="upstream request failed",
+                status_code=502,
+                latency_ms=latency_ms,
+            )
+
         latency_ms = int((time.monotonic() - start) * 1000)
-        logger.warning("social search upstream error: %s", exc)
-        return build_social_attempt_summary(
-            model,
-            False,
-            error="upstream request failed",
-            status_code=502,
-            latency_ms=latency_ms,
-        )
+        try:
+            upstream_body = response.json()
+        except Exception:
+            upstream_body = None
 
-    latency_ms = int((time.monotonic() - start) * 1000)
-    try:
-        upstream_body = response.json()
-    except Exception:
-        logger.warning("social upstream non-JSON response")
-        return build_social_attempt_summary(
-            model,
-            False,
-            error="Upstream returned non-JSON",
-            status_code=502,
-            latency_ms=latency_ms,
-        )
+        if response.status_code >= 400:
+            safe_error = extract_social_upstream_error(
+                upstream_body,
+                getattr(response, "text", "").strip(),
+                *configured_keys,
+                UPSTREAM_API_KEY,
+                GATEWAY_TOKEN,
+                ADMIN_APP_KEY,
+                ADMIN_PASSWORD,
+                *state.get("accepted_tokens", []),
+            )
+            classification_detail = redact_secret_text(
+                json.dumps(upstream_body, ensure_ascii=False)
+                if isinstance(upstream_body, (dict, list))
+                else safe_error,
+                *configured_keys,
+                UPSTREAM_API_KEY,
+                GATEWAY_TOKEN,
+                ADMIN_APP_KEY,
+                ADMIN_PASSWORD,
+                *state.get("accepted_tokens", []),
+            )
+            failure_kind = _classify_social_key_failure(response.status_code, classification_detail)
+            retry_after_seconds = _parse_retry_after_header(getattr(response, "headers", None))
+            if failure_kind == "rate_limited" and retry_after_seconds is None:
+                retry_after_seconds = 60
+            logger.warning("social upstream error %s: %s", response.status_code, safe_error)
+            attempt = build_social_attempt_summary(
+                model,
+                False,
+                error=safe_error or f"Upstream returned {response.status_code}",
+                status_code=response.status_code,
+                latency_ms=latency_ms,
+                failure_kind=failure_kind,
+                retry_after_seconds=retry_after_seconds,
+            )
+            if failure_kind:
+                _schedule_social_upstream_key(upstream_key, failure_kind, retry_after_seconds)
+                last_key_failure = attempt
+                last_key_failure_kind = failure_kind
+                if failure_kind == "rate_limited" and (
+                    rate_limit_failure is None
+                    or int(attempt.get("retry_after_seconds") or 60)
+                    < int(rate_limit_failure.get("retry_after_seconds") or 60)
+                ):
+                    rate_limit_failure = attempt
+                continue
+            return attempt
 
-    if response.status_code >= 400:
-        safe_error = extract_social_upstream_error(upstream_body, "")
-        logger.warning("social upstream error %s: %s", response.status_code, safe_error)
+        if upstream_body is None:
+            logger.warning("social upstream non-JSON response")
+            return build_social_attempt_summary(
+                model,
+                False,
+                error="Upstream returned non-JSON",
+                status_code=502,
+                latency_ms=latency_ms,
+            )
+        break
+    else:
+        if rate_limit_failure is not None:
+            return rate_limit_failure
+        if last_key_failure is not None:
+            if last_key_failure_kind in {"auth_rejected", "quota_exhausted"}:
+                last_key_failure = dict(last_key_failure)
+                last_key_failure["status_code"] = 503
+                last_key_failure["error"] = (
+                    "Social upstream API key pool is unavailable; manual key action required"
+                )
+            return last_key_failure
         return build_social_attempt_summary(
             model,
             False,
-            error=safe_error or f"Upstream returned {response.status_code}",
-            status_code=response.status_code,
-            latency_ms=latency_ms,
+            error="All social upstream API keys are unavailable; manual key action required",
+            status_code=503,
+            latency_ms=0,
         )
 
     if not isinstance(upstream_body, dict):
@@ -1411,10 +1645,26 @@ def normalize_social_search_response(
     return normalize_search_response(query, payload, max_results, model=model)
 
 
+def social_attempt_http_exception(attempt: dict[str, Any]) -> HTTPException:
+    status_code = max(400, int(attempt.get("status_code") or 502))
+    headers = None
+    retry_after_seconds = attempt.get("retry_after_seconds")
+    if status_code == 429 and retry_after_seconds is not None:
+        headers = {"Retry-After": str(max(1, int(retry_after_seconds)))}
+    return HTTPException(
+        status_code=status_code,
+        detail=attempt.get("error") or "Social search failed",
+        headers=headers,
+    )
+
+
 async def _build_health_payload() -> dict[str, Any]:
     state = await resolve_gateway_state(force=False)
+    configured_keys = state.get("upstream_api_keys") or [state.get("resolved_upstream_api_key")]
+    configured_keys = unique_preserve_order(configured_keys)
+    available_keys = _available_social_upstream_keys(configured_keys)
     return {
-        "ok": bool(state["resolved_upstream_api_key"] and state["accepted_tokens"]),
+        "ok": bool(available_keys and state["accepted_tokens"]),
         "mode": state["mode"],
         "upstream_base_url": state["upstream_base_url"],
         "upstream_responses_path": state["upstream_responses_path"],
@@ -1432,10 +1682,12 @@ async def _build_health_payload() -> dict[str, Any]:
         "admin_api_version": state["admin_api_version"],
         "accepted_token_count": len(state["accepted_tokens"]),
         "upstream_api_key_count": len(state["upstream_api_keys"]),
+        "upstream_available_key_count": len(available_keys),
+        "upstream_unavailable_key_count": max(0, len(configured_keys) - len(available_keys)),
         "token_configured": bool(state["accepted_tokens"]),
         "upstream_key_configured": bool(state["resolved_upstream_api_key"]),
         "stats": state["stats"],
-        "error": state["error"],
+        "error": "Social gateway configuration requires attention" if state["error"] else "",
     }
 
 
@@ -1469,7 +1721,7 @@ async def social_search(request: Request) -> dict[str, Any]:
     state = await resolve_gateway_state(force=False)
     token_value = extract_token(request, body)
     verify_gateway_token(token_value, state["accepted_tokens"])
-    if not state["resolved_upstream_api_key"]:
+    if not state.get("upstream_api_keys") and not state.get("resolved_upstream_api_key"):
         raise HTTPException(status_code=503, detail="Missing social upstream API key")
     _, max_results = build_upstream_payload(body)
     attempts = []
@@ -1517,7 +1769,7 @@ async def social_search(request: Request) -> dict[str, Any]:
             requested_max_results=max_results,
         )
 
-    if has_social_fallback(primary_model, fallback_model):
+    if has_social_fallback(primary_model, fallback_model) and not primary_attempt.get("failure_kind"):
         fallback_reason = "upstream_error"
         fallback_attempt = await execute_social_search_attempt(
             query,
@@ -1537,14 +1789,9 @@ async def social_search(request: Request) -> dict[str, Any]:
                 fallback_min_results=fallback_min_results,
                 requested_max_results=max_results,
             )
-        detail = fallback_attempt.get("error") or primary_attempt.get("error") or "Social search failed"
-        status_code = int(fallback_attempt.get("status_code") or primary_attempt.get("status_code") or 502)
-        raise HTTPException(status_code=max(400, status_code), detail=detail)
+        raise social_attempt_http_exception(fallback_attempt)
 
-    raise HTTPException(
-        status_code=max(400, int(primary_attempt.get("status_code") or 502)),
-        detail=primary_attempt.get("error") or "Social search failed",
-    )
+    raise social_attempt_http_exception(primary_attempt)
 
 
 def main() -> None:

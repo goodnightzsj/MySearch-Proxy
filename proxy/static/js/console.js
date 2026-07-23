@@ -892,9 +892,40 @@ function setLoginBusy(isBusy) {
   }
 }
 
+function setDashboardError(message = '') {
+  const shell = document.getElementById('dashboard-error');
+  const messageNode = document.getElementById('dashboard-error-message');
+  if (!shell || !messageNode) return;
+  messageNode.textContent = message;
+  shell.classList.toggle('hidden', !message);
+}
+
+async function retryConsoleRefresh() {
+  const shell = document.getElementById('dashboard-error');
+  const button = shell?.querySelector('button');
+  if (button) {
+    button.disabled = true;
+    button.textContent = '重试中...';
+  }
+  setDashboardError('正在重新读取控制台状态...');
+  try {
+    await refresh({ force: true });
+    setDashboardError('');
+  } catch (error) {
+    if (error.message === 'Unauthorized') return;
+    setDashboardError(`控制台加载失败：${error.message}`);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = '重试';
+    }
+  }
+}
+
 function showDashboard(options = {}) {
   const animate = Boolean(options.animate);
   document.getElementById('login-err').classList.add('hidden');
+  setDashboardError('');
   const loginBox = document.getElementById('login-box');
   const dashboard = document.getElementById('dashboard');
   loginBox.classList.add('hidden');
@@ -914,6 +945,7 @@ function showLogin() {
   const loginBox = document.getElementById('login-box');
   dashboard.classList.remove('is-entering');
   dashboard.classList.add('hidden');
+  setDashboardError('');
   loginBox.classList.remove('hidden');
   closeSettingsModal();
   closeDetailDrawer();
@@ -2371,6 +2403,10 @@ async function api(method, path, body) {
 function setStatus(id, message, isError = false) {
   const el = document.getElementById(id);
   if (!el) return;
+  const role = isError ? 'alert' : 'status';
+  const live = isError ? 'assertive' : 'polite';
+  el.setAttribute('role', role);
+  el.setAttribute('aria-live', live);
   if (!message) {
     el.textContent = '';
     el.classList.add('hidden');
@@ -3024,7 +3060,7 @@ function setActiveService(service) {
   }
 }
 
-function doLogin(event) {
+async function doLogin(event) {
   event?.preventDefault?.();
   const input = document.getElementById('pwd-input');
   const password = input.value.trim();
@@ -3034,22 +3070,30 @@ function doLogin(event) {
     return;
   }
   setLoginBusy(true);
-  loginWithPassword(password)
-    .then(async () => {
-      PWD = '';
-      clearStoredPasswords();
-      showDashboard({ animate: true });
+  try {
+    await loginWithPassword(password);
+    PWD = '';
+    clearStoredPasswords();
+    showDashboard({ animate: true });
+    try {
       await refresh();
-    })
-    .catch((error) => {
+    } catch (error) {
+      if (error.message === 'Unauthorized') {
+        showLogin();
+        document.getElementById('login-err').textContent = '登录会话已失效，请重试。';
+        document.getElementById('login-err').classList.remove('hidden');
+        return;
+      }
+      setDashboardError(`控制台加载失败：${error.message}`);
+    }
+  } catch (error) {
       document.getElementById('login-err').textContent = error.message === 'Unauthorized'
         ? '密码错误。'
         : '登录失败，请检查管理 API 是否可用。';
       document.getElementById('login-err').classList.remove('hidden');
-    })
-    .finally(() => {
-      setLoginBusy(false);
-    });
+  } finally {
+    setLoginBusy(false);
+  }
 }
 
 function logout() {
@@ -4511,8 +4555,7 @@ async function initConsole() {
         showLogin();
         return;
       }
-      document.getElementById('login-err').textContent = `控制台加载失败：${error.message}`;
-      document.getElementById('login-err').classList.remove('hidden');
+      setDashboardError(`控制台加载失败：${error.message}`);
     }
     return;
   }
@@ -4531,8 +4574,7 @@ async function initConsole() {
       showLogin();
       return;
     }
-    document.getElementById('login-err').textContent = `控制台加载失败：${error.message}`;
-    document.getElementById('login-err').classList.remove('hidden');
+    setDashboardError(`控制台加载失败：${error.message}`);
   }
 }
 

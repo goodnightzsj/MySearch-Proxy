@@ -4569,6 +4569,94 @@ class MySearchClientTests(unittest.TestCase):
         )
         sleep.assert_called_once_with(1.5)
 
+    def test_crawl_site_fails_when_polling_ends_without_terminal_state(self) -> None:
+        client = MySearchClient()
+        client._get_key_or_raise = lambda provider: SimpleNamespace(key="fc-key", source="env")  # type: ignore[method-assign]
+        calls: list[tuple[str, str]] = []
+
+        def fake_request_json(**kwargs):  # type: ignore[no-untyped-def]
+            calls.append((kwargs["method"], kwargs["path"]))
+            if kwargs["method"] == "POST":
+                return {"id": "job-pending"}
+            return {"status": "processing", "data": []}
+
+        client._request_json_once = fake_request_json  # type: ignore[method-assign]
+
+        with patch("mysearch.clients.time.sleep"):
+            with self.assertRaisesRegex(MySearchError, "terminal state before deadline"):
+                client._crawl_firecrawl(
+                    url="https://fastapi.tiangolo.com",
+                    max_poll_attempts=2,
+                    poll_interval_seconds=0,
+                )
+
+        self.assertEqual(
+            calls,
+            [
+                ("POST", "/v2/crawl"),
+                ("GET", "/v2/crawl/job-pending"),
+                ("GET", "/v2/crawl/job-pending"),
+            ],
+        )
+
+    def test_crawl_caps_each_request_timeout_at_provider_timeout(self) -> None:
+        client = MySearchClient()
+        client._get_key_or_raise = lambda provider: SimpleNamespace(key="fc-key", source="env")  # type: ignore[method-assign]
+        timeouts: list[float] = []
+
+        def fake_request_json(**kwargs):  # type: ignore[no-untyped-def]
+            timeouts.append(float(kwargs["timeout_seconds"]))
+            return {"status": "completed", "data": []}
+
+        client._request_json_once = fake_request_json  # type: ignore[method-assign]
+
+        with patch("mysearch.clients.time.monotonic", side_effect=[100.0, 100.0, 100.0]):
+            client._crawl_firecrawl(url="https://fastapi.tiangolo.com")
+
+        self.assertEqual(timeouts, [float(client.config.timeout_seconds)])
+
+    def test_crawl_rejects_response_returned_after_total_deadline(self) -> None:
+        client = MySearchClient()
+        client._get_key_or_raise = lambda provider: SimpleNamespace(key="fc-key", source="env")  # type: ignore[method-assign]
+        client._request_json_once = lambda **kwargs: {"status": "completed", "data": []}  # type: ignore[method-assign]
+
+        with patch("mysearch.clients.time.monotonic", side_effect=[100.0, 100.0, 102.0]):
+            with self.assertRaisesRegex(MySearchError, "crawl deadline exceeded"):
+                client._crawl_firecrawl(
+                    url="https://fastapi.tiangolo.com",
+                    timeout_seconds=1,
+                )
+
+    def test_crawl_deadline_rejects_retry_after_beyond_remaining_budget(self) -> None:
+        client = MySearchClient()
+        client._get_key_or_raise = lambda provider: SimpleNamespace(key="fc-key", source="env")  # type: ignore[method-assign]
+        calls = 0
+
+        def fake_request_json(**kwargs):  # type: ignore[no-untyped-def]
+            nonlocal calls
+            calls += 1
+            if kwargs["method"] == "POST":
+                return {"id": "job-limited"}
+            raise MySearchHTTPError(
+                provider="firecrawl",
+                status_code=429,
+                detail={"error": "rate limited"},
+                url="https://api.firecrawl.dev/v2/crawl/job-limited",
+                retry_after_seconds=60,
+            )
+
+        client._request_json_once = fake_request_json  # type: ignore[method-assign]
+
+        with patch("mysearch.clients.time.sleep") as sleep:
+            with self.assertRaisesRegex(MySearchError, "crawl deadline exceeded"):
+                client._crawl_firecrawl(
+                    url="https://fastapi.tiangolo.com",
+                    timeout_seconds=5,
+                )
+
+        self.assertEqual(calls, 2)
+        sleep.assert_not_called()
+
     def test_extract_url_exa_fallback_rejects_different_domain_content(self) -> None:
         client = MySearchClient()
         client._scrape_firecrawl = lambda **kwargs: (_ for _ in ()).throw(MySearchError("firecrawl failed"))  # type: ignore[method-assign]
@@ -13403,7 +13491,7 @@ class MySearchClientTests(unittest.TestCase):
 
 
 class CacheKeyCorrectnessTests(unittest.TestCase):
-    """perf-r4 P0 AC1：日期窗口 / handles 必须进 search cache key。"""
+    """Search cache identity must include every result-shaping request input."""
 
     def _build_key(self, client: MySearchClient, **overrides):
         from mysearch.clients import RouteDecision as _RD
@@ -13419,6 +13507,7 @@ class CacheKeyCorrectnessTests(unittest.TestCase):
             include_domains=None,
             exclude_domains=None,
             decision=_RD(provider="xai", reason="test-fixture"),
+            max_results=5,
         )
         defaults.update(overrides)
         return client._build_search_cache_key(**defaults)
@@ -13447,6 +13536,12 @@ class CacheKeyCorrectnessTests(unittest.TestCase):
         client = MySearchClient()
         key_a = self._build_key(client, excluded_x_handles=["spam_handle"])
         key_b = self._build_key(client, excluded_x_handles=[])
+        self.assertNotEqual(key_a, key_b)
+
+    def test_cache_key_includes_requested_max_results(self) -> None:
+        client = MySearchClient()
+        key_a = self._build_key(client, max_results=3)
+        key_b = self._build_key(client, max_results=8)
         self.assertNotEqual(key_a, key_b)
 
     def test_cache_key_includes_x_media_flags(self) -> None:

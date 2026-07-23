@@ -546,6 +546,7 @@ app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__
 templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
 http_client = httpx.AsyncClient(timeout=httpx.Timeout(max(120, SOCIAL_GATEWAY_TIMEOUT_SECONDS), connect=10.0), limits=httpx.Limits(max_connections=20, max_keepalive_connections=10))
 social_gateway_state_cache = {"expires_at": 0.0, "value": None}
+social_gateway_state_generation = 0
 social_upstream_key_schedule = {}
 social_upstream_key_generation = 0
 social_upstream_key_cursor = 0
@@ -663,7 +664,8 @@ def is_key_schedulable(key):
 
 
 def reset_social_gateway_cache(*, clear_key_schedule=False):
-    global social_upstream_key_cursor, social_upstream_key_generation
+    global social_gateway_state_generation, social_upstream_key_cursor, social_upstream_key_generation
+    social_gateway_state_generation += 1
     social_gateway_state_cache["expires_at"] = 0.0
     social_gateway_state_cache["value"] = None
     if clear_key_schedule:
@@ -1819,11 +1821,15 @@ async def resolve_social_gateway_state(force=False):
         if not force and cached and social_gateway_state_cache.get("expires_at", 0) > now:
             return cached
 
-        config = get_runtime_social_config()
-        state = await resolve_social_gateway_state_for_config(config)
-        social_gateway_state_cache["value"] = state
-        social_gateway_state_cache["expires_at"] = now + state["cache_ttl_seconds"]
-        return state
+        while True:
+            generation = social_gateway_state_generation
+            config = get_runtime_social_config()
+            state = await resolve_social_gateway_state_for_config(config)
+            if generation != social_gateway_state_generation:
+                continue
+            social_gateway_state_cache["value"] = state
+            social_gateway_state_cache["expires_at"] = time.time() + state["cache_ttl_seconds"]
+            return state
 
 
 def verify_social_gateway_token(token_value, accepted_tokens):

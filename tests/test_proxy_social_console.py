@@ -56,6 +56,25 @@ class ProxySocialConsoleTests(unittest.TestCase):
 
         self.assertIn('class="skip-link"', console)
         self.assertIn('class="skip-link"', mysearch)
+        self.assertIn('id="dashboard-error"', console)
+        self.assertIn('id="dashboard-error"', mysearch)
+        self.assertIn('onclick="retryConsoleRefresh()"', console)
+        self.assertIn('function setDashboardError(message = \'\')', javascript)
+        self.assertIn('await refresh({ force: true });', javascript)
+        login_block = javascript[
+            javascript.index("async function doLogin(event)"):
+            javascript.index("function logout()")
+        ]
+        self.assertIn("setDashboardError(`控制台加载失败：${error.message}`);", login_block)
+        status_block = javascript[
+            javascript.index("function setStatus(id, message, isError = false)"):
+            javascript.index("function describeConfiguredSecret")
+        ]
+        self.assertLess(
+            status_block.index("el.setAttribute('role', role);"),
+            status_block.index("el.textContent = message;"),
+        )
+        self.assertIn('role="status" aria-live="polite" aria-atomic="true"', settings)
         self.assertIn("dashboard.inert = overlayOpen", javascript)
         self.assertIn("shell.setAttribute('aria-hidden'", javascript)
         self.assertIn('role="radiogroup"', settings)
@@ -72,6 +91,8 @@ class ProxySocialConsoleTests(unittest.TestCase):
         stylesheet = (REPO_ROOT / "proxy/static/css/console.css").read_text(encoding="utf-8")
 
         self.assertIn("--muted: #606c7a;", stylesheet)
+        self.assertIn("--warn: #9a5708;", stylesheet)
+        self.assertIn(".dashboard-error:not(.hidden)", stylesheet)
         self.assertIn(".mode-switch-btn {", stylesheet)
         self.assertIn("min-height: 44px;", stylesheet)
         self.assertNotIn("font-size: 8px;", stylesheet)
