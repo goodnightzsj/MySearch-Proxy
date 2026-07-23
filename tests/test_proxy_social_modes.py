@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -25,12 +27,23 @@ def _load_module(module_name: str, path: Path):
 class ProxySocialModeTests(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        cls.tempdir = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.tempdir.cleanup)
+        cls.env_patch = patch.dict(
+            os.environ,
+            {"MYSEARCH_PROXY_DB_PATH": str(Path(cls.tempdir.name) / "proxy.db")},
+        )
+        cls.env_patch.start()
+        cls.addClassCleanup(cls.env_patch.stop)
         if str(PROXY_ROOT) not in sys.path:
             sys.path.insert(0, str(PROXY_ROOT))
         cls.server = _load_module(
             "test_proxy_server_social_modes",
             PROXY_ROOT / "server.py",
         )
+        cls.server.db.close_conn()
+        cls.server.db.init_db()
+        cls.addClassCleanup(cls.server.db.close_conn)
 
     def _base_config(self, **overrides):
         config = {
