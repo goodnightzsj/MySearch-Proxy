@@ -1114,10 +1114,21 @@ class ProxyPoolCooldownTests(unittest.TestCase):
 class ProxyForwardingSchedulingTests(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        cls.tempdir = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.tempdir.cleanup)
+        cls.env_patch = patch.dict(
+            os.environ,
+            {"MYSEARCH_PROXY_DB_PATH": str(Path(cls.tempdir.name) / "proxy.db")},
+        )
+        cls.env_patch.start()
+        cls.addClassCleanup(cls.env_patch.stop)
         cls.server = _load_module(
             "test_provider_key_proxy_server",
             PROXY_ROOT / "server.py",
         )
+        cls.server.db.close_conn()
+        cls.server.db.init_db()
+        cls.addClassCleanup(cls.server.db.close_conn)
 
     def setUp(self) -> None:
         self.setting_patch = patch.object(self.server.db, "set_setting")
