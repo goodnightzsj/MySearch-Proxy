@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import os
 import sys
@@ -231,6 +232,40 @@ class ProxySocialModeTests(unittest.IsolatedAsyncioTestCase):
             post.await_args.kwargs["headers"]["Authorization"],
             "Bearer upstream-key",
         )
+
+    async def test_state_reset_cannot_commit_inflight_old_social_state(self) -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        stale_state = {"cache_ttl_seconds": 60, "mode": "local"}
+        fresh_state = {"cache_ttl_seconds": 60, "mode": "upstream"}
+        calls = 0
+
+        async def resolve_for_config(config):  # type: ignore[no-untyped-def]
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                started.set()
+                await release.wait()
+                return stale_state
+            return fresh_state
+
+        original_resolve = self.server.resolve_social_gateway_state_for_config
+        self.server.social_gateway_state_cache.update({"value": None, "expires_at": 0.0})
+        self.server.resolve_social_gateway_state_for_config = resolve_for_config
+        result = None
+        try:
+            task = asyncio.create_task(self.server.resolve_social_gateway_state(force=True))
+            await asyncio.wait_for(started.wait(), timeout=1)
+            self.server.reset_social_gateway_cache()
+            release.set()
+            result = await asyncio.wait_for(task, timeout=1)
+        finally:
+            self.server.resolve_social_gateway_state_for_config = original_resolve
+
+        self.assertEqual(calls, 2)
+        self.assertIs(result, fresh_state)
+        self.assertEqual(self.server.social_gateway_state_cache["value"], fresh_state)
+        self.server.social_gateway_state_cache.update({"value": None, "expires_at": 0.0})
 
     async def test_empty_local_url_never_falls_back_to_upstream_target(self) -> None:
         config = self._base_config(

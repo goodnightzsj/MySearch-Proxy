@@ -54,11 +54,13 @@ class _FakeResponse:
         text: str = "",
         *,
         json_error: bool = False,
+        headers: dict[str, str] | None = None,
     ) -> None:
         self.status_code = status_code
         self._payload = payload
         self.text = text or str(payload)
         self._json_error = json_error
+        self.headers = headers or {}
 
     def json(self) -> dict[str, object]:
         if self._json_error:
@@ -419,6 +421,171 @@ class SocialFallbackRouteTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["route"]["fallback"]["reason"], "upstream_error")
             self.assertTrue(result["route"]["fallback"]["used"])
             self.assertEqual(len(result["results"]), 2)
+
+
+class StandaloneSocialKeySchedulingTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        social_gateway.social_upstream_key_schedule.clear()
+        social_gateway.social_upstream_key_cursor = 0
+
+    def tearDown(self) -> None:
+        social_gateway.social_upstream_key_schedule.clear()
+        social_gateway.social_upstream_key_cursor = 0
+
+    def test_upstream_error_redacts_secret_before_truncating(self) -> None:
+        secret = "standalone-social-secret-abcdef"
+        detail = social_gateway.extract_social_upstream_error(
+            {"error": {"message": f"prefix {secret} {'x' * 290}"}},
+            "",
+            secret,
+        )
+
+        self.assertNotIn(secret, detail)
+        self.assertNotIn(secret[:12], detail)
+
+    async def test_rate_limited_keys_without_retry_after_use_default_cooldown(self) -> None:
+        fake_client = _FakeHttpClient(
+            [
+                _FakeResponse(429, {"error": {"message": "rate limit exceeded"}}),
+                _FakeResponse(429, {"error": {"message": "rate limit exceeded"}}),
+            ]
+        )
+        state = {
+            "upstream_base_url": "http://social.example/v1",
+            "upstream_responses_path": "/responses",
+            "upstream_api_keys": ["standalone-first", "standalone-second"],
+            "resolved_upstream_api_key": "standalone-first",
+        }
+        original_http_client = social_gateway.http_client
+        social_gateway.http_client = fake_client
+        try:
+            attempt = await social_gateway.execute_social_search_attempt(
+                "test", {}, state, "grok-test", 5
+            )
+        finally:
+            social_gateway.http_client = original_http_client
+
+        self.assertEqual(attempt["status_code"], 429)
+        self.assertEqual(attempt["retry_after_seconds"], 60)
+        self.assertEqual(
+            social_gateway.social_attempt_http_exception(attempt).headers["Retry-After"],
+            "60",
+        )
+
+    async def test_rate_limited_key_rotates_to_next_configured_key(self) -> None:
+        fake_client = _FakeHttpClient(
+            [
+                _FakeResponse(
+                    429,
+                    {"error": {"message": "rate limit exceeded"}},
+                    headers={"retry-after": "15"},
+                ),
+                _FakeResponse(200, {"output_text": '{"answer":"ok","results":[]}'}),
+            ]
+        )
+        state = {
+            "upstream_base_url": "http://social.example/v1",
+            "upstream_responses_path": "/responses",
+            "upstream_api_keys": ["standalone-first", "standalone-second"],
+            "resolved_upstream_api_key": "standalone-first",
+        }
+        original_http_client = social_gateway.http_client
+        social_gateway.http_client = fake_client
+        try:
+            result = await social_gateway.execute_social_search_attempt(
+                "test", {}, state, "grok-test", 5
+            )
+        finally:
+            social_gateway.http_client = original_http_client
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            [call["headers"]["Authorization"] for call in fake_client.calls],
+            ["Bearer standalone-first", "Bearer standalone-second"],
+        )
+
+    async def test_all_rate_limited_keys_skip_model_fallback_and_keep_retry_after(self) -> None:
+        async def resolve_gateway_state(force: bool = False) -> dict[str, object]:
+            return {
+                "upstream_base_url": "http://social.example/v1",
+                "upstream_responses_path": "/responses",
+                "upstream_api_keys": ["standalone-first", "standalone-second"],
+                "resolved_upstream_api_key": "standalone-first",
+                "accepted_tokens": ["client-token"],
+                "model": "grok-primary",
+                "fallback_model": "grok-fallback",
+                "fallback_min_results": 3,
+            }
+
+        fake_client = _FakeHttpClient(
+            [
+                _FakeResponse(
+                    429,
+                    {"error": {"message": "rate limit exceeded"}},
+                    headers={"retry-after": "15"},
+                ),
+                _FakeResponse(
+                    429,
+                    {"error": {"message": "rate limit exceeded"}},
+                    headers={"retry-after": "20"},
+                ),
+            ]
+        )
+        request = _FakeRequest({"query": "test", "source": "x", "max_results": 5})
+        original_http_client = social_gateway.http_client
+        original_resolve = social_gateway.resolve_gateway_state
+        original_verify = social_gateway.verify_gateway_token
+        social_gateway.http_client = fake_client
+        social_gateway.resolve_gateway_state = resolve_gateway_state  # type: ignore[assignment]
+        social_gateway.verify_gateway_token = lambda token, accepted: None  # type: ignore[assignment]
+        try:
+            with self.assertRaises(social_gateway.HTTPException) as raised:
+                await social_gateway.social_search(request)
+        finally:
+            social_gateway.http_client = original_http_client
+            social_gateway.resolve_gateway_state = original_resolve  # type: ignore[assignment]
+            social_gateway.verify_gateway_token = original_verify  # type: ignore[assignment]
+
+        self.assertEqual(raised.exception.status_code, 429)
+        self.assertEqual(raised.exception.headers.get("Retry-After"), "15")
+        self.assertEqual(len(fake_client.calls), 2)
+
+    async def test_public_health_hides_admin_error_details(self) -> None:
+        leaked_secret = "standalone-admin-access-secret"
+
+        async def resolve_gateway_state(force: bool = False) -> dict[str, object]:
+            return {
+                "resolved_upstream_api_key": "standalone-key",
+                "upstream_api_keys": ["standalone-key"],
+                "accepted_tokens": ["client-token"],
+                "mode": "manual",
+                "upstream_base_url": "http://social.example/v1",
+                "upstream_responses_path": "/responses",
+                "admin_base_url": "http://social.example",
+                "admin_verify_path": "/v1/admin/verify",
+                "admin_config_path": "/admin/api/config",
+                "admin_tokens_path": "/admin/api/tokens",
+                "model": "grok-test",
+                "fallback_model": "",
+                "fallback_min_results": 1,
+                "token_source": "manual",
+                "admin_configured": True,
+                "admin_connected": False,
+                "admin_auth_mode": "v3_credentials",
+                "admin_api_version": "v3",
+                "stats": {},
+                "error": f"admin login returned {leaked_secret}",
+            }
+
+        original_resolve = social_gateway.resolve_gateway_state
+        social_gateway.resolve_gateway_state = resolve_gateway_state  # type: ignore[assignment]
+        try:
+            payload = await social_gateway._build_health_payload()
+        finally:
+            social_gateway.resolve_gateway_state = original_resolve  # type: ignore[assignment]
+
+        self.assertEqual(payload["error"], "Social gateway configuration requires attention")
+        self.assertNotIn(leaked_secret, str(payload))
 
 
 class SocialAdminCompatibilityTests(unittest.IsolatedAsyncioTestCase):

@@ -37,6 +37,10 @@
 
 <div id="dashboard" class="{% if not initial_authenticated %}hidden{% endif %}">
   <div class="container">
+    <div class="dashboard-error hidden" id="dashboard-error" role="alert" aria-live="assertive">
+      <span id="dashboard-error-message"></span>
+      <button class="btn btn-soft btn-sm" type="button" onclick="retryConsoleRefresh()">重试</button>
+    </div>
     <section class="card access-shell">
       <div class="access-shell-head">
         <div class="access-shell-copy">

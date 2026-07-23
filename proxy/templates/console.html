@@ -37,6 +37,10 @@
 
 <div id="dashboard" class="{% if not initial_authenticated %}hidden{% endif %}">
   <div class="container">
+    <div class="dashboard-error hidden" id="dashboard-error" role="alert" aria-live="assertive">
+      <span id="dashboard-error-message"></span>
+      <button class="btn btn-soft btn-sm" type="button" onclick="retryConsoleRefresh()">重试</button>
+    </div>
     {% include "components/_hero.html" %}
 
     <section class="summary-strip" id="global-summary" aria-label="全局运行摘要"></section>

@@ -686,6 +686,7 @@ class MySearchClient:
         to_date: str | None = None,
         include_x_images: bool = False,
         include_x_videos: bool = False,
+        max_results: int = 5,
     ) -> str:
         # `search()` 接受日期窗口和 X handle 过滤参数，且这些会改变上游请求的实际
         # query / 结果集；不把它们放进 cache key 会导致两次"同 query 但不同日期范围"
@@ -712,6 +713,7 @@ class MySearchClient:
                 "to_date": to_date or "",
                 "include_x_images": include_x_images,
                 "include_x_videos": include_x_videos,
+                "requested_max_results": max_results,
             },
         )
 
@@ -927,6 +929,7 @@ class MySearchClient:
                 to_date=to_date,
                 include_x_images=include_x_images,
                 include_x_videos=include_x_videos,
+                max_results=max_results,
             )
             cached_result = self._cache_get("search", cache_key)
             if cached_result is not None:
@@ -9943,7 +9946,7 @@ class MySearchClient:
         payload: dict[str, Any] | None,
         key: str,
         base_url: str | None = None,
-        timeout_seconds: int | None = None,
+        timeout_seconds: float | None = None,
         attempts: int = 2,
     ) -> dict[str, Any]:
         return self._request_json_with_transient_retry_selected(
@@ -9966,7 +9969,7 @@ class MySearchClient:
         payload: dict[str, Any] | None,
         key: str,
         base_url: str | None = None,
-        timeout_seconds: int | None = None,
+        timeout_seconds: float | None = None,
         attempts: int = 2,
         allow_key_rotation: bool = True,
     ) -> tuple[dict[str, Any], str]:
@@ -10243,20 +10246,81 @@ class MySearchClient:
         crawl_entire_domain: bool = True,
         poll_interval_seconds: float = 2.0,
         max_poll_attempts: int = 30,
+        timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         provider = self.config.firecrawl
         key = self._get_key_or_raise(provider)
+        configured_crawl_timeout = (
+            timeout_seconds
+            if timeout_seconds is not None
+            else self.config.timeout_seconds + MAX_PINNED_KEY_RETRY_DELAY_SECONDS
+        )
+        crawl_timeout_seconds = max(0.001, float(configured_crawl_timeout))
+        deadline = time.monotonic() + crawl_timeout_seconds
+
+        def remaining_timeout() -> float:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise MySearchError("firecrawl crawl deadline exceeded")
+            return max(0.001, min(float(self.config.timeout_seconds), remaining))
+
+        def request_with_deadline(
+            *,
+            method: str,
+            path: str,
+            payload: dict[str, Any] | None,
+            selected_key: str,
+            allow_key_rotation: bool,
+        ) -> tuple[dict[str, Any], str]:
+            for attempt in range(2):
+                try:
+                    result = self._request_json_with_transient_retry_selected(
+                        provider=provider,
+                        method=method,
+                        path=path,
+                        payload=payload,
+                        key=selected_key,
+                        timeout_seconds=remaining_timeout(),
+                        attempts=1,
+                        allow_key_rotation=allow_key_rotation,
+                    )
+                    if time.monotonic() >= deadline:
+                        raise MySearchError("firecrawl crawl deadline exceeded")
+                    return result
+                except MySearchError as exc:
+                    if attempt or not self._is_retryable_transient_error(exc):
+                        raise
+                    if (
+                        provider.managed_key_pool
+                        and isinstance(exc, MySearchHTTPError)
+                        and exc.status_code == 429
+                    ):
+                        raise
+                    retry_delay = 1.5
+                    if (
+                        not allow_key_rotation
+                        and isinstance(exc, MySearchHTTPError)
+                        and exc.status_code == 429
+                    ):
+                        retry_delay = exc.retry_after_seconds or DEFAULT_KEY_COOLDOWN_SECONDS
+                        if retry_delay > MAX_PINNED_KEY_RETRY_DELAY_SECONDS:
+                            raise
+                    if deadline - time.monotonic() <= retry_delay:
+                        raise MySearchError("firecrawl crawl deadline exceeded") from exc
+                    time.sleep(retry_delay)
+            raise AssertionError("unreachable")
+
         payload: dict[str, Any] = {"url": url, "limit": limit}
         if max_depth is not None:
             # Firecrawl v2 crawl uses `maxDiscoveryDepth`; `maxDepth` is silently ignored.
             payload["maxDiscoveryDepth"] = max_depth
         payload["crawlEntireDomain"] = crawl_entire_domain
-        start, selected_key = self._request_json_with_transient_retry_selected(
-            provider=provider,
+        start, selected_key = request_with_deadline(
             method="POST",
             path=provider.path("crawl"),
             payload=payload,
-            key=key.key,
+            selected_key=key.key,
+            allow_key_rotation=True,
         )
         job_id = start.get("id")
         if not job_id:
@@ -10266,19 +10330,25 @@ class MySearchClient:
             )
         status_path = f"{provider.path('crawl')}/{job_id}"
         status_payload: dict[str, Any] = start
+        terminal = False
         for _ in range(max(1, max_poll_attempts)):
-            status_payload = self._request_json_with_transient_retry_selected(
-                provider=provider,
+            status_payload = request_with_deadline(
                 method="GET",
                 path=status_path,
                 payload=None,
-                key=selected_key,
+                selected_key=selected_key,
                 allow_key_rotation=False,
             )[0]
             state = str(status_payload.get("status") or "").lower()
             if state in {"completed", "failed", "cancelled"}:
+                terminal = True
                 break
-            time.sleep(poll_interval_seconds)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise MySearchError("firecrawl crawl deadline exceeded")
+            time.sleep(min(max(0.0, poll_interval_seconds), remaining))
+        if not terminal:
+            raise MySearchError("firecrawl crawl did not reach a terminal state before deadline")
         return self._build_firecrawl_crawl_result(
             url=url, limit=limit, transport=key.source, status_payload=status_payload
         )
@@ -12829,7 +12899,7 @@ class MySearchClient:
         payload: dict[str, Any] | None,
         key: str,
         base_url: str | None = None,
-        timeout_seconds: int | None = None,
+        timeout_seconds: float | None = None,
         allow_key_rotation: bool = True,
     ) -> tuple[dict[str, Any], str]:
         current_key = key
@@ -12903,7 +12973,7 @@ class MySearchClient:
         payload: dict[str, Any] | None,
         key: str,
         base_url: str | None = None,
-        timeout_seconds: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         headers: dict[str, str] = {}
         body = dict(payload or {})

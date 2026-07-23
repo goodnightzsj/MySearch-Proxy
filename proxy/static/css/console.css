@@ -22,7 +22,7 @@
   --accent: #0f766e;
   --accent-soft: rgba(15, 118, 110, 0.12);
   --ok: #157347;
-  --warn: #b76a11;
+  --warn: #9a5708;
   --danger: #bb3b31;
   --info: #1d4ed8;
   --scrollbar-track: rgba(116, 128, 142, 0.12);
@@ -462,6 +462,29 @@ body.theme-dark .auth {
   margin-top: 12px;
   color: var(--danger);
   font-size: 13px;
+}
+
+.dashboard-error {
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--danger) 32%, var(--border));
+  border-left: 4px solid var(--danger);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.dashboard-error:not(.hidden) {
+  display: flex;
+}
+
+.dashboard-error .btn {
+  flex: 0 0 auto;
 }
 
 .auth .stack {
