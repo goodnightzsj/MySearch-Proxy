@@ -447,6 +447,7 @@ function getKeyAvailability(key) {
     auth_rejected: '凭证失效',
     manual: '手动禁用',
     repeated_failure: '连续失败',
+    legacy_failure_threshold: '历史失败停用',
   };
   return {
     active,
@@ -581,14 +582,15 @@ function showConfirmDialog({
 } = {}) {
   const shell = document.getElementById('app-dialog');
   if (!shell) return Promise.resolve(false);
+  const preferCancelFocus = tone === 'danger' && Boolean(cancelText);
   rememberOverlayFocus('app-dialog');
   document.getElementById('app-dialog-kicker').textContent = kicker;
   document.getElementById('app-dialog-title').textContent = title;
   document.getElementById('app-dialog-message').textContent = message;
   shell.dataset.tone = tone;
   document.getElementById('app-dialog-actions').innerHTML = `
-    ${cancelText ? `<button class="btn btn-soft" type="button" onclick="closeAppDialog(false)">${escapeHtml(cancelText)}</button>` : ''}
-    <button class="btn ${tone === 'danger' ? 'btn-danger' : 'btn-primary'}" type="button" data-overlay-autofocus="true" onclick="closeAppDialog(true)">${escapeHtml(confirmText)}</button>
+    ${cancelText ? `<button class="btn btn-soft" type="button"${preferCancelFocus ? ' data-overlay-autofocus="true"' : ''} onclick="closeAppDialog(false)">${escapeHtml(cancelText)}</button>` : ''}
+    <button class="btn ${tone === 'danger' ? 'btn-danger' : 'btn-primary'}" type="button"${preferCancelFocus ? '' : ' data-overlay-autofocus="true"'} onclick="closeAppDialog(true)">${escapeHtml(confirmText)}</button>
   `;
   shell.classList.remove('hidden');
   syncOverlayState();
@@ -3117,7 +3119,19 @@ function formatTime(iso) {
   if (!iso) return '未同步';
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return '未同步';
-  return date.toLocaleString();
+  return date.toLocaleString('zh-CN', { hour12: false });
+}
+
+function formatDisabledDetail(key) {
+  const reason = String(key?.disabled_reason || '').trim();
+  const details = {
+    legacy_failure_threshold: '旧版连续失败阈值曾被触发，重新上传此 Key 可恢复使用。',
+    manual: '该 Key 已被手动禁用。',
+    quota_exhausted: '上游额度已耗尽，补充额度后可手动恢复。',
+    auth_rejected: '上游拒绝了当前凭证，请检查 Key 是否仍然有效。',
+    repeated_failure: '连续请求失败达到保护阈值。',
+  };
+  return details[reason] || String(key?.disabled_detail || '').trim();
 }
 
 function quotaBar(used, limit) {
@@ -3966,6 +3980,7 @@ function openKeyDetail(service, keyId) {
     return;
   }
   const availability = getKeyAvailability(key);
+  const disabledDetail = formatDisabledDetail(key);
   const label = getServiceDisplayLabel(service);
   openDetailDrawer({
     kicker: `${label} Key`,
@@ -3980,7 +3995,7 @@ function openKeyDetail(service, keyId) {
     bodyHtml: [
       drawerSection('Key 配额', renderKeyQuota(service, key)),
       drawerSection('账户额度', renderAccountQuota(service, key)),
-      key.disabled_detail ? drawerSection('调度原因', `<div class="table-note danger">${escapeHtml(key.disabled_detail)}</div>`) : '',
+      disabledDetail ? drawerSection('调度原因', `<div class="table-note danger">${escapeHtml(disabledDetail)}</div>`) : '',
       drawerSection('代理统计', `
         <div class="drawer-grid drawer-grid-compact">
           <div class="drawer-inline-card"><span>成功</span><strong>${fmtNum(key.total_used || 0)}</strong></div>

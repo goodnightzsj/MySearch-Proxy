@@ -65,6 +65,26 @@ class ProxySocialConsoleTests(unittest.TestCase):
         self.assertIn('aria-label="搜索 ${meta.label} Token"', javascript)
         self.assertIn('aria-label="搜索 ${meta.label} API Key"', javascript)
         self.assertIn('class="inline-meta-base-url"', javascript)
+        self.assertIn("const preferCancelFocus = tone === 'danger' && Boolean(cancelText);", javascript)
+        self.assertIn("preferCancelFocus ? ' data-overlay-autofocus=\"true\"' : ''", javascript)
+
+    def test_console_secondary_text_and_mode_targets_are_readable(self) -> None:
+        stylesheet = (REPO_ROOT / "proxy/static/css/console.css").read_text(encoding="utf-8")
+
+        self.assertIn("--muted: #606c7a;", stylesheet)
+        self.assertIn(".mode-switch-btn {", stylesheet)
+        self.assertIn("min-height: 44px;", stylesheet)
+        self.assertNotIn("font-size: 8px;", stylesheet)
+
+    def test_console_localizes_key_disable_details_and_dates(self) -> None:
+        javascript = (REPO_ROOT / "proxy/static/js/console.js").read_text(encoding="utf-8")
+
+        self.assertIn("legacy_failure_threshold: '历史失败停用'", javascript)
+        self.assertIn("function formatDisabledDetail(key)", javascript)
+        self.assertIn("旧版连续失败阈值曾被触发", javascript)
+        self.assertIn("date.toLocaleString('zh-CN', { hour12: false })", javascript)
+        self.assertIn("const disabledDetail = formatDisabledDetail(key);", javascript)
+        self.assertNotIn("escapeHtml(key.disabled_detail)", javascript)
 
     def test_console_exposes_social_key_recovery_and_filters_only_schedulable_keys(self) -> None:
         javascript = (REPO_ROOT / "proxy/static/js/console.js").read_text(encoding="utf-8")
@@ -117,6 +137,15 @@ class ProxySocialConsoleTests(unittest.TestCase):
         self.assertIn("overscroll-behavior: contain;", stylesheet)
         self.assertNotIn("position: sticky;\n  bottom: -22px;", stylesheet)
         self.assertNotIn("settings-head-meta", settings)
+
+    def test_social_settings_sidebar_wraps_and_mobile_prioritizes_controls(self) -> None:
+        stylesheet = (REPO_ROOT / "proxy/static/css/console.css").read_text(encoding="utf-8")
+
+        self.assertIn(".settings-secret-meta {", stylesheet)
+        self.assertIn("overflow-wrap: anywhere;", stylesheet)
+        self.assertIn("#settings-panel-social .settings-panel-main {\n    order: -1;", stylesheet)
+        self.assertIn("grid-template-columns: repeat(2, minmax(0, 1fr));", stylesheet)
+        self.assertNotIn("grid-auto-columns: minmax(210px, 78vw);", stylesheet)
 
     def test_key_tables_paginate_and_mobile_tables_keep_field_labels(self) -> None:
         javascript = (REPO_ROOT / "proxy/static/js/console.js").read_text(encoding="utf-8")
