@@ -2,7 +2,7 @@
 
 - Date: 2026-07-17
 - Surface: runtime, provider compatibility, docs, tests
-- Baseline: deployed MySearch image `7ec7a62-local`; deployed grok2api image revision `e05aada`
+- Baseline: deployed MySearch image `9a1fd32-local`; deployed grok2api image revision `e05aada`
 
 ## Findings
 

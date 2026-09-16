@@ -1,7 +1,7 @@
 ## Loop 11 Fixes And Validation
 
 - Date: 2026-07-18
-- Status: deployed baseline `55cee0c` produced the latest finding-discovery run; revision `1e54884` produced a complete but non-clean comparison; the factual-answer and provider-scheduling hardening candidate is validated locally and release is pending.
+- Status: deployed baseline `6ffe8c3` produced the latest finding-discovery run; revision `618bba0` produced a complete but non-clean comparison; the factual-answer and provider-scheduling hardening candidate is validated locally and release is pending.
 
 ## Fixes
 
@@ -43,19 +43,19 @@
 
 ## Release And Deploy Verification
 
-- Runtime commits `71840fe`, `6399b8a`, and `d5deccc` were pushed to `main`.
-- Docker workflow `29631966606` succeeded for `d5deccc`.
-- Remote `mysearch-stack` runs image revision `d5deccc1a8a1ba1424bcd894df5c5d42972a34b9` with the required ports, mount, and `restart=always` policy.
+- Runtime commits `92a6804`, `15a7a29`, and `54050a3` were pushed to `main`.
+- Docker workflow `29631966606` succeeded for `54050a3`.
+- Remote `mysearch-stack` runs image revision `54050a362e8a61f1b794f343cb1a6a49e2822c12` with the required ports, mount, and `restart=always` policy.
 - Proxy health reports grok2api v3 admin connectivity; MCP initialize returned HTTP 200 with a session ID.
 - Live authenticated browser smoke passed at 375px and 1440px with no horizontal overflow or duplicate IDs; settings overlay background inertness and `aria-modal` passed.
-- Commit `14badab` was pushed; Docker workflow `29637368712` succeeded; the remote container reports image revision `14badabf9674a0e6b821cb337cfda487ad881df6`.
+- Commit `160163e` was pushed; Docker workflow `29637368712` succeeded; the remote container reports image revision `160163ec4a409062ad0d1b18988ad697745ed42e`.
 - The complete 41-row postdeploy run had no structural failures, but its 81-column output is retained only as an intermediate artifact because the findings above changed both runtime and scorer contracts.
-- The first 84-column run on `30153c1` captured all 41 unique rows with no structural failure, timeout, empty result, or row error and a 39-2 row win count for MySearch. Six MySearch budget overruns and the content/canonical issues above make it an intermediate artifact rather than a convergence result.
-- Commit `55cee0c` passed Docker workflow `29644084979`, was deployed as the immutable stack image, and produced a fresh 41/41, 84-column comparison. MySearch had zero timeout, empty result, budget overrun, or row error and won 40 rows; the run nevertheless exposed a Python stable-version regression on `factual-accuracy-01`, so it is an intermediate finding-discovery artifact.
-- Runtime commit `2ab00cf` was pushed. Its Docker workflow `29652388231` exposed a Social scheduling test-isolation issue rather than a runtime failure.
-- Follow-up commit `1e54884` isolated that test; Docker workflow `29652482238` passed the 728-test verification job and published the Proxy, MCP, and all-in-one stack images.
-- The remote `mysearch-stack` now runs revision `1e548848d44c802ce841775a7f6d3526c506ff43` with the required ports, data mount, and `restart=always`. Proxy health reports grok2api v3 connectivity with one schedulable Social key, and MCP initialize returned HTTP 200 with a session ID.
-- The fresh revision-`1e54884` comparison captured 41/41 unique rows with 84 columns, zero structural failures, timeouts, empty results, and row errors; MySearch won 39 rows. `factual-accuracy-01` remained non-clean because the answer was `3.14.3` instead of expected `3.14.6`.
+- The first 84-column run on `3bb99e3` captured all 41 unique rows with no structural failure, timeout, empty result, or row error and a 39-2 row win count for MySearch. Six MySearch budget overruns and the content/canonical issues above make it an intermediate artifact rather than a convergence result.
+- Commit `6ffe8c3` passed Docker workflow `29644084979`, was deployed as the immutable stack image, and produced a fresh 41/41, 84-column comparison. MySearch had zero timeout, empty result, budget overrun, or row error and won 40 rows; the run nevertheless exposed a Python stable-version regression on `factual-accuracy-01`, so it is an intermediate finding-discovery artifact.
+- Runtime commit `44b5793` was pushed. Its Docker workflow `29652388231` exposed a Social scheduling test-isolation issue rather than a runtime failure.
+- Follow-up commit `618bba0` isolated that test; Docker workflow `29652482238` passed the 728-test verification job and published the Proxy, MCP, and all-in-one stack images.
+- The remote `mysearch-stack` now runs revision `618bba0942f4f9f1334a6c83abbdcd8a92a63a66` with the required ports, data mount, and `restart=always`. Proxy health reports grok2api v3 connectivity with one schedulable Social key, and MCP initialize returned HTTP 200 with a session ID.
+- The fresh revision-`618bba0` comparison captured 41/41 unique rows with 84 columns, zero structural failures, timeouts, empty results, and row errors; MySearch won 39 rows. `factual-accuracy-01` remained non-clean because the answer was `3.14.3` instead of expected `3.14.6`.
 - The local follow-up adds exact patch-release ranking and hardens provider scheduling against direct error-key leakage, stale in-flight writes after recovery/reload, all-key Proxy cooldown response semantics, and non-finite `Retry-After` values. The full suite passes 738 tests.
 
 ## Pending Gates

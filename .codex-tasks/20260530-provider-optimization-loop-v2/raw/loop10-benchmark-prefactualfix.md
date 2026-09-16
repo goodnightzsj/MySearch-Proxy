@@ -1,9 +1,9 @@
 ## Loop 10 First Post-Deploy Comparison
 
 - Date: 2026-07-17
-- Commit under test: `19a566e`
+- Commit under test: `d696cf2`
 - CI run: `29572859355`, success
-- Deployed image: `helloworldz1024/mysearch-stack:sha-19a566e`
+- Deployed image: `helloworldz1024/mysearch-stack:sha-d696cf2`
 - Output: `raw/loop10-remote-compare.csv`
 
 ## Integrity

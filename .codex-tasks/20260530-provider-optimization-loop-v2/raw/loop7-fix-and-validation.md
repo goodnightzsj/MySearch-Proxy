@@ -29,10 +29,10 @@
 
 ## Completion
 
-- Commit `699c8a7` (`Fix version answers and crawl breadth defaults`) was pushed to `main`.
+- Commit `46f95c7` (`Fix version answers and crawl breadth defaults`) was pushed to `main`.
 - GitHub Actions run `26708010346` for that commit completed with `success`.
-- Remote `mysearch-stack` was rebuilt from the Loop 7 tree as image `helloworldz1024/mysearch-stack:699c8a7-local` and redeployed on `root@192.168.31.122`.
-- Post-deploy checks passed: `http://192.168.31.122:9874/health` returned success and MCP `initialize` on `http://192.168.31.122:18000/mcp` returned an `mcp-session-id`.
+- Remote `mysearch-stack` was rebuilt from the Loop 7 tree as image `helloworldz1024/mysearch-stack:46f95c7-local` and redeployed on `root@<benchmark-host>`.
+- Post-deploy checks passed: `http://<benchmark-host>:9874/health` returned success and MCP `initialize` on `http://<benchmark-host>:18000/mcp` returned an `mcp-session-id`.
 - Fresh full post-deploy 41-row comparison is recorded in `.codex-tasks/20260530-provider-optimization-loop-v2/raw/loop7-remote-compare.csv` with 41/41 captured, 0 timeout, 0 empty-result, and a single non-actionable comparator structural failure `tavily-research-upstream-plan-limited` on `research-01`.
 
 ## Loop Outcome

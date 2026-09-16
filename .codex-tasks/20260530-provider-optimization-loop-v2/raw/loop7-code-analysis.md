@@ -1,7 +1,7 @@
 ## Loop 7 Code Analysis
 
 - Date: 2026-05-31
-- HEAD under analysis: deployed Loop 6 baseline `86d5474` plus local Loop 7 edits
+- HEAD under analysis: deployed Loop 6 baseline `8c9c05c` plus local Loop 7 edits
 - Method: compare the fresh 41-row Loop 6 baseline against provider capabilities and runtime post-processing paths, with extra focus on factual-version answers and the new `crawl_site` benchmark row.
 
 ## New / regressed actionable findings

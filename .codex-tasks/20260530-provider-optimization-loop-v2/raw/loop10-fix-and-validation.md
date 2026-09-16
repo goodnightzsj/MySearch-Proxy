@@ -28,7 +28,7 @@
 
 ## Completed Gates
 
-- Follow-up commit `47b417f` was pushed to `main`.
+- Follow-up commit `cb85db8` was pushed to `main`.
 - Docker workflow `29574992460` completed successfully.
-- Remote `mysearch-stack` was replaced with `helloworldz1024/mysearch-stack:sha-47b417f`; proxy health and MCP initialize passed.
+- Remote `mysearch-stack` was replaced with `helloworldz1024/mysearch-stack:sha-cb85db8`; proxy health and MCP initialize passed.
 - Final comparison `loop10-remote-compare-final.csv` captured 41/41 rows with no structural failures, timeouts, empty MySearch results, or errors.
