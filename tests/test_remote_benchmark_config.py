@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -13,6 +14,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts import run_remote_mcp_benchmark
+
+# runner 不再内置默认真实目标主机（改由 MYSEARCH_BENCHMARK_HOST 提供），
+# 测试显式传入文档用示例地址。
+TEST_BENCHMARK_HOST = "root@172.16.0.10"
 
 
 class RemoteBenchmarkConfigTests(unittest.TestCase):
@@ -576,6 +581,8 @@ class RemoteBenchmarkConfigTests(unittest.TestCase):
             "out.csv",
             "--raw-dir",
             "raw",
+            "--host",
+            TEST_BENCHMARK_HOST,
             "--tavily-bearer",
             "token",
             "--chunk-size",
@@ -717,6 +724,8 @@ class RemoteBenchmarkConfigTests(unittest.TestCase):
                 "out.csv",
                 "--raw-dir",
                 "raw",
+                "--host",
+                TEST_BENCHMARK_HOST,
                 "--codex-config",
                 str(Path(tmpdir) / "missing-config.toml"),
             ]
@@ -774,6 +783,8 @@ Authorization = "Bearer th-from-http-headers"
                 "out.csv",
                 "--raw-dir",
                 "raw",
+                "--host",
+                TEST_BENCHMARK_HOST,
                 "--codex-config",
                 str(config_path),
             ]
@@ -817,6 +828,8 @@ Authorization = "Bearer th-from-http-headers"
                 "--raw-dir",
                 "raw",
                 "--mysearch-only",
+                "--host",
+                TEST_BENCHMARK_HOST,
                 "--codex-config",
                 str(Path(tmpdir) / "missing-config.toml"),
             ]
@@ -847,6 +860,40 @@ Authorization = "Bearer th-from-http-headers"
             ), patch.object(run_remote_mcp_benchmark, "write_output") as write_output:
                 self.assertEqual(run_remote_mcp_benchmark.main(), 0)
                 write_output.assert_called_once()
+
+    def test_missing_host_fails_fast_before_touching_remote(self) -> None:
+        # runner 不再内置默认真实目标主机；未提供时必须显式失败，
+        # 而不是拿空 host 去连（会静默连错或抛难懂的 ssh 错误）。
+        argv = [
+            "run_remote_mcp_benchmark.py",
+            "--input-csv",
+            "dummy.csv",
+            "--output-csv",
+            "out.csv",
+            "--raw-dir",
+            "raw",
+            "--mysearch-only",
+        ]
+        row = {
+            "benchmark_id": "case-1",
+            "query": "OpenAI pricing",
+            "domain": "Web",
+            "preferred_tool": "search",
+            "prompt_variant": "balanced",
+            "primary_dimensions": "",
+            "secondary_dimensions": "",
+            "repeat_runs": "1",
+        }
+        # 显式清空 env 与该模块的默认值，避免本地已配置 MYSEARCH_BENCHMARK_HOST 时行为漂移。
+        with patch.dict(os.environ, {"MYSEARCH_BENCHMARK_HOST": ""}), patch.object(
+            run_remote_mcp_benchmark, "DEFAULT_HOST", ""
+        ), patch.object(sys, "argv", argv), patch.object(
+            run_remote_mcp_benchmark, "read_rows", return_value=[row]
+        ), patch.object(
+            run_remote_mcp_benchmark, "run_remote_cases"
+        ) as run_remote_cases:
+            self.assertEqual(run_remote_mcp_benchmark.main(), 1)
+            run_remote_cases.assert_not_called()
 
     def test_build_output_row_preserves_existing_tavily_columns_in_mysearch_only_mode(self) -> None:
         input_row = {

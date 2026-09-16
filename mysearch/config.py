@@ -152,7 +152,7 @@ def _get_list(*names: str) -> list[str]:
 # social_gateway / proxy 通过 from .config import 触发 _bootstrap_runtime_env
 # 副作用（读 ~/.codex/config.toml + .env）。
 # 本文件保留 re-export 以维持向后兼容（tests、historical 调用方）。
-from mysearch.grok_registry import (
+from mysearch.grok_registry import (  # noqa: F401
     GrokModelSpec,
     _BUILTIN_GROK_MODELS,
     _GROK_MODEL_ID_PATTERN,

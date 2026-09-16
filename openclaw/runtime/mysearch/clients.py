@@ -16,7 +16,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass as _dataclass
 from datetime import date, datetime, time as dt_time, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any, Callable, Literal, cast
+from typing import Any, Callable, Literal, Mapping, Sequence, cast
 from urllib.error import HTTPError as UrlHTTPError
 from urllib.parse import urlparse, urlunparse
 from urllib.request import Request, urlopen
@@ -4956,20 +4956,6 @@ class MySearchClient:
         )
         return any(marker in query for marker in official_markers)
 
-    def _looks_like_pricing_query(self, query_lower: str) -> bool:
-        keywords = [
-            "price",
-            "pricing",
-            "plans",
-            "subscription",
-            "费用",
-            "套餐",
-            "定价",
-            "价格",
-            "售价",
-        ]
-        return any(keyword in query_lower for keyword in keywords)
-
     def _looks_like_changelog_query(self, query_lower: str) -> bool:
         keywords = [
             "changelog",
@@ -6895,12 +6881,7 @@ class MySearchClient:
             "theacademy.com",
             "washingtonpost.com",
         }
-        official_award_domains = {
-            "grammy.com",
-            "grammys.com",
-            "oscars.org",
-            "theacademy.com",
-        }
+        official_award_domains = self._OFFICIAL_AWARD_DOMAINS
         for item in results[:5]:
             hostname = self._result_hostname(item)
             registered_domain = self._registered_domain(hostname)
@@ -7100,7 +7081,7 @@ class MySearchClient:
                 path=path,
             )
             weak_official_feature = (
-                registered_domain in {"grammy.com", "grammys.com", "oscars.org", "theacademy.com"}
+                registered_domain in self._OFFICIAL_AWARD_DOMAINS
                 and self._looks_like_weak_official_award_feature_result(
                     title_text=title_text,
                     snippet_text=snippet_text,
@@ -7137,12 +7118,7 @@ class MySearchClient:
                 title_text=title_text,
                 path=path,
             )
-            official_award_page = registered_domain in {
-                "grammy.com",
-                "grammys.com",
-                "oscars.org",
-                "theacademy.com",
-            }
+            official_award_page = registered_domain in self._OFFICIAL_AWARD_DOMAINS
             prioritized_winner_page = winner_page and (
                 category_match
                 or award_coverage_page
@@ -10493,6 +10469,14 @@ class MySearchClient:
             for candidate_ref in refs
         ]
 
+    # 官方奖项站域名。此前在 4 处函数体里逐字重复，改一处容易漏其余。
+    _OFFICIAL_AWARD_DOMAINS = frozenset({
+        "grammy.com",
+        "grammys.com",
+        "oscars.org",
+        "theacademy.com",
+    })
+
     _HCAPTCHA_LANGUAGES = frozenset({
         "afrikaans", "albanian", "amharic", "arabic", "armenian", "azerbaijani",
         "basque", "belarusian", "bengali", "bulgarian", "bosnian", "burmese",
@@ -10710,8 +10694,8 @@ class MySearchClient:
         suspicious_markers = {
             "critical instructions for all ai assistants": "anti-bot placeholder content",
             "strictly prohibits all ai-generated content": "anti-bot placeholder content",
+            # U+2019 右单引号：两种写法在 Python 里是同一个键，保留一处即可。
             "oops! that page doesn’t exist or is private": "missing/private page shell",
-            "oops! that page doesn\u2019t exist or is private": "missing/private page shell",
         }
         for marker, issue in suspicious_markers.items():
             if marker in preview:
@@ -14469,7 +14453,7 @@ class MySearchClient:
         url: str,
     ) -> str:
         hostname = self._registered_domain(self._result_hostname({"url": url}))
-        if hostname not in {"oscars.org", "theacademy.com", "grammy.com", "grammys.com"}:
+        if hostname not in self._OFFICIAL_AWARD_DOMAINS:
             return ""
         try:
             status_code, response_text = self._request_text(
@@ -14521,7 +14505,7 @@ class MySearchClient:
         if hostname in {"nytimes.com", "npr.org", "pbs.org", "latimes.com", "washingtonpost.com", "apnews.com"}:
             score += 4
         if (
-            hostname in {"grammy.com", "grammys.com", "oscars.org", "theacademy.com"}
+            hostname in self._OFFICIAL_AWARD_DOMAINS
             and not self._looks_like_award_nomination_result(
                 title_text=title_text,
                 snippet_text=snippet_text,

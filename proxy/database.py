@@ -154,6 +154,12 @@ def init_db():
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_usage_service_created ON usage_logs(service, created_at)")
+    # 必须放在 _ensure_provider_scoped_key_uniqueness 之后：该迁移会重建 api_keys，
+    # 先建的索引会随旧表一起被 DROP。取 key 热路径按 (service, active, schedule_until) 过滤，
+    # 覆盖索引可免回表。
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_api_keys_schedule ON api_keys(service, active, schedule_until)"
+    )
     conn.commit()
     pass  # connection reused via thread-local
 
@@ -860,6 +866,68 @@ def get_usage_stats(token_id=None, service=None):
             "today_count": count("created_at >= ?", [today]),
             "month_count": count("created_at >= ?", [month]),
         }
+    finally:
+        pass  # connection reused via thread-local
+
+
+def get_token_usage_stats(token_ids, service=None):
+    """批量获取多个 token 的用量统计，返回 {token_id: stats}。
+
+    与逐个调用 get_usage_stats(token_id=...) 等价，但只发一条 GROUP BY 查询，
+    避免 token 数量线性放大查询次数。请求的每个 id 都会出现，无记录时为零值。
+    """
+    ids = [int(token_id) for token_id in (token_ids or [])]
+    if not ids:
+        return {}
+
+    conn = get_conn()
+    try:
+        now = datetime.now(timezone.utc)
+        today = now.strftime("%Y-%m-%d")
+        month = now.strftime("%Y-%m")
+        hour_ago = now.replace(minute=0, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
+
+        # CASE 参数按 SQL 文本顺序绑定，位于 WHERE 参数之前。
+        case_params = [today, today, month, hour_ago, today, month]
+        where_parts = ["token_id IN (" + ",".join("?" * len(ids)) + ")"]
+        where_params = list(ids)
+        # 与 get_usage_stats 一致：mysearch 不做 service 过滤。
+        if service and service != "mysearch":
+            where_parts.append("service = ?")
+            where_params.append(normalize_service(service))
+
+        sql = (
+            "SELECT token_id,"
+            " SUM(CASE WHEN success = 1 AND created_at >= ? THEN 1 ELSE 0 END) AS today_success,"
+            " SUM(CASE WHEN success = 0 AND created_at >= ? THEN 1 ELSE 0 END) AS today_failed,"
+            " SUM(CASE WHEN success = 1 AND created_at >= ? THEN 1 ELSE 0 END) AS month_success,"
+            " SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS hour_count,"
+            " SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS today_count,"
+            " SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS month_count"
+            " FROM usage_logs WHERE " + " AND ".join(where_parts) +
+            " GROUP BY token_id"
+        )
+        rows = conn.execute(sql, case_params + where_params).fetchall()
+
+        empty = {
+            "today_success": 0,
+            "today_failed": 0,
+            "month_success": 0,
+            "hour_count": 0,
+            "today_count": 0,
+            "month_count": 0,
+        }
+        stats = {token_id: dict(empty) for token_id in ids}
+        for row in rows:
+            stats[int(row["token_id"])] = {
+                "today_success": row["today_success"] or 0,
+                "today_failed": row["today_failed"] or 0,
+                "month_success": row["month_success"] or 0,
+                "hour_count": row["hour_count"] or 0,
+                "today_count": row["today_count"] or 0,
+                "month_count": row["month_count"] or 0,
+            }
+        return stats
     finally:
         pass  # connection reused via thread-local
 

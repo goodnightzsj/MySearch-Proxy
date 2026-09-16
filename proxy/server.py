@@ -2291,8 +2291,9 @@ async def build_service_dashboard(service, auto_sync=False):
     service = get_service(service)
     overview = db.get_usage_stats(service=service)
     tokens = [dict(token) for token in db.get_all_tokens(service)]
+    stats_by_token = db.get_token_usage_stats([token["id"] for token in tokens], service=service)
     for token in tokens:
-        token["stats"] = db.get_usage_stats(token_id=token["id"], service=service)
+        token["stats"] = stats_by_token[token["id"]]
     keys = mask_key_rows([dict(key) for key in db.get_all_keys(service)])
     active_keys = [key for key in keys if is_key_schedulable(key)]
     routing = None
@@ -2326,8 +2327,9 @@ async def build_service_dashboard(service, auto_sync=False):
 
 async def build_mysearch_dashboard():
     tokens = [dict(token) for token in db.get_all_tokens("mysearch")]
+    stats_by_token = db.get_token_usage_stats([token["id"] for token in tokens], service="mysearch")
     for token in tokens:
-        token["stats"] = db.get_usage_stats(token_id=token["id"], service="mysearch")
+        token["stats"] = stats_by_token[token["id"]]
 
     overview = {
         "today_count": sum(int((token.get("stats") or {}).get("today_count") or 0) for token in tokens),
@@ -4524,8 +4526,15 @@ async def list_tokens(request: Request, _=Depends(verify_admin)):
     raw_service = request.query_params.get("service")
     service = get_token_service(raw_service) if raw_service else None
     tokens = [dict(token) for token in db.get_all_tokens(service)]
+    # 每个 token 按自身 service 统计，因此按 service 分组后各发一条聚合查询。
+    stats_by_service = {}
     for token in tokens:
-        token["stats"] = db.get_usage_stats(token_id=token["id"], service=token["service"])
+        stats_by_service.setdefault(token["service"], []).append(token["id"])
+    token_stats = {}
+    for token_service, token_ids in stats_by_service.items():
+        token_stats.update(db.get_token_usage_stats(token_ids, service=token_service))
+    for token in tokens:
+        token["stats"] = token_stats[token["id"]]
     return {"tokens": tokens}
 
 

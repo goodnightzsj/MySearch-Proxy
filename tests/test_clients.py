@@ -6,6 +6,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from urllib.error import HTTPError
 from unittest.mock import patch
 
@@ -2247,7 +2248,7 @@ class MySearchClientTests(unittest.TestCase):
         urls = [item["url"] for item in result["results"]]
         self.assertEqual(urls, ["https://www.oscars.org/oscars/ceremonies/2026"])
 
-    def test_extract_result_event_answer_prefers_prioritized_top_five_candidates(self) -> None:
+    def test_extract_result_event_answer_prefers_prioritized_top_five_without_snippets(self) -> None:
         client = MySearchClient()
 
         answer = client._extract_result_event_answer(

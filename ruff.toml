@@ -1,0 +1,39 @@
+# Ruff 配置：只启用能捕获真实缺陷的规则。
+#
+# 刻意不启用 E/W(pep8 风格)、BLE(blind-except)、B008、RUF012 等规则——
+# 本仓库大量使用 `except MySearchError` 收口和函数默认参数，
+# 那些是既定设计而非缺陷，纳入 CI 只会产生噪声并让人习惯性忽略告警。
+
+exclude = [
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".codex-tasks",
+    ".claude",
+    # bundle 是 mysearch/ 的逐字副本，由 scripts/check_sync.sh 单独校验同步，
+    # 在此重复检查只会得到同样的结果。
+    "openclaw/runtime",
+]
+
+target-version = "py310"
+line-length = 120
+
+[lint]
+select = [
+    "F",      # pyflakes：未定义名、未使用导入/变量、重复定义
+    "E9",     # 语法/缩进级错误
+    "F63",    # 无效的比较/断言
+    "F7",     # 语法层面必定出错
+    "F52",    # 无效的 __all__
+]
+
+# 以下规则在既有代码里属于刻意写法，不纳入 CI：
+#   F841 - 未使用局部变量（多处用于解构占位）
+# 如需收紧，先清理存量再逐条移除忽略。
+ignore = ["F841"]
+
+[lint.per-file-ignores]
+# 测试里大量 import 用于 patch 目标与类型标注，未使用属正常。
+"tests/*" = ["F401"]

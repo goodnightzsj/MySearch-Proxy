@@ -36,6 +36,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r mysearch/requirements.txt -r proxy/requirements.txt
+          # 版本钉死：lint 规则集会随版本变化，不钉死会让 CI 因上游新增规则而意外变红。
+          pip install ruff==0.16.7
+
+      - name: Lint (ruff)
+        run: ruff check .
 
       - name: Set up Node.js
         uses: actions/setup-node@v4

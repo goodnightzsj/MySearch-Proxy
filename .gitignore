@@ -20,6 +20,9 @@ mysearch/.env
 proxy/.env
 openclaw/.env
 
+# benchmark runner 本地目标主机配置（示例见 scripts/benchmark.env.example）
+scripts/benchmark.env
+
 # proxy 运行时数据
 proxy/data/
 *.db
@@ -32,13 +35,20 @@ openclaw/.venv/
 # 本地测试输出
 htmlcov/
 .coverage
+out.csv
 
 # 本地 AI 辅助产物
 .ace-tool/
 .serena/
+extract.py
+.ai/
+.playwright-mcp/
+/raw/
+
+# llmdoc/ 与 .codex-tasks/ 按目录忽略：已跟踪的历史文件不受影响，
+# 新增的草稿/中间产物不会被误提交。
 llmdoc/
 .codex-tasks/
-extract.py
 
 # Trellis 工作流（本地协作产物，不入仓）
 .trellis/

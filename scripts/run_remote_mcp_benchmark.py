@@ -19,10 +19,12 @@ except ModuleNotFoundError:  # pragma: no cover - py311 fallback
     import tomli as tomllib  # type: ignore[no-redef]
 
 
-DEFAULT_HOST = "root@192.168.31.122"
-DEFAULT_MYSEARCH_URL = "http://127.0.0.1:18000/mcp"
-DEFAULT_TAVILY_URL = "http://127.0.0.1:8787/mcp"
-DEFAULT_TAVILY_BEARER = ""
+# 目标主机与端点不硬编码：默认值来自环境变量，示例见 scripts/benchmark.env.example。
+# 未设置时留空，由 --host / --mysearch-url / --tavily-url 显式传入。
+DEFAULT_HOST = os.environ.get("MYSEARCH_BENCHMARK_HOST", "")
+DEFAULT_MYSEARCH_URL = os.environ.get("MYSEARCH_BENCHMARK_MYSEARCH_URL", "http://127.0.0.1:18000/mcp")
+DEFAULT_TAVILY_URL = os.environ.get("MYSEARCH_BENCHMARK_TAVILY_URL", "http://127.0.0.1:8787/mcp")
+DEFAULT_TAVILY_BEARER = os.environ.get("MYSEARCH_BENCHMARK_TAVILY_BEARER", "")
 DEFAULT_CODEX_CONFIG = str((Path(os.getenv("CODEX_HOME", "~/.codex")).expanduser() / "config.toml"))
 DEFAULT_TAVILY_MCP_SERVER = "tavily-hikari"
 FIRECRAWL_CRAWL_MAP_TOOLS = {"map_site", "crawl_site"}
@@ -1997,6 +1999,13 @@ def main() -> int:
         selected_rows = selected_rows[: args.limit]
     if not selected_rows:
         print("No benchmark rows selected", file=sys.stderr)
+        return 1
+    if not str(args.host or "").strip():
+        print(
+            "Missing benchmark SSH host. Pass --host user@host, or set MYSEARCH_BENCHMARK_HOST."
+            " See scripts/benchmark.env.example.",
+            file=sys.stderr,
+        )
         return 1
     if not args.mysearch_only and not str(resolved_tavily_bearer or "").strip():
         print(
