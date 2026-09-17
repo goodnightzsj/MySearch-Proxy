@@ -42,9 +42,21 @@ def _get_list_local(*names: str) -> list[str]:
 class GrokModelSpec:
     """单个 Grok 模型登记项。
 
-    `source` = `"builtin"` 表示来自项目内置默认清单（与上游 chenyme/grok2api
-    basic 层一致），`"user"` 表示来自环境变量自定义。`tier` 仅作展示用，
-    不参与请求校验——用户每次请求传入的 `model` 仍会原样透传给上游。
+    `source` = `"builtin"` 表示来自项目内置默认清单，`"user"` 表示来自环境变量自定义。
+    `tier` 仅作展示用，不参与请求校验——用户每次请求传入的 `model` 仍会原样透传给上游。
+
+    内置清单的选取依据（2026-09-17 对 grok2api 上游逐项实测推理，非采信列表）：
+
+    - 三个来源的可用性判据互不一致，**不能用任何单一列表当判据**：
+      `GET /v1/models` 含实测 404 的 `grok-4.20-0309`；`GET /api/admin/v1/models`
+      的 `capability=responses` 只列 4 项，却漏掉实测 200 的 `-non-reasoning`。
+    - 实测可用：`grok-4.6`(6.7s)、`grok-4.20-0309-non-reasoning`、`grok-4.3`(6.8s)、
+      `grok-4.20-0309-reasoning`、`grok-build-0.1`、`grok-4.20-multi-agent-0309`、
+      `grok-composer-2.5-fast`；`grok-4.20-0309` 返回 404 `model_not_found`。
+    - 因此**不得**把 `grok-4.20-0309`（无后缀版）放回清单：它曾是首位，会让零配置
+      部署的默认 primary 直接指向不存在的模型。
+
+    上游模型线会变；`scripts/refresh_grok_models.py` 负责探测并刷新本清单。
     """
 
     id: str
@@ -53,9 +65,9 @@ class GrokModelSpec:
 
 
 _BUILTIN_GROK_MODELS: tuple[GrokModelSpec, ...] = (
-    GrokModelSpec(id="grok-4.20-0309", tier="basic", source="builtin"),
-    GrokModelSpec(id="grok-4.3", tier="basic", source="builtin"),
-    GrokModelSpec(id="grok-4.5", tier="advanced", source="builtin"),
+    GrokModelSpec(id="grok-4.6", tier="basic", source="builtin"),
+    GrokModelSpec(id="grok-4.3", tier="advanced", source="builtin"),
+    GrokModelSpec(id="grok-4.20-0309-non-reasoning", tier="custom", source="builtin"),
 )
 
 

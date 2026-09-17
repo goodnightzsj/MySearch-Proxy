@@ -36,6 +36,157 @@ except ImportError:  # pragma: no cover - 极端隔离部署兜底
     _BUILTIN_GROK_MODELS = None  # type: ignore[assignment]
     _resolve_grok_models = None  # type: ignore[assignment]
 
+try:
+    from mysearch.grok_model_refresh import (
+        collect_candidates_from_model_list,
+        collect_text_candidates,
+        merge_candidates,
+        pick_primary_and_fallback,
+    )
+except ImportError:  # pragma: no cover - 极端隔离部署兜底
+    collect_candidates_from_model_list = None  # type: ignore[assignment]
+    collect_text_candidates = None  # type: ignore[assignment]
+    merge_candidates = None  # type: ignore[assignment]
+    pick_primary_and_fallback = None  # type: ignore[assignment]
+
+# 上游模型线会变（新增/下架/改名）。到期后在后台探测一次，把可用模型写回
+# social_model / social_fallback_model。默认 24h：探测是真实推理调用（每个 5-9s），
+# 且模型上线节奏以天计，频繁探测没有收益。设为 0 可关闭。
+try:
+    SOCIAL_MODEL_REFRESH_TTL_SECONDS = max(
+        0, int(os.environ.get("SOCIAL_MODEL_REFRESH_TTL_SECONDS", "86400"))
+    )
+except (TypeError, ValueError):
+    SOCIAL_MODEL_REFRESH_TTL_SECONDS = 86400
+
+
+def _root_of_upstream(base_url):
+    """把上游 base_url 归一为站点根，供拼接 `/v1/models`、`/api/admin/v1/...` 用。
+
+    `social_upstream_base_url` 常带 `/v1` 后缀，而上面两类路径各自已含完整前缀；
+    保留 `/v1` 再拼会得到 `/v1/v1/models` 这类双前缀地址。
+    """
+    normalized = str(base_url or "").strip().rstrip("/")
+    for suffix in ("/v1/responses", "/v1/models", "/v1", "/responses"):
+        if normalized.endswith(suffix):
+            return normalized[: -len(suffix)].rstrip("/")
+    return normalized
+
+
+async def fetch_social_upstream_json(root_base, path, api_key, timeout=30.0):
+    """对上游 OpenAI 兼容端点发一次 GET，返回 JSON 或 None。"""
+    try:
+        response = await http_client.get(
+            f"{root_base}{path}",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=timeout,
+        )
+    except Exception as exc:
+        logger.warning("social upstream fetch %s failed: %s", path, exc)
+        return None
+    if response.status_code != 200:
+        return None
+    try:
+        return response.json()
+    except Exception:
+        return None
+
+
+async def probe_social_model(root_base, api_key, model_id, timeout=None):
+    """真实推理调用——上游列表会漏报也会误报，只有实际调用能判定可用性。"""
+    try:
+        response = await http_client.post(
+            f"{root_base}/v1/responses",
+            json={"model": model_id, "input": "ok", "stream": False},
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=timeout or max(60.0, float(SOCIAL_GATEWAY_TIMEOUT_SECONDS)),
+        )
+    except Exception:
+        return False
+    return response.status_code == 200
+
+
+def _is_social_model_refresh_stale():
+    """距上次成功刷新是否已超过 TTL。从未刷新过视为 stale（首次启动即触发一次）。"""
+    if SOCIAL_MODEL_REFRESH_TTL_SECONDS <= 0:
+        return False
+    synced_at = get_setting_text("social_model_refreshed_at", "")
+    if not synced_at:
+        return True
+    try:
+        parsed = datetime.fromisoformat(synced_at.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - parsed).total_seconds() >= SOCIAL_MODEL_REFRESH_TTL_SECONDS
+
+
+async def probe_and_refresh_social_models():
+    """探测上游可用模型并写回配置。
+
+    候选取两个端点的并集——实测两边各有漏报与误报，取并集再由真实推理调用裁定，
+    是唯一可靠的判定方式（见 mysearch/grok_model_refresh 模块说明）。
+    """
+    if pick_primary_and_fallback is None:
+        return {"ok": False, "reason": "refresh module unavailable"}
+
+    config = get_runtime_social_config()
+    root_base = _root_of_upstream(config.get("upstream_base_url"))
+    api_key = str(config.get("upstream_api_key") or "").strip()
+    if not root_base or not api_key:
+        return {"ok": False, "reason": "social upstream not configured"}
+
+    candidates: list[list[str]] = []
+    if collect_text_candidates is not None:
+        admin_token = ""
+        try:
+            admin_token = await get_social_admin_v3_access_token(config)
+        except Exception as exc:
+            logger.warning("social model refresh: admin login failed: %s", exc)
+        if admin_token:
+            payload = await fetch_social_admin_v3_json(
+                config, f"{SOCIAL_GATEWAY_V3_ADMIN_PREFIX}/models", admin_token
+            )
+            if payload:
+                candidates.append(collect_text_candidates(payload.get("data") or payload))
+    list_payload = await fetch_social_upstream_json(root_base, "/v1/models", api_key)
+    if list_payload and collect_candidates_from_model_list is not None:
+        candidates.append(collect_candidates_from_model_list(list_payload))
+
+    ranked = merge_candidates(*candidates)
+    if not ranked:
+        return {"ok": False, "reason": "no candidates"}
+
+    available: list[str] = []
+    probes: list[dict] = []
+    for model_id in ranked[:8]:
+        ok = await probe_social_model(root_base, api_key, model_id)
+        probes.append({"model": model_id, "available": ok})
+        if ok:
+            available.append(model_id)
+            if len(available) >= 2:
+                break
+
+    primary, fallback = pick_primary_and_fallback(available)
+    if not primary:
+        # 全部探测失败不应清空现有配置——保留现值比写入空值安全。
+        return {"ok": False, "reason": "no model passed probing", "probes": probes}
+
+    current_primary = get_setting_text("social_model", SOCIAL_GATEWAY_MODEL)
+    current_fallback = get_setting_text("social_fallback_model", SOCIAL_GATEWAY_FALLBACK_MODEL)
+    changed = (primary != current_primary) or (fallback != current_fallback)
+
+    db.set_setting("social_model", primary)
+    db.set_setting("social_fallback_model", fallback)
+    db.set_setting("social_model_refreshed_at", datetime.now(timezone.utc).isoformat())
+    if changed:
+        logger.info(
+            "social model refreshed: %s -> %s (fallback %s -> %s)",
+            current_primary, primary, current_fallback, fallback,
+        )
+    return {"ok": True, "primary": primary, "fallback": fallback, "changed": changed, "probes": probes}
+
 
 def _default_social_model() -> str:
     if _resolve_grok_models is not None:
@@ -535,10 +686,38 @@ SERVICE_LABELS = {
 async def lifespan(_: FastAPI):
     db.init_db()
     _load_social_upstream_key_schedule()
+    model_refresh_task = asyncio.create_task(_social_model_refresh_loop())
     try:
         yield
     finally:
+        model_refresh_task.cancel()
+        try:
+            await model_refresh_task
+        except asyncio.CancelledError:
+            pass
         await http_client.aclose()
+
+
+async def _social_model_refresh_loop():
+    """周期性探测上游可用模型并写回配置。
+
+    首次启动即触发一次（从未刷新过视为 stale），之后每 TTL 检查一次。
+    任何失败都不应影响主服务，因此整轮包在 try/except 里。
+    """
+    # 让服务先完成启动；探测是慢操作，不该拖慢 readiness。
+    await asyncio.sleep(30)
+    while True:
+        try:
+            if _is_social_model_refresh_stale():
+                result = await probe_and_refresh_social_models()
+                if not result.get("ok"):
+                    logger.warning("social model refresh skipped: %s", result.get("reason"))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("social model refresh failed: %s", exc)
+        # 每 30 分钟醒来检查一次 TTL；真正的刷新频率由 TTL 决定。
+        await asyncio.sleep(1800)
 
 
 app = FastAPI(title="MySearch Proxy", lifespan=lifespan)

@@ -257,11 +257,11 @@ class GrokModelRegistryTests(unittest.TestCase):
             )
             models = module._resolve_grok_models()
             ids = [m.id for m in models]
-            self.assertEqual(
-                ids,
-                ["grok-4.20-0309", "grok-4.3", "grok-4.5"],
-            )
-            self.assertEqual([m.tier for m in models], ["basic", "basic", "advanced"])
+            # 断言结构（保序、全部来自 builtin），不硬编码 ID：
+            # 内置清单由 scripts/refresh_grok_models.py 按上游实测结果刷新，
+            # 硬编码具体模型名会让每次刷新都误报失败。
+            self.assertEqual(ids, [m.id for m in module._BUILTIN_GROK_MODELS])
+            self.assertEqual(len(ids), len(set(ids)), "内置清单不应有重复 ID")
             for m in models:
                 self.assertEqual(m.source, "builtin")
         finally:
@@ -271,7 +271,7 @@ class GrokModelRegistryTests(unittest.TestCase):
         snapshot = self._preserve_env("MYSEARCH_GROK_MODELS", "MYSEARCH_GROK_EXTRA_MODELS")
         try:
             os.environ["MYSEARCH_GROK_EXTRA_MODELS"] = (
-                "grok-4.20-auto, grok-4.20-expert, grok-4.20-0309"
+                "grok-4.20-auto, grok-4.20-expert, grok-4.3"
             )
             module = _load_module(
                 "test_mysearch_grok_models_extras",
@@ -279,19 +279,13 @@ class GrokModelRegistryTests(unittest.TestCase):
             )
             models = module._resolve_grok_models()
             ids = [m.id for m in models]
+            builtin_ids = [m.id for m in module._BUILTIN_GROK_MODELS]
             self.assertEqual(
                 ids,
-                [
-                    "grok-4.20-0309",
-                    "grok-4.3",
-                    "grok-4.5",
-                    "grok-4.20-auto",
-                    "grok-4.20-expert",
-                ],
+                builtin_ids + ["grok-4.20-auto", "grok-4.20-expert"],
             )
             sources = {m.id: m.source for m in models}
             tiers = {m.id: m.tier for m in models}
-            self.assertEqual(sources["grok-4.20-0309"], "builtin")
             self.assertEqual(sources["grok-4.20-auto"], "user")
             self.assertEqual(sources["grok-4.20-expert"], "user")
             # 追加项的 tier 必须显式为 `custom`；防止未来重构把默认值改回 `basic`。
@@ -314,7 +308,7 @@ class GrokModelRegistryTests(unittest.TestCase):
                 ids = [m.id for m in models]
                 self.assertEqual(
                     ids,
-                    ["grok-4.20-0309", "grok-4.3", "grok-4.5"],
+                    [m.id for m in module._BUILTIN_GROK_MODELS],
                     f"blank env {raw!r} should fall back to builtin",
                 )
             finally:
@@ -379,7 +373,7 @@ class GrokModelRegistryTests(unittest.TestCase):
 
     def test_single_model_override_keeps_fallback_aligned(self) -> None:
         """`MYSEARCH_GROK_MODELS=single-only` 时 social_gateway helpers 不应崩溃，
-        fallback 退化为内置 basic 层第 2 项作为兜底（保证 has_social_fallback 仍能成立）。"""
+        fallback 退化为内置清单第 2 项作为兜底（保证 has_social_fallback 仍能成立）。"""
         snapshot = self._preserve_env("MYSEARCH_GROK_MODELS", "MYSEARCH_GROK_EXTRA_MODELS")
         # 同时确保 sys.path 含 repo root，让 mysearch 作为 package 可导入
         if str(REPO_ROOT) not in sys.path:
@@ -391,7 +385,9 @@ class GrokModelRegistryTests(unittest.TestCase):
             primary = social_gateway._grok_default_primary()
             fallback = social_gateway._grok_default_fallback(primary)
             self.assertEqual(primary, "grok-only-one")
-            self.assertEqual(fallback, "grok-4.3")
+            # 引用符号而非硬编码 ID：内置清单会按上游实测结果刷新。
+            self.assertEqual(fallback, social_gateway._BUILTIN_GROK_MODELS[1].id)
+            self.assertNotEqual(fallback, primary)
         finally:
             self._restore_env(snapshot)
 

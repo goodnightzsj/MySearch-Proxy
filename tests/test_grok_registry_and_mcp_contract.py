@@ -63,10 +63,11 @@ class GrokModelResolveTests(unittest.TestCase):
         self.assertTrue(all(m.source == "user" for m in models))
 
     def test_extras_append_after_builtins(self) -> None:
-        models = self._resolve(MYSEARCH_GROK_EXTRA_MODELS="grok-4.5, grok-new")
-        self.assertEqual([m.id for m in models], ["grok-4.20-0309", "grok-4.3", "grok-4.5", "grok-new"])
-        # grok-4.5 已在内置清单中，不应重复出现。
-        self.assertEqual([m.id for m in models].count("grok-4.5"), 1)
+        models = self._resolve(MYSEARCH_GROK_EXTRA_MODELS="grok-4.3, grok-new")
+        builtin_ids = [m.id for m in grok_registry._BUILTIN_GROK_MODELS]
+        self.assertEqual([m.id for m in models], builtin_ids + ["grok-new"])
+        # 已在内置清单中的 ID 不应因叠加 extras 而重复出现。
+        self.assertEqual([m.id for m in models].count("grok-4.3"), 1)
 
     def test_invalid_override_falls_back_to_builtins(self) -> None:
         # 过滤后为空 -> 回退内置，而不是返回空清单。
