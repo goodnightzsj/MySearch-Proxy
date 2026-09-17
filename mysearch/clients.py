@@ -72,6 +72,13 @@ HYBRID_SOCIAL_TIMEOUT_SECONDS = 20
 DEFAULT_KEY_COOLDOWN_SECONDS = 60
 MAX_PINNED_KEY_RETRY_DELAY_SECONDS = 120
 
+# Minimum per-version signal for a candidate to count as an assertion about the
+# current release rather than a bare mention. `_software_version_candidates_from_text`
+# scores a generic positive marker ("version", "release", "supported") as 2 and a
+# real "latest stable release" phrase as 4; a version-index page's table rows only
+# ever reach 2. See `_software_version_item_is_version_index`.
+MIN_VERSION_ASSERTION_SCORE = 4
+
 
 class MySearchError(RuntimeError):
     """MySearch 调用失败。"""
@@ -14208,6 +14215,7 @@ class MySearchClient:
             item_score = self._software_version_result_score(query=query, item=item)
             if item_score <= 0:
                 continue
+            item_candidates: list[tuple[tuple[int, int, int], int, str]] = []
             seen_versions: dict[tuple[int, int, int], int] = {}
             text_chunks = [
                 str(item.get("title") or ""),
@@ -14220,7 +14228,14 @@ class MySearchClient:
                     if prior is not None and prior >= signal_score:
                         continue
                     seen_versions[version_tuple] = signal_score
-                    candidates.append((item_score + signal_score, version_tuple, -index, version_text))
+                    item_candidates.append((version_tuple, signal_score, version_text))
+            if self._software_version_item_is_version_index(
+                versions=[candidate[0] for candidate in item_candidates],
+                peak_signal=max((candidate[1] for candidate in item_candidates), default=0),
+            ):
+                continue
+            for version_tuple, signal_score, version_text in item_candidates:
+                candidates.append((item_score + signal_score, version_tuple, -index, version_text))
 
         if not candidates:
             return ""
@@ -14231,6 +14246,24 @@ class MySearchClient:
         if subject:
             return f"The latest stable version of {subject} is {version_text}."
         return f"The latest stable version is {version_text}."
+
+    def _software_version_item_is_version_index(
+        self,
+        *,
+        versions: list[tuple[int, int, int]],
+        peak_signal: int,
+    ) -> bool:
+        """True when an item enumerates versions instead of asserting one.
+
+        Pages such as devguide.python.org/versions/ or an end-of-life table
+        list every supported branch. Their entries score only the generic
+        positive marker, so the page can still win on host authority while
+        saying nothing about which release is current -- exactly how a
+        "future Python 3.16" table row displaced the real answer.
+        """
+        if len(set(versions)) < 3:
+            return False
+        return peak_signal < MIN_VERSION_ASSERTION_SCORE
 
     def _software_version_candidates_from_text(
         self,

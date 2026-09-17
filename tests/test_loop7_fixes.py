@@ -189,6 +189,60 @@ class SoftwareVersionFixTests(unittest.TestCase):
             "The latest stable version of Python is 3.14.6.",
         )
 
+    def test_version_index_table_does_not_displace_asserted_answer(self) -> None:
+        """A versions table listing future branches must not win on authority.
+
+        Loop 12 regression: the real devguide page renders its branches as a
+        table, so "future Python 3.16" is nowhere near the "3.16" cell and the
+        prerelease marker filter cannot see it. The table row scores only the
+        generic positive marker, yet devguide.python.org/versions/ is a
+        canonical host and outranked the page that actually asserts the answer.
+        """
+        client = MySearchClient()
+        result = {
+            "answer": "",
+            "results": [
+                {
+                    "title": "Status of Python versions - Python Developer's Guide",
+                    "url": "https://devguide.python.org/versions/",
+                    "snippet": (
+                        "Supported versions. Python 3.8 Python 3.11 Python 3.12 "
+                        "Python 3.13 Python 3.14 Python 3.15 Python 3.16"
+                    ),
+                    "content": "",
+                },
+                {
+                    "title": "Download Python - Python.org",
+                    "url": "https://www.python.org/downloads/",
+                    "snippet": "Download the latest version of Python. Download Python 3.14.7.",
+                    "content": "",
+                },
+                {
+                    "title": "History of Python - Wikipedia",
+                    "url": "https://en.wikipedia.org/wiki/History_of_Python",
+                    "snippet": "Python 3.14.6 is the latest stable release.",
+                    "content": "",
+                },
+            ],
+            "evidence": {},
+        }
+
+        updated = client._apply_software_version_answer_override(
+            query="what is the latest stable version of Python",
+            mode="web",
+            intent="factual",
+            result=result,
+        )
+
+        self.assertEqual(
+            updated["answer"],
+            "The latest stable version of Python is 3.14.7.",
+        )
+        self.assertEqual(
+            updated["evidence"]["answer_source"],
+            "software-version-extraction",
+        )
+
 
 class CrawlBreadthFixTests(unittest.TestCase):
     def test_crawl_site_defaults_to_crawl_entire_domain(self) -> None:
