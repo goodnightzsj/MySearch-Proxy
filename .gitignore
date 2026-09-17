@@ -45,8 +45,8 @@ extract.py
 .playwright-mcp/
 /raw/
 
-# llmdoc/ 与 .codex-tasks/ 按目录忽略：已跟踪的历史文件不受影响，
-# 新增的草稿/中间产物不会被误提交。
+# llmdoc/ 与 .codex-tasks/ 完全不入仓：目录下已无跟踪文件（d56b4ee 全部移出），
+# 本地文件保留在磁盘上，新增内容也不会被提交。
 llmdoc/
 .codex-tasks/
 
