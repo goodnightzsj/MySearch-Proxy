@@ -143,8 +143,11 @@ class RefreshFailureTests(unittest.TestCase):
         self.server.db.set_setting("social_model", "keep-me")
         self.server.db.set_setting("social_fallback_model", "keep-fallback")
 
-    async def _run_refresh(self, *, config, candidates, probes):
+    async def _run_refresh(self, *, config, candidates, probes, current=""):
+        """probes 是 `(capable, evidence)` 元组列表——探测返回的是二元组。"""
         server = self.server
+        if current:
+            server.db.set_setting("social_model", current)
         # 必须同时 patch 两个网络函数：只 patch probe_social_model 的话，
         # fetch_social_upstream_json 会真的去请求 config 里的假主机直到超时
         # （实测让本测试从 0.2s 变成 18.5s）。
@@ -155,9 +158,7 @@ class RefreshFailureTests(unittest.TestCase):
              patch.object(server, "probe_social_model", side_effect=probes), \
              patch.object(server, "fetch_social_upstream_json", return_value=None), \
              patch.object(server, "get_social_admin_v3_access_token",
-                          side_effect=RuntimeError("admin disabled in test")), \
-             patch.object(server, "pick_primary_and_fallback",
-                          side_effect=lambda ids: (ids[0], ids[1] if len(ids) > 1 else "") if ids else ("", "")):
+                          side_effect=RuntimeError("admin disabled in test")):
             return await server.probe_and_refresh_social_models()
 
     def test_unconfigured_upstream_keeps_config(self) -> None:
@@ -184,9 +185,9 @@ class RefreshFailureTests(unittest.TestCase):
         result = asyncio.run(self._run_refresh(
             config={"upstream_base_url": "http://h:8000/v1", "upstream_api_key": "k"},
             candidates=["grok-a", "grok-b"],
-            probes=[False, False]))
+            probes=[(False, {"tool_calls": 0, "status_ids": 0})] * 2))
         self.assertFalse(result["ok"])
-        self.assertEqual(result["reason"], "no model passed probing")
+        self.assertEqual(result["reason"], "no model passed search probing")
         self.assertEqual(self.server.get_setting_text("social_model", ""), "keep-me")
         self.assertEqual(self.server.get_setting_text("social_fallback_model", ""), "keep-fallback")
 
@@ -195,25 +196,62 @@ class RefreshFailureTests(unittest.TestCase):
 
         result = asyncio.run(self._run_refresh(
             config={"upstream_base_url": "http://h:8000/v1", "upstream_api_key": "k"},
-            candidates=["grok-new", "grok-old"],
-            probes=[True, True]))
+            candidates=["grok-4.3", "grok-4.20-0309-non-reasoning"],
+            probes=[(True, {"tool_calls": 9, "status_ids": 5})] * 2))
         self.assertTrue(result["ok"])
-        self.assertEqual(result["primary"], "grok-new")
-        self.assertEqual(self.server.get_setting_text("social_model", ""), "grok-new")
-        self.assertEqual(self.server.get_setting_text("social_fallback_model", ""), "grok-old")
+        self.assertIn(result["primary"], {"grok-4.3", "grok-4.20-0309-non-reasoning"})
+        self.assertEqual(self.server.get_setting_text("social_model", ""), result["primary"])
+        self.assertNotEqual(
+            self.server.get_setting_text("social_fallback_model", ""), result["primary"]
+        )
         # 刷新时间戳必须写入，否则下一轮又会被判为 stale。
         self.assertTrue(self.server.get_setting_text("social_model_refreshed_at", ""))
         self.assertFalse(self.server._is_social_model_refresh_stale())
+
+    def test_keeps_current_model_when_still_search_capable(self) -> None:
+        """现有模型仍能搜索时不切换——避免按名字赌版本语义。"""
+        import asyncio
+
+        result = asyncio.run(self._run_refresh(
+            config={"upstream_base_url": "http://h:8000/v1", "upstream_api_key": "k"},
+            candidates=["grok-4.20-0309-non-reasoning", "grok-4.3"],
+            probes=[(True, {"tool_calls": 9, "status_ids": 5})] * 2,
+            current="grok-4.3"))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["primary"], "grok-4.3")
+        # primary 保留；fallback 会从测试预设的 keep-fallback 换成真实可用模型，
+        # 所以整体 changed 为真属预期。
+        self.assertEqual(self.server.get_setting_text("social_model", ""), "grok-4.3")
+        self.assertIn(
+            self.server.get_setting_text("social_fallback_model", ""),
+            {"grok-4.20-0309-non-reasoning"},
+        )
+
+    def test_switches_away_from_model_that_cannot_search(self) -> None:
+        """`grok-4.6` 返回 200 但不调用 x_search——它必须被换掉。"""
+        import asyncio
+
+        result = asyncio.run(self._run_refresh(
+            config={"upstream_base_url": "http://h:8000/v1", "upstream_api_key": "k"},
+            # grok-4.6 探测失败（无 tool_call），只有 grok-4.3 通过
+            candidates=["grok-4.6", "grok-4.3"],
+            probes=[(False, {"tool_calls": 0, "status_ids": 0}),
+                    (True, {"tool_calls": 9, "status_ids": 5})],
+            current="grok-4.6"))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["primary"], "grok-4.3")
+        self.assertTrue(result["changed"])
+        self.assertEqual(self.server.get_setting_text("social_model", ""), "grok-4.3")
 
     def test_single_available_model_leaves_fallback_empty_but_not_stale_config(self) -> None:
         import asyncio
 
         result = asyncio.run(self._run_refresh(
             config={"upstream_base_url": "http://h:8000/v1", "upstream_api_key": "k"},
-            candidates=["grok-only"],
-            probes=[True]))
+            candidates=["grok-4.3"],
+            probes=[(True, {"tool_calls": 9, "status_ids": 5})]))
         self.assertTrue(result["ok"])
-        self.assertEqual(result["primary"], "grok-only")
+        self.assertEqual(result["primary"], "grok-4.3")
         self.assertEqual(result["fallback"], "")
 
 

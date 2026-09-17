@@ -17,8 +17,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from mysearch.grok_model_refresh import (  # noqa: E402
+    build_probe_payload,
     collect_candidates_from_model_list,
     collect_text_candidates,
+    evaluate_search_probe,
+    extract_status_ids,
     grok_model_sort_key,
     is_eligible_model,
     merge_candidates,
@@ -162,13 +165,19 @@ class PickModelsTests(unittest.TestCase):
 
 
 class BuiltinRegistryTests(unittest.TestCase):
-    """内置清单必须与"探测式刷新"的排序结论一致。"""
+    """内置清单必须与"搜索探测"的结论一致。"""
 
-    def test_builtin_list_is_ordered_newest_first(self) -> None:
+    def test_no_model_known_to_lack_search_capability(self) -> None:
+        """实测不调用 x_search 的模型绝不能出现在清单里。
+
+        `grok-4.6` / `grok-4.5` 返回 200 但零 tool_call；被选为搜索模型时
+        会产出编造内容。这个断言防止它们被"因为更新"而加回。
+        """
         from mysearch.grok_registry import _BUILTIN_GROK_MODELS
 
-        ids = [spec.id for spec in _BUILTIN_GROK_MODELS]
-        self.assertEqual(ids, rank_candidates(ids), "内置清单顺序应与排序结论一致")
+        ids = {spec.id for spec in _BUILTIN_GROK_MODELS}
+        self.assertNotIn("grok-4.6", ids)
+        self.assertNotIn("grok-4.5", ids)
 
     def test_builtin_list_has_no_duplicates(self) -> None:
         from mysearch.grok_registry import _BUILTIN_GROK_MODELS
@@ -193,8 +202,116 @@ class BuiltinRegistryTests(unittest.TestCase):
         for spec in _BUILTIN_GROK_MODELS:
             self.assertNotEqual(spec.id, "grok-4.20-0309")
 
+    def test_first_entry_is_not_a_known_non_search_model(self) -> None:
+        """零配置部署的默认 primary 取清单首位，必须不是已知不能搜索的模型。"""
+        from mysearch.grok_registry import _BUILTIN_GROK_MODELS
+
+        self.assertNotIn(_BUILTIN_GROK_MODELS[0].id, {"grok-4.6", "grok-4.5", "grok-4.20-0309"})
+
+
+class SearchCapabilityProbeTests(unittest.TestCase):
+    """探测必须校验"工具真的被调用了"，不能只看 HTTP 200。
+
+    实测 `grok-4.6` / `grok-4.5` 返回 200 却完全不调用 `x_search`，而是凭训练数据
+    编造 X 帖子。只验 200 会让它们被选为搜索主模型。
+    """
+
+    def test_probe_payload_sends_search_tool(self) -> None:
+        payload = build_probe_payload("grok-4.6")
+        self.assertEqual(payload["model"], "grok-4.6")
+        self.assertEqual(payload["tools"], [{"type": "x_search"}])
+        self.assertIs(payload["stream"], False)
+
+    def test_200_without_tool_call_is_not_search_capable(self) -> None:
+        """这是导致回归的形状：有编造的假 ID，但没有 tool_call。"""
+        payload = {
+            "output": [
+                {"type": "reasoning"},
+                {
+                    "type": "message",
+                    "content": [
+                        {"type": "output_text", "text": "x.com/OpenAI/status/1970600000000000000"}
+                    ],
+                },
+            ]
+        }
+        verdict = evaluate_search_probe(payload)
+        self.assertEqual(verdict["tool_calls"], 0)
+        self.assertFalse(verdict["search_capable"])
+
+    def test_tool_call_with_real_id_is_search_capable(self) -> None:
+        payload = {
+            "output": [
+                {"type": "custom_tool_call"},
+                {"type": "custom_tool_call"},
+                {"type": "reasoning"},
+                {
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "https://x.com/AnthropicAI/status/1970558198109126942",
+                        }
+                    ],
+                },
+            ]
+        }
+        verdict = evaluate_search_probe(payload)
+        self.assertEqual(verdict["tool_calls"], 2)
+        self.assertEqual(verdict["status_ids"], 1)
+        self.assertTrue(verdict["search_capable"])
+
+    def test_tool_call_without_results_is_not_search_capable(self) -> None:
+        """探测查询选用必然有结果的词，"没搜到 ID" 即意味着没有真实搜索。"""
+        verdict = evaluate_search_probe(
+            {"output": [{"type": "custom_tool_call"}, {"type": "message"}]}
+        )
+        self.assertEqual(verdict["tool_calls"], 1)
+        self.assertFalse(verdict["search_capable"])
+
+    def test_malformed_payloads_do_not_raise(self) -> None:
+        for payload in (None, {}, {"output": None}, {"output": "nope"}, "string", []):
+            self.assertFalse(evaluate_search_probe(payload)["search_capable"], repr(payload))
+
+    def test_extract_status_ids_dedupes_and_keeps_order(self) -> None:
+        payload = {
+            "a": "x.com/OpenAI/status/111",
+            "b": "twitter.com/sama/status/222",
+            "c": "x.com/OpenAI/status/111",
+        }
+        self.assertEqual(extract_status_ids(payload), ["111", "222"])
+
+
+class PreferCurrentModelTests(unittest.TestCase):
+    """刷新只负责"发现失效并恢复"，不追版本。
+
+    上游命名跨两套方案（点分式 / 日期式），无法从名字可靠判断谁更新；
+    按名字排序切换等于赌版本语义——实测已因此把不支持搜索的模型推上生产。
+    """
+
+    def test_keeps_current_when_still_capable(self) -> None:
+        capable = ["grok-4.3", "grok-4.20-0309-non-reasoning"]
+        primary, fallback = pick_primary_and_fallback(capable, current_primary="grok-4.3")
+        self.assertEqual(primary, "grok-4.3")
+        self.assertIn(fallback, capable)
+        self.assertNotEqual(fallback, primary)
+
+    def test_switches_away_when_current_not_capable(self) -> None:
+        """`grok-4.6` 不支持搜索，即使它是 current 也必须换掉。"""
+        capable = ["grok-4.3", "grok-4.20-0309-non-reasoning"]
+        primary, _ = pick_primary_and_fallback(capable, current_primary="grok-4.6")
+        self.assertIn(primary, capable)
+        self.assertNotEqual(primary, "grok-4.6")
+
+    def test_no_current_falls_back_to_ranking(self) -> None:
+        capable = ["grok-4.3", "grok-4.20-0309-non-reasoning"]
+        primary, fallback = pick_primary_and_fallback(capable)
+        self.assertIn(primary, capable)
+        self.assertNotEqual(fallback, primary)
+
 
 class BaseUrlNormalizationTests(unittest.TestCase):
+
     """`SOCIAL_GATEWAY_UPSTREAM_BASE_URL` 带 `/v1`，但脚本拼接的三类路径各自已含前缀。
 
     保留 `/v1` 再拼会得到 `/v1/v1/responses`、`/v1/api/admin/v1/...` 这类双前缀地址，

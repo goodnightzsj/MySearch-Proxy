@@ -38,20 +38,24 @@ except ImportError:  # pragma: no cover - 极端隔离部署兜底
 
 try:
     from mysearch.grok_model_refresh import (
+        build_probe_payload,
         collect_candidates_from_model_list,
         collect_text_candidates,
+        evaluate_search_probe,
         merge_candidates,
         pick_primary_and_fallback,
     )
 except ImportError:  # pragma: no cover - 极端隔离部署兜底
+    build_probe_payload = None  # type: ignore[assignment]
     collect_candidates_from_model_list = None  # type: ignore[assignment]
     collect_text_candidates = None  # type: ignore[assignment]
+    evaluate_search_probe = None  # type: ignore[assignment]
     merge_candidates = None  # type: ignore[assignment]
     pick_primary_and_fallback = None  # type: ignore[assignment]
 
-# 上游模型线会变（新增/下架/改名）。到期后在后台探测一次，把可用模型写回
-# social_model / social_fallback_model。默认 24h：探测是真实推理调用（每个 5-9s），
-# 且模型上线节奏以天计，频繁探测没有收益。设为 0 可关闭。
+# 上游模型线会变（新增/下架/改名）。到期后在后台探测一次，把**确实支持搜索**的
+# 模型写回 social_model / social_fallback_model。默认 24h：探测是真实搜索调用
+# （每个 15-55s），且模型上线节奏以天计，频繁探测没有收益。设为 0 可关闭。
 try:
     SOCIAL_MODEL_REFRESH_TTL_SECONDS = max(
         0, int(os.environ.get("SOCIAL_MODEL_REFRESH_TTL_SECONDS", "86400"))
@@ -93,17 +97,34 @@ async def fetch_social_upstream_json(root_base, path, api_key, timeout=30.0):
 
 
 async def probe_social_model(root_base, api_key, model_id, timeout=None):
-    """真实推理调用——上游列表会漏报也会误报，只有实际调用能判定可用性。"""
+    """真实搜索探测：返回 `(search_capable, 证据)`。
+
+    **必须发送真实的 x_search 工具并校验它被调用**——只看 HTTP 200 不够：
+    实测 `grok-4.6` / `grok-4.5` 返回 200 却完全不调用工具，而是凭训练数据
+    编造 X 帖子（假 status ID、整点时间戳、事实错误）。只验 200 会让这类模型
+    被选为搜索主模型，产出看似正常实则捏造的结果。
+    """
+    if build_probe_payload is None or evaluate_search_probe is None:
+        return False, {"reason": "probe helpers unavailable"}
     try:
         response = await http_client.post(
             f"{root_base}/v1/responses",
-            json={"model": model_id, "input": "ok", "stream": False},
+            json=build_probe_payload(model_id),
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=timeout or max(60.0, float(SOCIAL_GATEWAY_TIMEOUT_SECONDS)),
         )
+    except Exception as exc:
+        return False, {"reason": f"request failed: {type(exc).__name__}"}
+    if response.status_code != 200:
+        return False, {"http_status": response.status_code, "reason": "http_error"}
+    try:
+        payload = response.json()
     except Exception:
-        return False
-    return response.status_code == 200
+        return False, {"http_status": 200, "reason": "invalid_json"}
+    verdict = evaluate_search_probe(payload)
+    verdict["http_status"] = 200
+    return verdict["search_capable"], verdict
+
 
 
 def _is_social_model_refresh_stale():
@@ -125,8 +146,8 @@ def _is_social_model_refresh_stale():
 async def probe_and_refresh_social_models():
     """探测上游可用模型并写回配置。
 
-    候选取两个端点的并集——实测两边各有漏报与误报，取并集再由真实推理调用裁定，
-    是唯一可靠的判定方式（见 mysearch/grok_model_refresh 模块说明）。
+    候选取两个端点的并集——实测两边各有漏报与误报，取并集再由真实搜索探测裁定。
+    判定标准是"模型真的调用了 x_search 工具"，不是 HTTP 200（见 probe_social_model）。
     """
     if pick_primary_and_fallback is None:
         return {"ok": False, "reason": "refresh module unavailable"}
@@ -145,9 +166,13 @@ async def probe_and_refresh_social_models():
         except Exception as exc:
             logger.warning("social model refresh: admin login failed: %s", exc)
         if admin_token:
-            payload = await fetch_social_admin_v3_json(
-                config, f"{SOCIAL_GATEWAY_V3_ADMIN_PREFIX}/models", admin_token
-            )
+            try:
+                payload = await fetch_social_admin_v3_json(
+                    config, f"{SOCIAL_GATEWAY_V3_ADMIN_PREFIX}/models", admin_token
+                )
+            except Exception as exc:
+                logger.warning("social model refresh: models endpoint failed: %s", exc)
+                payload = None
             if payload:
                 candidates.append(collect_text_candidates(payload.get("data") or payload))
     list_payload = await fetch_social_upstream_json(root_base, "/v1/models", api_key)
@@ -158,22 +183,23 @@ async def probe_and_refresh_social_models():
     if not ranked:
         return {"ok": False, "reason": "no candidates"}
 
-    available: list[str] = []
+    capable: list[str] = []
     probes: list[dict] = []
     for model_id in ranked[:8]:
-        ok = await probe_social_model(root_base, api_key, model_id)
-        probes.append({"model": model_id, "available": ok})
+        ok, evidence = await probe_social_model(root_base, api_key, model_id)
+        probes.append({"model": model_id, "search_capable": ok, **evidence})
         if ok:
-            available.append(model_id)
-            if len(available) >= 2:
+            capable.append(model_id)
+            # 凑够主+备即可停：探测是真实推理（15-55s），不必探完全部候选。
+            if len(capable) >= 2:
                 break
 
-    primary, fallback = pick_primary_and_fallback(available)
+    current_primary = get_setting_text("social_model", SOCIAL_GATEWAY_MODEL)
+    primary, fallback = pick_primary_and_fallback(capable, current_primary)
     if not primary:
         # 全部探测失败不应清空现有配置——保留现值比写入空值安全。
-        return {"ok": False, "reason": "no model passed probing", "probes": probes}
+        return {"ok": False, "reason": "no model passed search probing", "probes": probes}
 
-    current_primary = get_setting_text("social_model", SOCIAL_GATEWAY_MODEL)
     current_fallback = get_setting_text("social_fallback_model", SOCIAL_GATEWAY_FALLBACK_MODEL)
     changed = (primary != current_primary) or (fallback != current_fallback)
 
@@ -181,11 +207,18 @@ async def probe_and_refresh_social_models():
     db.set_setting("social_fallback_model", fallback)
     db.set_setting("social_model_refreshed_at", datetime.now(timezone.utc).isoformat())
     if changed:
-        logger.info(
-            "social model refreshed: %s -> %s (fallback %s -> %s)",
+        logger.warning(
+            "social model refreshed: primary %s -> %s (fallback %s -> %s)",
             current_primary, primary, current_fallback, fallback,
         )
-    return {"ok": True, "primary": primary, "fallback": fallback, "changed": changed, "probes": probes}
+    return {
+        "ok": True,
+        "primary": primary,
+        "fallback": fallback,
+        "changed": changed,
+        "search_capable": capable,
+        "probes": probes,
+    }
 
 
 def _default_social_model() -> str:

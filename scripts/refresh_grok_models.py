@@ -52,8 +52,10 @@ for _candidate in (Path(__file__).resolve().parent, REPO_ROOT):
         sys.path.insert(0, str(_candidate))
 
 from mysearch.grok_model_refresh import (  # noqa: E402
+    build_probe_payload,
     collect_candidates_from_model_list,
     collect_text_candidates,
+    evaluate_search_probe,
     merge_candidates,
     pick_primary_and_fallback,
 )
@@ -125,21 +127,30 @@ def fetch_json(base_url, path, token=None, timeout=30):
 
 
 def probe_model(base_url, api_key, model_id):
-    """真实推理调用。返回 True 表示该模型当前可用。
+    """真实搜索探测。返回 `(search_capable, 证据)`。
 
-    这是唯一的权威判据——上游列表会漏报也会误报。
+    **必须发送真实的 x_search 工具并校验它被调用**——只看 HTTP 200 不够：
+    实测 `grok-4.6` / `grok-4.5` 返回 200 却完全不调用工具，而是凭训练数据
+    编造 X 帖子（假 status ID、整点时间戳、事实错误）。若只验 200，这类模型
+    会被选为搜索主模型，产出看似正常实则捏造的结果。
     """
     status, raw = _request(
         f"{base_url}/v1/responses",
         method="POST",
-        body={"model": model_id, "input": "ok", "stream": False},
+        body=build_probe_payload(model_id),
         headers={"Authorization": f"Bearer {api_key}"},
         timeout=PROBE_TIMEOUT_SECONDS,
     )
-    if status == 200:
-        return True
-    # 404 = 模型不存在（终端失败，无需重试）；其它 HTTP 错误也算不可用。
-    return False
+    if status != 200:
+        return False, {"http_status": status, "reason": "http_error"}
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return False, {"http_status": status, "reason": "invalid_json"}
+    verdict = evaluate_search_probe(payload)
+    verdict["http_status"] = status
+    return verdict["search_capable"], verdict
+
 
 
 def collect_candidates(root_base, admin_token, api_key):
@@ -155,17 +166,20 @@ def collect_candidates(root_base, admin_token, api_key):
 
 
 def probe_candidates(base_url, api_key, candidates, *, want=2, limit=MAX_PROBE_COUNT):
-    """按新→旧探测，凑够 want 个可用即停（不必探完全部候选）。"""
-    available: list[str] = []
+    """按偏好顺序探测，凑够 want 个**支持搜索**的模型即停。
+
+    注意：判定标准是"真的调用了搜索工具"，不是 HTTP 200。
+    """
+    capable: list[str] = []
     probes: list[dict] = []
     for model_id in candidates[:limit]:
-        ok = probe_model(base_url, api_key, model_id)
-        probes.append({"model": model_id, "available": ok})
+        ok, evidence = probe_model(base_url, api_key, model_id)
+        probes.append({"model": model_id, "search_capable": ok, **evidence})
         if ok:
-            available.append(model_id)
-            if len(available) >= want:
+            capable.append(model_id)
+            if len(capable) >= want:
                 break
-    return available, probes
+    return capable, probes
 
 
 def read_proxy_settings(db_path):
@@ -231,21 +245,36 @@ def main() -> int:
         print("No candidates from either endpoint; keeping current configuration.", file=sys.stderr)
         return 1
 
-    available, probes = probe_candidates(root_base, args.api_key, candidates)
-    primary, fallback = pick_primary_and_fallback(available)
+    capable, probes = probe_candidates(root_base, args.api_key, candidates)
+
+    # 现有 primary 用于"仍可用则保留"——本脚本的职责是发现失效并恢复，
+    # 不是追版本（上游命名跨两套方案，无法从名字可靠判断谁更新）。
+    current_primary = ""
+    if args.db_path:
+        try:
+            current_primary = read_proxy_settings(args.db_path).get("social_model", "")
+        except Exception as exc:
+            print(f"warn: cannot read current social_model: {exc}", file=sys.stderr)
+
+    primary, fallback = pick_primary_and_fallback(capable, current_primary)
 
     result = {
         "root_base": root_base,
         "candidates": candidates,
         "probes": probes,
-        "available": available,
+        "search_capable": capable,
+        "current_primary": current_primary,
         "primary": primary,
         "fallback": fallback,
+        "changed": primary != current_primary,
         "applied": False,
     }
 
     if not primary:
-        print("No model passed probing; keeping current configuration.", file=sys.stderr)
+        print(
+            "No model passed search probing; keeping current configuration.",
+            file=sys.stderr,
+        )
         if args.json:
             print(json.dumps(result, ensure_ascii=False, indent=2))
         return 1
@@ -262,9 +291,15 @@ def main() -> int:
     else:
         print(f"candidates: {', '.join(candidates)}")
         for probe in probes:
-            print(f"  {'PASS' if probe['available'] else 'FAIL'}  {probe['model']}")
+            mark = "PASS" if probe.get("search_capable") else "FAIL"
+            detail = f"tools={probe.get('tool_calls', '-')} ids={probe.get('status_ids', '-')}"
+            if probe.get("reason"):
+                detail = probe["reason"]
+            print(f"  {mark}  {probe['model']:<32} {detail}")
+        print(f"current : {current_primary or '(unset)'}")
         print(f"primary : {primary}")
         print(f"fallback: {fallback}")
+        print(f"changed : {'yes' if result['changed'] else 'no'}")
         print("applied : " + ("yes" if result["applied"] else "no (dry-run)"))
     return 0
 
