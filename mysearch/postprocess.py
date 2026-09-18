@@ -14,7 +14,7 @@ import re
 from datetime import date, datetime, time as dt_time, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 #: hCaptcha 挑战页会列出这些语言名；出现在正文里即判定为挑战页污染。
 _HCAPTCHA_LANGUAGES = frozenset(
@@ -74,11 +74,11 @@ def _merge_ranked_results(result_lists: list[list[dict[str, Any]]],
             candidate = dict(items[current_index])
             indexes[list_index] += 1
             progressed = True
-            url = candidate.get("url", "")
-            if url and url in seen_urls:
+            dedupe_key = _result_url_identity(str(candidate.get("url") or ""))
+            if dedupe_key and dedupe_key in seen_urls:
                 continue
-            if url:
-                seen_urls.add(url)
+            if dedupe_key:
+                seen_urls.add(dedupe_key)
             merged.append(candidate)
             if len(merged) >= max_results:
                 break
@@ -423,8 +423,25 @@ def _citation_dedupe_key(item: dict[str, Any]) -> str:
     )
 
 
+def _result_url_identity(url: str) -> str:
+    """Comparison-only identity for a result URL.
+
+    Collapses forms that name the same page but differ textually — a trailing
+    slash mainly (`/pricing` vs `/pricing/`). Deliberately does NOT feed emitted
+    URLs: some origins 404 on the slash-stripped form, so callers keep
+    publishing the original bytes and use this only to spot duplicates.
+    """
+    raw = _canonical_result_url((url or "").strip()).lower()
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    if not parsed.netloc or not parsed.path:
+        return raw
+    return urlunparse(parsed._replace(path=parsed.path.rstrip("/")))
+
+
 def _result_dedupe_key(item: dict[str, Any]) -> str:
-    url = _canonical_result_url((item.get("url") or "").strip()).lower()
+    url = _result_url_identity(str(item.get("url") or ""))
     if url:
         return url
     title = re.sub(r"\s+", " ", (item.get("title") or "").strip().lower())

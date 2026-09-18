@@ -1024,6 +1024,51 @@ class MergeDedupeTests(unittest.TestCase):
         self.assertIn("my title", key)
         self.assertIn("my snippet", key)
 
+    def test_result_dedupe_key_collapses_trailing_slash(self) -> None:
+        """同一页面的 /pricing 与 /pricing/ 必须算同一条，否则重复占名额。"""
+        client = _make_client()
+        self.assertEqual(
+            client._result_dedupe_key({"url": "https://example.com/pricing/"}),
+            client._result_dedupe_key({"url": "https://example.com/pricing"}),
+        )
+
+    def test_result_dedupe_key_keeps_distinct_paths_apart(self) -> None:
+        """去斜杠不能把不同路径合并。"""
+        client = _make_client()
+        self.assertNotEqual(
+            client._result_dedupe_key({"url": "https://example.com/a"}),
+            client._result_dedupe_key({"url": "https://example.com/b"}),
+        )
+        self.assertNotEqual(
+            client._result_dedupe_key({"url": "https://example.com/a?q=1"}),
+            client._result_dedupe_key({"url": "https://example.com/a?q=2"}),
+        )
+
+    def test_result_url_identity_preserves_root_and_emitted_url(self) -> None:
+        """归一化只用于比较键；对外输出的 URL 必须保持原样。"""
+        client = _make_client()
+        self.assertEqual(client._result_url_identity("https://example.com/"), "https://example.com")
+        self.assertEqual(
+            client._canonicalize_result_item({"url": "https://example.com/a/"})["url"],
+            "https://example.com/a/",
+        )
+
+    def test_merge_ranked_results_drops_trailing_slash_duplicate(self) -> None:
+        """合流口是三个调用点共用的去重 choke point。"""
+        client = _make_client()
+        merged = client._merge_ranked_results(
+            [
+                [{"url": "https://example.com/pricing/", "title": "A"}],
+                [{"url": "https://example.com/pricing", "title": "B"}],
+                [{"url": "https://example.com/other", "title": "C"}],
+            ],
+            max_results=10,
+        )
+        self.assertEqual(
+            [item["url"] for item in merged],
+            ["https://example.com/pricing/", "https://example.com/other"],
+        )
+
     def test_interleaved_merge_ordering(self) -> None:
         """Results should be interleaved from primary and secondary."""
         client = _make_client()

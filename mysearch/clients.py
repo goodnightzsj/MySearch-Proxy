@@ -4563,7 +4563,10 @@ class MySearchClient(ProviderTransport):
                     *[
                         dict(item)
                         for item in official_candidates
-                        if item.get("url") != official_rescue_candidate.get("url")
+                        if self._result_url_identity(str(item.get("url") or ""))
+                        != self._result_url_identity(
+                            str(official_rescue_candidate.get("url") or "")
+                        )
                     ],
                 ]
                 evidence["official_rescue_applied"] = True
@@ -4574,7 +4577,10 @@ class MySearchClient(ProviderTransport):
                         *[
                             dict(item)
                             for item in results
-                            if item.get("url") != official_rescue_candidate.get("url")
+                            if self._result_url_identity(str(item.get("url") or ""))
+                            != self._result_url_identity(
+                                str(official_rescue_candidate.get("url") or "")
+                            )
                         ],
                     ]
                     enriched["results"] = self._rerank_resource_results(
@@ -10199,6 +10205,9 @@ class MySearchClient(ProviderTransport):
 
     def _result_dedupe_key(self, item: dict[str, Any]) -> str:
         return postprocess._result_dedupe_key(item)
+
+    def _result_url_identity(self, url: str) -> str:
+        return postprocess._result_url_identity(url)
 
     def _canonicalize_result_item(self, item: dict[str, Any]) -> dict[str, Any]:
         return postprocess._canonicalize_result_item(item)
