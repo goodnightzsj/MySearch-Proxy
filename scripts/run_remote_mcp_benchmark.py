@@ -611,31 +611,34 @@ def collect_urls(blob):
 
 
 def collect_duplicate_url_count(blob):
-    # Count result items whose URL names a page already returned. Collapses
-    # trailing slashes and host case so /pricing and /pricing/ count as one
-    # page. Observation only: this does not feed any dimension score.
+    # Count items within a collection whose URL names a page the same
+    # collection already listed. Collapses trailing slashes and host case so
+    # /pricing and /pricing/ count as one page, mirroring the runtime's
+    # `_result_url_identity`. Fragments are kept: `#overview` and
+    # `#model-availability` are distinct deep links, not duplicates.
+    # Collections are counted independently because `citations` is a superset
+    # of `results` in a MySearch response, so one shared `seen` set would
+    # report every ordinary overlap as a duplicate.
+    # Observation only: this does not feed any dimension score.
     if not isinstance(blob, dict):
         return 0
-    seen = set()
     duplicates = 0
     for key in ("results", "pages", "sources", "items", "citations", "links"):
         value = blob.get(key)
         if not isinstance(value, list):
             continue
+        seen = set()
         for item in value:
             url = item if isinstance(item, str) else (
                 item.get("url") if isinstance(item, dict) else None
             )
-            if not isinstance(url, str) or not url:
+            if not isinstance(url, str) or not url.strip():
                 continue
-            parsed = urllib.parse.urlparse(url.strip())
+            parsed = urllib.parse.urlparse(url.strip().lower())
             if not parsed.netloc:
                 continue
-            identity = "{scheme}://{netloc}{path}{query}".format(
-                scheme=(parsed.scheme or "https").lower(),
-                netloc=parsed.netloc.lower(),
-                path=parsed.path.rstrip("/"),
-                query=("?" + parsed.query) if parsed.query else "",
+            identity = urllib.parse.urlunparse(
+                parsed if not parsed.path else parsed._replace(path=parsed.path.rstrip("/"))
             )
             if identity in seen:
                 duplicates += 1
