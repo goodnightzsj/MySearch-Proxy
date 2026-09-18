@@ -1737,6 +1737,37 @@ class SearchSourceNormalizationTests(unittest.TestCase):
 # 12  Parallel execution
 # ===========================================================================
 
+class FirecrawlResponseGroupTests(unittest.TestCase):
+    """Firecrawl 在 2026-11-16 把 `research` 分类的结果从 `data.web` 移到
+    `data.research`；两种形态都必须能读到，否则该日期一到，走 research 分类的
+    调用会静默返回空。"""
+
+    def _results_for(self, data: dict) -> list:
+        client = _make_client(firecrawl_keys=["fc"])
+        with patch.object(client, "_request_json", return_value={"data": data}):
+            payload = client._search_firecrawl_once(
+                query="transformer attention",
+                max_results=5,
+                categories=["research"],
+                include_content=False,
+            )
+        return payload["results"]
+
+    def test_reads_research_group_after_the_2026_11_16_migration(self) -> None:
+        """迁移后：结果在 data.research 里，仍必须被读到。"""
+        results = self._results_for(
+            {"research": [{"title": "Paper", "url": "https://arxiv.org/abs/1706.03762"}]}
+        )
+        self.assertEqual([r["url"] for r in results], ["https://arxiv.org/abs/1706.03762"])
+
+    def test_still_reads_web_group_before_the_migration(self) -> None:
+        """迁移前：结果仍在 data.web 里，行为不变。"""
+        results = self._results_for(
+            {"web": [{"title": "Paper", "url": "https://arxiv.org/abs/1706.03762"}]}
+        )
+        self.assertEqual([r["url"] for r in results], ["https://arxiv.org/abs/1706.03762"])
+
+
 class ParallelExecutionTests(unittest.TestCase):
     def test_single_task_no_threadpool(self) -> None:
         client = _make_client()

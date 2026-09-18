@@ -8017,7 +8017,12 @@ class MySearchClient(ProviderTransport):
         if not isinstance(data, dict):
             data = {}
         results = []
-        source_order = ("news", "web") if requested_news else ("web", "news")
+        # Group order sets result priority (news first when news was requested).
+        # `research` is included because Firecrawl moves the results of the
+        # `research` category out of `data.web` into `data.research` on
+        # 2026-11-16; reading both keys means the switch is a no-op for us, and
+        # today the key is simply absent.
+        source_order = ("news", "web", "research") if requested_news else ("web", "news", "research")
         for source_name in source_order:
             for item in data.get(source_name, []) or []:
                 results.append(
