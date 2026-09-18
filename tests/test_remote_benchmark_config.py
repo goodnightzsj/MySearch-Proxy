@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -1168,6 +1169,103 @@ Authorization = "Bearer th-from-http-headers"
 
         self.assertEqual(row["structural_failure"], "")
         self.assertEqual(row["optimization_hint"], "")
+
+
+class TimeWindowAlignmentTests(unittest.TestCase):
+    """Tavily 与 MySearch 必须拿到等价的时间窗。
+
+    历史缺陷：runner 只给 Tavily 传 `time_range`，MySearch 侧不传
+    `from_date`/`to_date`，于是 11 行上 Tavily 有日期过滤而 MySearch 没有 ——
+    "freshness 不如 Tavily" 可能只是评测条件不对等造成的假象。
+    """
+
+    def _row(self, domain: str, benchmark_id: str = "x-01") -> dict[str, str]:
+        return {"benchmark_id": benchmark_id, "domain": domain}
+
+    def test_tavily_and_mysearch_windows_agree_for_every_domain(self) -> None:
+        domains = [
+            "新闻",
+            "技术动态 / status",
+            "娱乐",
+            "八卦",
+            "纯 Social / X",
+            "更新日志 / release",
+            "网页",
+            "技术文档",
+            "PDF",
+        ]
+        for domain in domains:
+            row = self._row(domain)
+            tavily_has = bool(run_remote_mcp_benchmark.map_tavily_time_range(row))
+            from_date, to_date = run_remote_mcp_benchmark.map_mysearch_date_bounds(row)
+            with self.subTest(domain=domain):
+                self.assertEqual(
+                    tavily_has,
+                    bool(from_date),
+                    f"{domain}: 一侧有日期过滤而另一侧没有",
+                )
+                if from_date:
+                    self.assertLess(from_date, to_date)
+                    self.assertRegex(from_date, r"^\d{4}-\d{2}-\d{2}$")
+                    self.assertRegex(to_date, r"^\d{4}-\d{2}-\d{2}$")
+
+    def test_month_window_is_thirty_days(self) -> None:
+        from_date, to_date = run_remote_mcp_benchmark.map_mysearch_date_bounds(
+            self._row("新闻")
+        )
+        start = date.fromisoformat(from_date)
+        end = date.fromisoformat(to_date)
+        self.assertEqual((end - start).days, 30)
+
+    def test_year_window_is_365_days(self) -> None:
+        from_date, to_date = run_remote_mcp_benchmark.map_mysearch_date_bounds(
+            self._row("更新日志 / release")
+        )
+        start = date.fromisoformat(from_date)
+        end = date.fromisoformat(to_date)
+        self.assertEqual((end - start).days, 365)
+
+    def test_domains_without_a_time_range_send_neither_side(self) -> None:
+        row = self._row("网页")
+        self.assertIsNone(run_remote_mcp_benchmark.map_tavily_time_range(row))
+        self.assertEqual(
+            run_remote_mcp_benchmark.map_mysearch_date_bounds(row), ("", "")
+        )
+
+    def test_build_case_wires_the_window_into_mysearch_args(self) -> None:
+        row = {
+            "benchmark_id": "news-01",
+            "domain": "新闻",
+            "query": "q",
+            "prompt_variant": "baseline",
+            "preferred_tool": "search",
+            "mode_hint": "news",
+            "strategy_hint": "verify",
+            "repeat_runs": "1",
+            "latency_budget_ms": "15000",
+        }
+        case = run_remote_mcp_benchmark.build_case(row)
+        mysearch_args = case["mysearch_args"]
+        tavily_args = case["tavily_args"]
+        self.assertIn("from_date", mysearch_args)
+        self.assertIn("to_date", mysearch_args)
+        self.assertEqual(tavily_args.get("time_range"), "month")
+
+    def test_build_case_omits_the_window_when_tavily_has_none(self) -> None:
+        row = {
+            "benchmark_id": "web-01",
+            "domain": "网页",
+            "query": "q",
+            "prompt_variant": "baseline",
+            "preferred_tool": "search",
+            "mode_hint": "web",
+            "strategy_hint": "balanced",
+            "repeat_runs": "1",
+            "latency_budget_ms": "15000",
+        }
+        case = run_remote_mcp_benchmark.build_case(row)
+        self.assertNotIn("from_date", case["mysearch_args"])
+        self.assertNotIn("time_range", case["tavily_args"])
 
 
 if __name__ == "__main__":

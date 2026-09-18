@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 import urllib.parse
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -30,6 +30,9 @@ DEFAULT_TAVILY_MCP_SERVER = "tavily-hikari"
 FIRECRAWL_CRAWL_MAP_TOOLS = {"map_site", "crawl_site"}
 FIRECRAWL_CRAWL_MAP_COOLDOWN_SECONDS = 65
 
+#: 仅作**兜底**：CSV 的 `include_domains` 列优先（见 build_case）。
+#: 这 9 条当前与 CSV 完全重复，所以实际增量为 0。保留是为了 CSV 列被清空时
+#: 不静默丢覆盖，但若两者开始漂移，以 CSV 为准。
 OFFICIAL_DOMAINS = {
     "official-web-01": ["openai.com"],
     "docs-01": ["playwright.dev"],
@@ -289,6 +292,27 @@ def map_tavily_time_range(row: dict[str, str]) -> Optional[str]:
     return None
 
 
+#: Tavily `time_range` 值的等价天数，用来给 MySearch 传同一时间窗。
+#: 对齐两个 provider 的检索条件；否则 Tavily 拿到时间过滤而 MySearch 没有，
+#: "freshness 不如 Tavily" 可能只是评测条件不对等造成的假象。
+TIME_RANGE_DAYS = {"day": 1, "week": 7, "month": 30, "year": 365}
+
+
+def map_mysearch_date_bounds(row: dict[str, str]) -> tuple[str, str]:
+    """与 `map_tavily_time_range` 等价的时间窗，转成 MySearch 的 from_date/to_date。
+
+    返回 ``(from_date, to_date)``，无时间过滤时返回 ``("", "")``。
+    """
+    time_range = map_tavily_time_range(row)
+    if not time_range:
+        return "", ""
+    days = TIME_RANGE_DAYS.get(time_range)
+    if not days:
+        return "", ""
+    today = date.today()
+    return (today - timedelta(days=days)).isoformat(), today.isoformat()
+
+
 def build_case(row: dict[str, str]) -> dict[str, object]:
     benchmark_id = row["benchmark_id"]
     query = row["query"]
@@ -426,6 +450,10 @@ def build_case(row: dict[str, str]) -> dict[str, object]:
         mysearch_args["sources"] = sources_hint
     elif mode == "social":
         mysearch_args["sources"] = ["x"]
+    mysearch_from_date, mysearch_to_date = map_mysearch_date_bounds(row)
+    if mysearch_from_date:
+        mysearch_args["from_date"] = mysearch_from_date
+        mysearch_args["to_date"] = mysearch_to_date
 
     tavily_args: dict[str, object] = {
         "query": query,
