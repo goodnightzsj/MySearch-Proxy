@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import os
 import sys
@@ -1266,6 +1267,60 @@ class TimeWindowAlignmentTests(unittest.TestCase):
         case = run_remote_mcp_benchmark.build_case(row)
         self.assertNotIn("from_date", case["mysearch_args"])
         self.assertNotIn("time_range", case["tavily_args"])
+
+
+class AutoStrategyTests(unittest.TestCase):
+    """空 `strategy_hint` 必须表示 `auto`，而不是按 prompt_variant 猜。
+
+    `_resolve_strategy` 的推导分支只有调用方不传 strategy 时才走；历史实现里
+    空值会退化成按 variant 猜（strict→verify 等），使那条推导链零覆盖。
+    """
+
+    def _row(self, strategy_hint: str, variant: str = "baseline") -> dict[str, str]:
+        return {"strategy_hint": strategy_hint, "prompt_variant": variant}
+
+    def test_empty_hint_maps_to_auto(self) -> None:
+        self.assertEqual(run_remote_mcp_benchmark.map_strategy(self._row("")), "auto")
+
+    def test_empty_hint_is_not_inferred_from_prompt_variant(self) -> None:
+        for variant in ("strict", "research", "status", "baseline"):
+            with self.subTest(variant=variant):
+                self.assertEqual(
+                    run_remote_mcp_benchmark.map_strategy(self._row("", variant)),
+                    "auto",
+                )
+
+    def test_explicit_hint_still_wins(self) -> None:
+        for hint in ("fast", "balanced", "verify", "deep", "auto"):
+            with self.subTest(hint=hint):
+                self.assertEqual(
+                    run_remote_mcp_benchmark.map_strategy(self._row(hint)), hint
+                )
+
+    def test_tavily_depth_treats_auto_like_fast(self) -> None:
+        self.assertEqual(
+            run_remote_mcp_benchmark.map_tavily_search_depth(self._row("")), "fast"
+        )
+        self.assertEqual(
+            run_remote_mcp_benchmark.map_tavily_search_depth(self._row("verify")),
+            "advanced",
+        )
+
+    def test_shipped_matrix_still_pins_every_strategy(self) -> None:
+        """现有矩阵每行都显式给 strategy，所以本改动不影响它们。"""
+        matrix = (
+            REPO_ROOT
+            / ".codex-tasks"
+            / "20260530-provider-optimization-loop-v2"
+            / "raw"
+            / "loop11-benchmark-input-final.csv"
+        )
+        if not matrix.exists():  # 任务目录可能未随仓库分发
+            self.skipTest("benchmark matrix not present")
+        with matrix.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+        empty = [r["benchmark_id"] for r in rows if not (r.get("strategy_hint") or "").strip()]
+        self.assertEqual(empty, [], f"这些行会突然变成 auto: {empty}")
 
 
 if __name__ == "__main__":

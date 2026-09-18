@@ -77,6 +77,7 @@ FIELDNAMES = [
     "mysearch_content_char_count",
     "mysearch_content_item_count",
     "mysearch_content_noise_hits",
+    "mysearch_duplicate_url_count",
     "mysearch_published_date_count",
     "mysearch_expected_answer_match",
     "mysearch_official_mode",
@@ -101,6 +102,7 @@ FIELDNAMES = [
     "tavily_content_char_count",
     "tavily_content_item_count",
     "tavily_content_noise_hits",
+    "tavily_duplicate_url_count",
     "tavily_published_date_count",
     "tavily_expected_answer_match",
     "tavily_latency_ms",
@@ -263,17 +265,16 @@ def map_mysearch_mode(row: dict[str, str]) -> str:
 
 
 def map_strategy(row: dict[str, str]) -> str:
+    """矩阵的 `strategy_hint` 决定传给工具的 strategy。
+
+    留空表示 ``"auto"``（真实调用方的默认形态），用来覆盖
+    `_resolve_strategy` 的推导分支 —— 那些分支只有在调用方不传 strategy 时才会走。
+    历史实现里空值会退化成按 `prompt_variant` 猜，导致 auto 推导零覆盖。
+    """
     strategy_hint = row.get("strategy_hint", "").strip()
     if strategy_hint:
         return strategy_hint
-    variant = row["prompt_variant"]
-    if variant == "strict":
-        return "verify"
-    if variant == "research":
-        return "deep"
-    if variant == "status":
-        return "verify"
-    return "balanced"
+    return "auto"
 
 
 def map_tavily_search_depth(row: dict[str, str]) -> str:
@@ -609,6 +610,40 @@ def collect_urls(blob):
     return deduped[:3]
 
 
+def collect_duplicate_url_count(blob):
+    # Count result items whose URL names a page already returned. Collapses
+    # trailing slashes and host case so /pricing and /pricing/ count as one
+    # page. Observation only: this does not feed any dimension score.
+    if not isinstance(blob, dict):
+        return 0
+    seen = set()
+    duplicates = 0
+    for key in ("results", "pages", "sources", "items", "citations", "links"):
+        value = blob.get(key)
+        if not isinstance(value, list):
+            continue
+        for item in value:
+            url = item if isinstance(item, str) else (
+                item.get("url") if isinstance(item, dict) else None
+            )
+            if not isinstance(url, str) or not url:
+                continue
+            parsed = urllib.parse.urlparse(url.strip())
+            if not parsed.netloc:
+                continue
+            identity = "{scheme}://{netloc}{path}{query}".format(
+                scheme=(parsed.scheme or "https").lower(),
+                netloc=parsed.netloc.lower(),
+                path=parsed.path.rstrip("/"),
+                query=("?" + parsed.query) if parsed.query else "",
+            )
+            if identity in seen:
+                duplicates += 1
+            else:
+                seen.add(identity)
+    return duplicates
+
+
 def collect_citation_count(blob):
     if not isinstance(blob, dict):
         return 0
@@ -873,6 +908,7 @@ def summarize(blob):
         "content_char_count": measured_content["char_count"],
         "content_item_count": measured_content["item_count"],
         "content_noise_hits": measured_content["noise_hits"],
+        "duplicate_url_count": collect_duplicate_url_count(blob),
         "published_date_count": published_date_count,
         "official_mode": extract_official_mode(blob),
         "conflicts": collect_conflicts(blob),
@@ -1081,6 +1117,7 @@ def timed_tool_runs(client, tool_name, arguments, repeat_runs, latency_budget_ms
                     "content_char_count": summarized["content_char_count"],
                     "content_item_count": summarized["content_item_count"],
                     "content_noise_hits": summarized["content_noise_hits"],
+                    "duplicate_url_count": summarized["duplicate_url_count"],
                     "empty_result": summarized["empty_result"],
                 }
             )
@@ -1127,6 +1164,7 @@ def timed_tool_runs(client, tool_name, arguments, repeat_runs, latency_budget_ms
         "content_char_count": first_success["content_char_count"],
         "content_item_count": first_success["content_item_count"],
         "content_noise_hits": first_success["content_noise_hits"],
+        "duplicate_url_count": first_success["duplicate_url_count"],
         "published_date_count": first_success["published_date_count"],
         "official_mode": first_success["official_mode"],
         "conflicts": first_success["conflicts"],
@@ -1184,6 +1222,7 @@ for case in payload["cases"]:
         "mysearch_content_char_count": 0,
         "mysearch_content_item_count": 0,
         "mysearch_content_noise_hits": 0,
+        "mysearch_duplicate_url_count": 0,
         "mysearch_published_date_count": 0,
         "mysearch_official_mode": "",
         "mysearch_conflicts": "",
@@ -1207,6 +1246,7 @@ for case in payload["cases"]:
         "tavily_content_char_count": 0,
         "tavily_content_item_count": 0,
         "tavily_content_noise_hits": 0,
+        "tavily_duplicate_url_count": 0,
         "tavily_published_date_count": 0,
         "tavily_latency_ms": "",
         "tavily_repeat_variance": "",
@@ -1245,6 +1285,7 @@ for case in payload["cases"]:
             row["mysearch_content_char_count"] = observed["content_char_count"]
             row["mysearch_content_item_count"] = observed["content_item_count"]
             row["mysearch_content_noise_hits"] = observed["content_noise_hits"]
+            row["mysearch_duplicate_url_count"] = observed["duplicate_url_count"]
             row["mysearch_published_date_count"] = observed["published_date_count"]
             row["mysearch_official_mode"] = observed["official_mode"]
             row["mysearch_conflicts"] = " | ".join(observed["conflicts"])
@@ -1285,6 +1326,7 @@ for case in payload["cases"]:
             row["tavily_content_char_count"] = observed["content_char_count"]
             row["tavily_content_item_count"] = observed["content_item_count"]
             row["tavily_content_noise_hits"] = observed["content_noise_hits"]
+            row["tavily_duplicate_url_count"] = observed["duplicate_url_count"]
             row["tavily_published_date_count"] = observed["published_date_count"]
             row["tavily_latency_ms"] = observed["latency_ms"]
             row["tavily_repeat_variance"] = observed["repeat_variance"]
