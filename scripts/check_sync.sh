@@ -7,11 +7,11 @@ SRC="$BASE/mysearch"
 DST="$BASE/openclaw/runtime/mysearch"
 
 # 以 bundle 实际发布的 .py 文件为准自动发现，新增 runtime 文件无需再手工登记。
+# 递归：bundle 现在有 providers/ 子包，只扫顶层会漏掉子目录里的漂移。
 FILES=()
-for path in "$DST"/*.py; do
-    [[ -f "$path" ]] || continue
-    FILES+=("$(basename "$path")")
-done
+while IFS= read -r path; do
+    FILES+=("${path#"$DST"/}")
+done < <(find "$DST" -name '*.py' -type f | sort)
 EXIT=0
 
 for f in "${FILES[@]}"; do

@@ -106,12 +106,20 @@ while stack:
     seen.add(name)
     tree = ast.parse((src_dir / name).read_text(encoding="utf-8"))
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("mysearch."):
-            stack.append(node.module.split(".", 1)[1] + ".py")
+        if isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if module.startswith("mysearch."):
+                stack.append(module.split(".", 1)[1].replace(".", "/") + ".py")
+            elif module == "mysearch":
+                # `from mysearch import postprocess` -- the imported name is
+                # itself a module, so it must ship even though the module
+                # string is just the package.
+                for alias in node.names:
+                    stack.append(alias.name.replace(".", "/") + ".py")
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name.startswith("mysearch."):
-                    stack.append(alias.name.split(".", 1)[1] + ".py")
+                    stack.append(alias.name.split(".", 1)[1].replace(".", "/") + ".py")
 print("\n".join(sorted(seen)))
 PY
 ))

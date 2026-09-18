@@ -1,9 +1,10 @@
 """覆盖 _request_json / _request_text 的 httpx 分支。
 
-背景：clients.py 里有一个 `prefer_urlopen = "unittest.mock" in type(urlopen).__module__`
-分支，当 urlopen 被 mock 时走 urllib，否则走 httpx。绝大多数测试通过
-patch("mysearch.clients.urlopen") 走 urllib 分支，导致**生产实际使用的 httpx
-分支长期没有测试覆盖**。
+背景：`mysearch/providers/base.py` 里有一个
+`prefer_urlopen = "unittest.mock" in type(urlopen).__module__` 分支，当
+urlopen 被 mock 时走 urllib，否则走 httpx。绝大多数测试通过
+patch("mysearch.providers.base.urlopen") 走 urllib 分支，导致**生产实际使用
+的 httpx 分支长期没有测试覆盖**。
 
 这里用一个本地 HTTP server 提供真实响应，不 mock 任何网络函数，因此走的就是
 生产的 httpx 路径。

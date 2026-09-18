@@ -2901,7 +2901,7 @@ class MySearchClientTests(unittest.TestCase):
             ),
         )
 
-        with patch("mysearch.clients.urlopen", side_effect=error):
+        with patch("mysearch.providers.base.urlopen", side_effect=error):
             with self.assertRaises(MySearchHTTPError) as ctx:
                 client._request_json(
                     provider=provider,

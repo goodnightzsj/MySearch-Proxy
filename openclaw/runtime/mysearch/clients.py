@@ -12,12 +12,10 @@ import re
 import sys
 import threading
 import time
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass as _dataclass
 from datetime import date, datetime, timezone
-from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Literal, Mapping, Sequence, cast
-from urllib.error import HTTPError as UrlHTTPError
 from urllib.parse import urlparse, urlunparse
 from urllib.request import Request, urlopen
 
@@ -26,6 +24,7 @@ import httpx
 from mysearch.config import MySearchConfig, ProviderConfig
 from mysearch.keyring import MySearchKeyRing
 from mysearch import postprocess
+from mysearch.providers.base import ProviderTransport
 from mysearch.provider_contract import ProviderResponse
 
 logger = logging.getLogger(__name__)
@@ -82,146 +81,13 @@ MAX_PINNED_KEY_RETRY_DELAY_SECONDS = 120
 MIN_VERSION_ASSERTION_SCORE = 4
 
 
-class MySearchError(RuntimeError):
-    """MySearch 调用失败。"""
-
-
-class MySearchHTTPError(MySearchError):
-    """携带 provider 与状态码的 HTTP 错误。"""
-
-    def __init__(
-        self,
-        *,
-        provider: str,
-        status_code: int,
-        detail: Any,
-        url: str,
-        retry_after_seconds: int | None = None,
-        classification_detail: Any | None = None,
-    ) -> None:
-        self.provider = provider
-        self.status_code = status_code
-        self.detail = detail
-        self.url = url
-        self.retry_after_seconds = retry_after_seconds
-        self.classification_detail = (
-            detail if classification_detail is None else classification_detail
-        )
-        super().__init__(self._build_message())
-
-    @property
-    def is_auth_error(self) -> bool:
-        return (
-            _classify_key_failure(self.status_code, self.classification_detail)
-            == "auth_rejected"
-        )
-
-    @property
-    def is_plan_limit_error(self) -> bool:
-        return self.status_code in {402, 432}
-
-    @property
-    def key_failure_kind(self) -> str:
-        return _classify_key_failure(self.status_code, self.classification_detail)
-
-    def _build_message(self) -> str:
-        detail_text = _stringify_error_detail(self.detail)
-        if self.is_auth_error:
-            return (
-                f"{self.provider} is configured but the API key was rejected "
-                f"(HTTP {self.status_code}): {detail_text or 'authentication failed'}"
-            )
-        return (
-            f"{self.provider} request failed "
-            f"(HTTP {self.status_code}): {detail_text or 'unknown error'}"
-        )
-
-
-def _stringify_error_detail(detail: Any) -> str:
-    if isinstance(detail, str):
-        return detail.strip()
-    if detail is None:
-        return ""
-    if isinstance(detail, (dict, list)):
-        return json.dumps(detail, ensure_ascii=False)
-    return str(detail).strip()
-
-
-def _redact_provider_secret(detail: Any, secret: str) -> str:
-    text = _stringify_error_detail(detail)
-    return text.replace(secret, "<redacted>") if secret else text
-
-
-_QUOTA_FAILURE_MARKERS = (
-    "quota_exhausted",
-    "quota exhausted",
-    "insufficient_quota",
-    "insufficient quota",
-    "credits exhausted",
-    "credit exhausted",
-    "credits limit",
-    "credit limit",
-    "exceeded your credits",
-    "no credits remaining",
-    "billing limit",
-    "usage limit",
-    "plan limit",
-    "resource_exhausted",
-)
-_AUTH_FAILURE_MARKERS = (
-    "invalid api key",
-    "invalid_api_key",
-    "api key is invalid",
-    "api key has expired",
-    "expired api key",
-    "revoked api key",
-    "invalid token",
-    "token is invalid",
-    "token has expired",
-    "expired token",
-    "revoked token",
-    "bad credentials",
-    "authentication failed",
+from mysearch.errors import (  # noqa: F401  (re-exported: public import path stays mysearch.clients)
+    MySearchError,
+    MySearchHTTPError,
+    _parse_retry_after_seconds,
+    _stringify_error_detail,
 )
 
-
-def _classify_key_failure(status_code: int, detail: Any) -> str:
-    normalized = " ".join(_stringify_error_detail(detail).lower().split())
-    has_quota_marker = any(
-        marker in normalized for marker in _QUOTA_FAILURE_MARKERS
-    )
-    if status_code in {402, 432} or (
-        status_code in {403, 429} and has_quota_marker
-    ):
-        return "quota_exhausted"
-    if status_code == 429:
-        return "rate_limited"
-    if status_code == 401 or (
-        status_code == 403
-        and any(marker in normalized for marker in _AUTH_FAILURE_MARKERS)
-    ):
-        return "auth_rejected"
-    return ""
-
-
-def _parse_retry_after_seconds(headers: Any) -> int | None:
-    if headers is None or not hasattr(headers, "get"):
-        return None
-    raw_value = str(headers.get("retry-after") or headers.get("Retry-After") or "").strip()
-    if not raw_value:
-        return None
-    try:
-        return max(1, min(86400, math.ceil(float(raw_value))))
-    except (ValueError, OverflowError):
-        pass
-    try:
-        retry_at = parsedate_to_datetime(raw_value)
-        if retry_at.tzinfo is None:
-            retry_at = retry_at.replace(tzinfo=timezone.utc)
-        seconds = math.ceil((retry_at - datetime.now(timezone.utc)).total_seconds())
-        return max(1, min(86400, seconds))
-    except (TypeError, ValueError, OverflowError):
-        return None
 
 
 @dataclass(slots=True)
@@ -347,7 +213,7 @@ _MODE_PROVIDER_POLICY: dict[str, SearchRoutePolicy] = {
 }
 
 
-class MySearchClient:
+class MySearchClient(ProviderTransport):
     def __init__(
         self,
         config: MySearchConfig | None = None,
@@ -557,107 +423,6 @@ class MySearchClient:
             separators=(",", ":"),
         )
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-
-    def _execute_parallel(
-        self,
-        tasks: dict[str, Callable[[], Any]],
-        *,
-        max_workers: int | None = None,
-        timeout_seconds: float | None = None,
-        stop_after_primary_and_verifier: bool = False,
-    ) -> tuple[dict[str, Any], dict[str, Exception]]:
-        if not tasks:
-            return {}, {}
-
-        if len(tasks) == 1:
-            name, task = next(iter(tasks.items()))
-            try:
-                return {name: task()}, {}
-            except Exception as exc:  # pragma: no cover - defensive
-                return {}, {name: exc}
-
-        results: dict[str, Any] = {}
-        errors: dict[str, Exception] = {}
-        worker_count = max(1, min(max_workers or self.config.max_parallel_workers, len(tasks)))
-        executor = self._executor
-        temporary_executor: ThreadPoolExecutor | None = None
-        if max_workers is not None:
-            temporary_executor = ThreadPoolExecutor(
-                max_workers=worker_count,
-                thread_name_prefix="mysearch-branch",
-            )
-            executor = temporary_executor
-        future_map: dict[Future[Any], str] = {
-            executor.submit(task): name for name, task in tasks.items()
-        }
-        pending = set(future_map)
-        budget = max(
-            0.001,
-            float(timeout_seconds)
-            if timeout_seconds is not None
-            else float(self.config.timeout_seconds + 5),
-        )
-        deadline = time.monotonic() + budget
-
-        def cancel_pending(reason: str) -> None:
-            for pending_future in pending:
-                pending_future.cancel()
-                pending_name = future_map[pending_future]
-                errors.setdefault(pending_name, MySearchError(reason))
-
-        try:
-            while pending:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    cancel_pending(f"parallel task timed out after {budget:g}s")
-                    break
-                completed, _ = wait(
-                    pending,
-                    timeout=remaining,
-                    return_when=FIRST_COMPLETED,
-                )
-                if not completed:
-                    cancel_pending(f"parallel task timed out after {budget:g}s")
-                    break
-                for future in completed:
-                    pending.discard(future)
-                    name = future_map[future]
-                    if name in errors or name in results:
-                        continue
-                    try:
-                        results[name] = future.result()
-                    except TimeoutError:
-                        errors[name] = MySearchError(
-                            f"{name} task timed out within {budget:g}s parallel budget"
-                        )
-                    except Exception as exc:  # pragma: no cover - network/runtime dependent
-                        errors[name] = exc
-
-                if stop_after_primary_and_verifier:
-                    primary_completed = "primary" in results or "primary" in errors
-                    verifier_succeeded = any(name != "primary" for name in results)
-                    primary_failed_with_verifier = (
-                        "primary" in errors and verifier_succeeded
-                    )
-                    if primary_completed and (
-                        len(results) >= 2 or primary_failed_with_verifier
-                    ):
-                        cancel_pending(
-                            "parallel task cancelled after primary and verifier quorum"
-                        )
-                        break
-        finally:
-            if temporary_executor is not None:
-                temporary_executor.shutdown(wait=False, cancel_futures=True)
-        return results, errors
-
-    def _raise_parallel_error(self, errors: dict[str, Exception], task_name: str) -> None:
-        error = errors.get(task_name)
-        if error is None:
-            return
-        if isinstance(error, MySearchError):
-            raise error
-        raise MySearchError(str(error))
 
     def _should_cache_search(
         self,
@@ -12499,251 +12264,6 @@ class MySearchClient:
             "live_error": status["error"],
             "last_checked_at": status["checked_at"],
         }
-
-    def _get_key_or_raise(self, provider: ProviderConfig):
-        record = self.keyring.get_next(provider.name)
-        if record is None:
-            if self.keyring.has_configured_provider(provider.name):
-                raise MySearchError(
-                    f"{provider.name} has no available API keys; replace the key configuration "
-                    "and restart or reload MySearch before retrying"
-                )
-            if provider.name == "tavily":
-                raise MySearchError(
-                    "Tavily is not configured. Use "
-                    "MYSEARCH_TAVILY_MODE=gateway with MYSEARCH_TAVILY_GATEWAY_TOKEN "
-                    "to consume an upstream gateway, or keep "
-                    "MYSEARCH_TAVILY_MODE=official and import your own Tavily keys "
-                    "with MYSEARCH_TAVILY_API_KEY / MYSEARCH_TAVILY_API_KEYS / "
-                    "MYSEARCH_TAVILY_KEYS_FILE."
-                )
-            if provider.name == "xai":
-                raise MySearchError(
-                    "xAI / Social search is not configured; MySearch can still use "
-                    "Tavily + Firecrawl for web/docs/extract. Add "
-                    "MYSEARCH_XAI_API_KEY for official xAI, or configure a "
-                    "compatible /social/search gateway to enable mode='social'."
-                )
-            if provider.name == "exa":
-                raise MySearchError(
-                    "Exa search is not configured. Add MYSEARCH_EXA_API_KEY, "
-                    "or point MYSEARCH_EXA_BASE_URL to your proxy / compatible gateway."
-                )
-            raise MySearchError(f"{provider.name} is not configured")
-        return record
-
-    def _request_json(
-        self,
-        *,
-        provider: ProviderConfig,
-        method: str,
-        path: str,
-        payload: dict[str, Any] | None,
-        key: str,
-        base_url: str | None = None,
-        timeout_seconds: int | None = None,
-    ) -> dict[str, Any]:
-        return self._request_json_selected(
-            provider=provider,
-            method=method,
-            path=path,
-            payload=payload,
-            key=key,
-            base_url=base_url,
-            timeout_seconds=timeout_seconds,
-        )[0]
-
-    def _request_json_selected(
-        self,
-        *,
-        provider: ProviderConfig,
-        method: str,
-        path: str,
-        payload: dict[str, Any] | None,
-        key: str,
-        base_url: str | None = None,
-        timeout_seconds: float | None = None,
-        allow_key_rotation: bool = True,
-    ) -> tuple[dict[str, Any], str]:
-        current_key = key
-        request_generation = self.keyring.generation
-        attempted_keys: set[str] = set()
-        if (
-            allow_key_rotation
-            and self.keyring.has_configured_provider(provider.name)
-            and not self.keyring.is_available(provider.name, current_key)
-        ):
-            replacement = self.keyring.get_next(provider.name)
-            if replacement is None:
-                raise MySearchError(
-                    f"{provider.name} has no available API keys; manual key action required"
-                )
-            current_key = replacement.key
-            request_generation = self.keyring.generation
-        while True:
-            try:
-                return (
-                    self._request_json_once(
-                        provider=provider,
-                        method=method,
-                        path=path,
-                        payload=payload,
-                        key=current_key,
-                        base_url=base_url,
-                        timeout_seconds=timeout_seconds,
-                    ),
-                    current_key,
-                )
-            except MySearchHTTPError as exc:
-                failure_kind = exc.key_failure_kind
-                if failure_kind and (
-                    not provider.managed_key_pool or failure_kind == "auth_rejected"
-                ):
-                    if failure_kind == "rate_limited":
-                        self.keyring.quarantine(
-                            provider.name,
-                            current_key,
-                            failure_kind,
-                            retry_after_seconds=exc.retry_after_seconds or 60,
-                            generation=request_generation,
-                        )
-                    else:
-                        self.keyring.quarantine(
-                            provider.name,
-                            current_key,
-                            failure_kind,
-                            generation=request_generation,
-                        )
-                if (
-                    not failure_kind
-                    or (provider.managed_key_pool and failure_kind != "auth_rejected")
-                    or not allow_key_rotation
-                ):
-                    raise
-                attempted_keys.add(current_key)
-                replacement = self.keyring.get_next(provider.name)
-                if replacement is None or replacement.key in attempted_keys:
-                    raise
-                current_key = replacement.key
-                request_generation = self.keyring.generation
-
-    def _request_json_once(
-        self,
-        *,
-        provider: ProviderConfig,
-        method: str,
-        path: str,
-        payload: dict[str, Any] | None,
-        key: str,
-        base_url: str | None = None,
-        timeout_seconds: float | None = None,
-    ) -> dict[str, Any]:
-        headers: dict[str, str] = {}
-        body = dict(payload or {})
-
-        if provider.auth_mode == "bearer":
-            token = key if not provider.auth_scheme else f"{provider.auth_scheme} {key}"
-            headers[provider.auth_header] = token
-        elif provider.auth_mode == "body":
-            body[provider.auth_field] = key
-        else:
-            raise MySearchError(f"unsupported auth mode for {provider.name}: {provider.auth_mode}")
-
-        url = f"{(base_url or provider.base_url)}{path}"
-        if method.upper() != "GET":
-            headers.setdefault("Content-Type", "application/json")
-        effective_timeout = timeout_seconds or self.config.timeout_seconds
-
-        response_headers: Any = None
-        prefer_urlopen = "unittest.mock" in type(urlopen).__module__
-        if prefer_urlopen:
-            request_data = None if method.upper() == "GET" else json.dumps(body).encode("utf-8")
-            request = Request(url, data=request_data, headers=headers, method=method.upper())
-            try:
-                with urlopen(request, timeout=effective_timeout) as response:
-                    raw_body = response.read()
-                status_code = getattr(response, "status", 200)
-                response_headers = getattr(response, "headers", None)
-                response_text = raw_body.decode("utf-8", errors="replace")
-            except UrlHTTPError as exc:
-                status_code = int(getattr(exc, "code", 500) or 500)
-                response_headers = getattr(exc, "headers", None)
-                raw_body = exc.read() if getattr(exc, "fp", None) else b""
-                response_text = raw_body.decode("utf-8", errors="replace")
-            except Exception as exc:
-                raise MySearchError(f"{provider.name} network error: {exc}") from exc
-        else:
-            try:
-                response = self._http.request(
-                    method.upper(),
-                    url,
-                    json=body if method.upper() != "GET" else None,
-                    headers=headers,
-                    timeout=effective_timeout,
-                )
-                status_code = response.status_code
-                response_headers = response.headers
-                response_text = response.text
-            except httpx.TimeoutException as exc:
-                raise MySearchError(
-                    f"{provider.name} request timeout after {effective_timeout}s: {url}"
-                ) from exc
-            except httpx.HTTPError as exc:
-                raise MySearchError(f"{provider.name} network error: {exc}") from exc
-
-        try:
-            data = json.loads(response_text)
-        except ValueError as exc:
-            if status_code >= 400:
-                raise MySearchHTTPError(
-                    provider=provider.name,
-                    status_code=status_code,
-                    detail=_redact_provider_secret(response_text, key)[:300],
-                    url=url,
-                    retry_after_seconds=_parse_retry_after_seconds(response_headers),
-                ) from exc
-            raise MySearchError(f"non-json response from {url}: {response_text[:300]}") from exc
-
-        if status_code >= 400:
-            detail = data
-            if isinstance(data, dict):
-                detail = (
-                    data.get("detail")
-                    or data.get("error")
-                    or data.get("message")
-                    or data
-                )
-            raise MySearchHTTPError(
-                provider=provider.name,
-                status_code=status_code,
-                detail=_redact_provider_secret(detail, key)[:500],
-                url=url,
-                retry_after_seconds=_parse_retry_after_seconds(response_headers),
-                classification_detail=data,
-            )
-        if not isinstance(data, dict):
-            safe_response = _redact_provider_secret(response_text, key)[:200]
-            raise MySearchError(f"non-dict JSON response from {provider.name}: {safe_response}")
-        return data
-
-    def _request_text(
-        self,
-        *,
-        url: str,
-        timeout_seconds: int | None = None,
-    ) -> tuple[int, str]:
-        effective_timeout = timeout_seconds or self.config.timeout_seconds
-        try:
-            response = self._http.get(
-                url,
-                headers={"Accept": "text/html,application/json;q=0.9,*/*;q=0.8"},
-                timeout=effective_timeout,
-            )
-            return response.status_code, response.text
-        except httpx.TimeoutException as exc:
-            return 0, ""
-        except httpx.HTTPError as exc:
-            raise MySearchError(str(exc)) from exc
 
     def _xai_probe_model(self) -> str:
         # Probe 取当前 registry 首项，跟随 MYSEARCH_GROK_MODELS / EXTRA_MODELS 自定义。
