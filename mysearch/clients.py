@@ -25,6 +25,7 @@ import httpx
 
 from mysearch.config import MySearchConfig, ProviderConfig
 from mysearch.keyring import MySearchKeyRing
+from mysearch.provider_contract import ProviderResponse
 
 logger = logging.getLogger(__name__)
 
@@ -1616,7 +1617,7 @@ class MySearchClient:
         )
 
         route_reason = decision.reason
-        if result.get("provider") == "hybrid" and resolved_strategy in {"balanced", "verify", "deep"}:
+        if ProviderResponse.is_hybrid(result) and resolved_strategy in {"balanced", "verify", "deep"}:
             route_reason = f"{route_reason}；strategy={resolved_strategy} 已启用 Tavily + Firecrawl 交叉检索"
         fallback = result.get("fallback")
         if isinstance(fallback, dict):
@@ -2104,7 +2105,7 @@ class MySearchClient:
 
         urls: list[str] = []
         prefetched_content: dict[str, str] = {}
-        if web_search.get("provider") == "hybrid":
+        if ProviderResponse.is_hybrid(web_search):
             base_candidate_results = web_search.get("results") or web_search.get("web", {}).get("results", [])
         else:
             base_candidate_results = web_search.get("results", [])
@@ -5714,7 +5715,7 @@ class MySearchClient:
             "page_success_rate": page_success_rate,
             "citation_count": len(citations),
             "verification": "cross-provider"
-            if web_search.get("provider") == "hybrid" or len(providers_consulted) > 1
+            if ProviderResponse.is_hybrid(web_search) or len(providers_consulted) > 1
             else "single-provider",
             "source_diversity": len(source_domains),
             "source_domains": source_domains[:5],

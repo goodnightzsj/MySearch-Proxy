@@ -86,7 +86,37 @@ sync_runtime() {
   rm -rf "$RUNTIME_DIR" "$OPENCLAW_DIR/scripts/__pycache__" "$OPENCLAW_DIR/runtime/__pycache__"
   mkdir -p "$RUNTIME_DIR"
 
-  local files=(__init__.py clients.py config.py keyring.py)
+  # bundle 只带 clients.py 的传递 import 闭包，不带 server.py / __main__.py /
+  # social_gateway.py 这些宿主侧文件。闭包按源码实时计算，避免手工清单漏掉新
+  # 模块（clients.py 依赖 provider_contract.py、config.py 依赖
+  # grok_registry.py，漏一个 bundle 就会在 import 时崩溃）。
+  local -a files
+  files=($(python3 - "$MYSEARCH_DIR" <<'PY'
+import ast
+import sys
+from pathlib import Path
+
+src_dir = Path(sys.argv[1])
+seen: set[str] = set()
+stack = ["clients.py"]
+while stack:
+    name = stack.pop()
+    if name in seen or not (src_dir / name).exists():
+        continue
+    seen.add(name)
+    tree = ast.parse((src_dir / name).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("mysearch."):
+            stack.append(node.module.split(".", 1)[1] + ".py")
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.startswith("mysearch."):
+                    stack.append(alias.name.split(".", 1)[1] + ".py")
+print("\n".join(sorted(seen)))
+PY
+))
+
+  local file
   for file in "${files[@]}"; do
     install -m 0644 "$MYSEARCH_DIR/$file" "$RUNTIME_DIR/$file"
     echo "  - $file"
@@ -95,12 +125,12 @@ sync_runtime() {
 
 run_smoke() {
   echo "Running OpenClaw runtime smoke test..."
-  python3 -m py_compile \
-    "$OPENCLAW_DIR/scripts/mysearch_openclaw.py" \
-    "$RUNTIME_DIR/__init__.py" \
-    "$RUNTIME_DIR/clients.py" \
-    "$RUNTIME_DIR/config.py" \
-    "$RUNTIME_DIR/keyring.py"
+  local py_files=("$OPENCLAW_DIR/scripts/mysearch_openclaw.py")
+  local path
+  for path in "$RUNTIME_DIR"/*.py; do
+    py_files+=("$path")
+  done
+  python3 -m py_compile "${py_files[@]}"
 
   python3 "$OPENCLAW_DIR/scripts/mysearch_openclaw.py" health >/dev/null
   echo "Smoke test passed."
