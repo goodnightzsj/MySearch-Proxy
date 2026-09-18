@@ -423,13 +423,39 @@ def _citation_dedupe_key(item: dict[str, Any]) -> str:
     )
 
 
+def _is_heading_anchor(fragment: str) -> bool:
+    """True for a fragment that addresses a section of the SAME document.
+
+    Anchors are `#overview`, `#getting-started`, `#named-id`. Hash routes start
+    with `/`, `!` or `?`, and `key=value` fragments are route parameters; both
+    address a different view, so neither may be collapsed. Anything else is
+    treated as a heading anchor.
+    """
+    text = (fragment or "").strip()
+    if not text:
+        return False
+    if text[0] in "/!?":
+        return False
+    # `name=value` / `key=value&...` is a route parameter, not a heading.
+    return "=" not in text
+
+
 def _result_url_identity(url: str) -> str:
     """Comparison-only identity for a result URL.
 
-    Collapses forms that name the same page but differ textually — a trailing
-    slash mainly (`/pricing` vs `/pricing/`). Deliberately does NOT feed emitted
-    URLs: some origins 404 on the slash-stripped form, so callers keep
-    publishing the original bytes and use this only to spot duplicates.
+    Collapses forms that name the same page but differ textually: a trailing
+    slash (`/pricing` vs `/pricing/`) and a heading anchor
+    (`/batch#overview` vs `/batch#model-availability`). Measured on saved
+    outputs, anchor-only variants always share one title -- they are one page
+    split by section, and each was holding its own result slot.
+
+    Deliberately does NOT feed emitted URLs: some origins 404 on the
+    slash-stripped form, so callers keep publishing the original bytes and use
+    this only to spot duplicates.
+
+    A fragment is dropped only when it looks like a heading anchor. Hash-route
+    fragments (`#/settings`, `#!/posts`) name a different document and are
+    kept; so is any fragment we cannot classify.
     """
     raw = _canonical_result_url((url or "").strip()).lower()
     if not raw:
@@ -437,7 +463,12 @@ def _result_url_identity(url: str) -> str:
     parsed = urlparse(raw)
     if not parsed.netloc or not parsed.path:
         return raw
-    return urlunparse(parsed._replace(path=parsed.path.rstrip("/")))
+    fragment = parsed.fragment
+    if fragment and _is_heading_anchor(fragment):
+        fragment = ""
+    return urlunparse(
+        parsed._replace(path=parsed.path.rstrip("/"), fragment=fragment)
+    )
 
 
 def _result_dedupe_key(item: dict[str, Any]) -> str:

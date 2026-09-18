@@ -5712,7 +5712,18 @@ class MySearchClientTests(unittest.TestCase):
             result["citations"][0]["url"],
             "https://playwright.dev/docs/api/class-test#test-step",
         )
-        self.assertEqual(result["evidence"]["official_source_count"], 2)
+        # 该页此前占两个结果位：rescue 的 `#test-step` 与 Tavily 的无锚点形式。
+        # 它们是同一页（同 title、同 path），锚点去重后只剩一条，
+        # 因此官方来源计数为 1 而非 2。两条 URL 仍完整保留在 citations 里。
+        self.assertEqual(result["evidence"]["official_source_count"], 1)
+        self.assertEqual(
+            sorted(citation["url"] for citation in result["citations"]),
+            [
+                "https://playwright.dev/docs/api/class-test",
+                "https://playwright.dev/docs/api/class-test#test-step",
+                "https://www.checklyhq.com/blog/playwright-test-step-guide/",
+            ],
+        )
         self.assertEqual(result["evidence"]["confidence"], "high")
         self.assertNotIn("mixed-official-and-third-party", result["evidence"]["conflicts"])
 
@@ -5762,7 +5773,9 @@ class MySearchClientTests(unittest.TestCase):
             include_answer=False,
         )
 
-        self.assertEqual(len(result["results"]), 2)
+        # rescue 的 `#test-step` 与 Tavily 的无锚点形式是同一页，锚点去重后合为一条；
+        # 两条 URL 仍保留在 citations 中，未丢失信息。
+        self.assertEqual(len(result["results"]), 1)
         self.assertEqual(
             result["results"][0]["url"],
             "https://playwright.dev/docs/api/class-test#test-step",
@@ -5772,7 +5785,7 @@ class MySearchClientTests(unittest.TestCase):
         )
         self.assertEqual(result["evidence"]["official_mode"], "strict")
         self.assertTrue(result["evidence"]["official_filter_applied"])
-        self.assertEqual(result["evidence"]["official_source_count"], 2)
+        self.assertEqual(result["evidence"]["official_source_count"], 1)
         self.assertNotIn("mixed-official-and-third-party", result["evidence"]["conflicts"])
 
     def test_search_strict_official_mode_keeps_results_but_flags_unmet(self) -> None:

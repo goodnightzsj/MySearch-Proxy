@@ -1053,6 +1053,47 @@ class MergeDedupeTests(unittest.TestCase):
             "https://example.com/a/",
         )
 
+    def test_result_url_identity_collapses_heading_anchors(self) -> None:
+        """同一页的不同小节锚点算一条；实测这些变体的 title 完全相同。"""
+        client = _make_client()
+        base = "https://developers.openai.com/api/docs/guides/batch"
+        keys = {
+            client._result_dedupe_key({"url": f"{base}{suffix}"})
+            for suffix in ("", "/", "#overview", "#model-availability", "#batch-expiration")
+        }
+        self.assertEqual(len(keys), 1, f"应为同一条，实得 {keys}")
+
+    def test_result_url_identity_keeps_hash_routes_distinct(self) -> None:
+        """hash 路由指向不同文档，不能归并；识别不了的一律保持区分。"""
+        client = _make_client()
+        pairs = [
+            ("https://x.com/#/settings", "https://x.com/#/profile"),
+            ("https://x.com/a#!/posts", "https://x.com/a#!/about"),
+            ("https://x.com/a#tab=1", "https://x.com/a#tab=2"),
+        ]
+        for left, right in pairs:
+            self.assertNotEqual(
+                client._result_dedupe_key({"url": left}),
+                client._result_dedupe_key({"url": right}),
+                f"{left} 与 {right} 不是同一页",
+            )
+
+    def test_merge_ranked_results_drops_anchor_duplicate(self) -> None:
+        """锚点重复同样在合流口被拦下，且保留下第一条的原始 URL。"""
+        client = _make_client()
+        merged = client._merge_ranked_results(
+            [
+                [{"url": "https://x.com/guide#overview", "title": "Guide"}],
+                [{"url": "https://x.com/guide#advanced", "title": "Guide"}],
+                [{"url": "https://x.com/other", "title": "Other"}],
+            ],
+            max_results=10,
+        )
+        self.assertEqual(
+            [item["url"] for item in merged],
+            ["https://x.com/guide#overview", "https://x.com/other"],
+        )
+
     def test_merge_ranked_results_drops_trailing_slash_duplicate(self) -> None:
         """合流口是三个调用点共用的去重 choke point。"""
         client = _make_client()
