@@ -1039,22 +1039,46 @@ def normalize_summary(value):
     return " ".join(str(value or "").lower().split())
 
 
+# 远端自包含的数值判据（REMOTE_SCRIPT 里取不到本地的 _as_float）。
+# 注意：本字符串内不要用三引号 docstring，会提前终止外层 REMOTE_SCRIPT。
+def _positive_number(value):
+    try:
+        return float(value) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def repeat_variance(observations):
     successful = [item for item in observations if item.get("success")]
     attempted_count = len(observations)
-    success_ratio = len(successful) / attempted_count if attempted_count else 0.0
+    # 空结果不是成功。上游可以在 HTTP 200 下返回空 results（Tavily 实测如此），
+    # 而 `success` 只看传输层，于是"什么都没返回"会算进成功数。更糟的是：全空运行
+    # 会让 consistency_parts 为空 -> consistency 落到默认 1.0，配合 success_ratio=1.0
+    # 反而拿满分。loop27 的 research-01 / longtail-academic-01 就是这样在全部重复
+    # 都只返回 "Research request failed" 的情况下 resilience 得 5.0，而 runner 同时
+    # 已把它们标为 tavily-*-upstream-plan-limited。
+    #
+    # 判据取"有无任何可用产出"：URL 或正文文本。实测分界很干净 —— 正当的 research
+    # 综合答案虽不带 URL，但有 8.5k~16k 正文；错误串只有 10~23 字符且正文为 0。
+    # 因此不能只判 urls（会误杀前者），也不能只判 summary 非空（错误串正是非空的）。
+    status_ok = [
+        item
+        for item in successful
+        if item.get("urls") or _positive_number(item.get("content_char_count"))
+    ]
+    success_ratio = len(status_ok) / attempted_count if attempted_count else 0.0
     summary_match_rate = 1.0
     url_overlap = 1.0
     consistency_parts = []
-    if len(successful) >= 2:
-        first_summary = normalize_summary(successful[0].get("summary"))
-        summaries = [normalize_summary(item.get("summary")) for item in successful[1:]]
+    if len(status_ok) >= 2:
+        first_summary = normalize_summary(status_ok[0].get("summary"))
+        summaries = [normalize_summary(item.get("summary")) for item in status_ok[1:]]
         if first_summary or any(summaries):
             summary_match_rate = sum(value == first_summary for value in summaries) / len(summaries)
             consistency_parts.append(summary_match_rate)
-        first_urls = set(successful[0].get("urls") or [])
+        first_urls = set(status_ok[0].get("urls") or [])
         overlaps = []
-        for item in successful[1:]:
+        for item in status_ok[1:]:
             current_urls = set(item.get("urls") or [])
             union = first_urls | current_urls
             if union:
@@ -1070,6 +1094,7 @@ def repeat_variance(observations):
         "summary_match_rate": round(summary_match_rate, 3),
         "url_overlap": round(url_overlap, 3),
         "successful_runs": len(successful),
+        "nonempty_runs": len(status_ok),
         "attempted_runs": attempted_count,
     }
 

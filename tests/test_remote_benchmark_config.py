@@ -394,6 +394,95 @@ class RemoteBenchmarkConfigTests(unittest.TestCase):
         self.assertEqual(variance["latency_range_ms"], 80.0)
         self.assertLess(variance["result_stability"], 1.0)
 
+    def _remote_repeat_variance(self):
+        namespace: dict[str, object] = {}
+        helper_source = run_remote_mcp_benchmark.REMOTE_SCRIPT.split("\npayload = json.loads", 1)[0]
+        exec(helper_source, namespace)
+        return namespace["repeat_variance"]
+
+    def test_repeat_variance_treats_all_empty_runs_as_unstable(self) -> None:
+        # 回归：上游可返回 HTTP 200 但结果为空，"transport 成功"不等于"有结果"。
+        # 修复前这种运行 consistency_parts 为空 -> consistency 默认 1.0，
+        # 配合 success_ratio=1.0 反而拿到 result_stability=1.0（resilience 满分）。
+        # 实证据：loop27 的 research-01 / longtail-academic-01 三次全返回
+        # "Research request failed" 却得 5.0，且已同时被标为
+        # tavily-*-upstream-plan-limited。
+        repeat_variance = self._remote_repeat_variance()
+        all_error = [
+            {
+                "success": True,
+                "urls": [],
+                "summary": "Research request failed",
+                "citation_count": 0,
+                "content_char_count": 0,
+                "latency_ms": 300.0,
+            }
+            for _ in range(3)
+        ]
+        variance = repeat_variance(all_error)
+        self.assertEqual(variance["result_stability"], 0.0)
+        self.assertEqual(variance["nonempty_runs"], 0)
+        self.assertEqual(variance["successful_runs"], 3)
+
+    def test_repeat_variance_keeps_url_less_research_synthesis_stable(self) -> None:
+        # 反向回归：正当的 research 综合答案不带 URL，但有真实正文。
+        # 判据若只看 urls 会把这类结果误判为不稳定。
+        repeat_variance = self._remote_repeat_variance()
+        legit = [
+            {
+                "success": True,
+                "urls": [],
+                "summary": "## Top Search-Oriented MCP Servers",
+                "citation_count": 0,
+                "content_char_count": 10525,
+                "latency_ms": 900.0,
+            },
+            {
+                "success": True,
+                "urls": [],
+                "summary": "## Top Search-Oriented MCP Servers",
+                "citation_count": 0,
+                "content_char_count": 10525,
+                "latency_ms": 800.0,
+            },
+        ]
+        variance = repeat_variance(legit)
+        self.assertEqual(variance["result_stability"], 1.0)
+        self.assertEqual(variance["nonempty_runs"], 2)
+
+    def test_repeat_variance_scales_with_intermittent_empty_runs(self) -> None:
+        # loop30 official-web-01 的形态：3 次里只有 1 次有结果。
+        repeat_variance = self._remote_repeat_variance()
+        mixed = [
+            {
+                "success": True,
+                "urls": ["https://developers.openai.com/api/docs/pricing"],
+                "summary": "pricing",
+                "citation_count": 5,
+                "content_char_count": 500,
+                "latency_ms": 387.0,
+            },
+            {
+                "success": True,
+                "urls": [],
+                "summary": "Search failed",
+                "citation_count": 0,
+                "content_char_count": 0,
+                "latency_ms": 549.0,
+            },
+            {
+                "success": True,
+                "urls": [],
+                "summary": "Search failed",
+                "citation_count": 0,
+                "content_char_count": 0,
+                "latency_ms": 336.0,
+            },
+        ]
+        variance = repeat_variance(mixed)
+        self.assertEqual(variance["result_stability"], 0.333)
+        self.assertEqual(variance["nonempty_runs"], 1)
+
     def test_classify_tavily_structural_failure_maps_research_quota_exhausted_from_error_text(self) -> None:
         self.assertEqual(
             run_remote_mcp_benchmark.classify_tavily_structural_failure(
