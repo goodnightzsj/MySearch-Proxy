@@ -827,7 +827,12 @@ def content_metrics(blob):
             if isinstance(raw_content, str) and raw_content.strip():
                 add(raw_content)
                 continue
-            for key in ("content", "markdown", "text"):
+            # `snippet` carries MySearch's per-result provider text -- the same
+            # role Tavily puts in `content`. Without it the two sides are not
+            # comparable: on rows where content_fidelity is inactive, Tavily's
+            # `content` still holds its snippet while MySearch keeps that same
+            # text in `snippet`, so MySearch scored 0 while Tavily scored ~4-9k.
+            for key in ("content", "markdown", "text", "snippet"):
                 add(item.get(key))
 
     noise_markers = (

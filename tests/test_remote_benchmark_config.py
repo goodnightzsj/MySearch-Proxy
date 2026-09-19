@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import csv
 import json
 import os
@@ -1321,6 +1322,46 @@ class AutoStrategyTests(unittest.TestCase):
             rows = list(csv.DictReader(handle))
         empty = [r["benchmark_id"] for r in rows if not (r.get("strategy_hint") or "").strip()]
         self.assertEqual(empty, [], f"这些行会突然变成 auto: {empty}")
+
+
+class ContentMetricsFairnessTests(unittest.TestCase):
+    """`content_metrics` 必须把两侧**同一语义的字段**都计入。
+
+    Tavily 把每条结果的摘要放在 `content`；MySearch 把同样的东西放在 `snippet`。
+    若只读 `content`，在 `content_fidelity` 未激活的行上（两侧都取不到正文）
+    Tavily 仍有几千字符而 MySearch 记 0 —— 两边不可比。实测 loop24 有 23 行如此，
+    计入 `snippet` 后 41/45 行的 MySearch 内容量上升（总量 +52%）。
+    """
+
+    def _load(self):
+        # The measurement helpers live inside the runner's REMOTE_SCRIPT string,
+        # which is what actually executes against the deployed server.
+        source = (REPO_ROOT / "scripts" / "run_remote_mcp_benchmark.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "REMOTE_SCRIPT":
+                namespace = {"PAYLOAD_B64": ""}
+                try:
+                    exec(compile(node.value.value, "<remote>", "exec"), namespace)
+                except Exception:
+                    pass
+                return namespace["content_metrics"]
+        raise AssertionError("REMOTE_SCRIPT not found")
+
+    def test_counts_the_snippet_field(self) -> None:
+        metrics = self._load()
+        blob = {"results": [{"url": "https://x", "content": "", "snippet": "a" * 900}]}
+        self.assertEqual(metrics(blob)["char_count"], 900)
+
+    def test_snippet_and_content_are_not_double_counted(self) -> None:
+        metrics = self._load()
+        blob = {"results": [{"url": "https://x", "content": "c" * 300, "snippet": "s" * 300}]}
+        self.assertEqual(metrics(blob)["char_count"], 600)
+
+    def test_raw_content_still_wins_over_the_snippet(self) -> None:
+        metrics = self._load()
+        blob = {"results": [{"url": "https://x", "raw_content": "r" * 500, "snippet": "s" * 300}]}
+        self.assertEqual(metrics(blob)["char_count"], 500)
 
 
 if __name__ == "__main__":
