@@ -3545,19 +3545,7 @@ class MySearchClient(ProviderTransport):
         return f"{trimmed[0]} vs {trimmed[1]}"
 
     def _research_ambiguous_product_tokens(self) -> set[str]:
-        return {
-            "assistants",
-            "audio",
-            "background",
-            "batch",
-            "chat",
-            "embeddings",
-            "files",
-            "images",
-            "realtime",
-            "responses",
-            "webhooks",
-        }
+        return research.comparison.research_ambiguous_product_tokens()
 
     def _research_subject_is_generic_comparison_dimension(self, subject: str) -> bool:
         tokens = self._query_precision_tokens(subject)
@@ -3667,17 +3655,7 @@ class MySearchClient(ProviderTransport):
         item: dict[str, Any],
         entity_tokens: tuple[str, ...],
     ) -> bool:
-        tokens = [str(token).strip().lower() for token in entity_tokens if str(token).strip()]
-        if not tokens:
-            return False
-        text = " ".join(
-            [
-                (item.get("title") or "").lower(),
-                (item.get("url") or "").lower(),
-                (item.get("snippet") or "").lower(),
-            ]
-        )
-        return any(token in text for token in tokens)
+        return research.comparison.research_result_matches_entity(item=item, entity_tokens=entity_tokens)
 
     def _research_result_matches_comparison_subject(
         self,
@@ -3685,24 +3663,7 @@ class MySearchClient(ProviderTransport):
         item: dict[str, Any],
         entity_tokens: tuple[str, ...],
     ) -> bool:
-        tokens = [str(token).strip().lower() for token in entity_tokens if str(token).strip()]
-        if not tokens:
-            return False
-        text = " ".join(
-            [
-                (item.get("title") or "").lower(),
-                (item.get("url") or "").lower(),
-                (item.get("snippet") or "").lower(),
-            ]
-        )
-        if len(tokens) == 1:
-            return tokens[0] in text
-        specific_tokens = tokens[1:] or tokens
-        specific_match_count = sum(1 for token in specific_tokens if token in text)
-        required_specific_matches = 1 if len(specific_tokens) == 1 else min(2, len(specific_tokens))
-        if specific_match_count >= required_specific_matches:
-            return True
-        return all(token in text for token in tokens)
+        return research.comparison.research_result_matches_comparison_subject(item=item, entity_tokens=entity_tokens)
 
     def _research_official_candidate_kind_rank(self, item: dict[str, Any]) -> int:
         url = str(item.get("url") or "")
@@ -14009,136 +13970,13 @@ class MySearchClient(ProviderTransport):
         return any(marker in normalized for marker in schema_markers)
 
     def _research_excerpt_looks_like_json_shell(self, text: str) -> bool:
-        normalized = re.sub(r"\s+", " ", text).strip()
-        if not normalized:
-            return False
-        lowered = normalized.lower()
-        if not (
-            normalized.startswith("{")
-            or normalized.startswith("{{")
-            or '"id"' in lowered
-            or '"completion_window"' in lowered
-            or '"created_at"' in lowered
-        ):
-            return False
-        json_field_count = len(
-            re.findall(
-                r'"[a-z0-9_]{2,40}"\s*:\s*(?:"[^"]*"|\d+|true|false|null|\{|\[)',
-                lowered,
-            )
-        )
-        if json_field_count >= 2:
-            return True
-        return any(
-            marker in lowered
-            for marker in (
-                '"id":',
-                '"completion_window":',
-                '"created_at":',
-                '"request_counts":',
-                '"input_file_id":',
-                '"output_file_id":',
-                '"error_file_id":',
-                '"status":',
-                '"endpoint":',
-            )
-        )
+        return research.claims.research_excerpt_looks_like_json_shell(text)
 
     def _research_claim_signature(self, claim: str) -> str:
-        normalized = re.sub(r"[^a-z0-9]+", " ", claim.lower()).strip()
-        if not normalized:
-            return ""
-        stopwords = {
-            "a",
-            "an",
-            "and",
-            "api",
-            "best",
-            "by",
-            "docs",
-            "documentation",
-            "for",
-            "guide",
-            "in",
-            "latest",
-            "of",
-            "official",
-            "reference",
-            "the",
-            "to",
-            "updated",
-            "with",
-        }
-        tokens = [
-            token
-            for token in normalized.split()
-            if token not in stopwords and len(token) > 1
-        ]
-        signature_tokens = tokens[:8] or normalized.split()[:8]
-        return " ".join(signature_tokens)
+        return research.claims.research_claim_signature(claim)
 
     def _research_claim_is_generic(self, claim: str) -> bool:
-        normalized = re.sub(r"[^a-z0-9]+", " ", claim.lower()).strip()
-        if not normalized:
-            return True
-        if normalized.startswith(("best ", "top ", "compare ", "comparison ")):
-            return True
-        if normalized.endswith((" for", " guide", " reference", " docs")):
-            return True
-        if any(
-            marker in normalized
-            for marker in (
-                "agent builder",
-                "agent skills",
-                "authoritative content for",
-                "api guide",
-                "api reference",
-                "best mcp servers",
-                "best practices",
-                "compare models",
-                "complete comparison",
-                "definition examples",
-                "integration docs",
-                "integrations",
-                "ultimate guide",
-            )
-        ):
-            return True
-        if "alternatives" in normalized:
-            return True
-        tokens = normalized.split()
-        generic_tokens = {
-            "api",
-            "authoritative",
-            "batch",
-            "batches",
-            "compare",
-            "comparison",
-            "content",
-            "docs",
-            "documentation",
-            "guide",
-            "guides",
-            "model",
-            "mcp",
-            "models",
-            "openai",
-            "reference",
-            "search",
-            "server",
-            "servers",
-            "tool",
-            "tools",
-        }
-        if ("vs" in tokens or "versus" in tokens) and any(
-            marker in normalized
-            for marker in ("comparison", "compare", "guide", "alternatives")
-        ):
-            return True
-        meaningful_tokens = [token for token in tokens if token not in generic_tokens]
-        if not meaningful_tokens and len(tokens) <= 4:
-            return True
-        return len(tokens) <= 3 and len(meaningful_tokens) <= 1
+        return research.claims.research_claim_is_generic(claim)
 
     def _research_claim_comparison_subject_match_count(
         self,
@@ -14147,15 +13985,7 @@ class MySearchClient(ProviderTransport):
         sources: Sequence[str],
         entities: Sequence[Sequence[str]],
     ) -> int:
-        if not claim or not entities:
-            return 0
-        haystack = " ".join([claim, *sources]).lower()
-        match_count = 0
-        for entity_tokens in entities[:4]:
-            tokens = [str(token).strip().lower() for token in entity_tokens if str(token).strip()]
-            if tokens and all(token in haystack for token in tokens):
-                match_count += 1
-        return match_count
+        return research.claims.research_claim_comparison_subject_match_count(claim=claim, sources=sources, entities=entities)
 
     def _align_research_claims_with_comparison_rows(
         self,
@@ -14232,26 +14062,7 @@ class MySearchClient(ProviderTransport):
         return aligned[:4]
 
     def _research_claim_is_comparison_tail_relevant(self, claim: str) -> bool:
-        normalized = f" {claim.lower().strip()} "
-        if not normalized.strip():
-            return False
-        return any(
-            marker in normalized
-            for marker in (
-                " background ",
-                " async ",
-                " asynchronous ",
-                " latency ",
-                " streaming ",
-                " long running ",
-                " long-running ",
-                " bulk ",
-                " batch api ",
-                " responses api ",
-                " tool-using ",
-                " interactive ",
-            )
-        )
+        return research.claims.research_claim_is_comparison_tail_relevant(claim)
 
     def _research_comparison_claim_from_row(
         self,
@@ -14364,11 +14175,7 @@ class MySearchClient(ProviderTransport):
         authoritative_source_count: int,
         supporting_source_count: int,
     ) -> str:
-        if authoritative_source_count > 0:
-            return "Authoritative sources and corroborating analysis were found."
-        if supporting_source_count > 0:
-            return "Supporting sources and corroborating analysis were found."
-        return "The strongest available evidence is comparative rather than authoritative."
+        return research.comparison.research_comparison_support_summary(authoritative_source_count=authoritative_source_count, supporting_source_count=supporting_source_count)
 
     def _select_research_primary_claim(
         self, claim_evidence: list[dict[str, Any]]
@@ -14397,13 +14204,7 @@ class MySearchClient(ProviderTransport):
         provider_count: int,
         cluster_count: int,
     ) -> str:
-        if provider_count >= 2 and source_count >= 1:
-            return "cross-provider"
-        if source_count >= 3 or cluster_count >= 2:
-            return "multi-source"
-        if source_count >= 2:
-            return "corroborated"
-        return "single-source"
+        return research.claims.research_claim_support_level(source_count=source_count, provider_count=provider_count, cluster_count=cluster_count)
 
     def _research_claim_support_phrase(self, claim_entry: dict[str, Any]) -> str:
         if not claim_entry:
@@ -14445,48 +14246,10 @@ class MySearchClient(ProviderTransport):
         return ""
 
     def _research_claim_support_basis(self, claim_entry: Mapping[str, Any]) -> str:
-        support_level = str(claim_entry.get("support_level") or "").strip()
-        providers = {
-            str(item).strip()
-            for item in (claim_entry.get("providers") or [])
-            if str(item).strip()
-        }
-        clusters = {
-            str(item).strip()
-            for item in (claim_entry.get("clusters") or [])
-            if str(item).strip()
-        }
-        has_project = "project" in clusters
-        has_vendor_docs = "canonical_research_docs" in providers and (
-            "official" in clusters or "supporting" in clusters
-        )
-        has_official = "official" in clusters
-
-        if has_project and has_vendor_docs:
-            return "shortlisted comparison page and vendor docs"
-        if has_project:
-            return "shortlisted comparison page"
-        if has_vendor_docs:
-            return (
-                "shortlisted vendor docs"
-                if support_level in {"cross-provider", "multi-source", "corroborated"}
-                else "shortlisted vendor doc"
-            )
-        if has_official:
-            return (
-                "shortlisted official docs"
-                if support_level in {"cross-provider", "multi-source", "corroborated"}
-                else "shortlisted official doc"
-            )
-        return ""
+        return research.claims.research_claim_support_basis(claim_entry)
 
     def _research_claim_support_rank(self, support_level: str) -> int:
-        return {
-            "cross-provider": 4,
-            "multi-source": 3,
-            "corroborated": 2,
-            "single-source": 1,
-        }.get(support_level, 0)
+        return research.claims.research_claim_support_rank(support_level)
 
     def _research_claim_best_cluster_rank(
         self,
@@ -14494,31 +14257,7 @@ class MySearchClient(ProviderTransport):
         clusters: list[str],
         authoritative_preferred: bool,
     ) -> int:
-        if not clusters:
-            return 0
-        if authoritative_preferred:
-            weights = {
-                "official": 5,
-                "supporting": 4,
-                "general": 3,
-                "project": 3,
-                "curated": 2,
-                "directory": 1,
-                "listicle": 1,
-                "community": 0,
-            }
-        else:
-            weights = {
-                "project": 5,
-                "supporting": 4,
-                "curated": 3,
-                "general": 3,
-                "official": 3,
-                "listicle": 2,
-                "directory": 1,
-                "community": 0,
-            }
-        return max(weights.get(cluster, 0) for cluster in clusters)
+        return research.claims.research_claim_best_cluster_rank(clusters=clusters, authoritative_preferred=authoritative_preferred)
 
     def _research_authoritative_claim_fallback(
         self,
@@ -14571,164 +14310,16 @@ class MySearchClient(ProviderTransport):
         return {}
 
     def _research_excerpt_has_substantive_claim(self, text: str) -> bool:
-        normalized = " " + re.sub(r"\s+", " ", text.lower()).strip() + " "
-        word_count = len(normalized.split())
-        if word_count < 5:
-            return False
-        markers = (
-            " is ",
-            " are ",
-            " can ",
-            " use ",
-            " vary by ",
-            " process ",
-            " processes ",
-            " handles ",
-            " supports ",
-            " allows ",
-            " enables ",
-            " helps ",
-            " uses ",
-            " provides ",
-            " delivers ",
-            " exposes ",
-            " integrates ",
-            " explores ",
-            " built for ",
-            " designed to ",
-            " suited to ",
-            " better suited ",
-            " should be considered ",
-            " unlike ",
-            " compared with ",
-            " compared to ",
-        )
-        if word_count < 7:
-            short_sentence_markers = (
-                " process ",
-                " processes ",
-                " use ",
-                " uses ",
-                " build ",
-                " builds ",
-                " run ",
-                " runs ",
-                " manage ",
-                " manages ",
-                " migrate ",
-                " migrates ",
-                " compare ",
-                " compares ",
-            )
-            return any(marker in normalized for marker in short_sentence_markers)
-        return any(
-            marker in normalized
-            for marker in markers
-        )
+        return research.claims.research_excerpt_has_substantive_claim(text)
 
     def _research_excerpt_looks_like_link_index_noise(self, text: str) -> bool:
-        normalized = re.sub(r"\s+", " ", text).strip()
-        if not normalized:
-            return False
-        lowered = normalized.lower()
-        markdown_link_count = normalized.count("](")
-        if markdown_link_count >= 2:
-            return True
-        if "![image" in lowered or "[![image" in lowered:
-            return True
-        if normalized.startswith(("* [", "- [")) and markdown_link_count >= 1:
-            return True
-        if normalized.startswith("# ") and (
-            markdown_link_count >= 1
-            or "openai developers" in lowered
-            or "api reference" in lowered
-        ):
-            return True
-        return False
+        return research.claims.research_excerpt_looks_like_link_index_noise(text)
 
     def _research_excerpt_looks_like_navigation_noise(self, text: str) -> bool:
-        lowered = text.lower()
-        return any(
-            marker in lowered
-            for marker in (
-                "primary navigation",
-                "copy markdown",
-                "open in chatgpt",
-                "search docs",
-                "skip to content",
-                "skip to main content",
-                "suggested",
-                "chatgpt actions",
-                "search the api docs",
-                "marketing copy",
-                "copy markdown",
-                "view as markdown",
-                "access to this page requires authorization",
-                "exit editor mode",
-                "focus mode note",
-                "ask learn",
-                "get api key",
-                "available skills",
-                "sign up at tavily.com",
-                "why use these skills",
-            )
-        )
+        return research.claims.research_excerpt_looks_like_navigation_noise(text)
 
     def _research_excerpt_looks_like_noise(self, text: str) -> bool:
-        if self._research_excerpt_looks_like_json_shell(text):
-            return True
-        lowered = text.lower()
-        code_like_markers = (
-            "api_key=",
-            "schema = {",
-            "\"type\": \"object\"",
-            "\"properties\": {",
-            "\"required\": [",
-            "firecrawl = firecrawl(",
-            "from firecrawl import firecrawl",
-            "your-api-key",
-            "const exa = new exa(",
-            "await exa.getcontents(",
-            "highlights: {",
-            "maxcharacters:",
-        )
-        if sum(1 for marker in code_like_markers if marker in lowered) >= 2:
-            return True
-        return any(
-            marker in lowered
-            for marker in (
-                "step 1: curl",
-                "curl -fssl",
-                "curl --request",
-                "authorization: bearer",
-                "content-type: application/json",
-                "x-api-key",
-                "generated using ai and may contain mistakes",
-                "api_key=",
-                "schema = {",
-                "your-api-key",
-                "const exa = new exa(",
-                "await exa.getcontents(",
-                "highlights: {",
-                "maxcharacters:",
-                "start getting web data for free",
-                "no credit card needed",
-                "scale seamlessly as your project expands",
-                "reasoning tokens pricing per 1m tokens",
-                "context window",
-                "knowledge cutoff",
-                "cached input",
-                "output tokens",
-                "endpoints v1/chat",
-                "ready to build",
-                "table of contents",
-                "back to all posts",
-                "you signed in with another tab",
-                "method not allowed",
-                "\"error\"",
-                "jsonrpc",
-            )
-        )
+        return research.claims.research_excerpt_looks_like_noise(text)
 
     def _research_cluster_base_weight(
         self,
@@ -14759,16 +14350,7 @@ class MySearchClient(ProviderTransport):
         return "supplemental"
 
     def _research_cluster_fit_summary(self, cluster_label: str) -> str:
-        return {
-            "official": "canonical ground truth",
-            "supporting": "supporting analysis",
-            "general": "general coverage",
-            "community": "community signal",
-            "project": "project-native source",
-            "curated": "curated comparison",
-            "listicle": "broad scan",
-            "directory": "directory-style inventory",
-        }.get(cluster_label, "general coverage")
+        return research.comparison.research_cluster_fit_summary(cluster_label)
 
     def _research_select_comparison_focus_rows(
         self,
@@ -14850,48 +14432,7 @@ class MySearchClient(ProviderTransport):
         fit: str,
         url: str,
     ) -> dict[str, str]:
-        text = " ".join(bit for bit in (candidate, note, fit, url) if bit).lower()
-        if any(token in text for token in ("responses api", "response api", "model response", "tool-using", "streaming")):
-            return {
-                "best_for": "interactive or tool-using request flows",
-                "operational_model": "request/response workflow with iterative calls",
-                "tradeoff": "less cost-efficient than batch for very large asynchronous jobs",
-            }
-        if any(token in text for token in ("batch api", "create batch", "batches", "jsonl", "bulk", "completion_window", "asynchronous")):
-            return {
-                "best_for": "bulk asynchronous workloads",
-                "operational_model": "file-backed batch execution",
-                "tradeoff": "higher latency and weaker fit for interactive request/response flows",
-            }
-        if "background" in text:
-            return {
-                "best_for": "long-running tasks without holding the client request open",
-                "operational_model": "background execution with later retrieval or polling",
-                "tradeoff": "complements, but does not replace, bulk batch processing",
-            }
-        if fit == "project-native source":
-            return {
-                "best_for": "direct product-side comparison context",
-                "operational_model": "product-native comparison page",
-                "tradeoff": "may be narrower than broader ecosystem analysis",
-            }
-        if fit == "canonical ground truth":
-            return {
-                "best_for": "canonical product guidance",
-                "operational_model": "first-party product documentation",
-                "tradeoff": "may describe capabilities more than head-to-head trade-offs",
-            }
-        if fit == "supporting analysis":
-            return {
-                "best_for": "secondary validation and implementation nuance",
-                "operational_model": "supporting vendor or official documentation",
-                "tradeoff": "usually complements, rather than replaces, canonical guidance",
-            }
-        return {
-            "best_for": fit or "general comparison coverage",
-            "operational_model": "comparison-oriented supporting source",
-            "tradeoff": "requires cross-checking against canonical product documentation",
-        }
+        return research.comparison.research_comparison_profile(candidate=candidate, note=note, fit=fit, url=url)
 
     def _research_build_decision_criteria(
         self,
@@ -14956,114 +14497,21 @@ class MySearchClient(ProviderTransport):
         *,
         focus_rows: Sequence[Mapping[str, Any]],
     ) -> list[dict[str, str]]:
-        matrix: list[dict[str, str]] = []
-        for row in focus_rows[:3]:
-            candidate = str(row.get("candidate") or "").strip()
-            if not candidate:
-                continue
-            profile = self._research_comparison_profile(
-                candidate=candidate,
-                note=str(row.get("note") or "").strip(),
-                fit=self._research_cluster_fit_summary(str(row.get("cluster") or "").strip()),
-                url=str(row.get("url") or "").strip(),
-            )
-            matrix.append(
-                {
-                    "candidate": candidate,
-                    "best_for": profile["best_for"],
-                    "operational_model": profile["operational_model"],
-                    "tradeoff": profile["tradeoff"],
-                }
-            )
-        return matrix[:3]
+        return research.comparison.research_build_comparison_matrix(focus_rows=focus_rows)
 
     def _research_build_operational_tradeoffs(
         self,
         *,
         focus_rows: Sequence[Mapping[str, Any]],
     ) -> list[str]:
-        tradeoffs: list[str] = []
-        responses_candidate = ""
-        batch_candidate = ""
-        background_candidate = ""
-        for row in focus_rows[:4]:
-            candidate = str(row.get("candidate") or "").strip()
-            candidate_lower = candidate.lower()
-            if not responses_candidate and ("responses" in candidate_lower or "response" in candidate_lower):
-                responses_candidate = candidate
-            if not batch_candidate and "batch" in candidate_lower:
-                batch_candidate = candidate
-            if not background_candidate and "background" in candidate_lower:
-                background_candidate = candidate
-        if responses_candidate and batch_candidate:
-            tradeoffs.append(
-                f"Interaction model: {responses_candidate} is stronger for interactive or tool-using request flows, while {batch_candidate} is stronger for bulk asynchronous workloads."
-            )
-            tradeoffs.append(
-                f"Latency model: {responses_candidate} keeps a request/response loop, while {batch_candidate} trades latency for discounted high-volume execution."
-            )
-            tradeoffs.append(
-                f"Cost and scale: {batch_candidate} is the better fit when discounted throughput matters more than immediate answers."
-            )
-        if background_candidate:
-            anchor = responses_candidate or "the request/response path"
-            tradeoffs.append(
-                f"Asynchronous execution: {background_candidate} complements {anchor} when work should continue after handoff without keeping the client request open."
-            )
-        return tradeoffs[:4]
+        return research.comparison.research_build_operational_tradeoffs(focus_rows=focus_rows)
 
     def _research_build_decision_checklist(
         self,
         *,
         focus_rows: Sequence[Mapping[str, Any]],
     ) -> list[dict[str, str]]:
-        checklist: list[dict[str, str]] = []
-        responses_candidate = ""
-        batch_candidate = ""
-        background_candidate = ""
-        for row in focus_rows[:4]:
-            candidate = str(row.get("candidate") or "").strip()
-            lowered = candidate.lower()
-            if not responses_candidate and ("responses" in lowered or "response" in lowered):
-                responses_candidate = candidate
-            if not batch_candidate and "batch" in lowered:
-                batch_candidate = candidate
-            if not background_candidate and "background" in lowered:
-                background_candidate = candidate
-        if responses_candidate and batch_candidate:
-            checklist.extend(
-                [
-                    {
-                        "factor": "Task duration",
-                        "prefer": responses_candidate,
-                        "rationale": "better when the answer needs to come back in an interactive request/response loop",
-                    },
-                    {
-                        "factor": "Workload volume",
-                        "prefer": batch_candidate,
-                        "rationale": "better when the job is bulk, asynchronous, and throughput-sensitive",
-                    },
-                    {
-                        "factor": "Latency sensitivity",
-                        "prefer": responses_candidate,
-                        "rationale": "better when immediate feedback matters more than discounted offline throughput",
-                    },
-                    {
-                        "factor": "Cost sensitivity",
-                        "prefer": batch_candidate,
-                        "rationale": "better when discounted high-volume execution matters more than immediate completion",
-                    },
-                ]
-            )
-        if background_candidate:
-            checklist.append(
-                {
-                    "factor": "Asynchronous continuation",
-                    "prefer": background_candidate,
-                    "rationale": "better when work should continue after handoff without holding the client request open",
-                }
-            )
-        return checklist[:5]
+        return research.comparison.research_build_decision_checklist(focus_rows=focus_rows)
 
     def _research_decision_strengths(
         self,
@@ -15073,15 +14521,7 @@ class MySearchClient(ProviderTransport):
         note: str,
         cluster_detail: dict[str, Any],
     ) -> str:
-        strength_bits = [self._research_cluster_fit_summary(cluster_label)]
-        tier = str(cluster_detail.get("tier") or "").strip()
-        if tier:
-            strength_bits.append(tier)
-        if provider_support and provider_support != "unknown":
-            strength_bits.append(f"provider support={provider_support}")
-        if note:
-            strength_bits.append(note[:100])
-        return "; ".join(bit for bit in strength_bits if bit)
+        return research.comparison.research_decision_strengths(cluster_label=cluster_label, provider_support=provider_support, note=note, cluster_detail=cluster_detail)
 
     def _research_decision_cautions(
         self,
@@ -15089,12 +14529,7 @@ class MySearchClient(ProviderTransport):
         cluster_label: str,
         provider_support: str,
     ) -> str:
-        cautions: list[str] = []
-        if cluster_label in {"community", "directory", "listicle"}:
-            cautions.append("lower authority")
-        if " + " not in provider_support and provider_support not in {"", "unknown"}:
-            cautions.append("single-provider support")
-        return "; ".join(cautions) if cautions else "none"
+        return research.comparison.research_decision_cautions(cluster_label=cluster_label, provider_support=provider_support)
 
     def _build_excerpt(self, content: str, limit: int = 600) -> str:
         compact = re.sub(r"\s+", " ", content).strip()
