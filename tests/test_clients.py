@@ -4635,6 +4635,33 @@ class MySearchClientTests(unittest.TestCase):
                     timeout_seconds=1,
                 )
 
+    def test_crawl_accepts_a_synchronous_response_with_no_job_id(self) -> None:
+        """部分部署直接同步返回数据，没有 job id；此时不应进入轮询。"""
+        client = MySearchClient()
+        client._get_key_or_raise = lambda provider: SimpleNamespace(key="fc-key", source="env")  # type: ignore[method-assign]
+        calls: list[str] = []
+
+        def fake_request_json(**kwargs):  # type: ignore[no-untyped-def]
+            calls.append(kwargs["method"])
+            return {
+                "data": [
+                    {
+                        "metadata": {"sourceURL": "https://s/a"},
+                        "markdown": "body",
+                    }
+                ],
+            }
+
+        client._request_json_once = fake_request_json  # type: ignore[method-assign]
+
+        result = client.crawl_site(url="https://s", limit=5)
+
+        self.assertEqual(calls, ["POST"])
+        # 同步响应不带 status 字段，因此原样透传为空串而不是伪造 completed。
+        self.assertEqual(result["status"], "")
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["pages"][0]["url"], "https://s/a")
+
     def test_crawl_deadline_rejects_retry_after_beyond_remaining_budget(self) -> None:
         client = MySearchClient()
         client._get_key_or_raise = lambda provider: SimpleNamespace(key="fc-key", source="env")  # type: ignore[method-assign]
