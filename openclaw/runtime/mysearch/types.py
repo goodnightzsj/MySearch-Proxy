@@ -12,6 +12,18 @@ from __future__ import annotations
 from typing import Literal
 
 SearchMode = Literal["auto", "web", "news", "social", "docs", "research", "github", "pdf"]
+
+#: `SearchMode` 的取值元组，顺序与 Literal 声明一致。
+SEARCH_MODES: tuple[SearchMode, ...] = (
+    "auto",
+    "web",
+    "news",
+    "social",
+    "docs",
+    "research",
+    "github",
+    "pdf",
+)
 SearchIntent = Literal[
     "auto",
     "factual",

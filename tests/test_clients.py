@@ -15,6 +15,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from mysearch.clients import MySearchClient, MySearchError, MySearchHTTPError, RouteDecision
+from mysearch.research import sections
 
 
 class _FakeResponse:
@@ -12328,7 +12329,9 @@ class MySearchClientTests(unittest.TestCase):
         self,
     ) -> None:
         client = MySearchClient()
-        client._build_research_claim_evidence = lambda *args, **kwargs: [  # type: ignore[method-assign]
+        # _build_research_claim_evidence 现在住在 mysearch.research.sections，
+        # 由 _build_research_report_sections 模块内直调；patch 实例属性已不再生效。
+        claim_evidence = [
             {
                 "claim": "Proxy support.",
                 "support_level": "multi-source",
@@ -12342,8 +12345,8 @@ class MySearchClientTests(unittest.TestCase):
                 "providers": ["canonical_research_docs", "tavily"],
             },
         ]
-
-        sections = client._build_research_report_sections(
+        with patch.object(sections, "_build_research_claim_evidence", lambda **kwargs: claim_evidence):
+            sections_report = client._build_research_report_sections(
             query="compare Firecrawl and Tavily for AI agent web retrieval 2026",
             web_search={"intent": "comparison", "answer": ""},
             ordered_results=[
@@ -12379,13 +12382,13 @@ class MySearchClientTests(unittest.TestCase):
                 "selected_supporting_source_count": 2,
                 "authoritative_research": False,
             },
-        )
+            )
 
         self.assertIn(
             "Tavily exposes a search API for web retrieval, real-time discovery, and agent search workflows.",
-            sections["executive_summary"],
+            sections_report["executive_summary"],
         )
-        self.assertNotIn("Proxy support.", sections["executive_summary"])
+        self.assertNotIn("Proxy support.", sections_report["executive_summary"])
 
     def test_research_report_sections_drop_json_shell_claims(self) -> None:
         client = MySearchClient()
