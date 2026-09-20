@@ -215,6 +215,48 @@ class CacheBehaviorTests(unittest.TestCase):
         self.assertIsNotNone(client._cache_get("search", "fresh"))
         self.assertIsNone(client._cache_get("search", "old-2"))
 
+    def test_probe_cache_entry_expires_at_its_ttl(self) -> None:
+        """探测缓存没有 TTL 表，过期时间存在条目里。"""
+        client = _make_client()
+        now = [1000.0]
+        with patch("mysearch.cache.time.monotonic", side_effect=lambda: now[0]):
+            client._cache.probe_set("k", {"status": "ok"}, ttl_seconds=30)
+            now[0] = 1029.999
+            self.assertIsNotNone(client._cache.probe_get("k"))
+            now[0] = 1030.0  # expires_at <= now 即过期
+            self.assertIsNone(client._cache.probe_get("k"))
+
+    def test_probe_cache_does_not_grow_without_bound(self) -> None:
+        """换密钥会不断产生新探测键；过期项必须在容量满时先被裁掉。
+
+        回归：旧实现只读不删，键随 keyring 代数无限累积。
+        """
+        client = _make_client()
+        store = client._cache
+        cap = store._probe_max_entries
+        now = [1000.0]
+        with patch("mysearch.cache.time.monotonic", side_effect=lambda: now[0]):
+            for i in range(cap):
+                now[0] += 1.0  # 每次写入不同的 inserted_at
+                store.probe_set(f"k{i}", {"i": i}, ttl_seconds=1)
+            now[0] += 10.0  # 全部过期
+            store.probe_set("live", {"v": 1}, ttl_seconds=1800)
+        self.assertEqual(len(store._probe_store), 1)
+        self.assertIsNotNone(store.probe_get("live"))
+
+    def test_probe_cache_evicts_the_oldest_entry_when_full(self) -> None:
+        """没有过期项可裁时，淘汰最旧的那一条。"""
+        client = _make_client()
+        store = client._cache
+        store._probe_max_entries = 2
+        now = [1000.0]
+        with patch("mysearch.cache.time.monotonic", side_effect=lambda: now[0]):
+            for i in range(3):
+                now[0] += 1.0
+                store.probe_set(f"k{i}", {"i": i}, ttl_seconds=1800)
+        self.assertIsNone(store.probe_get("k0"))
+        self.assertIsNotNone(store.probe_get("k2"))
+
     def test_should_cache_search_excludes_x_sources(self) -> None:
         client = _make_client()
         decision = RouteDecision(provider="tavily", reason="test")

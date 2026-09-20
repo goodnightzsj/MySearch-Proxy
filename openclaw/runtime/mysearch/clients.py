@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import copy
 import hashlib
 import html
 import json
 import logging
 import math
 import re
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
@@ -196,11 +194,7 @@ class MySearchClient(ProviderTransport):
                 "social_unavailable": 30,
             },
         )
-        # 独立于 `CacheStore` 的锁：探测缓存的键含密钥指纹与 keyring 代数，
-        # 与命名空间缓存无共享不变量，分锁可减少争用。
-        self._probe_lock = threading.Lock()
         self._provider_probe_ttl_seconds = 1800
-        self._provider_probe_cache: dict[str, dict[str, Any]] = {}
         self._http = httpx.Client(
             timeout=httpx.Timeout(self.config.timeout_seconds, connect=10.0),
             follow_redirects=True,
@@ -6679,11 +6673,9 @@ class MySearchClient(ProviderTransport):
             f"{provider.name}:{record.label}:{key_fingerprint}:{key_count}:"
             f"{self.keyring.generation}"
         )
-        with self._probe_lock:
-            now = time.monotonic()
-            cached = self._provider_probe_cache.get(cache_key)
-            if cached and cached.get("expires_at", 0.0) > now:
-                return copy.deepcopy(cached["value"])
+        cached = self._cache.probe_get(cache_key)
+        if cached is not None:
+            return cached
 
         checked_at = datetime.now(timezone.utc).isoformat()
         cache_ttl_seconds = self._provider_probe_ttl_seconds
@@ -6715,11 +6707,7 @@ class MySearchClient(ProviderTransport):
             }
             cache_ttl_seconds = min(cache_ttl_seconds, 30)
 
-        with self._probe_lock:
-            self._provider_probe_cache[cache_key] = {
-                "expires_at": time.monotonic() + cache_ttl_seconds,
-                "value": copy.deepcopy(result),
-            }
+        self._cache.probe_set(cache_key, result, ttl_seconds=cache_ttl_seconds)
         return result
 
     def _probe_xai_compatible_gateway(self, provider: ProviderConfig, key: str, timeout_seconds: int) -> None:

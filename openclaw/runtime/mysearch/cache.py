@@ -41,6 +41,11 @@ class CacheStore:
         self._stats: dict[str, dict[str, int]] = {
             namespace: {"hits": 0, "misses": 0} for namespace in self._ttls
         }
+        # provider 探测缓存：键由 provider 名 + 密钥指纹 + 密钥数 + keyring
+        # 代数拼成，每次换密钥都会产生新键。与命名空间缓存共用一把锁就够了
+        # ——探测发生在健康检查与路由路径上，不是热路径。
+        self._probe_store: dict[str, dict[str, Any]] = {}
+        self._probe_max_entries = 256
         self.max_entries = max_entries
 
     @property
@@ -133,3 +138,40 @@ class CacheStore:
         }
         result["cache"] = cache_meta
         return result
+
+    def probe_get(self, cache_key: str) -> dict[str, Any] | None:
+        """未命中或已过期返回 `None`，命中返回深拷贝。
+
+        过期项在读取时就地删除：调用方拿不到过期值，同时避免换密钥产生的
+        旧键永久堆积（探测缓存没有 TTL 表，过期时间存在每个条目里）。
+        """
+        with self._lock:
+            payload = self._probe_store.get(cache_key)
+            if payload is None:
+                return None
+            if payload.get("expires_at", 0.0) <= time.monotonic():
+                self._probe_store.pop(cache_key, None)
+                return None
+            return copy.deepcopy(payload["value"])
+
+    def probe_set(self, cache_key: str, value: dict[str, Any], *, ttl_seconds: float) -> None:
+        with self._lock:
+            now = time.monotonic()
+            if len(self._probe_store) >= self._probe_max_entries:
+                for key in [
+                    key
+                    for key, payload in self._probe_store.items()
+                    if payload.get("expires_at", 0.0) <= now
+                ]:
+                    self._probe_store.pop(key, None)
+            if len(self._probe_store) >= self._probe_max_entries:
+                oldest_key = min(
+                    self._probe_store,
+                    key=lambda k: self._probe_store[k].get("inserted_at", 0.0),
+                )
+                self._probe_store.pop(oldest_key, None)
+            self._probe_store[cache_key] = {
+                "expires_at": now + ttl_seconds,
+                "inserted_at": now,
+                "value": copy.deepcopy(value),
+            }
