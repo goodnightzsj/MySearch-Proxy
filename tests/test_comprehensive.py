@@ -191,6 +191,30 @@ class CacheBehaviorTests(unittest.TestCase):
         self.assertEqual(health["search"]["hits"], 1)
         self.assertEqual(health["search"]["misses"], 1)
 
+    def test_cache_entry_expires_at_its_ttl_boundary(self) -> None:
+        """缓存时钟来自 `mysearch.cache`，不再是 `mysearch.clients`。"""
+        client = _make_client(search_cache_ttl=60)
+        now = [1000.0]
+        with patch("mysearch.cache.time.monotonic", side_effect=lambda: now[0]):
+            client._cache_set("search", "k1", {"a": 1})
+            now[0] = 1059.999
+            self.assertIsNotNone(client._cache_get("search", "k1"))
+            now[0] = 1060.0  # expires_at <= now 即过期
+            self.assertIsNone(client._cache_get("search", "k1"))
+
+    def test_cache_eviction_prunes_expired_before_dropping_a_live_entry(self) -> None:
+        """容量已满时先裁剪过期项；只有仍满才淘汰最旧活项。"""
+        client = _make_client(search_cache_ttl=60)
+        client._cache_max_entries = 2
+        now = [1000.0]
+        with patch("mysearch.cache.time.monotonic", side_effect=lambda: now[0]):
+            client._cache_set("search", "old-1", {"v": 1})
+            client._cache_set("search", "old-2", {"v": 2})
+            now[0] = 1100.0  # 两项都过期
+            client._cache_set("search", "fresh", {"v": 3})
+        self.assertIsNotNone(client._cache_get("search", "fresh"))
+        self.assertIsNone(client._cache_get("search", "old-2"))
+
     def test_should_cache_search_excludes_x_sources(self) -> None:
         client = _make_client()
         decision = RouteDecision(provider="tavily", reason="test")

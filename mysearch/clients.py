@@ -19,6 +19,7 @@ from urllib.request import Request, urlopen
 
 import httpx
 
+from mysearch.cache import CacheStore
 from mysearch.config import MySearchConfig, ProviderConfig
 from mysearch.keyring import MySearchKeyRing
 from mysearch import postprocess
@@ -186,29 +187,18 @@ class MySearchClient(ProviderTransport):
     ) -> None:
         self.config = config or MySearchConfig.from_env()
         self.keyring = keyring or MySearchKeyRing(self.config)
-        self._cache_lock = threading.Lock()
-        self._cache_ttls = {
-            "search": self.config.search_cache_ttl_seconds,
-            "extract": self.config.extract_cache_ttl_seconds,
-            "social": max(self.config.search_cache_ttl_seconds, 300),
-            "social_gateway": 45,
-            "social_unavailable": 30,
-        }
-        self._cache_store: dict[str, dict[str, dict[str, Any]]] = {
-            "search": {},
-            "extract": {},
-            "social": {},
-            "social_gateway": {},
-            "social_unavailable": {},
-        }
-        self._cache_stats: dict[str, dict[str, int]] = {
-            "search": {"hits": 0, "misses": 0},
-            "extract": {"hits": 0, "misses": 0},
-            "social": {"hits": 0, "misses": 0},
-            "social_gateway": {"hits": 0, "misses": 0},
-            "social_unavailable": {"hits": 0, "misses": 0},
-        }
-        self._cache_max_entries = 256
+        self._cache = CacheStore(
+            ttls={
+                "search": self.config.search_cache_ttl_seconds,
+                "extract": self.config.extract_cache_ttl_seconds,
+                "social": max(self.config.search_cache_ttl_seconds, 300),
+                "social_gateway": 45,
+                "social_unavailable": 30,
+            },
+        )
+        # 独立于 `CacheStore` 的锁：探测缓存的键含密钥指纹与 keyring 代数，
+        # 与命名空间缓存无共享不变量，分锁可减少争用。
+        self._probe_lock = threading.Lock()
         self._provider_probe_ttl_seconds = 1800
         self._provider_probe_cache: dict[str, dict[str, Any]] = {}
         self._http = httpx.Client(
@@ -221,6 +211,20 @@ class MySearchClient(ProviderTransport):
             max_workers=self.config.max_parallel_workers,
             thread_name_prefix="mysearch",
         )
+
+    # 缓存内部状态已搬到 `CacheStore`；这两个属性保留给健康检查与既有测试，
+    # 是转发而非第二数据源。
+    @property
+    def _cache_stats(self) -> dict[str, dict[str, int]]:
+        return self._cache.stats
+
+    @property
+    def _cache_max_entries(self) -> int:
+        return self._cache.max_entries
+
+    @_cache_max_entries.setter
+    def _cache_max_entries(self, value: int) -> None:
+        self._cache.max_entries = value
 
     def close(self) -> None:
         self._executor.shutdown(wait=False)
@@ -310,72 +314,16 @@ class MySearchClient(ProviderTransport):
         }
 
     def _cache_health(self) -> dict[str, dict[str, int]]:
-        snapshot: dict[str, dict[str, int]] = {}
-        with self._cache_lock:
-            now = time.monotonic()
-            for namespace in self._cache_store:
-                self._prune_expired_cache_entries_locked(namespace, now)
-                stats = self._cache_stats[namespace]
-                snapshot[namespace] = {
-                    "ttl_seconds": self._cache_ttls.get(namespace, 0),
-                    "entries": len(self._cache_store[namespace]),
-                    "hits": stats["hits"],
-                    "misses": stats["misses"],
-                }
-        return snapshot
-
-    def _prune_expired_cache_entries_locked(self, namespace: str, now: float) -> None:
-        expired_keys = [
-            key
-            for key, payload in self._cache_store[namespace].items()
-            if payload.get("expires_at", 0.0) <= now
-        ]
-        for key in expired_keys:
-            self._cache_store[namespace].pop(key, None)
+        return self._cache.health()
 
     def _cache_get(self, namespace: str, cache_key: str) -> dict[str, Any] | None:
-        ttl_seconds = self._cache_ttls.get(namespace, 0)
-        if ttl_seconds <= 0:
-            return None
-
-        with self._cache_lock:
-            now = time.monotonic()
-            payload = self._cache_store[namespace].get(cache_key)
-            if payload is None:
-                self._cache_stats[namespace]["misses"] += 1
-                return None
-            if payload.get("expires_at", 0.0) <= now:
-                self._cache_store[namespace].pop(cache_key, None)
-                self._cache_stats[namespace]["misses"] += 1
-                return None
-
-            self._cache_stats[namespace]["hits"] += 1
-            return copy.deepcopy(payload["value"])
+        return self._cache.get(namespace, cache_key)
 
     def _cache_set(self, namespace: str, cache_key: str, value: dict[str, Any]) -> None:
-        ttl_seconds = self._cache_ttls.get(namespace, 0)
-        if ttl_seconds <= 0:
-            return
-
-        with self._cache_lock:
-            now = time.monotonic()
-            store = self._cache_store[namespace]
-            if len(store) >= self._cache_max_entries:
-                self._prune_expired_cache_entries_locked(namespace, now)
-            if len(store) >= self._cache_max_entries:
-                oldest_key = min(store, key=lambda k: store[k].get("inserted_at", 0.0))
-                store.pop(oldest_key, None)
-            store[cache_key] = {
-                "expires_at": now + ttl_seconds,
-                "inserted_at": now,
-                "value": copy.deepcopy(value),
-            }
+        return self._cache.set(namespace, cache_key, value)
 
     def _cache_delete(self, namespace: str, cache_key: str) -> None:
-        if namespace not in self._cache_store:
-            return
-        with self._cache_lock:
-            self._cache_store[namespace].pop(cache_key, None)
+        return self._cache.delete(namespace, cache_key)
 
     def _build_cache_key(self, namespace: str, payload: dict[str, Any]) -> str:
         return cache_keys._build_cache_key(namespace=namespace, payload=payload)
@@ -459,13 +407,7 @@ class MySearchClient(ProviderTransport):
         namespace: str,
         hit: bool,
     ) -> dict[str, Any]:
-        cache_meta = dict(result.get("cache") or {})
-        cache_meta[namespace] = {
-            "hit": hit,
-            "ttl_seconds": self._cache_ttls.get(namespace, 0),
-        }
-        result["cache"] = cache_meta
-        return result
+        return self._cache.annotate(result, namespace=namespace, hit=hit)
 
     def _annotate_search_debug(
         self,
@@ -6737,7 +6679,7 @@ class MySearchClient(ProviderTransport):
             f"{provider.name}:{record.label}:{key_fingerprint}:{key_count}:"
             f"{self.keyring.generation}"
         )
-        with self._cache_lock:
+        with self._probe_lock:
             now = time.monotonic()
             cached = self._provider_probe_cache.get(cache_key)
             if cached and cached.get("expires_at", 0.0) > now:
@@ -6773,7 +6715,7 @@ class MySearchClient(ProviderTransport):
             }
             cache_ttl_seconds = min(cache_ttl_seconds, 30)
 
-        with self._cache_lock:
+        with self._probe_lock:
             self._provider_probe_cache[cache_key] = {
                 "expires_at": time.monotonic() + cache_ttl_seconds,
                 "value": copy.deepcopy(result),
