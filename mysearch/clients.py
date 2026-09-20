@@ -29,6 +29,7 @@ from mysearch import ranking
 from mysearch import research
 from mysearch.research import events
 from mysearch.research import finalize
+from mysearch.research import quality
 from mysearch.research import sections
 from mysearch.research import software_version
 from mysearch.research import selection
@@ -4302,21 +4303,7 @@ class MySearchClient(ProviderTransport):
         mode: SearchMode,
         result: dict[str, Any],
     ) -> bool:
-        results = list(result.get("results") or [])
-        if not results:
-            return True
-        query_lower = query.lower()
-        if self._looks_like_award_result_query(query_lower):
-            return not self._has_strong_award_result(query=query, results=results)
-        if mode == "pdf":
-            return not self._has_strong_pdf_match(query=query, results=results)
-        if self._looks_like_pricing_query(query_lower):
-            return not self._has_canonical_pricing_result(results)
-        if self._looks_like_changelog_query(query_lower):
-            return not self._has_strong_changelog_result(query=query, results=results)
-        if self._looks_like_tutorial_query(query_lower) or self._looks_like_debugging_query(query_lower):
-            return not self._has_strong_tutorial_result(query=query, results=results, mode=mode)
-        return False
+        return quality._result_set_looks_weak_for_exa_rescue(query=query, mode=mode, result=result)
 
     def _has_strong_award_result(
         self,
@@ -4359,73 +4346,7 @@ class MySearchClient(ProviderTransport):
         query: str,
         results: list[dict[str, Any]],
     ) -> bool:
-        query_tokens = self._query_brand_tokens(query)
-        precision_tokens = self._query_precision_tokens(query)
-        paper_tokens = self._paper_query_subject_tokens(
-            query=query,
-            query_tokens=query_tokens,
-            precision_tokens=precision_tokens,
-        )
-        compound_tokens = self._paper_query_compound_tokens(query)
-        exact_base_report_query = self._looks_like_exact_base_paper_query(query)
-        for item in results[:3]:
-            url = item.get("url", "")
-            hostname = self._result_hostname(item)
-            registered_domain = self._registered_domain(hostname)
-            path = urlparse(url).path.lower()
-            title_text = (item.get("title") or "").lower()
-            path_hits, total_hits = self._query_precision_hit_counts(
-                hostname=hostname,
-                path=path,
-                title_text=title_text,
-                query_tokens=precision_tokens,
-            )
-            named_paper = self._looks_like_primary_named_paper_result(
-                title_text=title_text,
-                query_tokens=paper_tokens,
-            )
-            compound_match = any(
-                self._paper_text_matches_compound_token(f"{title_text} {path}", token)
-                for token in compound_tokens
-            )
-            derivative_title = self._looks_like_derivative_paper_title(title_text)
-            paper_shape = self._looks_like_pdf_url(url) or any(
-                marker in path for marker in ("/abs/", "/html/")
-            )
-            mirror_or_aggregator = self._is_obvious_pdf_mirror_or_aggregator_result(
-                hostname=hostname,
-                registered_domain=registered_domain,
-                path=path,
-            )
-            if mirror_or_aggregator:
-                continue
-            if exact_base_report_query and self._looks_like_variant_base_paper_result(
-                query=query,
-                title_text=title_text,
-            ):
-                continue
-            if (
-                compound_tokens
-                and compound_match
-                and paper_shape
-                and not derivative_title
-                and (named_paper or total_hits >= min(max(len(paper_tokens), 2), 3))
-            ):
-                return True
-            if (
-                compound_tokens
-                and not compound_match
-                and paper_shape
-                and not self._looks_like_generic_arxiv_subject_title(title_text)
-            ):
-                continue
-            if named_paper and paper_shape and not derivative_title:
-                return True
-            if not derivative_title and paper_shape and total_hits >= min(max(len(paper_tokens), 2), 3):
-                return True
-            if hostname == "arxiv.org" and path_hits >= 2 and paper_shape:
-                return True
-        return False
+        return quality._has_strong_pdf_match(query=query, results=results)
 
     def _looks_like_derivative_paper_title(self, title_text: str) -> bool:
         return query_routing._looks_like_derivative_paper_title(title_text)
@@ -4444,12 +4365,7 @@ class MySearchClient(ProviderTransport):
     ) -> bool:
         return query_routing._is_obvious_pdf_mirror_or_aggregator_result(hostname=hostname, registered_domain=registered_domain, path=path)
     def _has_canonical_pricing_result(self, results: list[dict[str, Any]]) -> bool:
-        for item in results[:5]:
-            hostname = self._result_hostname(item)
-            path = urlparse(item.get("url", "")).path.lower()
-            if self._looks_like_canonical_pricing_result(hostname=hostname, path=path):
-                return True
-        return False
+        return quality._has_canonical_pricing_result(results=results)
 
     def _has_strong_changelog_result(
         self,
@@ -4457,25 +4373,7 @@ class MySearchClient(ProviderTransport):
         query: str,
         results: list[dict[str, Any]],
     ) -> bool:
-        precision_tokens = self._query_precision_tokens(query)
-        for item in results[:3]:
-            url = item.get("url", "")
-            hostname = self._result_hostname(item)
-            title_text = (item.get("title") or "").lower()
-            if self._looks_like_canonical_changelog_result(
-                url=url,
-                hostname=hostname,
-                title_text=title_text,
-                precision_tokens=precision_tokens,
-            ):
-                return True
-            if self._looks_like_changelog_result(
-                url=url,
-                hostname=hostname,
-                title_text=title_text,
-            ):
-                return True
-        return False
+        return quality._has_strong_changelog_result(query=query, results=results)
 
     def _has_strong_tutorial_result(
         self,
@@ -4484,72 +4382,7 @@ class MySearchClient(ProviderTransport):
         results: list[dict[str, Any]],
         mode: SearchMode = "auto",
     ) -> bool:
-        query_tokens = self._query_brand_tokens(query)
-        precision_tokens = self._query_precision_tokens(query)
-        exact_identifier_tokens = self._query_exact_identifier_tokens(query)
-        debugging_query = self._looks_like_debugging_query(query.lower())
-        explicit_resource_mode = mode in {"docs", "github", "pdf"}
-        for item in results[:5]:
-            url = item.get("url", "")
-            hostname = self._result_hostname(item)
-            registered_domain = self._registered_domain(hostname)
-            path = urlparse(url).path.lower()
-            title_text = (item.get("title") or "").lower()
-            snippet_text = (item.get("snippet") or "").lower()
-            path_hits, total_hits = self._query_precision_hit_counts(
-                hostname=hostname,
-                path=path,
-                title_text=title_text,
-                query_tokens=precision_tokens,
-            )
-            _, exact_total_hits = self._query_exact_identifier_hit_counts(
-                path=path,
-                title_text=title_text,
-                query_tokens=exact_identifier_tokens,
-            )
-            community_debug = (
-                registered_domain == "stackoverflow.com"
-                or (registered_domain == "github.com" and any(marker in path for marker in ("/issues/", "/discussions/")))
-                or self._is_obvious_official_community_result(hostname=hostname, path=path)
-            )
-            brand_aligned = self._registered_domain_label_matches(
-                registered_domain=registered_domain,
-                query_tokens=query_tokens,
-            ) or any(token in hostname for token in query_tokens)
-            brand_aligned_docs = self._looks_like_brand_aligned_tutorial_result(
-                hostname=hostname,
-                registered_domain=registered_domain,
-                path=path,
-                title_text=title_text,
-                snippet_text=snippet_text,
-                query_tokens=query_tokens,
-                path_precision_hits=path_hits,
-                exact_total_hits=exact_total_hits,
-            )
-            debugging_match = self._looks_like_debugging_result(
-                hostname=hostname,
-                registered_domain=registered_domain,
-                path=path,
-                title_text=title_text,
-                snippet_text=snippet_text,
-            )
-            if not explicit_resource_mode and community_debug and (
-                path_hits > 0 or exact_total_hits > 0 or "issue" in title_text
-            ):
-                return True
-            if debugging_query:
-                if not explicit_resource_mode and community_debug and debugging_match:
-                    return True
-                if brand_aligned and brand_aligned_docs and debugging_match and (
-                    exact_total_hits > 0 or path_hits >= 1 or total_hits >= 2
-                ):
-                    return True
-                continue
-            if brand_aligned and brand_aligned_docs and (
-                exact_total_hits > 0 or path_hits >= 2 or total_hits >= 3
-            ):
-                return True
-        return False
+        return quality._has_strong_tutorial_result(query=query, results=results, mode=mode)
 
     def _apply_exa_rescue(
         self,
