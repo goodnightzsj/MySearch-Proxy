@@ -7205,39 +7205,7 @@ class MySearchClient(ProviderTransport):
         transport: str,
         status_payload: dict[str, Any],
     ) -> dict[str, Any]:
-        data = status_payload.get("data")
-        if not isinstance(data, list):
-            data = []
-        pages: list[dict[str, Any]] = []
-        for entry in data:
-            if not isinstance(entry, dict):
-                continue
-            metadata = entry.get("metadata")
-            if not isinstance(metadata, dict):
-                metadata = {}
-            content = entry.get("markdown") or entry.get("content") or ""
-            if content:
-                content = self._clean_extract_content(content)
-            pages.append({
-                "url": metadata.get("sourceURL")
-                or metadata.get("url")
-                or entry.get("url", ""),
-                "title": metadata.get("title", ""),
-                "content": content,
-            })
-        return {
-            "provider": "firecrawl",
-            "transport": transport,
-            "url": url,
-            "status": status_payload.get("status", ""),
-            "pages": pages,
-            "count": len(pages),
-            "metadata": {
-                "requested_limit": limit,
-                "total": status_payload.get("total"),
-                "completed": status_payload.get("completed"),
-            },
-        }
+        return query_routing._build_firecrawl_crawl_result(url=url, limit=limit, transport=transport, status_payload=status_payload)
 
     def _extract_tavily(self, *, url: str) -> dict[str, Any]:
         provider = self.config.tavily
@@ -7367,75 +7335,13 @@ class MySearchClient(ProviderTransport):
     })
 
     def _clean_extract_content(self, content: str) -> str:
-        if not isinstance(content, str) or not content.strip():
-            return content
-        text = content
-        text = re.sub(r"!\[[^\]]*\]\(\s*<?Base64-Image-Removed>?\s*\)", "", text)
-        text = text.replace("<Base64-Image-Removed>", "")
-        text = re.sub(r"!\[[^\]]*\]\(\s*data:[^)]*\)", "", text)
-        text = re.sub(r"data:image/[^\s)\]]+", "", text)
-        text = self._strip_browser_challenge_block(text)
-        text = self._strip_trailing_hcaptcha(text)
-        text = self._strip_hcaptcha_block(text)
-        text = self._strip_trailing_hcaptcha(text)
-        text = self._strip_trailing_empty_headings(text)
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        return text.strip()
+        return query_routing._clean_extract_content(content=content)
 
     def _strip_browser_challenge_block(self, text: str) -> str:
         return postprocess._strip_browser_challenge_block(text)
 
     def _strip_trailing_hcaptcha(self, text: str) -> str:
-        low = text.lower()
-        if "hcaptcha" not in low:
-            return text
-        # Only act when the actual verification widget is present, not a passing
-        # mention of the word in prose.
-        if not (
-            "select in order to trigger" in low
-            or "accessibility cookie" in low
-            or "\ni am human\n" in low
-        ):
-            return text
-        paragraphs = text.split("\n\n")
-        sig_idx = None
-        for i, para in enumerate(paragraphs):
-            pl = para.strip().lower()
-            if (
-                "select in order to trigger" in pl
-                or "accessibility cookie" in pl
-                or pl == "i am human"
-            ):
-                sig_idx = i
-                break
-        if sig_idx is None:
-            return text
-        # Walk back a few paragraphs to the widget header so the cut starts at the
-        # widget, not at its accessibility sentence. Language labels vary in spelling
-        # across hCaptcha locales, so anchor on structural markers, not a name list.
-        start = sig_idx
-        for j in range(sig_idx, max(-1, sig_idx - 6), -1):
-            pj = paragraphs[j].strip().lower()
-            if pj in {"hcaptcha", "ask ai"} or pj.startswith("### filters") or pj.startswith("#### tags"):
-                start = j
-        kept = paragraphs[:start]
-        dropped = paragraphs[start:]
-        joined = "\n\n".join(kept)
-        # Safety 1: never truncate away the bulk of the document.
-        if not kept or len(joined) < len(text) * 0.3:
-            return text
-        # Safety 2: only truncate when the dropped suffix is widget-artifact
-        # dominated. A captcha trigger phrase can legitimately appear in prose
-        # (e.g. a page that is *about* hCaptcha); in that case the dropped region
-        # still holds real content and must be preserved.
-        residual_content = sum(
-            len(para.strip())
-            for para in dropped
-            if not self._is_hcaptcha_artifact_paragraph(para.strip().lower())
-        )
-        if residual_content > 80:
-            return text
-        return joined
+        return query_routing._strip_trailing_hcaptcha(text=text)
 
     def _is_hcaptcha_artifact_paragraph(self, p_lower: str) -> bool:
         return query_routing._is_hcaptcha_artifact_paragraph(p_lower)
