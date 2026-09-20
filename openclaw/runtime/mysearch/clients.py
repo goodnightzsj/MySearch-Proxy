@@ -28,7 +28,9 @@ from mysearch import query_routing
 from mysearch import ranking
 from mysearch import research
 from mysearch.research import events
+from mysearch.research import finalize
 from mysearch.research import sections
+from mysearch.research import software_version
 from mysearch.research import selection
 from mysearch.providers.base import ProviderTransport
 from mysearch.provider_contract import ProviderResponse
@@ -54,13 +56,6 @@ OPTIONAL_VERIFY_TIMEOUT_SECONDS = 10
 HYBRID_SOCIAL_TIMEOUT_SECONDS = 20
 DEFAULT_KEY_COOLDOWN_SECONDS = 60
 MAX_PINNED_KEY_RETRY_DELAY_SECONDS = 120
-
-# Minimum per-version signal for a candidate to count as an assertion about the
-# current release rather than a bare mention. `_software_version_candidates_from_text`
-# scores a generic positive marker ("version", "release", "supported") as 2 and a
-# real "latest stable release" phrase as 4; a version-index page's table rows only
-# ever reach 2. See `_software_version_item_is_version_index`.
-MIN_VERSION_ASSERTION_SCORE = 4
 
 
 from mysearch.errors import (  # noqa: F401  (re-exported: public import path stays mysearch.clients)
@@ -2969,14 +2964,7 @@ class MySearchClient(ProviderTransport):
         return max(requested_max_results, budget)
 
     def _trim_search_payload(self, result: dict[str, Any], *, max_results: int) -> dict[str, Any]:
-        trimmed = dict(result)
-        results = list(trimmed.get("results") or [])[:max_results]
-        trimmed["results"] = results
-        trimmed["citations"] = self._align_citations_with_results(
-            results=results,
-            citations=list(trimmed.get("citations") or []),
-        )
-        return trimmed
+        return finalize._trim_search_payload(result=result, max_results=max_results)
 
     def _augment_evidence_summary(
         self,
@@ -2987,87 +2975,7 @@ class MySearchClient(ProviderTransport):
         intent: ResolvedSearchIntent,
         include_domains: list[str] | None,
     ) -> dict[str, Any]:
-        enriched = dict(result)
-        evidence = dict(enriched.get("evidence") or {})
-        results = list(enriched.get("results") or [])
-        citations = list(enriched.get("citations") or [])
-        official_mode = self._resolve_official_result_mode(
-            query=query,
-            mode=mode,
-            intent=intent,
-            include_domains=include_domains,
-        )
-        providers_consulted = [
-            item
-            for item in (
-                evidence.get("providers_consulted")
-                or [enriched.get("provider", "")]
-            )
-            if item
-        ]
-        evidence.setdefault("providers_consulted", providers_consulted)
-        evidence.setdefault(
-            "verification",
-            "cross-provider" if len(set(providers_consulted)) > 1 else "single-provider",
-        )
-        evidence.setdefault("citation_count", len(citations))
-        evidence.setdefault("official_mode", official_mode)
-        evidence.setdefault("official_filter_applied", False)
-        evidence.setdefault("official_filter_reduced", False)
-
-        source_domains = self._collect_source_domains(results=results, citations=citations)
-        social_identities = self._collect_social_identities(results=results, citations=citations)
-        social_identity_diversity = len(social_identities)
-        social_identity_diversity_applies = self._should_use_social_identity_diversity(
-            mode=mode,
-            intent=intent,
-            source_domains=source_domains,
-            social_identity_count=social_identity_diversity,
-        )
-        official_source_count = self._count_official_resource_results(
-            query=query,
-            mode=mode,
-            intent=intent,
-            results=results,
-            include_domains=include_domains,
-        )
-        conflicts = self._detect_evidence_conflicts(
-            mode=mode,
-            intent=intent,
-            results=results,
-            include_domains=include_domains,
-            source_domains=source_domains,
-            official_source_count=official_source_count,
-            providers_consulted=providers_consulted,
-            official_mode=str(evidence.get("official_mode") or official_mode),
-            social_identity_count=social_identity_diversity,
-            social_identity_diversity_applies=social_identity_diversity_applies,
-        )
-        evidence["source_diversity"] = len(source_domains)
-        evidence["source_domains"] = source_domains[:5]
-        if social_identities or mode == "social" or intent == "social":
-            evidence["social_identity_diversity"] = social_identity_diversity
-            evidence["social_handles"] = social_identities[:5]
-            evidence["diversity_basis"] = (
-                "social_handles" if social_identity_diversity_applies else "domains"
-            )
-        evidence["official_source_count"] = official_source_count
-        evidence["third_party_source_count"] = max(len(results) - official_source_count, 0)
-        evidence["confidence"] = self._estimate_search_confidence(
-            mode=mode,
-            intent=intent,
-            result_count=len(results),
-            source_domain_count=len(source_domains),
-            official_source_count=official_source_count,
-            verification=str(evidence.get("verification") or "single-provider"),
-            conflicts=conflicts,
-            official_mode=str(evidence.get("official_mode") or official_mode),
-            social_identity_count=social_identity_diversity,
-            social_identity_diversity_applies=social_identity_diversity_applies,
-        )
-        evidence["conflicts"] = conflicts
-        enriched["evidence"] = evidence
-        return enriched
+        return finalize._augment_evidence_summary(result=result, query=query, mode=mode, intent=intent, include_domains=include_domains)
 
     def _finalize_search_result(
         self,
@@ -3080,67 +2988,7 @@ class MySearchClient(ProviderTransport):
         result_profile: Literal["web", "news", "resource"],
         max_results: int,
     ) -> dict[str, Any]:
-        finalized = dict(result)
-
-        finalized = self._apply_status_result_policy(
-            query=query,
-            mode=mode,
-            intent=intent,
-            result=finalized,
-        )
-        finalized = self._apply_official_resource_policy(
-            query=query,
-            mode=mode,
-            intent=intent,
-            result=finalized,
-            include_domains=include_domains,
-        )
-
-        final_official_mode = str(
-            (
-                (finalized.get("evidence") or {})
-                if isinstance(finalized.get("evidence"), dict)
-                else {}
-            ).get("official_mode")
-            or "off"
-        )
-        if final_official_mode != "off" or self._should_rerank_resource_results(
-            mode=mode,
-            intent=intent,
-        ):
-            reranked_results = self._rerank_resource_results(
-                query=query,
-                mode=mode,
-                results=list(finalized.get("results") or []),
-                include_domains=include_domains,
-            )
-            finalized["results"] = reranked_results
-            finalized["citations"] = self._align_citations_with_results(
-                results=reranked_results,
-                citations=list(finalized.get("citations") or []),
-            )
-        elif self._should_rerank_general_results(result_profile=result_profile):
-            reranked_results = self._rerank_general_results(
-                query=query,
-                result_profile=result_profile,
-                results=list(finalized.get("results") or []),
-                include_domains=include_domains,
-            )
-            finalized["results"] = reranked_results
-            finalized["citations"] = self._align_citations_with_results(
-                results=reranked_results,
-                citations=list(finalized.get("citations") or []),
-            )
-
-        finalized = self._trim_search_payload(finalized, max_results=max_results)
-        finalized = self._augment_evidence_summary(
-            finalized,
-            query=query,
-            mode=mode,
-            intent=intent,
-            include_domains=include_domains,
-        )
-        return finalized
+        return finalize._finalize_search_result(result=result, query=query, mode=mode, intent=intent, include_domains=include_domains, result_profile=result_profile, max_results=max_results)
 
     def _apply_status_result_policy(
         self,
@@ -3150,69 +2998,7 @@ class MySearchClient(ProviderTransport):
         intent: ResolvedSearchIntent,
         result: dict[str, Any],
     ) -> dict[str, Any]:
-        query_lower = query.lower()
-        if intent != "status" and not self._looks_like_status_query(query_lower):
-            return result
-
-        enriched = dict(result)
-        results = [dict(item) for item in (enriched.get("results") or [])]
-        citations = list(enriched.get("citations") or [])
-        evidence = dict(enriched.get("evidence") or {})
-        status_results = [
-            item
-            for item in results
-            if self._looks_like_status_result(
-                url=str(item.get("url") or ""),
-                hostname=self._result_hostname(item),
-                title_text=str(item.get("title") or "").lower(),
-            )
-            and not self._is_obvious_official_community_result(
-                hostname=self._result_hostname(item),
-                path=urlparse(str(item.get("url") or "")).path.lower(),
-            )
-        ]
-        if status_results:
-            reordered = [
-                *status_results,
-                *[
-                    item
-                    for item in results
-                    if str(item.get("url") or "") not in {str(status.get("url") or "") for status in status_results}
-                ],
-            ]
-            if reordered != results:
-                evidence["status_filter_applied"] = True
-                enriched["results"] = reordered
-                enriched["citations"] = self._align_citations_with_results(
-                    results=reordered,
-                    citations=citations,
-                )
-            enriched["evidence"] = evidence
-            return enriched
-
-        rescue_candidate = self._build_known_canonical_resource_rescue(
-            query=query,
-            mode=mode,
-            intent=intent,
-        )
-        if rescue_candidate is None:
-            enriched["evidence"] = evidence
-            return enriched
-
-        rescue_url = str(rescue_candidate.get("url") or "")
-        deduped_results = [
-            rescue_candidate,
-            *[item for item in results if str(item.get("url") or "") != rescue_url],
-        ]
-        evidence["status_rescue_applied"] = True
-        evidence["status_rescue_source"] = "canonical-map"
-        enriched["results"] = deduped_results
-        enriched["citations"] = self._align_citations_with_results(
-            results=deduped_results,
-            citations=citations,
-        )
-        enriched["evidence"] = evidence
-        return enriched
+        return finalize._apply_status_result_policy(query=query, mode=mode, intent=intent, result=result)
 
     def _resolve_official_result_mode(
         self,
@@ -3247,92 +3033,7 @@ class MySearchClient(ProviderTransport):
         result: dict[str, Any],
         include_domains: list[str] | None,
     ) -> dict[str, Any]:
-        enriched = dict(result)
-        results = list(enriched.get("results") or [])
-        citations = list(enriched.get("citations") or [])
-        official_mode = self._resolve_official_result_mode(
-            query=query,
-            mode=mode,
-            intent=intent,
-            include_domains=include_domains,
-        )
-        evidence = dict(enriched.get("evidence") or {})
-        evidence.setdefault("official_mode", official_mode)
-        evidence.setdefault("official_filter_applied", False)
-        evidence.setdefault("official_filter_reduced", False)
-        evidence.setdefault("official_candidate_count", 0)
-        if official_mode == "off":
-            enriched["evidence"] = evidence
-            return enriched
-
-        official_candidates = self._collect_official_result_candidates(
-            query=query,
-            mode=mode,
-            intent=intent,
-            results=results,
-            include_domains=include_domains,
-            strict_official=official_mode == "strict",
-        )
-        official_rescue_candidate: dict[str, Any] | None = None
-        if official_mode in {"strict", "standard"}:
-            official_rescue_candidate = self._build_known_canonical_resource_rescue(
-                query=query,
-                mode=mode,
-                intent=intent,
-            )
-            if official_rescue_candidate is not None and self._should_apply_canonical_resource_rescue(
-                query=query,
-                mode=mode,
-                intent=intent,
-                official_candidates=official_candidates,
-                rescue_candidate=official_rescue_candidate,
-            ):
-                official_candidates = [
-                    official_rescue_candidate,
-                    *[
-                        dict(item)
-                        for item in official_candidates
-                        if self._result_url_identity(str(item.get("url") or ""))
-                        != self._result_url_identity(
-                            str(official_rescue_candidate.get("url") or "")
-                        )
-                    ],
-                ]
-                evidence["official_rescue_applied"] = True
-                evidence["official_rescue_source"] = "canonical-map"
-                if official_mode == "standard" and self._looks_like_github_release_query(query.lower()):
-                    promoted_results = [
-                        official_rescue_candidate,
-                        *[
-                            dict(item)
-                            for item in results
-                            if self._result_url_identity(str(item.get("url") or ""))
-                            != self._result_url_identity(
-                                str(official_rescue_candidate.get("url") or "")
-                            )
-                        ],
-                    ]
-                    enriched["results"] = self._rerank_resource_results(
-                        query=query,
-                        mode=mode,
-                        results=promoted_results,
-                        include_domains=include_domains,
-                    )
-                    enriched["citations"] = self._align_citations_with_results(
-                        results=enriched["results"],
-                        citations=[*citations, official_rescue_candidate],
-                    )
-        evidence["official_candidate_count"] = len(official_candidates)
-        if official_mode == "strict" and official_candidates:
-            evidence["official_filter_applied"] = True
-            evidence["official_filter_reduced"] = len(official_candidates) < len(results)
-            enriched["results"] = official_candidates
-            enriched["citations"] = self._align_citations_with_results(
-                results=official_candidates,
-                citations=citations,
-            )
-        enriched["evidence"] = evidence
-        return enriched
+        return finalize._apply_official_resource_policy(query=query, mode=mode, intent=intent, result=result, include_domains=include_domains)
 
     def _build_known_canonical_resource_rescue(
         self,
@@ -3374,41 +3075,7 @@ class MySearchClient(ProviderTransport):
         include_domains: list[str] | None,
         strict_official: bool,
     ) -> list[dict[str, Any]]:
-        query_tokens = self._query_brand_tokens(query)
-        candidates: list[dict[str, Any]] = []
-        for item in results:
-            if self._result_matches_official_policy(
-                item=item,
-                mode=mode,
-                query_tokens=query_tokens,
-                include_domains=include_domains,
-                strict_official=strict_official,
-            ):
-                candidates.append(dict(item))
-        if len(candidates) >= 2:
-            use_general_official_rerank = (
-                mode == "news"
-                or intent in {"news", "status"}
-                or self._looks_like_status_query(query.lower())
-            )
-            if use_general_official_rerank:
-                result_profile: Literal["web", "news"] = (
-                    "news" if mode == "news" or intent in {"news", "status"} else "web"
-                )
-                candidates = self._rerank_general_results(
-                    query=query,
-                    result_profile=result_profile,
-                    results=candidates,
-                    include_domains=include_domains,
-                )
-            else:
-                candidates = self._rerank_resource_results(
-                    query=query,
-                    mode=mode,
-                    results=candidates,
-                    include_domains=include_domains,
-                )
-        return candidates
+        return finalize._collect_official_result_candidates(query=query, mode=mode, intent=intent, results=results, include_domains=include_domains, strict_official=strict_official)
 
     def _build_research_web_fallback_result(
         self,
@@ -3612,91 +3279,7 @@ class MySearchClient(ProviderTransport):
         cross_provider_candidate_count: int,
         provider_match_depth: float,
     ) -> dict[str, Any]:
-        successful_pages = [page for page in pages if not page.get("error")]
-        page_error_count = max(len(pages) - len(successful_pages), 0)
-        page_success_rate = (
-            round(len(successful_pages) / requested_page_count, 2)
-            if requested_page_count > 0
-            else 0.0
-        )
-        web_evidence = dict(web_search.get("evidence") or {})
-        source_domains = self._collect_source_domains(
-            results=successful_pages,
-            citations=citations,
-        )
-        conflicts = list(web_evidence.get("conflicts") or [])
-        selected_authoritative_source_count = max(authoritative_source_count, 0)
-        selected_supporting_source_count = max(supporting_source_count, 0)
-        selected_community_source_count = max(community_source_count, 0)
-        search_authoritative_source_count = int(web_evidence.get("official_source_count") or 0)
-        effective_authoritative_source_count = max(
-            selected_authoritative_source_count,
-            search_authoritative_source_count,
-        )
-        if requested_page_count and not successful_pages:
-            conflicts.append("page-extraction-unavailable")
-        elif requested_page_count and page_error_count > 0:
-            conflicts.append("page-extraction-partial")
-        if social_error:
-            conflicts.append("social-search-unavailable")
-
-        official_mode = str(
-            web_evidence.get("official_mode")
-            or self._resolve_official_result_mode(
-                query=query,
-                mode=mode,
-                intent=str(intent) if isinstance(intent, str) else "factual",
-                include_domains=None,
-            )
-        )
-        confidence = self._estimate_research_confidence(
-            search_confidence=str(web_evidence.get("confidence") or "low"),
-            page_success_count=len(successful_pages),
-            requested_page_count=requested_page_count,
-            social_present=social is not None,
-            social_error=bool(social_error),
-            conflicts=conflicts,
-            authoritative_source_count=effective_authoritative_source_count,
-            cross_provider_candidate_count=cross_provider_candidate_count,
-            source_cluster_count=len(selected_candidate_cluster_counts),
-        )
-        return {
-            "providers_consulted": providers_consulted,
-            "web_result_count": len(web_search.get("results") or []),
-            "page_count": len(successful_pages),
-            "page_error_count": page_error_count,
-            "page_success_rate": page_success_rate,
-            "citation_count": len(citations),
-            "verification": "cross-provider"
-            if ProviderResponse.is_hybrid(web_search) or len(providers_consulted) > 1
-            else "single-provider",
-            "source_diversity": len(source_domains),
-            "source_domains": source_domains[:5],
-            "official_source_count": search_authoritative_source_count,
-            "official_mode": official_mode,
-            "search_confidence": str(web_evidence.get("confidence") or "low"),
-            "confidence": confidence,
-            "conflicts": conflicts,
-            "research_plan": research_plan,
-            "exa_discovery_count": exa_discovery_count,
-            "exa_unique_url_count": exa_unique_url_count,
-            "exa_promoted_page_count": exa_promoted_page_count,
-            "authoritative_source_count": effective_authoritative_source_count,
-            "search_authoritative_source_count": search_authoritative_source_count,
-            "selected_authoritative_source_count": selected_authoritative_source_count,
-            "supporting_source_count": selected_supporting_source_count,
-            "selected_supporting_source_count": selected_supporting_source_count,
-            "community_source_count": selected_community_source_count,
-            "selected_community_source_count": selected_community_source_count,
-            "selected_candidate_count": selected_candidate_count,
-            "selected_candidate_domains": selected_candidate_domains[:5],
-            "selected_candidate_cluster_counts": dict(selected_candidate_cluster_counts),
-            "source_cluster_count": len(selected_candidate_cluster_counts),
-            "docs_rescue_result_count": docs_rescue_result_count,
-            "authoritative_research": authoritative_research,
-            "cross_provider_candidate_count": cross_provider_candidate_count,
-            "provider_match_depth": provider_match_depth,
-        }
+        return finalize._augment_research_evidence(query=query, mode=mode, intent=intent, requested_page_count=requested_page_count, pages=pages, citations=citations, web_search=web_search, social=social, social_error=social_error, providers_consulted=providers_consulted, research_plan=research_plan, exa_discovery_count=exa_discovery_count, exa_unique_url_count=exa_unique_url_count, exa_promoted_page_count=exa_promoted_page_count, authoritative_source_count=authoritative_source_count, supporting_source_count=supporting_source_count, community_source_count=community_source_count, selected_candidate_count=selected_candidate_count, selected_candidate_domains=selected_candidate_domains, selected_candidate_cluster_counts=selected_candidate_cluster_counts, docs_rescue_result_count=docs_rescue_result_count, authoritative_research=authoritative_research, cross_provider_candidate_count=cross_provider_candidate_count, provider_match_depth=provider_match_depth)
 
     def _should_attempt_xai_arbitration(
         self,
@@ -3792,30 +3375,7 @@ class MySearchClient(ProviderTransport):
         cross_provider_candidate_count: int,
         source_cluster_count: int,
     ) -> str:
-        if "strict-official-unmet" in conflicts or "page-extraction-unavailable" in conflicts:
-            return "low"
-        if authoritative_source_count >= 2 and page_success_count > 0 and not social_error:
-            return "high"
-        if (
-            search_confidence == "high"
-            and page_success_count > 0
-            and not social_error
-            and (
-                authoritative_source_count >= 1
-                or cross_provider_candidate_count > 0
-                or source_cluster_count >= 2
-            )
-        ):
-            return "high"
-        if authoritative_source_count >= 1 and page_success_count > 0:
-            return "medium"
-        if search_confidence in {"high", "medium"} and (
-            page_success_count > 0 or requested_page_count <= 0 or not social_present
-        ):
-            return "medium"
-        if search_confidence == "high":
-            return "medium"
-        return "low" if conflicts else "medium"
+        return finalize._estimate_research_confidence(search_confidence=search_confidence, page_success_count=page_success_count, requested_page_count=requested_page_count, social_present=social_present, social_error=social_error, conflicts=conflicts, authoritative_source_count=authoritative_source_count, cross_provider_candidate_count=cross_provider_candidate_count, source_cluster_count=source_cluster_count)
 
     def _should_request_search_answer(
         self,
@@ -8028,20 +7588,7 @@ class MySearchClient(ProviderTransport):
         results: list[dict[str, Any]],
         citations: list[dict[str, Any]],
     ) -> list[str]:
-        identities: list[str] = []
-        seen: set[str] = set()
-        for item in [*results, *citations]:
-            if not isinstance(item, dict):
-                continue
-            hostname = self._result_hostname(item)
-            if hostname and not hostname.endswith(("x.com", "twitter.com")):
-                continue
-            identity = self._social_result_identity(item)
-            if not identity or identity in seen:
-                continue
-            seen.add(identity)
-            identities.append(identity)
-        return identities
+        return finalize._collect_social_identities(results=results, citations=citations)
 
     def _should_use_social_identity_diversity(
         self,
@@ -8061,27 +7608,7 @@ class MySearchClient(ProviderTransport):
         results: list[dict[str, Any]],
         include_domains: list[str] | None,
     ) -> int:
-        official_mode = self._resolve_official_result_mode(
-            query=query,
-            mode=mode,
-            intent=intent,
-            include_domains=include_domains,
-        )
-        if official_mode == "off" and not self._should_rerank_resource_results(mode=mode, intent=intent):
-            return 0
-        query_tokens = self._query_brand_tokens(query)
-        strict_official = official_mode == "strict"
-        official_count = 0
-        for item in results:
-            if self._result_matches_official_policy(
-                item=item,
-                mode=mode,
-                query_tokens=query_tokens,
-                include_domains=include_domains,
-                strict_official=strict_official,
-            ):
-                official_count += 1
-        return official_count
+        return finalize._count_official_resource_results(query=query, mode=mode, intent=intent, results=results, include_domains=include_domains)
 
     def _detect_evidence_conflicts(
         self,
@@ -8097,24 +7624,7 @@ class MySearchClient(ProviderTransport):
         social_identity_count: int,
         social_identity_diversity_applies: bool,
     ) -> list[str]:
-        conflicts: list[str] = []
-        effective_diversity = (
-            social_identity_count if social_identity_diversity_applies else len(source_domains)
-        )
-        if effective_diversity <= 1 and len(results) > 1:
-            conflicts.append("low-source-diversity")
-        if len(set(providers_consulted)) <= 1 and effective_diversity <= 1 and results:
-            conflicts.append("single-provider-single-domain")
-        if self._should_rerank_resource_results(mode=mode, intent=intent):
-            if results and official_source_count <= 0:
-                conflicts.append("official-source-not-confirmed")
-            elif results and official_source_count < len(results):
-                conflicts.append("mixed-official-and-third-party")
-            if include_domains and not results:
-                conflicts.append("domain-filter-returned-empty")
-        if official_mode == "strict" and results and official_source_count <= 0:
-            conflicts.append("strict-official-unmet")
-        return conflicts
+        return finalize._detect_evidence_conflicts(mode=mode, intent=intent, results=results, include_domains=include_domains, source_domains=source_domains, official_source_count=official_source_count, providers_consulted=providers_consulted, official_mode=official_mode, social_identity_count=social_identity_count, social_identity_diversity_applies=social_identity_diversity_applies)
 
     def _estimate_search_confidence(
         self,
@@ -8130,27 +7640,7 @@ class MySearchClient(ProviderTransport):
         social_identity_count: int,
         social_identity_diversity_applies: bool,
     ) -> str:
-        effective_diversity = (
-            social_identity_count if social_identity_diversity_applies else source_domain_count
-        )
-        if result_count <= 0:
-            return "low"
-        if official_mode == "strict" and official_source_count <= 0:
-            return "low"
-        if self._should_rerank_resource_results(mode=mode, intent=intent):
-            if official_source_count > 0 and "official-source-not-confirmed" not in conflicts:
-                if (
-                    verification == "cross-provider"
-                    or (effective_diversity >= 2 and "mixed-official-and-third-party" not in conflicts)
-                ):
-                    return "high"
-                return "medium"
-            return "medium" if effective_diversity >= 2 else "low"
-        if verification == "cross-provider" and effective_diversity >= 2:
-            return "high"
-        if effective_diversity >= 2:
-            return "medium"
-        return "low" if conflicts else "medium"
+        return finalize._estimate_search_confidence(mode=mode, intent=intent, result_count=result_count, source_domain_count=source_domain_count, official_source_count=official_source_count, verification=verification, conflicts=conflicts, official_mode=official_mode, social_identity_count=social_identity_count, social_identity_diversity_applies=social_identity_diversity_applies)
 
     def _describe_provider(
         self,
@@ -8864,46 +8354,7 @@ class MySearchClient(ProviderTransport):
         intent: ResolvedSearchIntent,
         result: dict[str, Any],
     ) -> dict[str, Any]:
-        query_lower = query.lower()
-        if not self._looks_like_software_version_query(query_lower):
-            return result
-        if mode == "news" or intent in {"news", "status", "social"}:
-            return result
-
-        result_items = list(result.get("results") or [])
-        if not result_items:
-            return result
-
-        version_evidence_items = list(result_items)
-        for branch_name in ("primary_search", "secondary_search"):
-            branch = result.get(branch_name)
-            if isinstance(branch, dict):
-                version_evidence_items.extend(list(branch.get("results") or []))
-
-        extracted_answer = self._extract_software_version_answer(
-            query=query,
-            results=version_evidence_items,
-        )
-        if not extracted_answer:
-            return result
-
-        current_answer = str(result.get("answer") or "").strip()
-        current_version = self._extract_semantic_version(current_answer)
-        extracted_version = self._extract_semantic_version(extracted_answer)
-        should_override = not current_answer
-        if extracted_version is not None:
-            if current_version is None or extracted_version > current_version or current_answer != extracted_answer:
-                should_override = True
-        elif current_answer != extracted_answer:
-            should_override = True
-        if not should_override:
-            return result
-
-        updated = dict(result)
-        updated["answer"] = extracted_answer
-        updated["evidence"] = dict(updated.get("evidence") or {})
-        updated["evidence"]["answer_source"] = "software-version-extraction"
-        return updated
+        return software_version._apply_software_version_answer_override(query=query, mode=mode, intent=intent, result=result)
 
     def _extract_software_version_answer(
         self,
@@ -8911,43 +8362,7 @@ class MySearchClient(ProviderTransport):
         query: str,
         results: list[dict[str, Any]],
     ) -> str:
-        subject = self._software_version_subject(query)
-        candidates: list[tuple[int, tuple[int, int, int], int, str]] = []
-        for index, item in enumerate(results):
-            item_score = self._software_version_result_score(query=query, item=item)
-            if item_score <= 0:
-                continue
-            item_candidates: list[tuple[tuple[int, int, int], int, str]] = []
-            seen_versions: dict[tuple[int, int, int], int] = {}
-            text_chunks = [
-                str(item.get("title") or ""),
-                str(item.get("snippet") or ""),
-                str(item.get("content") or ""),
-            ]
-            for text in text_chunks:
-                for version_text, version_tuple, signal_score in self._software_version_candidates_from_text(text):
-                    prior = seen_versions.get(version_tuple)
-                    if prior is not None and prior >= signal_score:
-                        continue
-                    seen_versions[version_tuple] = signal_score
-                    item_candidates.append((version_tuple, signal_score, version_text))
-            if self._software_version_item_is_version_index(
-                versions=[candidate[0] for candidate in item_candidates],
-                peak_signal=max((candidate[1] for candidate in item_candidates), default=0),
-            ):
-                continue
-            for version_tuple, signal_score, version_text in item_candidates:
-                candidates.append((item_score + signal_score, version_tuple, -index, version_text))
-
-        if not candidates:
-            return ""
-
-        best_score = max(item[0] for item in candidates)
-        shortlist = [item for item in candidates if item[0] >= best_score - 1]
-        _, _, _, version_text = max(shortlist, key=lambda item: (item[1], item[0], item[2]))
-        if subject:
-            return f"The latest stable version of {subject} is {version_text}."
-        return f"The latest stable version is {version_text}."
+        return software_version._extract_software_version_answer(query=query, results=results)
 
     def _software_version_item_is_version_index(
         self,
@@ -8955,93 +8370,13 @@ class MySearchClient(ProviderTransport):
         versions: list[tuple[int, int, int]],
         peak_signal: int,
     ) -> bool:
-        """True when an item enumerates versions instead of asserting one.
-
-        Pages such as devguide.python.org/versions/ or an end-of-life table
-        list every supported branch. Their entries score only the generic
-        positive marker, so the page can still win on host authority while
-        saying nothing about which release is current -- exactly how a
-        "future Python 3.16" table row displaced the real answer.
-        """
-        if len(set(versions)) < 3:
-            return False
-        return peak_signal < MIN_VERSION_ASSERTION_SCORE
+        return software_version._software_version_item_is_version_index(versions=versions, peak_signal=peak_signal)
 
     def _software_version_candidates_from_text(
         self,
         text: str,
     ) -> list[tuple[str, tuple[int, int, int], int]]:
-        if not text:
-            return []
-        normalized = re.sub(r"\s+", " ", text).strip()
-        lowered = normalized.lower()
-        if not normalized:
-            return []
-        positive_markers = (
-            "current stable",
-            "latest stable",
-            "stable version",
-            "stable release",
-            "latest version",
-            "latest release",
-            "released",
-            "release",
-            "supported",
-            "version",
-        )
-        negative_markers = (
-            "alpha",
-            "beta",
-            "development branch",
-            "development version",
-            "future",
-            "main branch",
-            "planned",
-            "pre-release",
-            "prerelease",
-            "preview",
-            "rc",
-            "release candidate",
-            "scheduled",
-            "upcoming",
-        )
-        candidates: list[tuple[str, tuple[int, int, int], int]] = []
-        for match in re.finditer(r"\b\d+\.\d+(?:\.\d+)?\b", normalized):
-            version_text = match.group(0)
-            version_tuple = self._extract_semantic_version(version_text)
-            if version_tuple is None:
-                continue
-            start = max(0, match.start() - 80)
-            end = min(len(lowered), match.end() + 80)
-            context = lowered[start:end]
-            sentence_start = start
-            sentence_end = end
-            left_context = lowered[start:match.start()]
-            left_boundaries = list(re.finditer(r"[.!?;]\s+", left_context))
-            if left_boundaries:
-                sentence_start += left_boundaries[-1].end()
-            right_context = lowered[match.end():end]
-            right_boundary = re.search(r"[.!?;]\s+", right_context)
-            if right_boundary:
-                sentence_end = match.end() + right_boundary.start()
-            sentence_context = lowered[sentence_start:sentence_end]
-            if any(marker in sentence_context for marker in negative_markers):
-                continue
-            score = 0
-            if any(marker in context for marker in positive_markers):
-                score += 2
-            if "latest" in context and "stable" in context:
-                score += 2
-            if "as of" in context or "maintenance release" in context:
-                score += 1
-            # Prefer an exact patch release over a major-only status-page mention
-            # when both are otherwise plausible stable-version evidence.
-            if version_text.count(".") >= 2:
-                score += 1
-            if score <= 0:
-                continue
-            candidates.append((version_text, version_tuple, score))
-        return candidates
+        return software_version._software_version_candidates_from_text(text=text)
 
     def _software_version_result_score(
         self,
@@ -9049,97 +8384,13 @@ class MySearchClient(ProviderTransport):
         query: str,
         item: Mapping[str, Any],
     ) -> int:
-        url = str(item.get("url") or "")
-        hostname = self._result_hostname(item)
-        registered_domain = self._registered_domain(hostname)
-        path = urlparse(url).path.lower()
-        title_text = str(item.get("title") or "").lower()
-        snippet_text = str(item.get("snippet") or "").lower()
-        query_tokens = self._query_brand_tokens(query)
-
-        score = 0
-        if self._looks_like_canonical_software_version_result(
-            hostname=hostname,
-            path=path,
-            title_text=title_text,
-        ):
-            score += 4
-        elif self._looks_like_software_version_reference_result(
-            url=url,
-            hostname=hostname,
-            title_text=title_text,
-            snippet_text=snippet_text,
-        ):
-            score += 2
-        if self._registered_domain_label_matches(
-            registered_domain=registered_domain,
-            query_tokens=query_tokens,
-        ):
-            score += 2
-        if self._result_matches_official_policy(
-            item=item,
-            mode="web",
-            query_tokens=query_tokens,
-            include_domains=None,
-            strict_official=False,
-        ):
-            score += 2
-        if not self._is_obvious_web_aggregator(registered_domain):
-            score += 1
-        else:
-            score -= 2
-        return score
+        return software_version._software_version_result_score(query=query, item=item)
 
     def _software_version_subject(self, query: str) -> str:
-        subject = ""
-        match = re.search(r"(?:version|release)\s+of\s+([^?]+)", query, flags=re.IGNORECASE)
-        if match:
-            subject = match.group(1).strip(" .?!")
-        if not subject:
-            skip_tokens = {
-                "current",
-                "latest",
-                "newest",
-                "release",
-                "stable",
-                "version",
-            }
-            candidates = [
-                token for token in self._query_brand_tokens(query)
-                if token not in skip_tokens
-            ]
-            if candidates:
-                subject = candidates[-1]
-        if not subject:
-            return ""
-        normalized = re.sub(r"\s+", " ", subject).strip()
-        subject_map = {
-            "go": "Go",
-            "javascript": "JavaScript",
-            "kubernetes": "Kubernetes",
-            "next.js": "Next.js",
-            "node": "Node.js",
-            "node.js": "Node.js",
-            "openai": "OpenAI",
-            "postgres": "Postgres",
-            "postgresql": "PostgreSQL",
-            "python": "Python",
-            "react": "React",
-            "rust": "Rust",
-            "typescript": "TypeScript",
-        }
-        return subject_map.get(normalized.lower(), normalized if any(ch.isupper() for ch in normalized) else normalized.title())
+        return software_version._software_version_subject(query=query)
 
     def _extract_semantic_version(self, text: str) -> tuple[int, int, int] | None:
-        if not text:
-            return None
-        match = re.search(r"\b(\d+)\.(\d+)(?:\.(\d+))?\b", text)
-        if not match:
-            return None
-        major = int(match.group(1))
-        minor = int(match.group(2))
-        patch = int(match.group(3) or 0)
-        return (major, minor, patch)
+        return software_version._extract_semantic_version(text=text)
 
     def _extract_result_event_answer_from_top_page(
         self,
