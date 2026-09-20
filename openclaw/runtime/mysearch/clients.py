@@ -34,6 +34,7 @@ from mysearch.research import quality
 from mysearch.research import sections
 from mysearch.research import software_version
 from mysearch.research import selection
+from mysearch.research import social
 from mysearch.providers.base import ProviderTransport
 from mysearch.provider_contract import ProviderResponse
 
@@ -6078,23 +6079,7 @@ class MySearchClient(ProviderTransport):
         self,
         results: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        normalized: list[dict[str, Any]] = []
-        for item in results:
-            if not self._is_exa_social_candidate(item):
-                continue
-            url = str(item.get("url") or "")
-            normalized.append(
-                {
-                    "provider": "exa_social_fallback",
-                    "source": "x",
-                    "title": item.get("title", ""),
-                    "url": url,
-                    "snippet": item.get("snippet", ""),
-                    "content": item.get("content", ""),
-                    "author": self._social_result_identity(item),
-                }
-            )
-        return normalized
+        return social._normalize_exa_social_fallback_results(results=results)
 
     def _is_exa_social_candidate(self, item: dict[str, Any]) -> bool:
         return query_routing._is_exa_social_candidate(item)
@@ -6261,21 +6246,7 @@ class MySearchClient(ProviderTransport):
         query: str,
         fallback_reason: str,
     ) -> dict[str, Any]:
-        reason = fallback_reason[:200]
-        return {
-            "provider": "social_unavailable",
-            "transport": "",
-            "query": query,
-            "answer": "",
-            "results": [],
-            "citations": [],
-            "fallback": {
-                "from": "xai_compatible",
-                "to": "social_unavailable",
-                "reason": reason,
-            },
-            "summary": f"Social/X search unavailable: {reason}",
-        }
+        return social._build_social_unavailable_result(query=query, fallback_reason=fallback_reason)
 
     def _build_social_gateway_unavailable_result(
         self,
@@ -6283,20 +6254,7 @@ class MySearchClient(ProviderTransport):
         base_url: str,
         fallback_reason: str,
     ) -> dict[str, Any]:
-        reason = fallback_reason[:200]
-        return {
-            "provider": "social_gateway_unavailable",
-            "transport": "",
-            "base_url": base_url,
-            "results": [],
-            "citations": [],
-            "fallback": {
-                "from": "xai_compatible",
-                "to": "social_gateway_unavailable",
-                "reason": reason,
-            },
-            "summary": f"Social/X gateway unavailable: {reason}",
-        }
+        return social._build_social_gateway_unavailable_result(base_url=base_url, fallback_reason=fallback_reason)
 
     def _scrape_firecrawl(
         self,
@@ -6802,78 +6760,7 @@ class MySearchClient(ProviderTransport):
         from_date: str | None = None,
         to_date: str | None = None,
     ) -> dict[str, Any]:
-        raw_results = self._extract_social_gateway_results(response)
-        results = []
-        for item in raw_results:
-            if not isinstance(item, dict):
-                continue
-            url = item.get("url") or item.get("link") or ""
-            hostname = self._clean_hostname(urlparse(url).netloc)
-            if hostname and not hostname.endswith(("x.com", "twitter.com")):
-                continue
-            content = (
-                item.get("content")
-                or item.get("full_text")
-                or item.get("text")
-                or item.get("body")
-                or ""
-            )
-            title = (
-                item.get("title")
-                or item.get("author")
-                or item.get("handle")
-                or item.get("username")
-                or url
-            )
-            snippet = item.get("snippet") or item.get("summary") or content
-            results.append(
-                {
-                    "provider": "custom_social",
-                    "source": "x",
-                    "title": title,
-                    "url": url,
-                    "snippet": snippet,
-                    "content": content,
-                    "author": item.get("author") or item.get("username") or item.get("handle") or "",
-                    "created_at": item.get("created_at") or item.get("published_at") or "",
-                }
-            )
-
-        results = self._filter_social_results_by_date(
-            results,
-            from_date=from_date,
-            to_date=to_date,
-        )
-        results = self._diversify_social_results(
-            results,
-            max_results=10,
-            max_per_identity=1,
-        )
-        citations = self._extract_social_gateway_citations(response, results)
-        answer = (
-            response.get("answer")
-            or response.get("summary")
-            or response.get("content")
-            or response.get("text")
-            or ""
-        )
-        warning = None
-        if (from_date or to_date) and not results:
-            answer = ""
-            warning = "no social results matched the requested date window"
-
-        normalized = {
-            "provider": "custom_social",
-            "transport": transport,
-            "query": response.get("query", query),
-            "answer": answer,
-            "results": results,
-            "citations": citations,
-            "tool_usage": response.get("tool_usage") or {"social_search_calls": 1},
-        }
-        if warning:
-            normalized["warning"] = warning
-        return normalized
+        return social._normalize_social_gateway_response(response=response, query=query, transport=transport, from_date=from_date, to_date=to_date)
 
     def _social_result_identity(self, item: dict[str, Any]) -> str:
         return postprocess._social_result_identity(item)
