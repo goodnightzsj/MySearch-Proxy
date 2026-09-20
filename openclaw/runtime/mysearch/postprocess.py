@@ -645,4 +645,3 @@ def _search_summary_excerpt_looks_like_noise(
                 "skip to content",
             )
         )
-

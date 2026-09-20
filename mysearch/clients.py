@@ -36,6 +36,7 @@ from mysearch.research import responses
 from mysearch.research import sections
 from mysearch.research import software_version
 from mysearch.research import selection
+from mysearch.research import shaping
 from mysearch.research import social
 from mysearch.providers.base import ProviderTransport
 from mysearch.provider_contract import ProviderResponse
@@ -2067,49 +2068,7 @@ class MySearchClient(ProviderTransport):
         include_social: bool,
         include_domains: list[str] | None,
     ) -> dict[str, Any]:
-        prefers_authoritative_sources = self._research_prefers_authoritative_sources(
-            query=query,
-            mode=mode,
-            intent=intent,
-            include_domains=include_domains,
-        )
-        if mode == "news":
-            web_mode: SearchMode = "news"
-        elif mode in {"docs", "github", "pdf"} or prefers_authoritative_sources:
-            web_mode = "docs"
-        elif intent in {"comparison", "exploratory"}:
-            web_mode = "exploratory"
-        else:
-            web_mode = "web"
-        planned_web_max = web_max_results
-        planned_social_max = social_max_results if include_social else 0
-        planned_scrape_top_n = scrape_top_n
-
-        if mode in {"docs", "github", "pdf"} or self._should_use_strict_resource_policy(
-            query=query,
-            mode=mode,
-            intent=intent,
-            include_domains=include_domains,
-        ):
-            planned_web_max = max(planned_web_max, 4)
-            planned_scrape_top_n = max(1, min(planned_scrape_top_n, 2))
-        elif mode == "news" or intent in {"news", "status"}:
-            planned_web_max = min(max(planned_web_max, 6), 8)
-            planned_scrape_top_n = min(max(planned_scrape_top_n, 4), 5)
-            if include_social:
-                planned_social_max = min(max(planned_social_max, 4), 6)
-        elif intent in {"comparison", "exploratory"} or strategy in {"verify", "deep"}:
-            planned_web_max = min(max(planned_web_max, 6), 10)
-            planned_scrape_top_n = min(max(planned_scrape_top_n, 4), 5)
-            if include_social:
-                planned_social_max = min(max(planned_social_max, 3), 5)
-
-        return {
-            "web_mode": web_mode,
-            "web_max_results": planned_web_max,
-            "social_max_results": planned_social_max,
-            "scrape_top_n": planned_scrape_top_n,
-        }
+        return discovery._resolve_research_plan(query=query, mode=mode, intent=intent, strategy=strategy, web_max_results=web_max_results, social_max_results=social_max_results, scrape_top_n=scrape_top_n, include_social=include_social, include_domains=include_domains)
 
     def _research_authoritative_rescue_queries(self, query: str) -> list[str]:
         return discovery._research_authoritative_rescue_queries(query=query)
@@ -2370,22 +2329,7 @@ class MySearchClient(ProviderTransport):
         self,
         results: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        project_results = [
-            item
-            for item in results
-            if str(item.get("provider") or "") == "canonical_research_projects"
-        ]
-        if not project_results:
-            return results
-        other_results = [
-            item
-            for item in results
-            if str(item.get("provider") or "") != "canonical_research_projects"
-        ]
-        return self._dedupe_research_results_for_report(
-            project_results,
-            other_results,
-        )
+        return shaping._prioritize_research_project_results(results=results)
 
     def _research_result_cluster_label(
         self,
@@ -2601,22 +2545,7 @@ class MySearchClient(ProviderTransport):
         include_domains: list[str] | None,
         route_provider: str,
     ) -> int:
-        if route_provider == "xai":
-            return requested_max_results
-
-        budget = requested_max_results
-        strategy_floor = {
-            "fast": requested_max_results,
-            "balanced": min(max(requested_max_results * 2, requested_max_results + 2), 10),
-            "verify": min(max(requested_max_results * 3, requested_max_results + 4), 15),
-            "deep": min(max(requested_max_results * 4, requested_max_results + 6), 20),
-        }
-        budget = max(budget, strategy_floor.get(strategy, requested_max_results))
-
-        if include_domains or self._should_rerank_resource_results(mode=mode, intent=intent):
-            budget = max(budget, min(max(requested_max_results * 2, requested_max_results + 3), 12))
-
-        return max(requested_max_results, budget)
+        return query_routing._candidate_result_budget(requested_max_results=requested_max_results, strategy=strategy, mode=mode, intent=intent, include_domains=include_domains, route_provider=route_provider)
 
     def _trim_search_payload(self, result: dict[str, Any], *, max_results: int) -> dict[str, Any]:
         return finalize._trim_search_payload(result=result, max_results=max_results)
@@ -3179,28 +3108,7 @@ class MySearchClient(ProviderTransport):
         return self._decision_from_policy(policy=policy, reason=reason)
 
     def _domains_prefer_firecrawl_discovery(self, include_domains: list[str] | None) -> bool:
-        if not include_domains:
-            return False
-        firecrawl_preferred_domains = {
-            "dev.to",
-            "juejin.cn",
-            "linux.do",
-            "medium.com",
-            "mp.weixin.qq.com",
-            "notion.site",
-            "notion.so",
-            "substack.com",
-            "weixin.qq.com",
-            "zhihu.com",
-        }
-        for domain in include_domains:
-            cleaned_domain = self._clean_hostname(domain)
-            if any(
-                self._domain_matches(cleaned_domain, preferred)
-                for preferred in firecrawl_preferred_domains
-            ):
-                return True
-        return False
+        return query_routing._domains_prefer_firecrawl_discovery(include_domains=include_domains)
 
     def _resolve_intent(
         self,
@@ -3210,38 +3118,7 @@ class MySearchClient(ProviderTransport):
         intent: SearchIntent,
         sources: list[str],
     ) -> ResolvedSearchIntent:
-        if intent != "auto":
-            return intent
-
-        query_lower = query.lower()
-
-        if mode == "news":
-            if self._looks_like_status_query(query_lower):
-                return "status"
-            return "news"
-        if self._looks_like_debugging_query(query_lower):
-            return "tutorial"
-        if self._looks_like_tutorial_query(query_lower):
-            return "tutorial"
-        if mode in {"docs", "github", "pdf"}:
-            return "resource"
-        if mode == "research":
-            return "exploratory"
-        if sources == ["x"]:
-            return "status"
-        if self._looks_like_changelog_query(query_lower):
-            return "resource"
-        if self._looks_like_status_query(query_lower):
-            return "status"
-        if self._looks_like_news_query(query_lower):
-            return "news"
-        if self._looks_like_comparison_query(query_lower):
-            return "comparison"
-        if self._looks_like_docs_query(query_lower):
-            return "resource"
-        if self._looks_like_exploratory_query(query_lower):
-            return "exploratory"
-        return "factual"
+        return query_routing._resolve_intent(query=query, mode=mode, intent=intent, sources=sources)
 
     def _resolve_strategy(
         self,
@@ -3252,18 +3129,7 @@ class MySearchClient(ProviderTransport):
         sources: list[str],
         include_content: bool,
     ) -> SearchStrategy:
-        if strategy != "auto":
-            return strategy
-
-        if "web" in sources and "x" in sources:
-            return "balanced"
-        if mode == "research":
-            return "deep"
-        if intent in {"comparison", "exploratory"}:
-            return "verify"
-        if include_content or mode in {"docs", "github", "pdf"} or intent in {"resource", "tutorial"}:
-            return "balanced"
-        return "fast"
+        return query_routing._resolve_strategy(mode=mode, intent=intent, strategy=strategy, sources=sources, include_content=include_content)
 
     def _should_prefer_tavily_official_discovery(
         self,
@@ -3435,10 +3301,7 @@ class MySearchClient(ProviderTransport):
         provider: ProviderName,
         policy: SearchRoutePolicy,
     ) -> list[str] | None:
-        if provider == "xai":
-            return None
-        chain = [item for item in policy.fallback_chain if item != provider]
-        return list(chain) or None
+        return query_routing._explicit_provider_fallback_chain(provider=provider, policy=policy)
 
     def _should_blend_web_providers(
         self,
@@ -3608,44 +3471,14 @@ class MySearchClient(ProviderTransport):
         include_domains: list[str] | None,
         include_content: bool = False,
     ) -> str | None:
-        results = list(result.get("results") or [])
-        if include_content and results and not any(
-            isinstance(item, dict) and str(item.get("content") or "").strip()
-            for item in results
-        ):
-            return "provider returned results without requested content"
-        if results:
-            return None
-        if include_domains:
-            return "provider returned no results for domain-filtered query"
-        if mode in {"docs", "github", "pdf", "news"} or intent in {
-            "comparison",
-            "exploratory",
-            "resource",
-            "tutorial",
-            "news",
-            "status",
-        }:
-            return "provider returned no results"
-        return None
+        return finalize._fallback_quality_issue(result=result, mode=mode, intent=intent, include_domains=include_domains, include_content=include_content)
 
     @staticmethod
     def _infer_tavily_days(
         intent: str,
         from_date: str | None = None,
     ) -> int | None:
-        if from_date:
-            try:
-                delta = date.today() - date.fromisoformat(from_date[:10])
-                if delta.days > 0:
-                    return delta.days
-            except (ValueError, TypeError):
-                pass
-        if intent in {"status"}:
-            return 3
-        if intent in {"news"}:
-            return 7
-        return None
+        return query_routing._infer_tavily_days(intent=intent, from_date=from_date)
 
     def _dispatch_single_provider(
         self,
@@ -3916,30 +3749,7 @@ class MySearchClient(ProviderTransport):
     def _refined_award_result_query(self, query: str) -> str:
         return query_routing._refined_award_result_query(query)
     def _award_result_trusted_domain_groups(self, query: str) -> list[list[str]]:
-        query_lower = query.lower()
-        if "grammy" in query_lower:
-            return [
-                ["grammy.com"],
-                ["npr.org", "pbs.org", "reuters.com", "billboard.com", "abcnews.go.com"],
-            ]
-        if "oscar" in query_lower or "academy awards" in query_lower:
-            return [
-                ["oscars.org", "theacademy.com"],
-                ["apnews.com", "npr.org", "reuters.com", "nytimes.com", "abcnews.go.com"],
-            ]
-        if "golden globe" in query_lower:
-            return [
-                ["goldenglobes.com"],
-                ["reuters.com", "variety.com", "nytimes.com", "apnews.com"],
-            ]
-        if "bafta" in query_lower:
-            return [
-                ["bafta.org"],
-                ["reuters.com", "bbc.com", "apnews.com", "theguardian.com"],
-            ]
-        return [
-            ["reuters.com", "apnews.com", "npr.org", "nytimes.com"],
-        ]
+        return query_routing._award_result_trusted_domain_groups(query=query)
 
     def _should_skip_exa_rescue_for_result_event(
         self,
@@ -3972,19 +3782,7 @@ class MySearchClient(ProviderTransport):
         query: str,
         results: list[dict[str, Any]],
     ) -> bool:
-        for item in results[:5]:
-            title_text = (item.get("title") or "").lower()
-            snippet_text = (item.get("snippet") or "").lower()
-            path = urlparse(item.get("url", "")).path.lower()
-            if self._looks_like_award_winner_result(
-                title_text=title_text,
-                snippet_text=snippet_text,
-                path=path,
-            ):
-                return True
-            if self._result_event_page_priority(query=query, item=item) >= 8:
-                return True
-        return False
+        return finalize._can_attempt_award_page_extraction(query=query, results=results)
 
     def _filter_strong_award_results(
         self,
@@ -5184,30 +4982,10 @@ class MySearchClient(ProviderTransport):
         strategy: str = "fast",
         include_domains: list[str] | None = None,
     ) -> str:
-        query_lower = query.lower()
-        exact_signals = re.findall(
-            r"[A-Z][a-zA-Z]+\.[a-zA-Z_]+|[a-z_]{2,}\.[a-z_]+\(|::\w+|#\w+|v\d+\.\d+",
-            query,
-        )
-        if strategy == "deep":
-            return "deep"
-        if exact_signals or (
-            self._looks_like_pricing_query(query_lower)
-            and (include_domains or mode in {"web", "docs"} or intent in {"factual", "resource"})
-        ):
-            return "auto"
-        if strategy == "fast":
-            return "fast"
-        return "auto"
+        return query_routing._exa_search_type(query=query, mode=mode, intent=intent, strategy=strategy, include_domains=include_domains)
 
     def _exa_category(self, mode: str, intent: str) -> str:
-        if mode == "pdf":
-            return "research paper"
-        if mode == "github":
-            return "github"
-        if mode == "news" or intent in {"news", "status"}:
-            return "news"
-        return ""
+        return query_routing._exa_category(mode=mode, intent=intent)
 
     def _search_exa(
         self,
@@ -6268,35 +6046,10 @@ class MySearchClient(ProviderTransport):
         return None
 
     def _github_blob_raw_url(self, url: str) -> str | None:
-        raw_urls = self._github_blob_raw_urls(url)
-        if not raw_urls:
-            return None
-        return raw_urls[0]
+        return shaping._github_blob_raw_url(url=url)
 
     def _github_blob_raw_urls(self, url: str) -> list[str]:
-        parsed = urlparse(url)
-        if parsed.scheme not in {"http", "https"}:
-            return []
-        if parsed.netloc.lower() != "github.com":
-            return []
-
-        parts = [segment for segment in parsed.path.split("/") if segment]
-        if len(parts) < 5 or parts[2] != "blob":
-            return []
-
-        owner, repo, _, ref, *path_parts = parts
-        if not owner or not repo or not ref or not path_parts:
-            return []
-        raw_path = "/".join(path_parts)
-        refs = [ref]
-        if ref == "main":
-            refs.append("master")
-        elif ref == "master":
-            refs.append("main")
-        return [
-            f"https://raw.githubusercontent.com/{owner}/{repo}/{candidate_ref}/{raw_path}"
-            for candidate_ref in refs
-        ]
+        return shaping._github_blob_raw_urls(url=url)
 
     # 官方奖项站域名。此前在 4 处函数体里逐字重复，改一处容易漏其余。
     _OFFICIAL_AWARD_DOMAINS = frozenset({
@@ -6347,7 +6100,7 @@ class MySearchClient(ProviderTransport):
         return postprocess._strip_hcaptcha_block(text)
 
     def _has_meaningful_extract_content(self, result: dict[str, Any]) -> bool:
-        return self._extract_quality_issue(result) is None
+        return shaping._has_meaningful_extract_content(result=result)
 
     def _extract_quality_issue(self, result: dict[str, Any]) -> str | None:
         return postprocess._extract_quality_issue(result=result)
@@ -6486,83 +6239,7 @@ class MySearchClient(ProviderTransport):
         secondary_result: dict[str, Any] | None,
         max_results: int,
     ) -> dict[str, Any]:
-        sequences: list[list[str]] = []
-        variants_by_key: dict[str, list[dict[str, Any]]] = {}
-        providers_by_key: dict[str, set[str]] = {}
-
-        for result in [primary_result, secondary_result]:
-            if not result:
-                continue
-
-            sequence: list[str] = []
-            result_provider = result.get("provider", "")
-            for item in result.get("results", []) or []:
-                if not isinstance(item, dict):
-                    continue
-                dedupe_key = self._result_dedupe_key(item)
-                if not dedupe_key:
-                    continue
-                sequence.append(dedupe_key)
-                variants_by_key.setdefault(dedupe_key, []).append(dict(item))
-                providers_by_key.setdefault(dedupe_key, set()).add(
-                    item.get("provider") or result_provider
-                )
-            sequences.append(sequence)
-
-        merged_keys: list[str] = []
-        indexes = [0 for _ in sequences]
-        seen_keys: set[str] = set()
-        while len(merged_keys) < max_results and sequences:
-            progressed = False
-            for seq_index, sequence in enumerate(sequences):
-                if len(merged_keys) >= max_results:
-                    break
-                while indexes[seq_index] < len(sequence):
-                    dedupe_key = sequence[indexes[seq_index]]
-                    indexes[seq_index] += 1
-                    if dedupe_key in seen_keys:
-                        continue
-                    seen_keys.add(dedupe_key)
-                    merged_keys.append(dedupe_key)
-                    progressed = True
-                    break
-            if not progressed:
-                break
-
-        results: list[dict[str, Any]] = []
-        matched_results = 0
-        for dedupe_key in merged_keys:
-            variants = variants_by_key.get(dedupe_key, [])
-            if not variants:
-                continue
-            providers = sorted(item for item in providers_by_key.get(dedupe_key, set()) if item)
-            if len(providers) > 1:
-                matched_results += 1
-            best = dict(max(variants, key=self._result_quality_score))
-            if urlparse(dedupe_key).hostname == "arxiv.org":
-                meaningful_titles = [
-                    str(item.get("title") or "").strip()
-                    for item in variants
-                    if str(item.get("title") or "").strip()
-                    and not self._looks_like_generic_arxiv_subject_title(
-                        str(item.get("title") or "").strip()
-                    )
-                ]
-                if meaningful_titles:
-                    best["title"] = max(meaningful_titles, key=len)
-            merged_item = self._canonicalize_result_item(best)
-            merged_item["matched_providers"] = providers
-            results.append(merged_item)
-
-        citations = self._dedupe_citations(
-            primary_result.get("citations") or [],
-            (secondary_result.get("citations") or []) if secondary_result else [],
-        )
-        return {
-            "results": results,
-            "citations": citations,
-            "matched_results": matched_results,
-        }
+        return shaping._merge_search_payloads(primary_result=primary_result, secondary_result=secondary_result, max_results=max_results)
 
     def _should_rerank_resource_results(
         self,
@@ -6988,15 +6665,7 @@ class MySearchClient(ProviderTransport):
         return "grok-4.20-0309"
 
     def _derive_root_health_base_url(self, provider: ProviderConfig) -> str:
-        candidate = (
-            provider.base_url_for("social_search")
-            or provider.base_url_for("social_health")
-            or provider.base_url
-        )
-        parsed = urlparse(str(candidate or "").strip())
-        if not parsed.scheme or not parsed.netloc:
-            return str(candidate or "").strip().rstrip("/")
-        return urlunparse((parsed.scheme, parsed.netloc, "", "", "", "")).rstrip("/")
+        return query_routing._derive_root_health_base_url(provider=provider)
 
     def _probe_xai_official_status_page(self, timeout_seconds: int) -> None:
         status_url = "https://status.x.ai/"
@@ -7251,10 +6920,7 @@ class MySearchClient(ProviderTransport):
             return
 
     def _summarize_route_error(self, error_text: str) -> str:
-        compact = " ".join(error_text.split())
-        if len(compact) <= 220:
-            return compact
-        return f"{compact[:217]}..."
+        return query_routing._summarize_route_error(error_text=error_text)
 
     @staticmethod
     def _looks_like_provider_limit_error(error_text: str) -> bool:
@@ -7297,17 +6963,7 @@ class MySearchClient(ProviderTransport):
         mode: SearchMode,
         intent: ResolvedSearchIntent | None = None,
     ) -> list[str]:
-        if mode == "github":
-            return ["github"]
-        if mode == "pdf":
-            return ["pdf"]
-        if mode == "news" or intent in {"news", "status"}:
-            return ["news"]
-        if intent == "tutorial":
-            return []
-        if mode in {"docs", "research"} or intent in {"resource", "tutorial"}:
-            return ["research"]
-        return []
+        return query_routing._firecrawl_categories(mode=mode, intent=intent)
 
     def _normalize_firecrawl_search_categories(self, categories: list[str]) -> list[str]:
         return cache_keys._normalize_firecrawl_search_categories(categories=categories)
@@ -7678,29 +7334,7 @@ class MySearchClient(ProviderTransport):
     ) -> int:
         return query_routing._result_event_page_priority(query=query, item=item)
     def _answer_looks_uncertain(self, answer: str) -> bool:
-        answer_lower = answer.lower()
-        markers = [
-            "not yet determined",
-            "not yet known",
-            "cannot be determined",
-            "cannot determine",
-            "not specified",
-            "not provided",
-            "insufficient data",
-            "no winner was specified",
-            "cannot be concluded",
-            "could not be determined",
-            "still unknown",
-            "to be announced",
-            "tbd",
-            "unclear",
-            "unknown",
-            "尚未确定",
-            "尚未公布",
-            "待公布",
-            "未知",
-        ]
-        return any(marker in answer_lower for marker in markers)
+        return finalize._answer_looks_uncertain(answer=answer)
 
     def _extract_result_event_answer(
         self,

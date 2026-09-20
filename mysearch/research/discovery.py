@@ -346,3 +346,60 @@ def _research_prefers_authoritative_sources(
             return True
         return query_routing._looks_like_technical_research_query(query_lower)
 
+
+def _resolve_research_plan(
+    *,
+    query: str,
+    mode: SearchMode,
+    intent: ResolvedSearchIntent,
+    strategy: SearchStrategy,
+    web_max_results: int,
+    social_max_results: int,
+    scrape_top_n: int,
+    include_social: bool,
+    include_domains: list[str] | None,
+) -> dict[str, Any]:
+        prefers_authoritative_sources = _research_prefers_authoritative_sources(
+            query=query,
+            mode=mode,
+            intent=intent,
+            include_domains=include_domains,
+        )
+        if mode == "news":
+            web_mode: SearchMode = "news"
+        elif mode in {"docs", "github", "pdf"} or prefers_authoritative_sources:
+            web_mode = "docs"
+        elif intent in {"comparison", "exploratory"}:
+            web_mode = "exploratory"
+        else:
+            web_mode = "web"
+        planned_web_max = web_max_results
+        planned_social_max = social_max_results if include_social else 0
+        planned_scrape_top_n = scrape_top_n
+
+        if mode in {"docs", "github", "pdf"} or query_routing._should_use_strict_resource_policy(
+            query=query,
+            mode=mode,
+            intent=intent,
+            include_domains=include_domains,
+        ):
+            planned_web_max = max(planned_web_max, 4)
+            planned_scrape_top_n = max(1, min(planned_scrape_top_n, 2))
+        elif mode == "news" or intent in {"news", "status"}:
+            planned_web_max = min(max(planned_web_max, 6), 8)
+            planned_scrape_top_n = min(max(planned_scrape_top_n, 4), 5)
+            if include_social:
+                planned_social_max = min(max(planned_social_max, 4), 6)
+        elif intent in {"comparison", "exploratory"} or strategy in {"verify", "deep"}:
+            planned_web_max = min(max(planned_web_max, 6), 10)
+            planned_scrape_top_n = min(max(planned_scrape_top_n, 4), 5)
+            if include_social:
+                planned_social_max = min(max(planned_social_max, 3), 5)
+
+        return {
+            "web_mode": web_mode,
+            "web_max_results": planned_web_max,
+            "social_max_results": planned_social_max,
+            "scrape_top_n": planned_scrape_top_n,
+        }
+

@@ -13,8 +13,9 @@
 from __future__ import annotations
 
 import re
+from datetime import date
 from typing import Any, Mapping
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 from mysearch import postprocess
 from mysearch.errors import MySearchHTTPError
@@ -2829,4 +2830,257 @@ def _strip_trailing_hcaptcha(
         if residual_content > 80:
             return text
         return joined
+
+
+def _candidate_result_budget(
+    *,
+    requested_max_results: int,
+    strategy: SearchStrategy,
+    mode: SearchMode,
+    intent: ResolvedSearchIntent,
+    include_domains: list[str] | None,
+    route_provider: str,
+) -> int:
+        if route_provider == "xai":
+            return requested_max_results
+
+        budget = requested_max_results
+        strategy_floor = {
+            "fast": requested_max_results,
+            "balanced": min(max(requested_max_results * 2, requested_max_results + 2), 10),
+            "verify": min(max(requested_max_results * 3, requested_max_results + 4), 15),
+            "deep": min(max(requested_max_results * 4, requested_max_results + 6), 20),
+        }
+        budget = max(budget, strategy_floor.get(strategy, requested_max_results))
+
+        if include_domains or _should_rerank_resource_results(mode=mode, intent=intent):
+            budget = max(budget, min(max(requested_max_results * 2, requested_max_results + 3), 12))
+
+        return max(requested_max_results, budget)
+
+
+def _domains_prefer_firecrawl_discovery(
+    include_domains: list[str] | None,
+) -> bool:
+        if not include_domains:
+            return False
+        firecrawl_preferred_domains = {
+            "dev.to",
+            "juejin.cn",
+            "linux.do",
+            "medium.com",
+            "mp.weixin.qq.com",
+            "notion.site",
+            "notion.so",
+            "substack.com",
+            "weixin.qq.com",
+            "zhihu.com",
+        }
+        for domain in include_domains:
+            cleaned_domain = _clean_hostname(domain)
+            if any(
+                postprocess._domain_matches(cleaned_domain, preferred)
+                for preferred in firecrawl_preferred_domains
+            ):
+                return True
+        return False
+
+
+def _resolve_intent(
+    *,
+    query: str,
+    mode: SearchMode,
+    intent: SearchIntent,
+    sources: list[str],
+) -> ResolvedSearchIntent:
+        if intent != "auto":
+            return intent
+
+        query_lower = query.lower()
+
+        if mode == "news":
+            if _looks_like_status_query(query_lower):
+                return "status"
+            return "news"
+        if _looks_like_debugging_query(query_lower):
+            return "tutorial"
+        if _looks_like_tutorial_query(query_lower):
+            return "tutorial"
+        if mode in {"docs", "github", "pdf"}:
+            return "resource"
+        if mode == "research":
+            return "exploratory"
+        if sources == ["x"]:
+            return "status"
+        if _looks_like_changelog_query(query_lower):
+            return "resource"
+        if _looks_like_status_query(query_lower):
+            return "status"
+        if _looks_like_news_query(query_lower):
+            return "news"
+        if _looks_like_comparison_query(query_lower):
+            return "comparison"
+        if _looks_like_docs_query(query_lower):
+            return "resource"
+        if _looks_like_exploratory_query(query_lower):
+            return "exploratory"
+        return "factual"
+
+
+def _resolve_strategy(
+    *,
+    mode: SearchMode,
+    intent: ResolvedSearchIntent,
+    strategy: SearchStrategy,
+    sources: list[str],
+    include_content: bool,
+) -> SearchStrategy:
+        if strategy != "auto":
+            return strategy
+
+        if "web" in sources and "x" in sources:
+            return "balanced"
+        if mode == "research":
+            return "deep"
+        if intent in {"comparison", "exploratory"}:
+            return "verify"
+        if include_content or mode in {"docs", "github", "pdf"} or intent in {"resource", "tutorial"}:
+            return "balanced"
+        return "fast"
+
+
+def _explicit_provider_fallback_chain(
+    *,
+    provider: ProviderName,
+    policy: SearchRoutePolicy,
+) -> list[str] | None:
+        if provider == "xai":
+            return None
+        chain = [item for item in policy.fallback_chain if item != provider]
+        return list(chain) or None
+
+
+def _infer_tavily_days(
+    intent: str,
+    from_date: str | None = None,
+) -> int | None:
+        if from_date:
+            try:
+                delta = date.today() - date.fromisoformat(from_date[:10])
+                if delta.days > 0:
+                    return delta.days
+            except (ValueError, TypeError):
+                pass
+        if intent in {"status"}:
+            return 3
+        if intent in {"news"}:
+            return 7
+        return None
+
+
+def _award_result_trusted_domain_groups(
+    query: str,
+) -> list[list[str]]:
+        query_lower = query.lower()
+        if "grammy" in query_lower:
+            return [
+                ["grammy.com"],
+                ["npr.org", "pbs.org", "reuters.com", "billboard.com", "abcnews.go.com"],
+            ]
+        if "oscar" in query_lower or "academy awards" in query_lower:
+            return [
+                ["oscars.org", "theacademy.com"],
+                ["apnews.com", "npr.org", "reuters.com", "nytimes.com", "abcnews.go.com"],
+            ]
+        if "golden globe" in query_lower:
+            return [
+                ["goldenglobes.com"],
+                ["reuters.com", "variety.com", "nytimes.com", "apnews.com"],
+            ]
+        if "bafta" in query_lower:
+            return [
+                ["bafta.org"],
+                ["reuters.com", "bbc.com", "apnews.com", "theguardian.com"],
+            ]
+        return [
+            ["reuters.com", "apnews.com", "npr.org", "nytimes.com"],
+        ]
+
+
+def _exa_search_type(
+    query: str,
+    *,
+    mode: str = '',
+    intent: str = '',
+    strategy: str = 'fast',
+    include_domains: list[str] | None = None,
+) -> str:
+        query_lower = query.lower()
+        exact_signals = re.findall(
+            r"[A-Z][a-zA-Z]+\.[a-zA-Z_]+|[a-z_]{2,}\.[a-z_]+\(|::\w+|#\w+|v\d+\.\d+",
+            query,
+        )
+        if strategy == "deep":
+            return "deep"
+        if exact_signals or (
+            _looks_like_pricing_query(query_lower)
+            and (include_domains or mode in {"web", "docs"} or intent in {"factual", "resource"})
+        ):
+            return "auto"
+        if strategy == "fast":
+            return "fast"
+        return "auto"
+
+
+def _exa_category(
+    mode: str,
+    intent: str,
+) -> str:
+        if mode == "pdf":
+            return "research paper"
+        if mode == "github":
+            return "github"
+        if mode == "news" or intent in {"news", "status"}:
+            return "news"
+        return ""
+
+
+def _derive_root_health_base_url(
+    provider: ProviderConfig,
+) -> str:
+        candidate = (
+            provider.base_url_for("social_search")
+            or provider.base_url_for("social_health")
+            or provider.base_url
+        )
+        parsed = urlparse(str(candidate or "").strip())
+        if not parsed.scheme or not parsed.netloc:
+            return str(candidate or "").strip().rstrip("/")
+        return urlunparse((parsed.scheme, parsed.netloc, "", "", "", "")).rstrip("/")
+
+
+def _summarize_route_error(
+    error_text: str,
+) -> str:
+        compact = " ".join(error_text.split())
+        if len(compact) <= 220:
+            return compact
+        return f"{compact[:217]}..."
+
+
+def _firecrawl_categories(
+    mode: SearchMode,
+    intent: ResolvedSearchIntent | None = None,
+) -> list[str]:
+        if mode == "github":
+            return ["github"]
+        if mode == "pdf":
+            return ["pdf"]
+        if mode == "news" or intent in {"news", "status"}:
+            return ["news"]
+        if intent == "tutorial":
+            return []
+        if mode in {"docs", "research"} or intent in {"resource", "tutorial"}:
+            return ["research"]
+        return []
 

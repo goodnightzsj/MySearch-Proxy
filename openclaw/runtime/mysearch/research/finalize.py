@@ -685,3 +685,81 @@ def _estimate_search_confidence(
             return "medium"
         return "low" if conflicts else "medium"
 
+
+def _fallback_quality_issue(
+    *,
+    result: dict[str, Any],
+    mode: SearchMode,
+    intent: ResolvedSearchIntent,
+    include_domains: list[str] | None,
+    include_content: bool = False,
+) -> str | None:
+        results = list(result.get("results") or [])
+        if include_content and results and not any(
+            isinstance(item, dict) and str(item.get("content") or "").strip()
+            for item in results
+        ):
+            return "provider returned results without requested content"
+        if results:
+            return None
+        if include_domains:
+            return "provider returned no results for domain-filtered query"
+        if mode in {"docs", "github", "pdf", "news"} or intent in {
+            "comparison",
+            "exploratory",
+            "resource",
+            "tutorial",
+            "news",
+            "status",
+        }:
+            return "provider returned no results"
+        return None
+
+
+def _can_attempt_award_page_extraction(
+    *,
+    query: str,
+    results: list[dict[str, Any]],
+) -> bool:
+        for item in results[:5]:
+            title_text = (item.get("title") or "").lower()
+            snippet_text = (item.get("snippet") or "").lower()
+            path = urlparse(item.get("url", "")).path.lower()
+            if query_routing._looks_like_award_winner_result(
+                title_text=title_text,
+                snippet_text=snippet_text,
+                path=path,
+            ):
+                return True
+            if query_routing._result_event_page_priority(query=query, item=item) >= 8:
+                return True
+        return False
+
+
+def _answer_looks_uncertain(
+    answer: str,
+) -> bool:
+        answer_lower = answer.lower()
+        markers = [
+            "not yet determined",
+            "not yet known",
+            "cannot be determined",
+            "cannot determine",
+            "not specified",
+            "not provided",
+            "insufficient data",
+            "no winner was specified",
+            "cannot be concluded",
+            "could not be determined",
+            "still unknown",
+            "to be announced",
+            "tbd",
+            "unclear",
+            "unknown",
+            "尚未确定",
+            "尚未公布",
+            "待公布",
+            "未知",
+        ]
+        return any(marker in answer_lower for marker in markers)
+
