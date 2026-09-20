@@ -4,12 +4,22 @@
 在不与 `clients` 形成循环导入的前提下复用这些类型。`clients` 继续 re-export，
 内部引用路径不变。
 
-这些是 `Literal` 别名，运行时只是 `typing` 对象，没有行为。
+这些是 `Literal` 别名与少数无行为的数据载体。本模块也是 `dataclass(slots=True)`
+兼容垫片的唯一所有者，需要它的上层从这里导入。
 """
 
 from __future__ import annotations
 
+import sys
+from dataclasses import dataclass as _dataclass
 from typing import Literal
+
+
+def dataclass(*args, **kwargs):
+    """`dataclass(slots=True)` 在 3.10 以前不存在；低版本静默降级为非 slots 版本。"""
+    if sys.version_info < (3, 10):
+        kwargs.pop("slots", None)
+    return _dataclass(*args, **kwargs)
 
 SearchMode = Literal["auto", "web", "news", "social", "docs", "research", "github", "pdf"]
 
@@ -45,3 +55,23 @@ ResolvedSearchIntent = Literal[
 ]
 SearchStrategy = Literal["auto", "fast", "balanced", "verify", "deep"]
 ProviderName = Literal["auto", "tavily", "firecrawl", "exa", "xai"]
+
+
+@dataclass(slots=True)
+class RouteDecision:
+    """一次搜索的路由结果：选中的 provider 与其参数化选项。
+
+    定义在这里而不是 `clients.py`，因为路由下游的纯函数层
+    （`research/cache_keys`、`research/responses`）需要引用它，而在
+    `clients` 里定义会迫使它们反向依赖编排层、形成环。
+    `clients` 继续 re-export，原有导入路径不变。
+    """
+
+    provider: str
+    reason: str
+    tavily_topic: str = "general"
+    firecrawl_categories: list[str] | None = None
+    sources: list[str] | None = None
+    fallback_chain: list[str] | None = None
+    result_profile: Literal["off", "web", "news", "resource"] = "off"
+    allow_exa_rescue: bool = False

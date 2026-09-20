@@ -9,11 +9,9 @@ import json
 import logging
 import math
 import re
-import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass as _dataclass
 from datetime import date, datetime, timezone
 from typing import Any, Callable, Literal, Mapping, Sequence, cast
 from urllib.parse import urlparse, urlunparse
@@ -44,14 +42,10 @@ from mysearch.provider_contract import ProviderResponse
 logger = logging.getLogger(__name__)
 
 
-def dataclass(*args, **kwargs):
-    if sys.version_info < (3, 10):
-        kwargs.pop("slots", None)
-    return _dataclass(*args, **kwargs)
-
-
 from mysearch.types import (  # noqa: F401  (re-exported: internal refs keep resolving)
     ProviderName,
+    dataclass,
+    RouteDecision,
     ResolvedSearchIntent,
     SearchIntent,
     SearchMode,
@@ -71,18 +65,6 @@ from mysearch.errors import (  # noqa: F401  (re-exported: public import path st
     _stringify_error_detail,
 )
 
-
-
-@dataclass(slots=True)
-class RouteDecision:
-    provider: str
-    reason: str
-    tavily_topic: str = "general"
-    firecrawl_categories: list[str] | None = None
-    sources: list[str] | None = None
-    fallback_chain: list[str] | None = None
-    result_profile: Literal["off", "web", "news", "resource"] = "off"
-    allow_exa_rescue: bool = False
 
 
 @dataclass(slots=True)
@@ -6052,13 +6034,6 @@ class MySearchClient(ProviderTransport):
         return shaping._github_blob_raw_urls(url=url)
 
     # 官方奖项站域名。此前在 4 处函数体里逐字重复，改一处容易漏其余。
-    _OFFICIAL_AWARD_DOMAINS = frozenset({
-        "grammy.com",
-        "grammys.com",
-        "oscars.org",
-        "theacademy.com",
-    })
-
     _HCAPTCHA_LANGUAGES = frozenset({
         "afrikaans", "albanian", "amharic", "arabic", "armenian", "azerbaijani",
         "basque", "belarusian", "bengali", "bulgarian", "bosnian", "burmese",
@@ -7297,7 +7272,7 @@ class MySearchClient(ProviderTransport):
         url: str,
     ) -> str:
         hostname = self._registered_domain(self._result_hostname({"url": url}))
-        if hostname not in self._OFFICIAL_AWARD_DOMAINS:
+        if hostname not in query_routing._OFFICIAL_AWARD_DOMAINS:
             return ""
         try:
             status_code, response_text = self._request_text(

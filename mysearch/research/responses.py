@@ -12,16 +12,18 @@ dict 与路由决策，输出是规范化引用、输出文本，或附加了 de
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from urllib.parse import urlparse
 
 from mysearch import postprocess
 from mysearch import query_routing
 from mysearch.provider_contract import ProviderResponse
-from mysearch.types import ProviderName, ResolvedSearchIntent, SearchStrategy
-
-if TYPE_CHECKING:  # RouteDecision 定义在 clients.py，运行时导入会成环
-    from mysearch.clients import RouteDecision
+from mysearch.types import (
+    ProviderName,
+    ResolvedSearchIntent,
+    RouteDecision,
+    SearchStrategy,
+)
 
 
 def _annotate_search_debug(
