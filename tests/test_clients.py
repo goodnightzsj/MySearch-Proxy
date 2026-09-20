@@ -11822,6 +11822,85 @@ class MySearchClientTests(unittest.TestCase):
         self.assertIn("https://www.firecrawl.dev/compare/firecrawl-vs-apify", top_urls)
         self.assertIn("https://docs.apify.com/api", top_urls)
 
+    def test_research_fallback_tail_runs_in_the_documented_order(self) -> None:
+        """两个 research 回退构造器共用一段收尾；这里钉住它的顺序。
+
+        顺序曾经在两份副本里各写一遍，是漂移风险点：对齐引用 → 官方资源策略
+        → （comparison 特化）→ 裁剪 → 证据 → 摘要。用假协作者记录调用序，
+        而不是只看返回值——顺序错了返回值可能仍然相同。
+        """
+        client = MySearchClient()
+        calls: list[str] = []
+
+        def record(name, value=None):  # type: ignore[no-untyped-def]
+            def fn(*args, **kwargs):  # type: ignore[no-untyped-def]
+                calls.append(name)
+                return value if value is not None else args[0]
+            return fn
+
+        client._should_rerank_resource_results = lambda **kw: False  # type: ignore[method-assign]
+        client._should_rerank_general_results = lambda **kw: False  # type: ignore[method-assign]
+        client._align_citations_with_results = lambda *, results, citations: (  # type: ignore[method-assign]
+            calls.append("align") or list(citations)
+        )
+        client._apply_official_resource_policy = lambda **kw: (  # type: ignore[method-assign]
+            calls.append("policy") or dict(kw["result"])
+        )
+        client._trim_search_payload = lambda payload, *, max_results: (  # type: ignore[method-assign]
+            calls.append("trim") or dict(payload)
+        )
+        client._augment_evidence_summary = lambda payload, **kw: (  # type: ignore[method-assign]
+            calls.append("evidence") or dict(payload)
+        )
+        client._build_search_summary_fallback = lambda **kw: (  # type: ignore[method-assign]
+            calls.append("summary") or "s"
+        )
+
+        for method, extra in (
+            (
+                client._build_research_web_fallback_result,
+                dict(exa_discovery={"results": [{"url": "https://a/1"}], "citations": []}),
+            ),
+            (
+                client._build_research_secondary_fallback_result,
+                dict(source_result={"results": [{"url": "https://a/1"}], "citations": []},
+                     fallback_to="exa", fallback_reason="r"),
+            ),
+        ):
+            calls.clear()
+            with self.subTest(method=method.__name__):
+                method(
+                    query="q",
+                    mode="web",
+                    intent="factual",
+                    strategy="balanced",
+                    include_domains=None,
+                    **extra,
+                )
+                self.assertEqual(calls, ["align", "policy", "trim", "evidence", "summary"])
+
+        # comparison + canonical_research_docs 会激活 after_policy 钩子；钩子必须
+        # 落在 policy 之后、trim 之前，否则重排结果会被裁掉或被证据摘要读到旧值。
+        calls.clear()
+        client._looks_like_comparison_query = lambda q: True  # type: ignore[method-assign]
+        client._prioritize_research_project_results = lambda results: (  # type: ignore[method-assign]
+            calls.append("reprioritize") or list(results)
+        )
+        client._build_research_secondary_fallback_result(
+            query="compare a and b",
+            mode="docs",
+            intent="exploratory",
+            strategy="deep",
+            source_result={"results": [{"url": "https://a/1"}], "citations": []},
+            include_domains=None,
+            fallback_to="canonical_research_docs",
+            fallback_reason="r",
+        )
+        self.assertEqual(
+            calls,
+            ["align", "policy", "reprioritize", "align", "trim", "evidence", "summary"],
+        )
+
     def test_research_secondary_fallback_prioritizes_project_page_for_comparison_docs_mode(
         self,
     ) -> None:

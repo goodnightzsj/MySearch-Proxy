@@ -2578,6 +2578,55 @@ class MySearchClient(ProviderTransport):
     ) -> list[dict[str, Any]]:
         return finalize._collect_official_result_candidates(query=query, mode=mode, intent=intent, results=results, include_domains=include_domains, strict_official=strict_official)
 
+    def _finish_research_fallback_result(
+        self,
+        fallback_result: dict[str, Any],
+        *,
+        query: str,
+        mode: SearchMode,
+        intent: ResolvedSearchIntent,
+        include_domains: list[str] | None,
+        results: list[dict[str, Any]],
+        after_policy: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """research 回退载荷的公共收尾：对齐引用 → 官方资源策略 → 裁剪 → 证据 → 摘要。
+
+        `_build_research_web_fallback_result` 与
+        `_build_research_secondary_fallback_result` 的这段逻辑逐字相同，此前是
+        两份副本；差异只在各自的前置步骤（provider/fallback 元数据）与
+        comparison 特化，后者由 `after_policy` 注入 —— 它必须落在"官方资源策略
+        之后、裁剪之前"，所以不能简单挪到调用方。
+        """
+        fallback_result["results"] = results
+        fallback_result["citations"] = self._align_citations_with_results(
+            results=results,
+            citations=list(fallback_result.get("citations") or []),
+        )
+        fallback_result = self._apply_official_resource_policy(
+            query=query,
+            mode=mode,
+            intent=intent,
+            result=fallback_result,
+            include_domains=include_domains,
+        )
+        if after_policy is not None:
+            fallback_result = after_policy(fallback_result)
+        fallback_result = self._trim_search_payload(fallback_result, max_results=len(results) or 5)
+        fallback_result = self._augment_evidence_summary(
+            fallback_result,
+            query=query,
+            mode=mode,
+            intent=intent,
+            include_domains=include_domains,
+        )
+        fallback_result["summary"] = self._build_search_summary_fallback(
+            query=query,
+            mode=mode,
+            intent=intent,
+            result=fallback_result,
+        )
+        return fallback_result
+
     def _build_research_web_fallback_result(
         self,
         *,
@@ -2613,33 +2662,15 @@ class MySearchClient(ProviderTransport):
                 results=results,
                 include_domains=include_domains,
             )
-        fallback_result["results"] = results
-        fallback_result["citations"] = self._align_citations_with_results(
-            results=results,
-            citations=citations,
-        )
-        fallback_result = self._apply_official_resource_policy(
-            query=query,
-            mode=mode,
-            intent=intent,
-            result=fallback_result,
-            include_domains=include_domains,
-        )
-        fallback_result = self._trim_search_payload(fallback_result, max_results=len(results) or 5)
-        fallback_result = self._augment_evidence_summary(
+        fallback_result["citations"] = citations
+        return self._finish_research_fallback_result(
             fallback_result,
             query=query,
             mode=mode,
             intent=intent,
             include_domains=include_domains,
+            results=results,
         )
-        fallback_result["summary"] = self._build_search_summary_fallback(
-            query=query,
-            mode=mode,
-            intent=intent,
-            result=fallback_result,
-        )
-        return fallback_result
 
     def _build_research_secondary_fallback_result(
         self,
@@ -2711,46 +2742,34 @@ class MySearchClient(ProviderTransport):
                 )
                 if selected_results:
                     results = selected_results
-        fallback_result["results"] = results
-        fallback_result["citations"] = self._align_citations_with_results(
-            results=results,
-            citations=citations,
-        )
-        fallback_result = self._apply_official_resource_policy(
-            query=query,
-            mode=mode,
-            intent=intent,
-            result=fallback_result,
-            include_domains=include_domains,
-        )
-        if (
-            fallback_to == "canonical_research_docs"
-            and self._looks_like_comparison_query(query.lower())
-            and fallback_result.get("results")
-        ):
+
+        def _reprioritize_projects(payload: dict[str, Any]) -> dict[str, Any]:
+            if not (
+                fallback_to == "canonical_research_docs"
+                and self._looks_like_comparison_query(query.lower())
+                and payload.get("results")
+            ):
+                return payload
             reprioritized_results = self._prioritize_research_project_results(
-                list(fallback_result.get("results") or [])
+                list(payload.get("results") or [])
             )
-            fallback_result["results"] = reprioritized_results
-            fallback_result["citations"] = self._align_citations_with_results(
+            payload["results"] = reprioritized_results
+            payload["citations"] = self._align_citations_with_results(
                 results=reprioritized_results,
-                citations=list(fallback_result.get("citations") or []),
+                citations=list(payload.get("citations") or []),
             )
-        fallback_result = self._trim_search_payload(fallback_result, max_results=len(results) or 5)
-        fallback_result = self._augment_evidence_summary(
+            return payload
+
+        fallback_result["citations"] = citations
+        return self._finish_research_fallback_result(
             fallback_result,
             query=query,
             mode=mode,
             intent=intent,
             include_domains=include_domains,
+            results=results,
+            after_policy=_reprioritize_projects,
         )
-        fallback_result["summary"] = self._build_search_summary_fallback(
-            query=query,
-            mode=mode,
-            intent=intent,
-            result=fallback_result,
-        )
-        return fallback_result
 
     def _augment_research_evidence(
         self,
