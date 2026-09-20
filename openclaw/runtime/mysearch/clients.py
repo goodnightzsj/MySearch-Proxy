@@ -27,6 +27,7 @@ from mysearch import postprocess
 from mysearch import query_routing
 from mysearch import ranking
 from mysearch import research
+from mysearch.research import cache_keys
 from mysearch.research import events
 from mysearch.research import finalize
 from mysearch.research import quality
@@ -391,16 +392,7 @@ class MySearchClient(ProviderTransport):
             self._cache_store[namespace].pop(cache_key, None)
 
     def _build_cache_key(self, namespace: str, payload: dict[str, Any]) -> str:
-        serialized = json.dumps(
-            {
-                "namespace": namespace,
-                "payload": payload,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+        return cache_keys._build_cache_key(namespace=namespace, payload=payload)
 
     def _should_cache_search(
         self,
@@ -440,34 +432,7 @@ class MySearchClient(ProviderTransport):
         include_x_videos: bool = False,
         max_results: int = 5,
     ) -> str:
-        # `search()` 接受日期窗口和 X handle 过滤参数，且这些会改变上游请求的实际
-        # query / 结果集；不把它们放进 cache key 会导致两次"同 query 但不同日期范围"
-        # 的请求误命中同一条缓存（perf-r4 P0 正确性 bug）。
-        return self._build_cache_key(
-            "search",
-            {
-                "query": query,
-                "mode": mode,
-                "intent": resolved_intent,
-                "strategy": resolved_strategy,
-                "provider": provider,
-                "normalized_sources": normalized_sources,
-                "include_content": include_content,
-                "include_answer": include_answer,
-                "include_domains": sorted(set(include_domains or [])),
-                "exclude_domains": sorted(set(exclude_domains or [])),
-                "route_provider": decision.provider,
-                "tavily_topic": decision.tavily_topic,
-                "firecrawl_categories": decision.firecrawl_categories or [],
-                "allowed_x_handles": sorted(set(allowed_x_handles or [])),
-                "excluded_x_handles": sorted(set(excluded_x_handles or [])),
-                "from_date": from_date or "",
-                "to_date": to_date or "",
-                "include_x_images": include_x_images,
-                "include_x_videos": include_x_videos,
-                "requested_max_results": max_results,
-            },
-        )
+        return cache_keys._build_search_cache_key(query=query, mode=mode, resolved_intent=resolved_intent, resolved_strategy=resolved_strategy, provider=provider, normalized_sources=normalized_sources, include_content=include_content, include_answer=include_answer, include_domains=include_domains, exclude_domains=exclude_domains, decision=decision, allowed_x_handles=allowed_x_handles, excluded_x_handles=excluded_x_handles, from_date=from_date, to_date=to_date, include_x_images=include_x_images, include_x_videos=include_x_videos, max_results=max_results)
 
     def _build_extract_cache_key(
         self,
@@ -477,15 +442,7 @@ class MySearchClient(ProviderTransport):
         only_main_content: bool,
         provider: Literal["auto", "firecrawl", "tavily"],
     ) -> str:
-        return self._build_cache_key(
-            "extract",
-            {
-                "url": url,
-                "formats": formats,
-                "only_main_content": only_main_content,
-                "provider": provider,
-            },
-        )
+        return cache_keys._build_extract_cache_key(url=url, formats=formats, only_main_content=only_main_content, provider=provider)
 
     def _build_social_cache_key(
         self,
@@ -499,19 +456,7 @@ class MySearchClient(ProviderTransport):
         include_x_images: bool,
         include_x_videos: bool,
     ) -> str:
-        return self._build_cache_key(
-            "social",
-            {
-                "query": query,
-                "max_results": max_results,
-                "allowed_x_handles": sorted(set(allowed_x_handles or [])),
-                "excluded_x_handles": sorted(set(excluded_x_handles or [])),
-                "from_date": from_date or "",
-                "to_date": to_date or "",
-                "include_x_images": include_x_images,
-                "include_x_videos": include_x_videos,
-            },
-        )
+        return cache_keys._build_social_cache_key(query=query, max_results=max_results, allowed_x_handles=allowed_x_handles, excluded_x_handles=excluded_x_handles, from_date=from_date, to_date=to_date, include_x_images=include_x_images, include_x_videos=include_x_videos)
 
     def _build_social_gateway_cache_key(
         self,
@@ -519,13 +464,7 @@ class MySearchClient(ProviderTransport):
         base_url: str,
         path: str,
     ) -> str:
-        return self._build_cache_key(
-            "social_gateway",
-            {
-                "base_url": (base_url or "").rstrip("/"),
-                "path": path,
-            },
-        )
+        return cache_keys._build_social_gateway_cache_key(base_url=base_url, path=path)
 
     def _annotate_cache(
         self,
@@ -5493,13 +5432,7 @@ class MySearchClient(ProviderTransport):
 
     @staticmethod
     def _build_firecrawl_tbs(from_date: str | None, to_date: str | None) -> str:
-        if not from_date and not to_date:
-            return ""
-        if from_date and to_date:
-            return f"cdr:1,cd_min:{from_date},cd_max:{to_date}"
-        if from_date:
-            return f"cdr:1,cd_min:{from_date}"
-        return f"cdr:1,cd_max:{to_date}"
+        return cache_keys._build_firecrawl_tbs(from_date, to_date)
 
     def _build_firecrawl_domain_query(
         self,
@@ -5508,13 +5441,7 @@ class MySearchClient(ProviderTransport):
         include_domain: str | None,
         exclude_domains: list[str] | None,
     ) -> str:
-        parts: list[str] = []
-        if include_domain:
-            parts.append(f"site:{include_domain}")
-        for domain in exclude_domains or []:
-            parts.append(f"-site:{domain}")
-        parts.append(query)
-        return " ".join(parts).strip()
+        return cache_keys._build_firecrawl_domain_query(query=query, include_domain=include_domain, exclude_domains=exclude_domains)
 
     def _merge_ranked_results(
         self,
@@ -7901,13 +7828,7 @@ class MySearchClient(ProviderTransport):
         return []
 
     def _normalize_firecrawl_search_categories(self, categories: list[str]) -> list[str]:
-        supported = {"github", "research", "pdf"}
-        normalized: list[str] = []
-        for item in categories:
-            value = str(item or "").strip().lower()
-            if value in supported and value not in normalized:
-                normalized.append(value)
-        return normalized
+        return cache_keys._normalize_firecrawl_search_categories(categories=categories)
 
     def _looks_like_news_query(self, query_lower: str) -> bool:
         return query_routing._looks_like_news_query(query_lower)
@@ -8420,16 +8341,7 @@ class MySearchClient(ProviderTransport):
         social: dict[str, Any] | None,
         evidence: dict[str, Any],
     ) -> str:
-        sections = self._build_research_report_sections(
-            query=query,
-            web_search=web_search,
-            ordered_results=[],
-            pages=pages,
-            citations=citations,
-            social=social,
-            evidence=evidence,
-        )
-        return self._render_research_report(sections)
+        return cache_keys._build_research_summary_fallback(query=query, web_search=web_search, pages=pages, citations=citations, social=social, evidence=evidence)
 
     def _build_research_source_clusters(
         self,
