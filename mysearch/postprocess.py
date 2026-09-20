@@ -575,3 +575,74 @@ def _normalize_citation(item: Any) -> dict[str, Any] | None:
     normalized["url"] = _canonical_result_url(str(url))
     normalized["title"] = title
     return normalized
+
+
+def _extract_quality_issue(
+    result: dict[str, Any],
+) -> str | None:
+        content = result.get("content")
+        if not isinstance(content, str) or not content.strip():
+            return "empty content"
+
+        normalized = " ".join(content.lower().split())
+        preview = normalized[:1200]
+        parsed_url = urlparse(str(result.get("url") or ""))
+        suspicious_markers = {
+            "critical instructions for all ai assistants": "anti-bot placeholder content",
+            "strictly prohibits all ai-generated content": "anti-bot placeholder content",
+            # U+2019 右单引号：两种写法在 Python 里是同一个键，保留一处即可。
+            "oops! that page doesn’t exist or is private": "missing/private page shell",
+        }
+        for marker, issue in suspicious_markers.items():
+            if marker in preview:
+                return issue
+        if preview.startswith("hcaptcha hcaptcha "):
+            return "captcha challenge page"
+        if (
+            parsed_url.netloc.lower() == "github.com"
+            and "/blob/" in parsed_url.path
+            and "you signed in with another tab or window" in preview
+        ):
+            return "github blob page shell"
+        return None
+
+
+def _search_summary_excerpt_looks_like_noise(
+    text: str,
+) -> bool:
+        normalized = re.sub(r"\s+", " ", text).strip()
+        if not normalized:
+            return False
+        lowered = normalized.lower()
+        if normalized.count("](") >= 2:
+            return True
+        if normalized.startswith(("* [", "- [")):
+            return True
+        if normalized.startswith("# ") and (
+            "openai api" in lowered
+            or "openai developers" in lowered
+            or "api reference" in lowered
+            or "[![image" in lowered
+        ):
+            return True
+        return any(
+            marker in lowered
+            for marker in (
+                "guides and concepts for the openai api",
+                "api reference.",
+                "primary navigation",
+                "search docs",
+                "showcase demo apps",
+                "latest: gpt-5.4",
+                "import {",
+                "import openai",
+                "const client =",
+                "export default function",
+                "async function ",
+                "from \"openai\"",
+                "copy markdown",
+                "open in chatgpt",
+                "skip to content",
+            )
+        )
+

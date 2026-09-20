@@ -31,6 +31,7 @@ from mysearch.research import cache_keys
 from mysearch.research import events
 from mysearch.research import finalize
 from mysearch.research import quality
+from mysearch.research import responses
 from mysearch.research import sections
 from mysearch.research import software_version
 from mysearch.research import selection
@@ -497,28 +498,7 @@ class MySearchClient(ProviderTransport):
         requested_max_results: int | None = None,
         candidate_max_results: int | None = None,
     ) -> dict[str, Any]:
-        result["route_debug"] = {
-            "requested_provider": provider,
-            "route_provider": decision.provider,
-            "normalized_sources": normalized_sources,
-            "resolved_intent": resolved_intent,
-            "resolved_strategy": resolved_strategy,
-            "include_content": include_content,
-            "include_answer": include_answer,
-            "cache_hit": cache_hit,
-        }
-        if requested_max_results is not None:
-            result["route_debug"]["requested_max_results"] = requested_max_results
-        if candidate_max_results is not None:
-            result["route_debug"]["candidate_max_results"] = candidate_max_results
-        evidence = result.get("evidence") or {}
-        if evidence.get("official_mode"):
-            result["route_debug"]["official_mode"] = evidence.get("official_mode")
-        if "official_filter_applied" in evidence:
-            result["route_debug"]["official_filter_applied"] = bool(
-                evidence.get("official_filter_applied")
-            )
-        return result
+        return responses._annotate_search_debug(result=result, provider=provider, normalized_sources=normalized_sources, resolved_intent=resolved_intent, resolved_strategy=resolved_strategy, decision=decision, include_content=include_content, include_answer=include_answer, cache_hit=cache_hit, requested_max_results=requested_max_results, candidate_max_results=candidate_max_results)
 
     def search(
         self,
@@ -6636,31 +6616,7 @@ class MySearchClient(ProviderTransport):
         return self._extract_quality_issue(result) is None
 
     def _extract_quality_issue(self, result: dict[str, Any]) -> str | None:
-        content = result.get("content")
-        if not isinstance(content, str) or not content.strip():
-            return "empty content"
-
-        normalized = " ".join(content.lower().split())
-        preview = normalized[:1200]
-        parsed_url = urlparse(str(result.get("url") or ""))
-        suspicious_markers = {
-            "critical instructions for all ai assistants": "anti-bot placeholder content",
-            "strictly prohibits all ai-generated content": "anti-bot placeholder content",
-            # U+2019 右单引号：两种写法在 Python 里是同一个键，保留一处即可。
-            "oops! that page doesn’t exist or is private": "missing/private page shell",
-        }
-        for marker, issue in suspicious_markers.items():
-            if marker in preview:
-                return issue
-        if preview.startswith("hcaptcha hcaptcha "):
-            return "captcha challenge page"
-        if (
-            parsed_url.netloc.lower() == "github.com"
-            and "/blob/" in parsed_url.path
-            and "you signed in with another tab or window" in preview
-        ):
-            return "github blob page shell"
-        return None
+        return postprocess._extract_quality_issue(result=result)
 
     def _annotate_extract_warning(
         self,
@@ -6668,12 +6624,7 @@ class MySearchClient(ProviderTransport):
         *,
         warning: str,
     ) -> dict[str, Any]:
-        annotated = dict(result)
-        metadata = dict(annotated.get("metadata") or {})
-        metadata["warning"] = warning
-        annotated["metadata"] = metadata
-        annotated["warning"] = warning
-        return annotated
+        return responses._annotate_extract_warning(result=result, warning=warning)
 
     def _annotate_extract_fallback(
         self,
@@ -6682,16 +6633,7 @@ class MySearchClient(ProviderTransport):
         fallback_from: str,
         fallback_reason: str,
     ) -> dict[str, Any]:
-        annotated = dict(result)
-        metadata = dict(annotated.get("metadata") or {})
-        metadata["fallback_from"] = fallback_from
-        metadata["fallback_reason"] = fallback_reason
-        annotated["metadata"] = metadata
-        annotated["fallback"] = {
-            "from": fallback_from,
-            "reason": fallback_reason,
-        }
-        return annotated
+        return responses._annotate_extract_fallback(result=result, fallback_from=fallback_from, fallback_reason=fallback_reason)
 
     def _build_xai_responses_payload(
         self,
@@ -6984,17 +6926,7 @@ class MySearchClient(ProviderTransport):
         requested_url: str,
         candidate_url: str,
     ) -> bool:
-        requested = self._canonical_result_url(requested_url)
-        candidate = self._canonical_result_url(candidate_url)
-        if not requested or not candidate:
-            return False
-        if requested.rstrip("/") == candidate.rstrip("/"):
-            return True
-        requested_host = self._clean_hostname(urlparse(requested).netloc)
-        candidate_host = self._clean_hostname(urlparse(candidate).netloc)
-        if not requested_host or not candidate_host:
-            return False
-        return self._registered_domain(requested_host) == self._registered_domain(candidate_host)
+        return responses._extract_candidate_matches_requested_url(requested_url=requested_url, candidate_url=candidate_url)
 
     @staticmethod
     def _is_social_unavailable_result(result: dict[str, Any] | None) -> bool:
@@ -7618,81 +7550,10 @@ class MySearchClient(ProviderTransport):
         return self._provider_live_status(provider) == "ok"
 
     def _extract_xai_output_text(self, payload: dict[str, Any]) -> str:
-        if isinstance(payload.get("output_text"), str):
-            return payload["output_text"]
-
-        parts: list[str] = []
-        for item in payload.get("output", []) or []:
-            content = item.get("content")
-            if isinstance(content, str):
-                parts.append(content)
-                continue
-
-            if not isinstance(content, list):
-                continue
-
-            for part in content:
-                if not isinstance(part, dict):
-                    continue
-
-                if isinstance(part.get("text"), str):
-                    parts.append(part["text"])
-                    continue
-
-                text_obj = part.get("text")
-                if isinstance(text_obj, dict) and isinstance(text_obj.get("value"), str):
-                    parts.append(text_obj["value"])
-
-        return "\n".join([item for item in parts if item]).strip()
+        return responses._extract_xai_output_text(payload=payload)
 
     def _extract_xai_citations(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
-        raw_citations = payload.get("citations") or []
-        normalized: list[dict[str, Any]] = []
-        seen: set[str] = set()
-
-        if isinstance(raw_citations, list):
-            for item in raw_citations:
-                citation = self._normalize_citation(item)
-                if citation is None:
-                    continue
-                url = citation.get("url", "")
-                if url and url in seen:
-                    continue
-                if url:
-                    seen.add(url)
-                normalized.append(citation)
-
-        if normalized:
-            return normalized
-
-        for output_item in payload.get("output", []) or []:
-            if not isinstance(output_item, dict):
-                continue
-
-            content_items = output_item.get("content") or []
-            if not isinstance(content_items, list):
-                continue
-
-            for content_item in content_items:
-                if not isinstance(content_item, dict):
-                    continue
-
-                annotations = content_item.get("annotations") or []
-                if not isinstance(annotations, list):
-                    continue
-
-                for annotation in annotations:
-                    citation = self._normalize_citation(annotation)
-                    if citation is None:
-                        continue
-                    url = citation.get("url", "")
-                    if url and url in seen:
-                        continue
-                    if url:
-                        seen.add(url)
-                    normalized.append(citation)
-
-        return normalized
+        return responses._extract_xai_citations(payload=payload)
 
     def _normalize_citation(self, item: Any) -> dict[str, Any] | None:
         return postprocess._normalize_citation(item)
@@ -7884,41 +7745,7 @@ class MySearchClient(ProviderTransport):
         return f"Latest release {version} ({date})"
 
     def _search_summary_excerpt_looks_like_noise(self, text: str) -> bool:
-        normalized = re.sub(r"\s+", " ", text).strip()
-        if not normalized:
-            return False
-        lowered = normalized.lower()
-        if normalized.count("](") >= 2:
-            return True
-        if normalized.startswith(("* [", "- [")):
-            return True
-        if normalized.startswith("# ") and (
-            "openai api" in lowered
-            or "openai developers" in lowered
-            or "api reference" in lowered
-            or "[![image" in lowered
-        ):
-            return True
-        return any(
-            marker in lowered
-            for marker in (
-                "guides and concepts for the openai api",
-                "api reference.",
-                "primary navigation",
-                "search docs",
-                "showcase demo apps",
-                "latest: gpt-5.4",
-                "import {",
-                "import openai",
-                "const client =",
-                "export default function",
-                "async function ",
-                "from \"openai\"",
-                "copy markdown",
-                "open in chatgpt",
-                "skip to content",
-            )
-        )
+        return postprocess._search_summary_excerpt_looks_like_noise(text=text)
 
     def _apply_result_event_answer_override(
         self,
