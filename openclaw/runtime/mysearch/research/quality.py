@@ -7,21 +7,20 @@ changelog 与定价页是否命中，以及整体结果集是否弱到需要 Exa
 输入是已经取回的结果项与查询文本，输出是布尔判据——不做 provider 调用、
 不读 config、不碰实例状态。
 
-依赖方向单向：本模块依赖 `query_routing`（结果与查询谓词）、`postprocess`
-（域名归一）与同包的 `sections`；`clients` 在上层依赖本模块。
+依赖方向单向：本模块依赖 `query_routing`（结果与查询谓词）与 `postprocess`
+（域名归一）；`clients` 在上层依赖本模块。
 
 `MySearchClient` 保留同名方法作为一行委托，调用面不变。
 """
 
 from __future__ import annotations
 
-import re
-from typing import Any, Sequence
+from typing import Any
 from urllib.parse import urlparse
 
 from mysearch import postprocess
 from mysearch import query_routing
-from mysearch.research import sections
+from mysearch.types import SearchMode
 def _result_set_looks_weak_for_exa_rescue(
     *,
     query: str,

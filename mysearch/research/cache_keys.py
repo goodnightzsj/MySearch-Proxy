@@ -14,13 +14,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Mapping, Sequence
+from typing import Any, Literal
 
-from mysearch import postprocess
-from mysearch import query_routing
 from mysearch.research import render
 from mysearch.research import sections
-from mysearch.types import ProviderName, RouteDecision, SearchStrategy
+from mysearch.types import ProviderName, ResolvedSearchIntent, RouteDecision, SearchMode, SearchStrategy
 def _build_cache_key(
     namespace: str,
     payload: dict[str, Any],

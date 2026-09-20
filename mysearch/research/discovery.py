@@ -13,13 +13,12 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Mapping, Sequence
+from typing import Any
 
-from mysearch import postprocess
 from mysearch import query_routing
 from mysearch.research import sections
 from mysearch.research import selection
-from mysearch.types import ResolvedSearchIntent, SearchMode
+from mysearch.types import ResolvedSearchIntent, SearchMode, SearchStrategy
 def _research_authoritative_rescue_queries(
     query: str,
 ) -> list[str]:

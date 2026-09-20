@@ -13,10 +13,9 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Mapping
+from typing import Any
 from urllib.parse import urlparse
 
-from mysearch import postprocess
 from mysearch import query_routing
 def _result_event_candidates(
     *,

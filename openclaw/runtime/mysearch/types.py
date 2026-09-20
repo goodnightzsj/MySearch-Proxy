@@ -75,3 +75,20 @@ class RouteDecision:
     fallback_chain: list[str] | None = None
     result_profile: Literal["off", "web", "news", "resource"] = "off"
     allow_exa_rescue: bool = False
+
+
+@dataclass(slots=True)
+class SearchRoutePolicy:
+    """一个 mode 的路由策略：首选 provider、回退链与参数化选项。
+
+    与 `RouteDecision` 同因：下游的路由谓词层（`query_routing`）需要引用它，
+    定义在 `clients` 会迫使那种反向依赖。`clients` 继续 re-export。
+    """
+
+    key: str
+    provider: str
+    fallback_chain: tuple[str, ...] = ()
+    tavily_topic: str = "general"
+    firecrawl_categories: tuple[str, ...] = ()
+    result_profile: Literal["off", "web", "news", "resource"] = "off"
+    allow_exa_rescue: bool = False

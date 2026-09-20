@@ -18,9 +18,10 @@ from typing import Any, Mapping
 from urllib.parse import urlparse, urlunparse
 
 from mysearch import postprocess
+from mysearch.config import ProviderConfig
 from mysearch.errors import MySearchHTTPError
 from mysearch.postprocess import _HCAPTCHA_LANGUAGES
-from mysearch.types import ResolvedSearchIntent, SearchMode, SearchStrategy
+from mysearch.types import ProviderName, ResolvedSearchIntent, SearchIntent, SearchMode, SearchRoutePolicy, SearchStrategy
 
 #: 官方颁奖机构域名：出现在结果里时说明命中官方颁奖页。
 _OFFICIAL_AWARD_DOMAINS = frozenset(

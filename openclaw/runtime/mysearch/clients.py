@@ -10,9 +10,9 @@ import math
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from typing import Any, Callable, Literal, Mapping, Sequence, cast
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 import httpx
@@ -46,6 +46,7 @@ from mysearch.types import (  # noqa: F401  (re-exported: internal refs keep res
     ProviderName,
     dataclass,
     RouteDecision,
+    SearchRoutePolicy,
     ResolvedSearchIntent,
     SearchIntent,
     SearchMode,
@@ -64,16 +65,6 @@ from mysearch.errors import (  # noqa: F401  (re-exported: public import path st
 )
 
 
-
-@dataclass(slots=True)
-class SearchRoutePolicy:
-    key: str
-    provider: str
-    fallback_chain: tuple[str, ...] = ()
-    tavily_topic: str = "general"
-    firecrawl_categories: tuple[str, ...] = ()
-    result_profile: Literal["off", "web", "news", "resource"] = "off"
-    allow_exa_rescue: bool = False
 
 
 _MODE_PROVIDER_POLICY: dict[str, SearchRoutePolicy] = {

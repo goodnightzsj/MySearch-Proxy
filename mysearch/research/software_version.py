@@ -13,12 +13,13 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import urlparse
 
 from mysearch import postprocess
 from mysearch import query_routing
 from mysearch.research import sections
+from mysearch.types import ResolvedSearchIntent, SearchMode
 
 #: 一个候选要算作对当前版本的**断言**而非单纯提及，所需的每版本最低信号分。
 #: `_software_version_candidates_from_text` 给泛化正向标记（"version"/"release"/

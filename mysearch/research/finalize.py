@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from mysearch import postprocess
@@ -20,6 +20,7 @@ from mysearch import query_routing
 from mysearch.provider_contract import ProviderResponse
 from mysearch.research import sections
 from mysearch.research import selection
+from mysearch.types import ResolvedSearchIntent, SearchMode
 def _trim_search_payload(
     result: dict[str, Any],
     *,

@@ -16,8 +16,6 @@ from typing import Any
 from urllib.parse import urlparse
 
 from mysearch import postprocess
-from mysearch import query_routing
-from mysearch.provider_contract import ProviderResponse
 from mysearch.types import (
     ProviderName,
     ResolvedSearchIntent,
