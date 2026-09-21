@@ -203,17 +203,27 @@ class CacheBehaviorTests(unittest.TestCase):
             self.assertIsNone(client._cache_get("search", "k1"))
 
     def test_cache_eviction_prunes_expired_before_dropping_a_live_entry(self) -> None:
-        """容量已满时先裁剪过期项；只有仍满才淘汰最旧活项。"""
-        client = _make_client(search_cache_ttl=60)
+        """容量已满时先裁剪过期项；只有仍满才淘汰最旧活项。
+
+        形状必须是"最旧的是活项、较新的是过期项"，否则两种实现结果相同：
+        若两条都已过期，被淘汰的那条读起来同样是 None（过期），断言无法区分
+        "淘汰了活项"和"过期了读不到"。
+        """
+        client = _make_client(search_cache_ttl=3600)
         client._cache_max_entries = 2
         now = [1000.0]
         with patch("mysearch.cache.time.monotonic", side_effect=lambda: now[0]):
-            client._cache_set("search", "old-1", {"v": 1})
-            client._cache_set("search", "old-2", {"v": 2})
-            now[0] = 1100.0  # 两项都过期
+            client._cache_set("search", "live-old", {"v": 1})  # inserted 1000，活
+            now[0] = 1100.0
+            client._cache_set("search", "expired-new", {"v": 2})  # 较新，但下面改成过期
+            client._cache._store["search"]["expired-new"]["expires_at"] = 1101.0
+            now[0] = 1200.0  # 容量已满，写入第三条
             client._cache_set("search", "fresh", {"v": 3})
-        self.assertIsNotNone(client._cache_get("search", "fresh"))
-        self.assertIsNone(client._cache_get("search", "old-2"))
+            # 先裁过期项：只删 expired-new，live-old 必须留下。
+            # 若跳过裁剪直接淘汰最旧，被删的会是 live-old —— 断言在此区分。
+            self.assertIsNotNone(client._cache_get("search", "live-old"))
+            self.assertNotIn("expired-new", client._cache._store["search"])
+            self.assertIsNotNone(client._cache_get("search", "fresh"))
 
     def test_probe_cache_entry_expires_at_its_ttl(self) -> None:
         """探测缓存没有 TTL 表，过期时间存在条目里。"""
@@ -225,6 +235,9 @@ class CacheBehaviorTests(unittest.TestCase):
             self.assertIsNotNone(client._cache.probe_get("k"))
             now[0] = 1030.0  # expires_at <= now 即过期
             self.assertIsNone(client._cache.probe_get("k"))
+            # 读取过期项时就地删除，而不是只返回 None —— 探测键带 keyring 代数，
+            # 只读不删会让旧代数的键在表里堆积。见下一测试。
+            self.assertNotIn("k", client._cache._probe_store)
 
     def test_probe_cache_does_not_grow_without_bound(self) -> None:
         """换密钥会不断产生新探测键；过期项必须在容量满时先被裁掉。
@@ -241,8 +254,9 @@ class CacheBehaviorTests(unittest.TestCase):
                 store.probe_set(f"k{i}", {"i": i}, ttl_seconds=1)
             now[0] += 10.0  # 全部过期
             store.probe_set("live", {"v": 1}, ttl_seconds=1800)
-        self.assertEqual(len(store._probe_store), 1)
-        self.assertIsNotNone(store.probe_get("live"))
+            # 同 test_cache_eviction_*：读取必须在 patch 块内，否则用真实时钟判过期。
+            self.assertEqual(len(store._probe_store), 1)
+            self.assertIsNotNone(store.probe_get("live"))
 
     def test_probe_cache_evicts_the_oldest_entry_when_full(self) -> None:
         """没有过期项可裁时，淘汰最旧的那一条。"""
@@ -254,8 +268,9 @@ class CacheBehaviorTests(unittest.TestCase):
             for i in range(3):
                 now[0] += 1.0
                 store.probe_set(f"k{i}", {"i": i}, ttl_seconds=1800)
-        self.assertIsNone(store.probe_get("k0"))
-        self.assertIsNotNone(store.probe_get("k2"))
+            # 同 test_cache_eviction_*：读取必须在 patch 块内。
+            self.assertIsNone(store.probe_get("k0"))
+            self.assertIsNotNone(store.probe_get("k2"))
 
     def test_should_cache_search_excludes_x_sources(self) -> None:
         client = _make_client()
