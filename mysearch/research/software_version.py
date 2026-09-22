@@ -165,6 +165,16 @@ _VERSION_ANCHOR_CONNECTORS = frozenset({
     "or", "the", "to", "was", "were", "with",
 })
 
+#: 出现在主语**之前**、把主语变成别的产品限定语的词。
+#:
+#: 锚点恰好是主语名仍不够：`Aspose.Cells for Node.js via Java 25.12` 里
+#: 紧邻 `25.12` 的实词就是 `Java`，但整个短语说的是 Aspose 的版本。
+#: 这类短语的形态固定 —— 主语前是 `via`/`for`/`with` 等连接词。
+#: 与连接词表的分工：那张表管**数字之前**的词，这张表管**主语之前**的词。
+_SUBJECT_QUALIFIER_PREPOSITIONS = frozenset({
+    "for", "in", "on", "using", "via", "with",
+})
+
 
 def _version_is_anchored_to_subject(
     *,
@@ -172,31 +182,36 @@ def _version_is_anchored_to_subject(
     start: int,
     subject_tokens: tuple[str, ...],
 ) -> bool:
-    """版本号**紧邻**的前一个实词是否就是被问软件。
+    """版本号**紧邻**的前一个实词是否就是被问软件，且不是别的产品的限定语。
 
     判据从"附近出现过主语"收紧为"主语必须是紧邻锚点"，因为前者会放行
-    主语属于别的产品的文本。三次真实编造（2026-09-22，生产
+    主语属于别的产品的文本。四次真实编造（2026-09-22，生产
     `latest stable version of Java`）机制同一 —— 都通过了旧校验：
 
-    - `Minecraft Java Edition 26.1.2` -> 抽出 `26.1.2`
-    - `JavaFX 10.7.3`                -> 抽出 `10.7.3`
-    - `Gradle 4.5 stable release`    -> 抽出 `4.5`
+    - `Minecraft Java Edition 26.1.2`        -> 抽出 `26.1.2`
+    - `JavaFX 10.7.3`                        -> 抽出 `10.7.3`
+    - `Gradle 4.5 stable release`            -> 抽出 `4.5`
+    - `Aspose.Cells for Node.js via Java 25.12` -> 抽出 `25.12`
 
-    锚定后：前两者紧邻的实词分别是 `Edition` / `JavaFX`（都不是主语），
-    自然被挡；而 `version of Java is 25.0.1` 跳过虚词后锚点正是 `Java`。
+    前两者紧邻的实词分别是 `Edition` / `JavaFX`（都不是主语）；第四个的
+    锚点**确实是** `Java`，所以还要看它前面 —— 是 `via`，说明 `Java` 在这里
+    是"通过 Java 调用"的限定语。而 `version of Java is 25.0.1` 里
+    主语前是 `of`，不在限定语表内，照常通过。
     """
     if not subject_tokens:
         return True
-    tokens = {token.lower() for token in subject_tokens}
+    tokens = {token.lower().rstrip(".") for token in subject_tokens}
     words = list(re.finditer(r"[A-Za-z][A-Za-z0-9.+#-]*", text[:start]))
     index = len(words)
     while index > 0 and words[index - 1].group(0).lower() in _VERSION_ANCHOR_CONNECTORS:
         index -= 1
     if index == 0:
         return False
-    return words[index - 1].group(0).lower().rstrip(".") in {
-        token.rstrip(".") for token in tokens
-    }
+    if words[index - 1].group(0).lower().rstrip(".") not in tokens:
+        return False
+    if index >= 2 and words[index - 2].group(0).lower() in _SUBJECT_QUALIFIER_PREPOSITIONS:
+        return False
+    return True
 
 
 def _software_version_candidates_from_text(

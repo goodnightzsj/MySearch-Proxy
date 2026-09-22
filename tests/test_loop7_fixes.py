@@ -342,6 +342,52 @@ class SoftwareVersionGroundingTests(unittest.TestCase):
             ["25.0.1"],
         )
 
+    def test_subject_used_as_a_qualifier_of_another_product_is_rejected(self) -> None:
+        """锚点恰是主语还不够 —— 主语可能是别的产品的**限定语**。
+
+        这是加锚定后的第 4 个变体（2026-09-23）：Minecraft 页被挡掉后，
+        答案落到了 `Aspose.Cells for Node.js via Java 25.12` —— 那 25.12 是
+        Aspose 的版本，紧邻的实词却**正是** `Java`。
+        """
+        self.assertEqual(
+            self._candidates("Aspose.Cells for Node.js via Java 25.12 is available.", "Java"),
+            [],
+        )
+        self.assertEqual(
+            self._candidates("The latest stable version of Aspose.Cells for Java is 25.12.", "Java"),
+            [],
+        )
+
+    def test_the_whole_java_extraction_declines_to_answer(self) -> None:
+        """端到端：源里只有别家产品的版本时，宁可**不回答**也不编造。
+
+        用的是修复前实际抓到的 payload（含 Minecraft 与 Aspose 两页），
+        旧代码在这一份上产出 `…is 26.1.2.`。
+        """
+        results = [
+            {
+                "url": "https://javawithus.com/faq/latest-version-of-java",
+                "title": "What Is the Latest Version of Java? (2026)",
+                "snippet": "As of 2026, the latest Java versions are Java 25 LTS and Java 26.",
+            },
+            {
+                "url": "https://gamercubic.com/latest-version-of-minecraft-java",
+                "title": "Latest Version of Minecraft: Java, Bedrock",
+                "snippet": "The latest stable Java version covered here is Minecraft Java Edition 26.1.2.",
+            },
+            {
+                "url": "https://forum.aspose.com/t/request-for-latest-stable-version/323912",
+                "title": "Request for Latest Stable Version - Aspose.Cells for Node.js via Java",
+                "snippet": "The latest stable version, Aspose.Cells for Node.js via Java 25.12, is available.",
+            },
+        ]
+        self.assertEqual(
+            software_version._extract_software_version_answer(
+                query="latest stable version of Java", results=results
+            ),
+            "",
+        )
+
     def test_subject_mention_makes_the_version_eligible(self) -> None:
         self.assertEqual(
             self._candidates("Python 3.14.7 is the latest stable release", "Python"),
