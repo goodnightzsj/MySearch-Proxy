@@ -2720,6 +2720,44 @@ class MySearchClientTests(unittest.TestCase):
             client._looks_like_generic_arxiv_subject_title("arXiv:2505.09388v1 [cs.CL] 14 May 2025")
         )
 
+    def test_generic_arxiv_title_detection_sees_through_decoration_prefixes(self) -> None:
+        """上游会给纯元数据标题套 `[PDF] ` 前缀 —— 必须剥掉再判。
+
+        实测（2026-09-23，`pdf-02`）：`[PDF] arXiv:2505.09388v1 [cs.CL] 14 May
+        2025` 逃过判定，于是 `research/shaping.py` 用它**覆盖了真标题**；该
+        title 不含任何查询词，`ranking.py` 里连输 4 个命中位，真答案被挤出
+        前 5 —— 而那正是被问的论文。同一判定还决定是否去抓真标题，所以
+        漏判让补救逻辑也一起失效。
+        """
+        client = MySearchClient()
+
+        for title in (
+            "[PDF] arXiv:2505.09388v1 [cs.CL] 14 May 2025",
+            "[HTML] arXiv:2505.09388",
+            "[abs] arXiv:2505.09388v2",
+            "[PDF] arXiv:2505.09388v1",
+        ):
+            with self.subTest(title=title):
+                self.assertTrue(client._looks_like_generic_arxiv_subject_title(title))
+
+    def test_decoration_prefix_does_not_hide_a_real_title(self) -> None:
+        """剥前缀不能把真标题也判成元数据 —— 那是反向误杀。"""
+        client = MySearchClient()
+
+        for title in (
+            "[PDF] Qwen3-Coder-Next Technical Report - arXiv",
+            "[2505.09388] Qwen3 Technical Report",
+            "Qwen3 Technical Report - arXiv",
+        ):
+            with self.subTest(title=title):
+                self.assertFalse(client._looks_like_generic_arxiv_subject_title(title))
+
+    def test_a_title_that_is_only_a_decoration_prefix_is_generic(self) -> None:
+        client = MySearchClient()
+
+        self.assertTrue(client._looks_like_generic_arxiv_subject_title("[PDF]"))
+        self.assertTrue(client._looks_like_generic_arxiv_subject_title("[PDF] "))
+
     def test_pdf_query_tokenization_keeps_short_model_suffix(self) -> None:
         client = MySearchClient()
 

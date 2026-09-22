@@ -2498,5 +2498,157 @@ class ResultEventDiscoveryRefinementTests(unittest.TestCase):
         self.assertEqual(processed.get("answer"), "")
         self.assertNotIn("answer_source", processed.get("evidence") or {})
 
+
+class ArxivMetadataTitleTests(unittest.TestCase):
+    """arXiv 元数据标题不能顶掉真标题，否则真答案会被自己的排序挤掉。
+
+    实测（2026-09-23，benchmark 行 `pdf-02`，查询
+    `Qwen3 technical report pdf`，`include_domains=arxiv.org`）：
+
+    - `tavily` 的池里第 0 位**就是**被问的那篇论文
+      `https://arxiv.org/pdf/2505.09388`（score 0.925，全池最高）
+    - 但它的 title 是 `[PDF] arXiv:2505.09388v1 [cs.CL] 14 May 2025` —— 纯元数据
+    - `research/shaping.py` 的合并逻辑本想用"有意义的标题"替换它，却因为
+      判定函数用 `re.fullmatch` 要求整串以 `arxiv:` 开头、而真实标题带
+      `[PDF] ` 前缀，判定失败 → **元数据被当成有意义标题保留了**
+    - 该 title 不含 `qwen3`/`technical`/`report` 任何查询词，于是在
+      `ranking.py` 的 `paper_compound_match` / `topic_total_hits` /
+      `total_precision_hits` 等 4 个命中位上连输，被排到第 10 位
+    - `_trim_search_payload(max_results=5)` 截断 → 正确答案被丢弃
+
+    修复是让判定剥掉装饰前缀。以下是该缺陷的端到端回放。
+    """
+
+    def _pool(self) -> list[dict[str, object]]:
+        """按实测 payload 的形状构造。
+
+        两个关键条件，缺一个就测不出缺陷：
+
+        1. 正确论文在池里有 **3 个变体**（`/pdf/`、`/abs/`、`/html/`），
+           其中一个带真标题 —— 合并阶段"取最长的有意义标题"靠它才能拿到真名。
+        2. 竞争项要有**足够的量级和强度**。实测合并后 12 条，其余论文的标题
+           都含 `Qwen3` 或 `Technical Report`。若 fixture 只有三两条弱竞争项，
+           元数据标题的真答案不会掉出前 5，缺陷就复现不出来 —— 这一点是
+           先用真实 payload 验证过的。
+        """
+        answered = [
+            {
+                "provider": "tavily",
+                "url": "https://arxiv.org/pdf/2505.09388",
+                "title": "[PDF] arXiv:2505.09388v1 [cs.CL] 14 May 2025",
+                "snippet": "Qwen3 is a large language model with advanced multilingual capabilities.",
+                "content": "Qwen3 technical report. " * 400,
+            },
+            {
+                "provider": "tavily",
+                "url": "https://arxiv.org/abs/2505.09388",
+                "title": "[2505.09388] Qwen3 Technical Report",
+                "snippet": "Qwen3 Technical Report.",
+                "content": "Qwen3 technical report. " * 100,
+            },
+            {
+                "provider": "tavily",
+                "url": "https://arxiv.org/html/2505.09388v1",
+                "title": "Qwen3 Technical Report - arXiv",
+                "snippet": "Qwen3 Technical Report.",
+                "content": "Qwen3 technical report. " * 80,
+            },
+        ]
+        competitors = [
+            ("2603.00729", "[PDF] Qwen3-Coder-Next Technical Report - arXiv", "Qwen3-Coder-Next"),
+            ("2601.15621", "[2601.15621] Qwen3-TTS Technical Report", "Qwen3-TTS"),
+            ("2511.21631", "[2511.21631] Qwen3-VL Technical Report - arXiv", "Qwen3-VL"),
+            ("2506.05176", "[PDF] Qwen3 Embedding: Advancing Text Embedding", "Qwen3 Embedding"),
+            ("2604.15804", "Qwen3.5-Omni Technical Report", "Qwen3.5-Omni"),
+            ("2510.14276", "[PDF] Qwen3Guard Technical Report - arXiv", "Qwen3Guard"),
+            ("2609.09240", "[PDF] Qwen3-Max Technical Report - arXiv", "Qwen3-Max"),
+            ("2605.00072", "[PDF] XekRung Technical Report - arXiv", "XekRung"),
+            ("2607.01927", "[PDF] Qwen3-VL Technical Report - arXiv", "Qwen3-VL v2"),
+        ]
+        pool = list(answered)
+        for paper_id, title, body in competitors:
+            pool.append(
+                {
+                    "provider": "tavily",
+                    "url": f"https://arxiv.org/pdf/{paper_id}",
+                    "title": title,
+                    "snippet": f"{body} Technical Report.",
+                    "content": f"{body} technical report. " * 120,
+                }
+            )
+        return pool
+
+    def _merged_result(self, client) -> dict[str, object]:
+        """走真实入口：先按 provider 响应合并，再交给 finalize。
+
+        这一步不能省。真实链路是 `_merge_search_payloads` → finalize；直接
+        把**未合并**的 pool 交给 finalize 会让同一论文的三个变体各自成条，
+        正确答案自然靠前，缺陷复现不出来（试过，测试会恒真）。
+        """
+        pool = self._pool()
+        merged = client._merge_search_payloads(
+            primary_result={"provider": "tavily", "results": pool, "citations": []},
+            secondary_result=None,
+            max_results=15,
+        )
+        return {
+            "provider": "tavily",
+            "results": merged["results"],
+            "citations": merged["citations"],
+            "answer": "",
+            "evidence": {},
+        }
+
+    def test_the_answered_paper_survives_the_finalize_chain(self) -> None:
+        client = _make_client()
+        result = self._merged_result(client)
+
+        finalized = client._finalize_search_result(
+            result,
+            query="Qwen3 technical report pdf",
+            mode="pdf",
+            intent="resource",
+            include_domains=["arxiv.org"],
+            result_profile="resource",
+            max_results=5,
+        )
+
+        urls = [str(item.get("url")) for item in finalized["results"]]
+        self.assertTrue(
+            any("2505.09388" in url for url in urls),
+            f"被问的那篇论文被挤出结果集: {urls}",
+        )
+        self.assertIn("2505.09388", urls[0], "正确答案应当排在首位")
+
+    def test_the_metadata_title_is_replaced_by_a_meaningful_one(self) -> None:
+        """首位标题应当是**真名**，不是 `[PDF] arXiv:…` 元数据。
+
+        修复前元数据被判成"有意义标题"，于是覆盖真名并被保留下来；
+        修复后它被识破，合并阶段转而采用同一论文的 `[2505.09388] Qwen3
+        Technical Report` 变体。
+        """
+        client = _make_client()
+        result = self._merged_result(client)
+
+        finalized = client._finalize_search_result(
+            result,
+            query="Qwen3 technical report pdf",
+            mode="pdf",
+            intent="resource",
+            include_domains=["arxiv.org"],
+            result_profile="resource",
+            max_results=5,
+        )
+
+        top = finalized["results"][0]
+        self.assertIn("2505.09388", str(top.get("url")))
+        title = str(top.get("title") or "")
+        self.assertFalse(
+            client._looks_like_generic_arxiv_subject_title(title),
+            f"首位仍是元数据标题: {title!r}",
+        )
+        self.assertIn("Qwen3", title, f"首位标题不含论文名: {title!r}")
+
+
 if __name__ == "__main__":
     unittest.main()

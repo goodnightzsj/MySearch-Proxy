@@ -1364,11 +1364,34 @@ def _looks_like_locale_prefixed_hostname(hostname: str) -> bool:
     return bool(re.fullmatch(r"[a-z]{2}(?:-[a-z0-9]{2,8}){0,2}", first))
 
 
+#: arXiv 结果标题上的装饰前缀。上游会给**纯元数据**标题套上这些前缀，
+#: 使下面那条"整串以 `arxiv:ID` 开头"的判据失效。
+#:
+#: 实测后果（2026-09-23，`pdf-02`）：`[PDF] arXiv:2505.09388v1 [cs.CL] 14 May
+#: 2025` 被判成"有意义的标题"，于是在 `research/shaping.py` 的合并里**覆盖了
+#: 真标题**；该 title 不含任何查询词，随后在 `ranking.py` 的关键词命中位上
+#: 连输 4 项，真答案被挤出前 5 —— 而那正是被问的那篇论文。
+#: 同一函数在 `clients.py` 还决定是否去抓真标题：判定失败就**不会**去补，
+#: 所以这不是误排序，是让补救逻辑也一起失效。
+_ARXIV_TITLE_DECORATION_RE = re.compile(r"^\s*(?:\[(?:pdf|html|abs|e-print)\]\s*)+", re.IGNORECASE)
+
+
 def _looks_like_generic_arxiv_subject_title(title_text: str) -> bool:
+    """该标题是否只是 arXiv 元数据（而非论文真名）。
+
+    判"是"有两个作用：合并时**不要**用它覆盖真标题，以及触发抓取真标题
+    （`MySearchClient._fetch_arxiv_title`）。所以这里漏判会让两个补救都失效，
+    而不只是排序变差 —— 见 `_ARXIV_TITLE_DECORATION_RE` 的实测记录。
+    """
     cleaned = re.sub(r"\s+", " ", (title_text or "").strip())
     if not cleaned:
         return True
     if re.fullmatch(r"[A-Za-z][A-Za-z &]+ > [A-Za-z][A-Za-z ,&()/-]+", cleaned):
+        return True
+    # 先剥装饰前缀再匹配。不剥的话 `[PDF] arXiv:…` 逃过判定，而它恰恰是
+    # 上游最常给的形态。
+    cleaned = _ARXIV_TITLE_DECORATION_RE.sub("", cleaned)
+    if not cleaned:
         return True
     lowered = cleaned.lower()
     return bool(
