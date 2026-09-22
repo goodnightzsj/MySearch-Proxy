@@ -8934,6 +8934,48 @@ class MySearchClientTests(unittest.TestCase):
         self.assertNotIn("text", request_payloads[0])
         self.assertNotIn("highlights", request_payloads[0])
 
+    def test_exa_search_still_requests_highlights_without_content(self) -> None:
+        """`include_content=False` 不代表"什么文本都不要"。
+
+        缺陷（loop37 抓到）：Exa 的 `highlights` 默认 false，且是结果里
+        `snippet` 的唯一来源。整块 `contents` 挂在 `include_content` 下时，
+        不要正文的调用方拿到的 5 条结果除 title/url 外全空 —— 实测
+        `comparison-01` 的 snippet 与 content 均为 ""，同查询 Tavily 有
+        4928 字符。snippet 同时是 ranking 与 routing 的输入，所以这不只是
+        计分问题。
+
+        断言锚在**上游请求体**上：只要 highlights 回到 `include_content`
+        门控之内，这个测试就失败（已按此做变异验证）。
+        """
+        client = MySearchClient()
+        request_payloads: list[dict[str, object]] = []
+
+        client._get_key_or_raise = lambda provider: type(  # type: ignore[method-assign]
+            "FakeKey",
+            (),
+            {"key": "test-key", "source": "env"},
+        )()
+
+        def fake_request_json(**kwargs):  # type: ignore[no-untyped-def]
+            request_payloads.append(dict(kwargs["payload"]))
+            return {"results": []}
+
+        client._request_json = fake_request_json  # type: ignore[method-assign]
+
+        client._search_exa(
+            query="best MCP server for web search compare 2026",
+            max_results=5,
+            include_domains=None,
+            exclude_domains=None,
+            include_content=False,
+            mode="web",
+            intent="comparison",
+            strategy="balanced",
+        )
+
+        self.assertEqual(request_payloads[0]["contents"], {"highlights": True})
+        self.assertNotIn("text", request_payloads[0]["contents"])
+
     def test_xai_responses_payload_prefers_allowed_filters_when_both_lists_are_present(self) -> None:
         client = MySearchClient()
 

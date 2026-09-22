@@ -4960,11 +4960,19 @@ class MySearchClient(ProviderTransport):
         exa_category = self._exa_category(mode, intent)
         if exa_category:
             payload["category"] = exa_category
+        # Exa 的 `highlights` 是结果里 `snippet` 的**唯一**来源，且**默认 false**。
+        # 早先把整块 `contents` 挂在 `include_content` 下，于是"不要正文"的
+        # 调用方连摘要都拿不到 —— 5 条结果除 title/url 外全空（实测
+        # `comparison-01`：snippet 与 content 均为 ""；Tavily 同查询 4928 字符）。
+        # 影响不止计分：`snippet` 是 ranking 与 routing 的输入
+        # （`ranking.py:34`、`query_routing.py:610` 等十余处），也是结果里
+        # 唯一能让用户看见"这条讲了什么"的字段。
+        # `/search` 不按内容类型分别计费（只有 AI summary 另计 $1/1k），
+        # 所以无条件求 highlights 不增加成本。
+        contents: dict[str, Any] = {"highlights": True}
         if include_content:
-            payload["contents"] = {
-                "text": True,
-                "highlights": True,
-            }
+            contents["text"] = True
+        payload["contents"] = contents
         if from_date:
             payload["startPublishedDate"] = from_date
         if to_date:
