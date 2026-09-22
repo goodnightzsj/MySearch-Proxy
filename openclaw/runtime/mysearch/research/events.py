@@ -153,6 +153,8 @@ _STRICT_AWARD_PATTERNS: dict[str, tuple[list[str], list[str]]] = {
             # `… winner: X`：**必须**带分隔符。曾写成可选，于是
             # `Best Picture winner at the Academy Awards` 把 "at the Academy Awards"
             # 当成了实体 —— 由 test_..._from_headline_style_result 抓到。
+            # 标题式现在时：`… Win <category> for "X" at 2026 Grammys`（Pitchfork 等常用）
+            r"(?:win|wins|won)\s+(?:the\s+)?best picture\s+for\s+[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]",
             r"best picture\s+winner\s*[:\-–—]\s*(?:is\s+)?([^\n.;\"”’']{2,100})",
             r"best picture[^\n]{0,30}\b(?:goes to|went to|awarded to)\b\s*[\"“'‘]?([^\n.;\"”’']{2,100})",
         ],
@@ -169,6 +171,8 @@ _STRICT_AWARD_PATTERNS: dict[str, tuple[list[str], list[str]]] = {
             # `… winner: X`：**必须**带分隔符。曾写成可选，于是
             # `Best Picture winner at the Academy Awards` 把 "at the Academy Awards"
             # 当成了实体 —— 由 test_..._from_headline_style_result 抓到。
+            # 标题式现在时：`… Win <category> for "X" at 2026 Grammys`（Pitchfork 等常用）
+            r"(?:win|wins|won)\s+(?:the\s+)?best actor\s+for\s+[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]",
             r"best actor\s+winner\s*[:\-–—]\s*(?:is\s+)?([^\n.;\"”’']{2,100})",
             r"best actor[^\n]{0,30}\b(?:goes to|went to|awarded to)\b\s*[\"“'‘]?([^\n.;\"”’']{2,100})",
         ],
@@ -185,6 +189,8 @@ _STRICT_AWARD_PATTERNS: dict[str, tuple[list[str], list[str]]] = {
             # `… winner: X`：**必须**带分隔符。曾写成可选，于是
             # `Best Picture winner at the Academy Awards` 把 "at the Academy Awards"
             # 当成了实体 —— 由 test_..._from_headline_style_result 抓到。
+            # 标题式现在时：`… Win <category> for "X" at 2026 Grammys`（Pitchfork 等常用）
+            r"(?:win|wins|won)\s+(?:the\s+)?album of the year\s+for\s+[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]",
             r"album of the year\s+winner\s*[:\-–—]\s*(?:is\s+)?([^\n.;\"”’']{2,100})",
             r"album of the year[^\n]{0,30}\b(?:goes to|went to|awarded to)\b\s*[\"“'‘]?([^\n.;\"”’']{2,100})",
         ],
@@ -201,6 +207,8 @@ _STRICT_AWARD_PATTERNS: dict[str, tuple[list[str], list[str]]] = {
             # `… winner: X`：**必须**带分隔符。曾写成可选，于是
             # `Best Picture winner at the Academy Awards` 把 "at the Academy Awards"
             # 当成了实体 —— 由 test_..._from_headline_style_result 抓到。
+            # 标题式现在时：`… Win <category> for "X" at 2026 Grammys`（Pitchfork 等常用）
+            r"(?:win|wins|won)\s+(?:the\s+)?record of the year\s+for\s+[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]",
             r"record of the year\s+winner\s*[:\-–—]\s*(?:is\s+)?([^\n.;\"”’']{2,100})",
             r"record of the year[^\n]{0,30}\b(?:goes to|went to|awarded to)\b\s*[\"“'‘]?([^\n.;\"”’']{2,100})",
         ],
@@ -471,6 +479,31 @@ def _extract_album_of_the_year_entity(
         return ""
 
 
+#: 捕获串不得以这些词开头 —— 它们说明正则从句子中间切了进去。
+#:
+#: 这条校验是三次失败的共同教训，而不是第四个模式：
+#:   `Best Picture winner at the Academy Awards`      -> 捕获 "at the Academy Awards"
+#:   `Win Record of the Year for "Luther" at 2026…`    -> 捕获 `for "Luther" at 2026…`
+#: 两者都是**介词开头**。逐形态补模式会一直漏；在出口处统一拒绝更可靠。
+_AWARD_ENTITY_STOPWORDS = frozenset({
+    "for", "at", "in", "to", "of", "on", "with", "and", "or", "by", "from",
+    "was", "is", "are", "were", "be", "been", "after", "before", "during",
+    "as", "than", "into",
+})
+#: 冠词**不**列入：与真实片名歧义（`The Substance` 会被误杀），而实测的三次
+#: 失败都以介词开头（`at the Academy Awards`、`for "Luther" at 2026 Grammys`），
+#: 介词已足够把它们拦下。
+
+
+def _looks_like_fragment(entity: str) -> bool:
+    """捕获串是否是从句子中间切出来的碎片。"""
+    stripped = entity.strip().strip("\"“”'‘’ \t")
+    if not stripped:
+        return True
+    first = re.split(r"[\s,]+", stripped, maxsplit=1)[0].lower()
+    return first in _AWARD_ENTITY_STOPWORDS
+
+
 def _extract_named_fact_entity(
     text: str,
     *,
@@ -485,7 +518,11 @@ def _extract_named_fact_entity(
                 match.group(1),
                 reject_substrings=reject_substrings,
             )
-            if entity:
+            # 拒绝"从句子中间切出来"的碎片。放在这里而不是各调用点，是因为
+            # 碎片**两条路径都会产生**：严格模式抓到过
+            # `for "Luther" at 2026 Grammys`，宽松模式抓到过
+            # `at the Academy Awards`。校验在出口处做一次才覆盖得全。
+            if entity and not _looks_like_fragment(entity):
                 return entity
         return ""
 
