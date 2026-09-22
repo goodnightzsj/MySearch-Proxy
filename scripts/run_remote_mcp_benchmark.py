@@ -463,13 +463,15 @@ def build_case(row: dict[str, str]) -> dict[str, object]:
         "include_raw_content": content_fidelity_active,
         "include_images": False,
         "include_image_descriptions": False,
-        # MySearch 侧一直传 include_answer=True（见上面的 mysearch_args）。此前
-        # Tavily 侧没有对应参数，实测 loop33 的 45 行里 tavily_summary 只有 5 行
-        # 非空 —— 而 REMOTE_SCRIPT 会读 blob["answer"] 当 summary。这使
-        # freshness_signal 在有 expected_answer_patterns 的行上对 Tavily 变成
-        # 结构性 0 分（该分支是 5.0 if match else 0.0），与评测意图相悖。
-        # 与 loop18 P0-1（时间范围不对等）同类：tool args 未对齐。
-        "include_answer": True,
+        # 这里**不能**加 include_answer：本仓 runner 的 mysearch_args 侧传
+        # include_answer=True，看上去像不对称，但 tavily_search MCP 工具
+        # 不接受该参数（线上 tools/list 实测，参数只有 country / end_date /
+        # exact_match / exclude_domains / include_domains / include_favicon /
+        # include_image_descriptions / include_images / include_raw_content /
+        # max_results / query / search_depth / start_date / time_range / topic）。
+        # 传了会让每次调用返回 -32603 validation error，把整个对照侧打挂。
+        # 且 Tavily 本来就会自合成 answer（loop33 健康 run 里 tavily_summary
+        # 45/45 非空），所以此处没有公平性缺口。
     }
     time_range = map_tavily_time_range(row)
     if time_range:
