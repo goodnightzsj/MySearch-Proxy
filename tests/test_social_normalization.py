@@ -953,5 +953,51 @@ async def _fake_proxy_state(force: bool = False) -> dict[str, object]:
     }
 
 
+class SharedNormalizationSingleSourceTests(unittest.TestCase):
+    """守护"两侧共用同一份实现"，防止重复以静默分叉的形式复发。
+
+    这组测试存在的理由是一次实测：把 `proxy/server.py:count_social_citations`
+    改成 `return 0`，**920 个测试全绿** —— 当时两份拷贝没有任何机制能发现
+    单边漂移，而两个文件在 15 个提交里被双改过 10 次，漏一次就静默分叉。
+    """
+
+    def test_both_modules_re_export_the_shared_implementation(self) -> None:
+        from mysearch import social_normalization
+
+        for name in social_normalization.__all__:
+            self.assertIs(
+                getattr(social_gateway, name, None),
+                getattr(social_normalization, name),
+                f"social_gateway.{name} 不再是共享实现",
+            )
+            self.assertIs(
+                getattr(proxy_server, name, None),
+                getattr(social_normalization, name),
+                f"proxy/server.py.{name} 不再是共享实现",
+            )
+
+    def test_shared_module_does_not_import_mysearch_internals(self) -> None:
+        """共享模块必须是叶子：两侧都要能廉价导入它。
+
+        若它 import 了 `mysearch` 包内其他模块，proxy 会被拖入
+        `mysearch.config` 的 `_bootstrap_runtime_env` 导入副作用。
+        """
+        import ast
+        from pathlib import Path
+
+        source = Path(REPO_ROOT / "mysearch" / "social_normalization.py").read_text(
+            encoding="utf-8"
+        )
+        offenders = []
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("mysearch"):
+                offenders.append(node.module)
+            if isinstance(node, ast.ImportFrom) and (node.level or 0) > 0:
+                offenders.append(f"relative:{node.module}")
+            if isinstance(node, ast.Import):
+                offenders.extend(a.name for a in node.names if a.name.startswith("mysearch"))
+        self.assertEqual(offenders, [], f"共享模块引入了内部依赖: {offenders}")
+
+
 if __name__ == "__main__":
     unittest.main()
