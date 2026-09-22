@@ -956,6 +956,26 @@ def looks_synthetic_social_status_id(status_id: str) -> bool:
 
 
 def normalize_social_match_url(url: str) -> str:
+    """把 X/Twitter 的 status URL 归一成**按 status ID** 的 join key。
+
+    这个 key 只用于在 `trusted_citations`（上游 annotations）与模型正文的
+    `results[]` 之间做匹配，**从不进入响应输出**（输出用 `citation["url"]` 原值）。
+    因此它可以自由选择最稳定的形态。
+
+    历史实现按 `handle` 归一（`x.com/{handle}/status/{id}`）。那在真实上游返回
+    下**永远匹配不上**：annotations 给的 handle 是匿名的 `i`
+    （`https://x.com/i/status/<id>`），而模型正文写的是真实 handle
+    （`https://x.com/QCodecc/status/<id>`）。结果是 `matched_results` 恒为空，
+    `build_social_result` 拿不到 `matched`，模型已给出的 title/author/text
+    全部丢失，下游只看到一串裸 URL。
+
+    status ID 本身就是 post 的唯一标识，handle 只是路径上的装饰——同一 post
+    经不同 handle 写法（含 `i`）指向的都是同一个对象，所以 key 只保留 ID。
+    `looks_synthetic_social_status_id` 的过滤保留在 key 生成处，防编造的语义不变：
+    ID 仍必须出现在 `trusted_citations` 里才算匹配成功。
+
+    与 `proxy/server.py` 的同名函数保持逐字一致（两份是刻意的独立实现）。
+    """
     raw_url = (url or "").strip()
     if not raw_url:
         return ""
@@ -979,8 +999,7 @@ def normalize_social_match_url(url: str) -> str:
         return ""
     if looks_synthetic_social_status_id(parts[2]):
         return ""
-    handle = parts[0].lstrip("@").lower()
-    return f"https://x.com/{handle}/status/{parts[2]}"
+    return f"https://x.com/i/status/{parts[2]}"
 
 
 def is_supported_social_result_url(url: str) -> bool:

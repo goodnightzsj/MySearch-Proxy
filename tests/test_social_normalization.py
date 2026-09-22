@@ -174,6 +174,41 @@ class SocialNormalizationTests(unittest.TestCase):
                 ],
             )
 
+    def test_anonymous_i_handle_in_annotations_still_matches_named_model_url(self) -> None:
+        """上游 annotations 用匿名 `i`，模型正文用真实 handle —— 必须匹配上。
+
+        这是真实上游的形态（实测 2026-09-22）：xAI 的 url_citation 一律给
+        `https://x.com/i/status/<id>`，而模型在 results[] 里写真实 handle。
+        按 handle 归一 key 时两者永不相等，`matched_results` 恒为空，
+        模型已给出的 title/author/text 全部丢失，下游只看到裸 URL。
+        """
+        payload = _payload(
+            text='{"answer":"summary","results":['
+            '{"url":"https://x.com/QCodecc/status/2100451355907502302",'
+            '"title":"反代 gemini 这条路 2 月封过一波","text":"real post text",'
+            '"author":"QCode","handle":"QCodecc","created_at":"2026-09-20T12:00:00Z",'
+            '"why_relevant":"directly about the query"}]}',
+            citations=[
+                {
+                    "url": "https://x.com/i/status/2100451355907502302",
+                    "title": "https://x.com/i/status/2100451355907502302",
+                }
+            ],
+        )
+
+        for module in (social_gateway, proxy_server):
+            result = module.normalize_social_search_response("claude code 反代", payload, 5)
+            self.assertEqual(len(result["results"]), 1)
+            item = result["results"][0]
+            self.assertEqual(
+                item["url"],
+                "https://x.com/i/status/2100451355907502302",
+            )
+            self.assertEqual(item["text"], "real post text")
+            self.assertEqual(item["author"], "QCode")
+            self.assertEqual(item["handle"], "QCodecc")
+            self.assertEqual(item["why_relevant"], "directly about the query")
+
     def test_matching_twitter_alias_merges_model_fields_into_trusted_citation(self) -> None:
         payload = _payload(
             text='{"answer":"summary","results":[{"url":"https://twitter.com/openai/status/1901234567890123456","text":"real post text","author":"OpenAI","handle":"@OpenAI","created_at":"2026-03-19T12:00:00Z","why_relevant":"launch context"}]}',

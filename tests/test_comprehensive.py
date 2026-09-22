@@ -1368,26 +1368,48 @@ KEY_SINGLE = 'value-single'
 # ===========================================================================
 
 class SocialURLNormalizationTests(unittest.TestCase):
+    """`normalize_social_match_url` 的契约：只按 status ID 归一。
+
+    这个返回值是 `trusted_citations` 与模型 `results[]` 之间的 join key，
+    不进入响应输出。**handle 不参与 key** —— 上游 annotations 用的是匿名
+    `i`，模型正文用真实 handle，把 handle 编进 key 会让两者永不匹配。
+    """
+
     def test_valid_x_url(self) -> None:
         url = "https://x.com/OpenAI/status/1901234567890123456"
         self.assertEqual(
             social_gateway.normalize_social_match_url(url),
-            "https://x.com/openai/status/1901234567890123456",
+            "https://x.com/i/status/1901234567890123456",
         )
 
     def test_twitter_url_normalized_to_x(self) -> None:
         url = "https://twitter.com/OpenAI/status/1901234567890123456"
         self.assertEqual(
             social_gateway.normalize_social_match_url(url),
-            "https://x.com/openai/status/1901234567890123456",
+            "https://x.com/i/status/1901234567890123456",
         )
 
     def test_mobile_twitter_url(self) -> None:
         url = "https://mobile.twitter.com/user/status/1901234567890123456"
         self.assertEqual(
             social_gateway.normalize_social_match_url(url),
-            "https://x.com/user/status/1901234567890123456",
+            "https://x.com/i/status/1901234567890123456",
         )
+
+    def test_handle_does_not_affect_key(self) -> None:
+        """同一 post 的不同 handle 写法必须归一到同一个 key。
+
+        这是回归测试：上游 annotations 给 `i`，模型正文给真实 handle，
+        按 handle 归一曾让二者永不相等，导致模型字段全丢。
+        """
+        anonymous = social_gateway.normalize_social_match_url(
+            "https://x.com/i/status/2100451355907502302"
+        )
+        named = social_gateway.normalize_social_match_url(
+            "https://x.com/QCodecc/status/2100451355907502302"
+        )
+        self.assertEqual(anonymous, named)
+        self.assertNotEqual(anonymous, "")
 
     def test_profile_url_rejected(self) -> None:
         self.assertEqual(social_gateway.normalize_social_match_url("https://x.com/OpenAI"), "")
@@ -1421,17 +1443,20 @@ class SocialURLNormalizationTests(unittest.TestCase):
         """IDs shorter than 12 digits should not be considered synthetic."""
         self.assertFalse(social_gateway.looks_synthetic_social_status_id("12345"))
 
-    def test_url_with_query_params_preserved(self) -> None:
-        """Query parameters should be stripped during normalization."""
+    def test_url_with_query_params_stripped(self) -> None:
+        """Query parameters must not leak into the join key."""
         url = "https://x.com/user/status/1901234567890123456?utm_source=test"
-        result = social_gateway.normalize_social_match_url(url)
-        # match_url should be clean
-        self.assertEqual(result, "https://x.com/user/status/1901234567890123456")
+        self.assertEqual(
+            social_gateway.normalize_social_match_url(url),
+            "https://x.com/i/status/1901234567890123456",
+        )
 
     def test_url_with_at_handle(self) -> None:
         url = "https://x.com/@OpenAI/status/1901234567890123456"
-        result = social_gateway.normalize_social_match_url(url)
-        self.assertEqual(result, "https://x.com/openai/status/1901234567890123456")
+        self.assertEqual(
+            social_gateway.normalize_social_match_url(url),
+            "https://x.com/i/status/1901234567890123456",
+        )
 
     def test_normalize_citation_extracts_url(self) -> None:
         item = {"target_url": "https://x.com/test/status/123", "source_title": "Title"}
