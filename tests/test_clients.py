@@ -752,6 +752,51 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(result["answer"], "Best Picture winner: One Battle After Another")
 
+    def test_nominee_list_does_not_beat_an_explicit_winner_statement(self) -> None:
+        """严格模式必须**跨全部候选**先扫一遍，否则名单式表述会抢答。
+
+        实测 entertainment-03：LA Times 在 `## Record of the year` 标题下列的是
+        **提名名单**（“DtMF” — Bad Bunny 在首位），而真正获奖的
+        “Luther” — Kendrick Lamar 排在末尾；同一批候选里 ABC News 明确写着
+        `record of the year winner "luther,"`。原实现逐条尝试、第一条抽到就返回，
+        于是把**提名**当成了获奖者。
+        """
+        client = MySearchClient()
+
+        result = client._apply_result_event_answer_override(
+            query="2026 Grammy Record of the Year winner",
+            mode="news",
+            intent="news",
+            strategy="verify",
+            result={
+                "answer": "",
+                "results": [
+                    {
+                        "title": "Grammys 2026: The complete winners list",
+                        "url": "https://example.com/latimes-grammys",
+                        "snippet": "",
+                        "content": (
+                            "## Record of the year\n\n"
+                            "“DtMF” — Bad Bunny\n"
+                            "“Manchild” — Sabrina Carpenter\n"
+                            "“Luther” — Kendrick Lamar\n"
+                        ),
+                    },
+                    {
+                        "title": "2026 Grammy Awards full list",
+                        "url": "https://example.com/abc-grammys",
+                        "snippet": "",
+                        "content": (
+                            "record of the year winner \"luther,\" Kendrick Lamar With SZA"
+                        ),
+                    },
+                ],
+                "evidence": {},
+            },
+        )
+
+        self.assertEqual(result["answer"], 'Record of the Year winner: luther')
+
     def test_apply_result_event_answer_override_falls_back_to_official_award_page_html(self) -> None:
         client = MySearchClient()
         extraction_calls: list[str] = []

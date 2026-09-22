@@ -44,6 +44,7 @@ def _extract_result_event_answer(
         query_lower = query.lower()
         award_query = query_routing._looks_like_award_result_query(query_lower)
         signal_texts: list[str] = []
+        strict_texts: list[str] = []
         for item in _result_event_candidates(query=query, results=results, limit=5):
             title_text = str(item.get("title") or "").strip()
             snippet_text = str(item.get("snippet") or "").strip()
@@ -78,20 +79,37 @@ def _extract_result_event_answer(
             )
             if title_only_allowed and title_text:
                 candidate_texts.append(title_text)
-            for text in candidate_texts:
-                if not text:
-                    continue
-                answer = _extract_result_event_answer_from_text(
-                    query_lower=query_lower,
-                    text=text,
-                )
-                if answer:
-                    return answer
+            # 第一遍的材料先攒起来，**不要**在这里就返回：标题式/名单式的宽松
+            # 命中会把"提名名单首项"当成获奖者，而正确表述可能排在后面的候选里
+            # （实测 entertainment-03：LA Times 的提名名单抢在 ABC News 的
+            #  `record of the year winner "luther"` 之前被抽走）。
+            strict_texts.extend(t for t in candidate_texts if t)
             combined_item_text = "\n".join(
                 value for value in (snippet_text, content_text, title_text) if value
             )
             if combined_item_text:
                 signal_texts.append(combined_item_text)
+
+        # 第一遍：严格模式，要求显式的获奖措辞。
+        for text in strict_texts:
+            answer = _strict_award_answer(query_lower=query_lower, text=text)
+            if answer:
+                return answer
+        if signal_texts:
+            answer = _strict_award_answer(
+                query_lower=query_lower, text="\n".join(signal_texts)
+            )
+            if answer:
+                return answer
+
+        # 第二遍：宽松模式（原行为），只在严格模式全无命中时兜底。
+        for text in strict_texts:
+            answer = _extract_result_event_answer_from_text(
+                query_lower=query_lower,
+                text=text,
+            )
+            if answer:
+                return answer
         if not signal_texts:
             return ""
 
@@ -100,6 +118,119 @@ def _extract_result_event_answer(
             query_lower=query_lower,
             text=combined_text,
         )
+
+
+#: 每类奖项的**严格**答案模式：必须出现 won / wins / winner 这类"获奖"动词。
+#:
+#: 为什么需要第二遍扫描（实测 entertainment-03）：抽取器原本逐条尝试候选文本、
+#: 第一条抽到就返回。LA Times 的页面在 `## Record of the year` 标题下给出的是
+#: **提名名单**（“DtMF” — Bad Bunny 排在首位），宽松模式 `record of the year\s*[–—:]\s*`
+#: 直接把它当成了获奖者；而同一批候选里 ABC News 写的是
+#: `record of the year winner "luther," Kendrick Lamar With SZA`（**正确**），
+#: 却因为 LA Times 排在前面而从未被尝试。
+#:
+#: 严格模式要求显式的获奖措辞，因此不会命中"标题 + 名单首项"。两遍扫描的次序
+#: 是关键：**先**用严格模式扫完所有候选，找不到才退回宽松模式。
+#: 类别 -> 输出标签。**不要**用 `str.title()`：它会把 "record of the year"
+#: 变成 "Record Of The Year"，与既有输出格式（`Record of the Year winner: …`）
+#: 不一致，而下游与测试按该格式断言。
+_AWARD_LABELS = {
+    "best picture": "Best Picture",
+    "best actor": "Best Actor",
+    "album of the year": "Album of the Year",
+    "record of the year": "Record of the Year",
+}
+
+_STRICT_AWARD_PATTERNS: dict[str, tuple[list[str], list[str]]] = {
+    "best picture": (
+        [
+            # 引号标题 + "is the …winner"：新闻报道最常见。
+            r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+is\s+the\s+(?:20\d{2}\s+)?best picture",
+            # 引号 + won + 奖项品牌
+            r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+won\s+(?:the\s+)?(?:20\d{2}\s+)?(?:oscar|academy award)[^\n]{0,40}\bbest picture\b",
+            # `… winner "X"`：紧跟在 winner 后的**引号**实体（ABC News 的措辞）。
+            r"best picture\s+winner[\s:–—-]*(?:is\s+)?[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]",
+            # `… winner: X`：**必须**带分隔符。曾写成可选，于是
+            # `Best Picture winner at the Academy Awards` 把 "at the Academy Awards"
+            # 当成了实体 —— 由 test_..._from_headline_style_result 抓到。
+            r"best picture\s+winner\s*[:\-–—]\s*(?:is\s+)?([^\n.;\"”’']{2,100})",
+            r"best picture[^\n]{0,30}\b(?:goes to|went to|awarded to)\b\s*[\"“'‘]?([^\n.;\"”’']{2,100})",
+        ],
+        ["presented annually", "recognizes", "is an award"],
+    ),
+    "best actor": (
+        [
+            # 引号标题 + "is the …winner"：新闻报道最常见。
+            r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+is\s+the\s+(?:20\d{2}\s+)?best actor",
+            # 引号 + won + 奖项品牌
+            r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+won\s+(?:the\s+)?(?:20\d{2}\s+)?(?:oscar|academy award)[^\n]{0,40}\bbest actor\b",
+            # `… winner "X"`：紧跟在 winner 后的**引号**实体（ABC News 的措辞）。
+            r"best actor\s+winner[\s:–—-]*(?:is\s+)?[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]",
+            # `… winner: X`：**必须**带分隔符。曾写成可选，于是
+            # `Best Picture winner at the Academy Awards` 把 "at the Academy Awards"
+            # 当成了实体 —— 由 test_..._from_headline_style_result 抓到。
+            r"best actor\s+winner\s*[:\-–—]\s*(?:is\s+)?([^\n.;\"”’']{2,100})",
+            r"best actor[^\n]{0,30}\b(?:goes to|went to|awarded to)\b\s*[\"“'‘]?([^\n.;\"”’']{2,100})",
+        ],
+        ["actress", "supporting", "nominee", "nominees", "presented annually"],
+    ),
+    "album of the year": (
+        [
+            # 引号标题 + "is the …winner"：新闻报道最常见。
+            r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+is\s+the\s+(?:20\d{2}\s+)?album of the year",
+            # 引号 + won + 奖项品牌
+            r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+won\s+(?:the\s+)?(?:20\d{2}\s+)?(?:grammy)[^\n]{0,40}\balbum of the year\b",
+            # `… winner "X"`：紧跟在 winner 后的**引号**实体（ABC News 的措辞）。
+            r"album of the year\s+winner[\s:–—-]*(?:is\s+)?[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]",
+            # `… winner: X`：**必须**带分隔符。曾写成可选，于是
+            # `Best Picture winner at the Academy Awards` 把 "at the Academy Awards"
+            # 当成了实体 —— 由 test_..._from_headline_style_result 抓到。
+            r"album of the year\s+winner\s*[:\-–—]\s*(?:is\s+)?([^\n.;\"”’']{2,100})",
+            r"album of the year[^\n]{0,30}\b(?:goes to|went to|awarded to)\b\s*[\"“'‘]?([^\n.;\"”’']{2,100})",
+        ],
+        ["nominee", "nominees", "presented annually"],
+    ),
+    "record of the year": (
+        [
+            # 引号标题 + "is the …winner"：新闻报道最常见。
+            r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+is\s+the\s+(?:20\d{2}\s+)?record of the year",
+            # 引号 + won + 奖项品牌
+            r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+won\s+(?:the\s+)?(?:20\d{2}\s+)?(?:grammy)[^\n]{0,40}\brecord of the year\b",
+            # `… winner "X"`：紧跟在 winner 后的**引号**实体（ABC News 的措辞）。
+            r"record of the year\s+winner[\s:–—-]*(?:is\s+)?[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]",
+            # `… winner: X`：**必须**带分隔符。曾写成可选，于是
+            # `Best Picture winner at the Academy Awards` 把 "at the Academy Awards"
+            # 当成了实体 —— 由 test_..._from_headline_style_result 抓到。
+            r"record of the year\s+winner\s*[:\-–—]\s*(?:is\s+)?([^\n.;\"”’']{2,100})",
+            r"record of the year[^\n]{0,30}\b(?:goes to|went to|awarded to)\b\s*[\"“'‘]?([^\n.;\"”’']{2,100})",
+        ],
+        ["nominee", "nominees", "presented annually"],
+    ),
+}
+
+
+def _strict_award_answer(*, query_lower: str, text: str) -> str:
+    """只在文本**明确写出获奖者**时返回答案，否则返回空串。
+
+    与 `_extract_result_event_answer_from_text` 的区别是后者接受
+    "`<奖项>:` + 首项"这种名单式表述，会把提名当成获奖。本函数的模式都要求
+    `winner` / `won` / `goes to` 之类的显式获奖措辞。
+    """
+    if not text:
+        return ""
+    text = re.sub(
+        r"\[([^\]\n]+)\]\(https?://[^)\n]+\)",
+        r"\1",
+        text,
+        flags=re.IGNORECASE,
+    )
+    for category, (patterns, reject) in _STRICT_AWARD_PATTERNS.items():
+        if category not in query_lower:
+            continue
+        entity = _extract_named_fact_entity(text, patterns=patterns, reject_substrings=reject)
+        if entity:
+            return f"{_AWARD_LABELS[category]} winner: {entity}"
+    return ""
 
 
 def _extract_result_event_answer_from_text(
