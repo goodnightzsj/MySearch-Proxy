@@ -1601,6 +1601,40 @@ class MySearchClientTests(unittest.TestCase):
             )
         )
 
+    def test_query_year_mismatch_ignores_copyright_year(self) -> None:
+        """版权/商标行的年份不能当作"该结果属于这一年"的证据。
+
+        实测来源：loop33 的 `entertainment-02`。grammy.com 的
+        「Album Of The Year Classical **1967** Winners & Nominees」
+        页面（标题与 URL 都是 1967）在 snippet 里带 `© 2026 Grammy`，
+        于是旧的年份集合混入 2026 → 与 query 的 2026 有交集 → 守卫放行 →
+        抽取出 1967 年的获奖者 "Morton Gould, conductor" 当作 2026 年的答案。
+        """
+        client = MySearchClient()
+
+        self.assertTrue(
+            client._looks_like_query_year_mismatch(
+                query="2026 Grammy Album of the Year winner",
+                text=(
+                    "Album Of The Year Classical 1967 Winners & Nominees "
+                    "© 2026 Grammy. All rights reserved."
+                ),
+            )
+        )
+        self.assertFalse(
+            client._looks_like_query_year_mismatch(
+                query="2026 Grammy Album of the Year winner",
+                text="© 2026 Grammy. 2026 Grammy Awards winners list",
+            )
+        )
+        # 页脚区间年份（"© 1999-2026"）同样不能算作内容年份。
+        self.assertTrue(
+            client._looks_like_query_year_mismatch(
+                query="2026 Grammy Album of the Year winner",
+                text="Album Of The Year Classical 1967 Winners © 1999-2026 Grammy",
+            )
+        )
+
     def test_refined_award_result_query_rewrites_oscars_query(self) -> None:
         client = MySearchClient()
 

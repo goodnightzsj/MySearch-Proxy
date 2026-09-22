@@ -1396,8 +1396,18 @@ class AutoStrategyTests(unittest.TestCase):
             "advanced",
         )
 
-    def test_shipped_matrix_still_pins_every_strategy(self) -> None:
-        """现有矩阵每行都显式给 strategy，所以本改动不影响它们。"""
+    def test_shipped_matrix_keeps_exactly_one_auto_row(self) -> None:
+        """矩阵里应当**恰好一行**不钉 strategy，用来覆盖 `_resolve_strategy` 的推导。
+
+        这条测试原先断言"每行都显式给 strategy"（即 0 行 auto），把它当时
+        记录的缺口当成了期望行为 —— loop18 的 P1 写得很清楚：
+        runner 侧 `map_strategy` 的空值已改为返回 `auto`，但矩阵全填了
+        strategy_hint，于是 5 个推导分支零覆盖，"机制修了、覆盖没修"。
+
+        现在 `fast-02`（纯事实快问）留空，应推导为 fast。
+        断言精确到 1 行：多行留空会让矩阵大面积变成 auto，
+        少到 0 行则缺口重新出现。
+        """
         matrix = (
             REPO_ROOT
             / ".codex-tasks"
@@ -1409,8 +1419,13 @@ class AutoStrategyTests(unittest.TestCase):
             self.skipTest("benchmark matrix not present")
         with matrix.open(newline="", encoding="utf-8") as handle:
             rows = list(csv.DictReader(handle))
-        empty = [r["benchmark_id"] for r in rows if not (r.get("strategy_hint") or "").strip()]
-        self.assertEqual(empty, [], f"这些行会突然变成 auto: {empty}")
+        auto = [r["benchmark_id"] for r in rows if run_remote_mcp_benchmark.map_strategy(r) == "auto"]
+        self.assertEqual(
+            len(auto),
+            1,
+            f"应恰好一行解析为 auto（覆盖 _resolve_strategy 推导），实得 {auto}",
+        )
+        self.assertEqual(auto, ["fast-02"])
 
 
 class ContentMetricsFairnessTests(unittest.TestCase):
@@ -1451,6 +1466,93 @@ class ContentMetricsFairnessTests(unittest.TestCase):
         metrics = self._load()
         blob = {"results": [{"url": "https://x", "raw_content": "r" * 500, "snippet": "s" * 300}]}
         self.assertEqual(metrics(blob)["char_count"], 500)
+
+
+class MatrixContractTests(unittest.TestCase):
+    """守护矩阵必须持续覆盖几个"机制修了、覆盖没修"的口子。
+
+    loop18 的 P1 记录了这个模式：runner 侧把 `map_strategy` 的空值从
+    "按 prompt_variant 猜"改成返回 `auto`，但**矩阵 45 行全部显式填了
+    strategy_hint**，于是 `_resolve_strategy` 的 5 个推导分支依旧零覆盖，
+    改机制没有产生任何可观察的差异。这组测试把覆盖本身钉住。
+    """
+
+    MATRIX = (
+        REPO_ROOT
+        / ".codex-tasks"
+        / "20260530-provider-optimization-loop-v2"
+        / "raw"
+        / "loop11-benchmark-input-final.csv"
+    )
+
+    def setUp(self) -> None:
+        # `.codex-tasks/` 被 gitignore，矩阵不随仓库分发；CI 的全新 clone 里
+        # 没有这个文件。缺文件时跳过，而不是让整套测试崩掉。
+        if not self.MATRIX.exists():
+            self.skipTest("benchmark matrix not present")
+
+    def _rows(self) -> list[dict[str, str]]:
+        with self.MATRIX.open(encoding="utf-8") as fh:
+            return list(csv.DictReader(fh))
+
+    def test_matrix_has_a_row_that_resolves_to_auto_strategy(self) -> None:
+        rows = self._rows()
+        auto = [row["benchmark_id"] for row in rows if run_remote_mcp_benchmark.map_strategy(row) == "auto"]
+        self.assertTrue(
+            auto,
+            "矩阵里没有任何一行解析出 strategy=auto，"
+            "_resolve_strategy 的推导分支重新变成零覆盖",
+        )
+
+    def test_news_rows_have_a_falsifiable_answer_expectation(self) -> None:
+        """新闻类行必须有可证伪的答案期望值。
+
+        没有期望值时，runner 的 authority_precision 走"无断言"分支，
+        freshness_signal 退化成只看有没有日期（不看内容对不对）——
+        这些行测的是"跑通了"，不是"答对了"。
+
+        实测证明了这条必要性：loop33 的健康 run 里 news-03 抽出
+        "Best Actor winner: John Malkovich"（那是**威尼斯电影节**的奖），
+        entertainment-02 抽出 "Morton Gould"（**1967 年**的格莱美）——
+        两行当时都没有期望值，所以没有任何计分项能发现它们答错了。
+        """
+        rows = {row["benchmark_id"]: row for row in self._rows()}
+        news = sorted(bid for bid in rows if bid.startswith("news-"))
+        self.assertTrue(news, "矩阵里没有 news-* 行")
+        missing = sorted(
+            bid
+            for bid in news
+            if not rows[bid]["expected_answer_patterns"].strip()
+        )
+        self.assertEqual(missing, [], f"这些新闻行没有答案期望值: {missing}")
+
+    def test_extract_and_crawl_rows_document_why_they_have_no_url_expectation(self) -> None:
+        """抽取/爬取行**无法**用 expected_url_patterns 证伪 —— 记录这个缺口。
+
+        `collect_urls` 对 extract_url/map_site/crawl_site 的响应会先取
+        `blob["url"]`，而输入就是那个 URL（实测 loop33：
+        `extract-01` 的 top_urls[0] == 查询 URL）。所以给这些行填
+        `expected_url_patterns` 会是一个**恒真断言**，还给
+        authority_precision 白送 +1.5 分。真正的缺口在 runner：
+        没有任何计分项检查"抽取到的正文是否包含某个事实"。
+        """
+        rows = {row["benchmark_id"]: row for row in self._rows()}
+        scoped = sorted(
+            bid
+            for bid in rows
+            if bid.startswith(("extract-", "hard-extract-", "crawl-map-"))
+        )
+        self.assertTrue(scoped, "矩阵里没有抽取/爬取行")
+        # 恒真断言比没有断言更糟：它把一个真空包装成"已覆盖"。
+        offenders = [
+            bid for bid in scoped if rows[bid]["expected_url_patterns"].strip()
+        ]
+        self.assertEqual(
+            offenders,
+            [],
+            "抽取/爬取行不该有 expected_url_patterns —— 输入 URL 会被回显，"
+            f"断言恒真: {offenders}",
+        )
 
 
 if __name__ == "__main__":

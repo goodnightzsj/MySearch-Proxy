@@ -2707,11 +2707,34 @@ def _looks_like_publisher_fragment(entity: str) -> bool:
     return False
 
 
+#: 版权/商标行的时间戳不描述内容年份，不能当作"该结果属于这一年"的证据。
+#: 实测：grammy.com 的「Album Of The Year Classical **1967** Winners & Nominees」
+#: 页面（标题与 URL 都是 1967）在 snippet 里带 `© 2026 Grammy`，于是
+#: `result_years` 混入 2026 → 与 query 年份有交集 → 年份守卫放行 →
+#: 抽取出 1967 年的获奖者 "Morton Gould" 当作 2026 年的答案。
+_COPYRIGHT_YEAR_RE = re.compile(
+    r"(?:©|\(c\)|\(C\)|&copy;|copyright(?:\s+©)?)\s*((?:19|20)\d{2})",
+    re.IGNORECASE,
+)
+
+
+def _content_years(text: str) -> set[str]:
+    """取文本里描述**内容**的年份，剔掉版权/商标行的年份。
+
+    掩码顺序有讲究：**先**抹区间再抹版权。反过来的话，
+    `© 1999-2026` 里的 `1999` 先被版权规则吃掉，区间规则就匹配不上
+    "1999-2026"，尾年 `2026` 会作为内容年份幸存。
+    """
+    masked = re.sub(r"(?:19|20)\d{2}\s*[-–—]\s*(?:19|20)\d{2}", " ", text)
+    masked = _COPYRIGHT_YEAR_RE.sub(" ", masked)
+    return set(re.findall(r"\b(?:19|20)\d{2}\b", masked))
+
+
 def _looks_like_query_year_mismatch(*, query: str, text: str) -> bool:
-    query_years = {year for year in re.findall(r"\b(?:19|20)\d{2}\b", query)}
+    query_years = _content_years(query)
     if not query_years:
         return False
-    result_years = {year for year in re.findall(r"\b(?:19|20)\d{2}\b", text)}
+    result_years = _content_years(text)
     if not result_years:
         return False
     return query_years.isdisjoint(result_years)
