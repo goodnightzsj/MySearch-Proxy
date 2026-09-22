@@ -81,7 +81,8 @@ def _extract_software_version_answer(
     results: list[dict[str, Any]],
 ) -> str:
         subject = _software_version_subject(query)
-        candidates: list[tuple[int, tuple[int, int, int], int, str]] = []
+        subject_tokens = _software_version_subject_tokens(query, subject)
+        candidates: list[tuple[int, tuple[int, int, int], int, str, int]] = []
         for index, item in enumerate(results):
             item_score = _software_version_result_score(query=query, item=item)
             if item_score <= 0:
@@ -94,7 +95,9 @@ def _extract_software_version_answer(
                 str(item.get("content") or ""),
             ]
             for text in text_chunks:
-                for version_text, version_tuple, signal_score in _software_version_candidates_from_text(text):
+                for version_text, version_tuple, signal_score in _software_version_candidates_from_text(
+                    text, subject_tokens=subject_tokens
+                ):
                     prior = seen_versions.get(version_tuple)
                     if prior is not None and prior >= signal_score:
                         continue
@@ -106,14 +109,28 @@ def _extract_software_version_answer(
             ):
                 continue
             for version_tuple, signal_score, version_text in item_candidates:
-                candidates.append((item_score + signal_score, version_tuple, -index, version_text))
+                candidates.append(
+                    (item_score + signal_score, version_tuple, -index, version_text, signal_score)
+                )
 
         if not candidates:
             return ""
 
         best_score = max(item[0] for item in candidates)
         shortlist = [item for item in candidates if item[0] >= best_score - 1]
-        _, _, _, version_text = max(shortlist, key=lambda item: (item[1], item[0], item[2]))
+        # 先按**证据质量**取，版本号大小只作为同级兜底。
+        #
+        # 原实现是 `max(shortlist, key=lambda item: (item[1], item[0], item[2]))`，
+        # 以版本元组为**第一**排序键 —— 等价于"取版本号数值最大者"。实测后果：
+        # 页面上任何更大的无关数字都会赢，于是抽出了源文本里根本不存在的
+        # "The latest stable version of Java is 4.5." / "…is 10.7.3."（同一查询两次
+        # 不同结果、皆无出处）。已验证 `10.7.3` 在上游语境里是 JavaFX 的版本，
+        # 被主语共现校验挡下后，这里再保证"证据最强"优先于"数字最大"。
+        # 主语校验通过后，候选**都属于被问的软件**，此时"版本号最大者即最新版"
+        # 才是成立的启发式 —— 恢复原有的按版本元组取最大。
+        _, _, _, version_text, _ = max(
+            shortlist, key=lambda item: (item[1], item[0], item[2])
+        )
         if subject:
             return f"The latest stable version of {subject} is {version_text}."
         return f"The latest stable version is {version_text}."
@@ -137,8 +154,38 @@ def _software_version_item_is_version_index(
         return peak_signal < MIN_VERSION_ASSERTION_SCORE
 
 
+#: 版本号周围多大范围内出现主语才算"这个版本属于该软件"。
+#: 比打分窗口（±80）紧，因为这里判的是归属而不是语境。
+_SUBJECT_WINDOW = 60
+
+
+def _subject_mentioned_near(
+    *,
+    text: str,
+    start: int,
+    end: int,
+    subject_tokens: tuple[str, ...],
+) -> bool:
+    """版本号附近是否出现了被问软件的名字。
+
+    用词边界匹配，**不用子串**：`javafx` 里含 `java`，子串匹配会把
+    "JavaFX 10.7.3" 当成 Java 的版本 —— 实测就是这样抽出了不存在的
+    "Java 10.7.3"。`\\bjava\\b` 对 "javafx" 不成立，正好挡住。
+    """
+    if not subject_tokens:
+        return True
+    window = text[max(0, start - _SUBJECT_WINDOW):min(len(text), end + _SUBJECT_WINDOW)]
+    lowered = window.lower()
+    for token in subject_tokens:
+        if re.search(rf"\b{re.escape(token.lower())}\b", lowered):
+            return True
+    return False
+
+
 def _software_version_candidates_from_text(
     text: str,
+    *,
+    subject_tokens: tuple[str, ...] = (),
 ) -> list[tuple[str, tuple[int, int, int], int]]:
         if not text:
             return []
@@ -208,6 +255,14 @@ def _software_version_candidates_from_text(
             if version_text.count(".") >= 2:
                 score += 1
             if score <= 0:
+                continue
+            # 没有主语共现就丢弃：版本号在页面上存在，不代表它属于被问的软件。
+            if not _subject_mentioned_near(
+                text=normalized,
+                start=match.start(),
+                end=match.end(),
+                subject_tokens=subject_tokens,
+            ):
                 continue
             candidates.append((version_text, version_tuple, score))
         return candidates
@@ -301,6 +356,27 @@ def _software_version_subject(
             "typescript": "TypeScript",
         }
         return subject_map.get(normalized.lower(), normalized if any(ch.isupper() for ch in normalized) else normalized.title())
+
+
+def _software_version_subject_tokens(query: str, subject: str) -> tuple[str, ...]:
+    """返回用于"版本号归属"校验的软件名别名。
+
+    同时给出原始 query token 与 `_software_version_subject` 归一化后的名字，
+    两者取并集：查询里可能写 `node.js` 而归一化成 `Node.js`，任一形态出现
+    都应算数。
+    """
+    tokens: list[str] = []
+
+    def _add(value: str) -> None:
+        cleaned = value.strip().strip(".,;:!?()\"'")
+        if len(cleaned) >= 2 and cleaned not in tokens:
+            tokens.append(cleaned)
+
+    if subject:
+        _add(subject)
+    for token in query_routing._query_brand_tokens(query):
+        _add(token)
+    return tuple(tokens)
 
 
 def _extract_semantic_version(

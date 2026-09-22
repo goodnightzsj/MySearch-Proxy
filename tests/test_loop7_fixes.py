@@ -10,6 +10,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from mysearch.clients import MySearchClient
+from mysearch.research import software_version
 
 
 def _fake_key(_provider):
@@ -290,6 +291,45 @@ class CrawlBreadthFixTests(unittest.TestCase):
         payload = calls[0]["payload"]
         assert isinstance(payload, dict)
         self.assertFalse(payload["crawlEntireDomain"])
+
+
+class SoftwareVersionGroundingTests(unittest.TestCase):
+    """版本号必须属于**被问的那个软件**，否则宁可不说。
+
+    实测（2026-09-22，生产）：`latest stable version of Java` 两次返回
+    `The latest stable version of Java is 4.5.` 与 `... is 10.7.3.`，
+    而这两个数字**在整个响应里都不存在**。根因是候选完全不校验归属：
+    只要一段文本里同时有版本关键词和 `\d+\.\d+`，该数字就进候选；
+    终选又是"取版本号数值最大者"，于是页面上任何更大的无关数字都会赢。
+    `10.7.3` 在上游语境里是 **JavaFX** 的版本。
+    """
+
+    def _candidates(self, text: str, subject: str) -> list[str]:
+        return [
+            version
+            for version, _tuple, _score in software_version._software_version_candidates_from_text(
+                text, subject_tokens=(subject,)
+            )
+        ]
+
+    def test_other_products_version_is_rejected(self) -> None:
+        # `javafx` 里含 `java`，子串匹配会放行 —— 必须用词边界。
+        self.assertEqual(self._candidates("JavaFX 10.7.3 released", "Java"), [])
+        self.assertEqual(self._candidates("Gradle 4.5 stable release", "Java"), [])
+
+    def test_subject_mention_makes_the_version_eligible(self) -> None:
+        self.assertEqual(
+            self._candidates("Python 3.14.7 is the latest stable release", "Python"),
+            ["3.14.7"],
+        )
+
+    def test_largest_version_still_wins_among_the_subject_s_own_versions(self) -> None:
+        """主语校验之后，"最大者即最新"才是成立的启发式，不能被削弱。"""
+        text = (
+            "Python 3.14.3 is the latest stable release. "
+            "Python 3.14.6 is the latest stable release with security fixes."
+        )
+        self.assertEqual(self._candidates(text, "Python"), ["3.14.3", "3.14.6"])
 
 
 if __name__ == "__main__":
