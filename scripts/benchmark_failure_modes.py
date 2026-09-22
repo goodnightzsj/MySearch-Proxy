@@ -35,8 +35,13 @@ class FailureModeRow(NamedTuple):
 
 
 #: `latest stable version of Java` 的四个编造变体。断言写成**归属式**
-#: （`java 26|java 25`）而不是裸版本号：实测 `pattern=['25']` 会放行编造的
-#: `25.12`，`pattern=['java 25']` 对四个变体全部拒绝。
+#: （主语 + 版本号）而不是裸版本号：实测 `pattern=['25']` 会放行编造的
+#: `25.12`（Aspose.Cells for Node.js via Java 的版本）。
+#:
+#: 同时必须容忍产品名的**官方后缀**：实测 MySearch 正确答成
+#: `Java SE 25`，而 `pattern='java 25'` 因为中间隔着 `SE` 匹配不上 ——
+#: 那是误杀答对的产品。列举 `java se NN` 与 `java NN` 两种写法后，
+#: 正确答案全部匹配、四个编造变体全部拒绝（已在测试里钉住）。
 VERSION_ATTRIBUTION = FailureModeRow(
     benchmark_id="failure-version-attribution-01",
     domain="事实型版本查询",
@@ -47,9 +52,10 @@ VERSION_ATTRIBUTION = FailureModeRow(
     secondary_dimensions="authority_precision|traceability",
     latency_budget_ms="20000",
     expected_url_patterns="",
-    expected_answer_patterns="java 26|java 25",
+    expected_answer_patterns="java se 26|java 26|java se 25|java 25",
     notes=(
-        "失效模式行。断言必须带主语：裸版本号会放行张冠李戴（25.12 是 Aspose 的版本）。"
+        "失效模式行。断言必须带主语（裸版本号会放行张冠李戴的 25.12），"
+        "且要覆盖 `Java SE NN` 这一官方写法（否则误杀答对的产品）。"
     ),
 )
 

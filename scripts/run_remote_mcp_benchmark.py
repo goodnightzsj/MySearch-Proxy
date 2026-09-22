@@ -1842,20 +1842,29 @@ def _claim_groundedness(row: dict[str, object], prefix: str) -> tuple[float, int
     return grounded / len(tokens), len(tokens)
 
 
-#: social 结果**应当**携带的文本字段。判据是"这些字段有没有内容"，
-#: 不是"已存在的键里几个非空"—— 后者对"整个字段被丢掉"是盲的：
-#: loop32 的 payload 只有 `provider/source/title/url`，缺 author/snippet，
-#: 而 title 非空会让"已存在键的填充率"算出 1.0，缺陷照样满分。
-_SOCIAL_REQUIRED_FIELDS = ("title", "snippet", "author")
+#: 一条结果里**可以**承载正文的字段名。判据是"是否落在这些字段的任一"，
+#: 而不是点名某几个 —— 两侧的字段名本来就不同（社交通道用
+#: `snippet`/`author`，web 通道用 `content`），点名会变成"字段名对了才给分"。
+_TEXT_BEARING_FIELDS = ("content", "text", "snippet", "summary", "description")
+#: 结果的标题类字段。
+_TITLE_FIELDS = ("title", "name")
+#: 社交结果**特有**的作者字段。只有存在这类字段时才要求它非空。
+_AUTHOR_FIELDS = ("author", "handle", "username", "user", "screen_name")
 
 
 def _header_grounding_ratio(row: dict[str, object], prefix: str) -> float:
-    """social 结果**应有文本字段**的填充率 —— social 缺陷的判据。
+    """每条结果是否**带上了实质文本** —— social 缺陷的判据。
 
     social 真实缺陷（2026-09-22）：`results[]` 除 url 外全为空 —— 先是
-    `title`/`snippet`/`author` 全是空串，再往前是这些键**根本不存在**。
+    `title`/`snippet`/`author` 全是空串，更早是这些键**根本不存在**。
     `semantic_discovery` / `site_coverage` 只看条数与域名数，所以
     "5 条全空"与"5 条齐全"得分完全相同。
+
+    **不点名具体字段名**：两侧字段名本就不同，点名会把"Tavily 返回 web
+    结果、没有 author 键"判成缺陷 —— 那是误杀，不是发现。实测反例：
+    同一行 Tavily 的每条结果都有 `title` + `content`，只因缺 `author`
+    被算成 0.333。判据改为"有标题**且**有任一正文承载字段"；若该结果
+    **声明了**作者类字段，再要求它非空。
 
     **只在 url 非空时**计入，避免把"没有结果"算成"字段填写很差"；
     没有结果由 `empty_result` / `assertion_pass_rate` 表达。
@@ -1873,10 +1882,17 @@ def _header_grounding_ratio(row: dict[str, object], prefix: str) -> float:
             continue
         if not str(item.get("url") or "").strip():
             continue
-        filled = sum(
-            1 for key in _SOCIAL_REQUIRED_FIELDS if str(item.get(key) or "").strip()
-        )
-        ratios.append(filled / len(_SOCIAL_REQUIRED_FIELDS))
+        checks = [
+            any(str(item.get(key) or "").strip() for key in _TITLE_FIELDS),
+            any(str(item.get(key) or "").strip() for key in _TEXT_BEARING_FIELDS),
+        ]
+        # 作者字段只在**该结果自己带了**这类键时才计入。
+        declared_author_fields = [key for key in _AUTHOR_FIELDS if key in item]
+        if declared_author_fields:
+            checks.append(
+                any(str(item.get(key) or "").strip() for key in declared_author_fields)
+            )
+        ratios.append(sum(checks) / len(checks))
     if not ratios:
         return 1.0
     return sum(ratios) / len(ratios)

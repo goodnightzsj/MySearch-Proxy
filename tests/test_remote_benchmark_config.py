@@ -1542,7 +1542,7 @@ class AssertionPassRateTests(unittest.TestCase):
         return row
 
     def test_a_social_result_missing_author_and_snippet_is_penalised(self) -> None:
-        # 缺陷期的真实形状。
+        # 缺陷期的真实形状：只有 title，没有正文 / 作者。
         raw = {
             "results": [
                 {"provider": "x", "source": "x", "title": "Some post", "url": "https://x.com/i/status/1"}
@@ -1550,7 +1550,44 @@ class AssertionPassRateTests(unittest.TestCase):
         }
         self.assertAlmostEqual(
             run_remote_mcp_benchmark._header_grounding_ratio(self._row(raw), "mysearch"),
-            1 / 3,
+            0.5,
+        )
+
+    def test_a_web_result_without_author_is_not_penalised(self) -> None:
+        """Tavily 返回 web 结果、字段名与社交通道不同 —— 不该判成缺陷。
+
+        实测误杀：同一行 Tavily 每条结果都有 title + content，只因没有
+        `author` 键被算成 0.333。判据改成"有标题且有正文"，作者字段仅在
+        该结果**自己带了**时才算。
+        """
+        raw = {
+            "results": [
+                {
+                    "url": "https://example.com/a",
+                    "title": "A page",
+                    "content": "body text",
+                }
+            ]
+        }
+        self.assertEqual(
+            run_remote_mcp_benchmark._header_grounding_ratio(self._row(raw), "tavily"), 1.0
+        )
+
+    def test_a_declared_but_blank_author_is_penalised(self) -> None:
+        """带了作者字段却是空的 —— 那是真缺陷，必须扣。"""
+        raw = {
+            "results": [
+                {
+                    "url": "https://x.com/u/status/1",
+                    "title": "Post",
+                    "snippet": "body",
+                    "author": "",
+                }
+            ]
+        }
+        self.assertAlmostEqual(
+            run_remote_mcp_benchmark._header_grounding_ratio(self._row(raw), "mysearch"),
+            2 / 3,
         )
 
     def test_a_fully_populated_social_result_scores_full(self) -> None:
@@ -1858,6 +1895,44 @@ class MatrixContractTests(unittest.TestCase):
                 "The latest stable version of Java is 25.12.", ["java 25"]
             )
         )
+
+    def test_version_assertion_accepts_the_official_suffix_and_rejects_all_four(self) -> None:
+        """断言必须同时做到两件事，缺一个就不可用。
+
+        - **不误杀**：MySearch 正确答成 `Java SE 25`，`pattern='java 25'`
+          因中间隔着 `SE` 匹配不上。实测就是这样把答对的产品判成 0 分。
+        - **不放行**：四个真实编造变体必须全部拒绝。
+
+        规格里的 pattern 集合必须同时满足这两条。
+        """
+        from scripts import benchmark_failure_modes
+
+        patterns = run_remote_mcp_benchmark.parse_pipe_list(
+            benchmark_failure_modes.VERSION_ATTRIBUTION.expected_answer_patterns
+        )
+        correct = [
+            "The latest stable version of Java is Java SE 25, released in September 2025.",
+            "The latest stable version of Java is Java 25 LTS.",
+            "The latest stable version of Java is Java 26.",
+        ]
+        fabricated = [
+            "The latest stable version of Java is 26.1.2.",   # Minecraft Java Edition
+            "The latest stable version of Java is 10.7.3.",   # JavaFX
+            "The latest stable version of Java is 25.12.",    # Aspose via Java
+            "The latest stable version of Java is 4.5.",      # Gradle
+        ]
+        for answer in correct:
+            with self.subTest(kind="correct", answer=answer[:48]):
+                self.assertTrue(
+                    run_remote_mcp_benchmark._summary_matches_expected_answer(answer, patterns),
+                    f"正确写法被误杀: {answer}",
+                )
+        for answer in fabricated:
+            with self.subTest(kind="fabricated", answer=answer[:48]):
+                self.assertFalse(
+                    run_remote_mcp_benchmark._summary_matches_expected_answer(answer, patterns),
+                    f"编造被放行: {answer}",
+                )
 
     def test_matrix_has_a_row_that_resolves_to_auto_strategy(self) -> None:
         rows = self._rows()
