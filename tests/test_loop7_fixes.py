@@ -296,12 +296,12 @@ class CrawlBreadthFixTests(unittest.TestCase):
 class SoftwareVersionGroundingTests(unittest.TestCase):
     """版本号必须属于**被问的那个软件**，否则宁可不说。
 
-    实测（2026-09-22，生产）：`latest stable version of Java` 两次返回
-    `The latest stable version of Java is 4.5.` 与 `... is 10.7.3.`，
-    而这两个数字**在整个响应里都不存在**。根因是候选完全不校验归属：
-    只要一段文本里同时有版本关键词和 `\d+\.\d+`，该数字就进候选；
-    终选又是"取版本号数值最大者"，于是页面上任何更大的无关数字都会赢。
-    `10.7.3` 在上游语境里是 **JavaFX** 的版本。
+    实测（2026-09-22，生产）：`latest stable version of Java` 反复返回源里
+    不存在的版本号 —— `4.5`、`10.7.3`，以及部署 `918f752` 后仍未修好的
+    `26.1.2`（那是 **Minecraft Java Edition** 的版本，出自
+    `gamercubic.com`，Tavily 侧 `answer=None`，句子是我们自己合成的）。
+    根因是归属校验只问"附近出现过主语吗"，而主语名常常**属于别的产品**。
+    现在要求主语是版本号的**紧邻锚点**。
     """
 
     def _candidates(self, text: str, subject: str) -> list[str]:
@@ -317,10 +317,39 @@ class SoftwareVersionGroundingTests(unittest.TestCase):
         self.assertEqual(self._candidates("JavaFX 10.7.3 released", "Java"), [])
         self.assertEqual(self._candidates("Gradle 4.5 stable release", "Java"), [])
 
+    def test_subject_owned_by_another_product_is_rejected(self) -> None:
+        """紧邻锚点判定：`Minecraft Java Edition 26.1.2` 的锚点是 `Edition`。
+
+        这是 918f752 部署后仍在生产中复现的缺陷（2026-09-22）。
+        """
+        self.assertEqual(
+            self._candidates(
+                "The latest stable Java version covered here is Minecraft Java Edition 26.1.2.",
+                "Java",
+            ),
+            [],
+        )
+        self.assertEqual(
+            self._candidates("The latest stable Minecraft Java version is 26.1.2.", "Java"),
+            [],
+        )
+
+    def test_a_version_label_between_subject_and_number_is_not_a_bridge(self) -> None:
+        """`version` 出现在主语与数字之间，说明主语名属于别的产品，不是锚点。"""
+        self.assertEqual(self._candidates("Java version is 26.1.2.", "Java"), [])
+        self.assertEqual(
+            self._candidates("The latest stable version of Java is 25.0.1.", "Java"),
+            ["25.0.1"],
+        )
+
     def test_subject_mention_makes_the_version_eligible(self) -> None:
         self.assertEqual(
             self._candidates("Python 3.14.7 is the latest stable release", "Python"),
             ["3.14.7"],
+        )
+        self.assertEqual(
+            self._candidates("The latest stable version of Node.js is 26.7.0.", "Node.js"),
+            ["26.7.0"],
         )
 
     def test_largest_version_still_wins_among_the_subject_s_own_versions(self) -> None:

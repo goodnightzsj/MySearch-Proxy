@@ -154,32 +154,49 @@ def _software_version_item_is_version_index(
         return peak_signal < MIN_VERSION_ASSERTION_SCORE
 
 
-#: 版本号周围多大范围内出现主语才算"这个版本属于该软件"。
-#: 比打分窗口（±80）紧，因为这里判的是归属而不是语境。
-_SUBJECT_WINDOW = 60
+#: 版本号与主语之间允许出现的连接词（系词与虚词）。
+#:
+#: 刻意**不**收录 `version` / `release` / `edition`：它们出现在主语与数字之间时，
+#: 恰恰说明主语名属于别的产品 —— `Minecraft Java Edition 26.1.2`、
+#: `Minecraft Java version is 26.1.2`。把 `Java 25 LTS` 这类正确写法
+#: 误伤的风险，远小于放行 Minecraft 版本号冒充 Java 的代价。
+_VERSION_ANCHOR_CONNECTORS = frozenset({
+    "a", "an", "are", "as", "at", "be", "been", "for", "in", "is", "of", "on",
+    "or", "the", "to", "was", "were", "with",
+})
 
 
-def _subject_mentioned_near(
+def _version_is_anchored_to_subject(
     *,
     text: str,
     start: int,
-    end: int,
     subject_tokens: tuple[str, ...],
 ) -> bool:
-    """版本号附近是否出现了被问软件的名字。
+    """版本号**紧邻**的前一个实词是否就是被问软件。
 
-    用词边界匹配，**不用子串**：`javafx` 里含 `java`，子串匹配会把
-    "JavaFX 10.7.3" 当成 Java 的版本 —— 实测就是这样抽出了不存在的
-    "Java 10.7.3"。`\\bjava\\b` 对 "javafx" 不成立，正好挡住。
+    判据从"附近出现过主语"收紧为"主语必须是紧邻锚点"，因为前者会放行
+    主语属于别的产品的文本。三次真实编造（2026-09-22，生产
+    `latest stable version of Java`）机制同一 —— 都通过了旧校验：
+
+    - `Minecraft Java Edition 26.1.2` -> 抽出 `26.1.2`
+    - `JavaFX 10.7.3`                -> 抽出 `10.7.3`
+    - `Gradle 4.5 stable release`    -> 抽出 `4.5`
+
+    锚定后：前两者紧邻的实词分别是 `Edition` / `JavaFX`（都不是主语），
+    自然被挡；而 `version of Java is 25.0.1` 跳过虚词后锚点正是 `Java`。
     """
     if not subject_tokens:
         return True
-    window = text[max(0, start - _SUBJECT_WINDOW):min(len(text), end + _SUBJECT_WINDOW)]
-    lowered = window.lower()
-    for token in subject_tokens:
-        if re.search(rf"\b{re.escape(token.lower())}\b", lowered):
-            return True
-    return False
+    tokens = {token.lower() for token in subject_tokens}
+    words = list(re.finditer(r"[A-Za-z][A-Za-z0-9.+#-]*", text[:start]))
+    index = len(words)
+    while index > 0 and words[index - 1].group(0).lower() in _VERSION_ANCHOR_CONNECTORS:
+        index -= 1
+    if index == 0:
+        return False
+    return words[index - 1].group(0).lower().rstrip(".") in {
+        token.rstrip(".") for token in tokens
+    }
 
 
 def _software_version_candidates_from_text(
@@ -256,11 +273,11 @@ def _software_version_candidates_from_text(
                 score += 1
             if score <= 0:
                 continue
-            # 没有主语共现就丢弃：版本号在页面上存在，不代表它属于被问的软件。
-            if not _subject_mentioned_near(
+            # 紧邻锚点不是主语就丢弃：版本号在页面上存在，不代表它属于被问的软件。
+            # `Minecraft Java Edition 26.1.2` 的锚点是 `Edition`，被这一步挡下。
+            if not _version_is_anchored_to_subject(
                 text=normalized,
                 start=match.start(),
-                end=match.end(),
                 subject_tokens=subject_tokens,
             ):
                 continue
@@ -366,10 +383,15 @@ def _software_version_subject_tokens(query: str, subject: str) -> tuple[str, ...
     都应算数。
     """
     tokens: list[str] = []
+    # 句式词不能作锚点：`Java version is 26.1.2` 里紧邻数字的实词是 `version`，
+    # 若它进了锚点集合，Minecraft 的版本号就会被判成"属于 Java"。
+    sentence_tokens = {
+        "current", "latest", "newest", "release", "stable", "version",
+    }
 
     def _add(value: str) -> None:
         cleaned = value.strip().strip(".,;:!?()\"'")
-        if len(cleaned) >= 2 and cleaned not in tokens:
+        if len(cleaned) >= 2 and cleaned.lower() not in sentence_tokens and cleaned not in tokens:
             tokens.append(cleaned)
 
     if subject:
