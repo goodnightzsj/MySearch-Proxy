@@ -16,12 +16,25 @@ grok2api 上游有三个能列模型的来源，但**没有一个是可信的可
 ## 探测必须校验"工具真的被调用了"，不能只看 HTTP 200
 
 这是踩过的坑：`grok-4.6` / `grok-4.5` 对 `/v1/responses` 返回 **200**，
-但 output 里**没有任何 tool_call**——它们不调用 `x_search`，而是凭训练数据
-编造 X 帖子（实测编出整千的假 status ID、整点时间戳，以及
-"Sam Altman 称赞 Claude 4.5" 这类事实错误；他是 OpenAI CEO）。
+但 output 里**没有任何 tool_call**，正文里却出现 ` ```invoke tool ` /
+`<tool_call>` 这类文本形态的调用意图。
 
-只验 200 会让这类模型被选为搜索主模型，产出看似正常实则捏造的结果。
-因此探测必须发送真实的 `x_search` 工具并断言：
+**2026-09-22 更正归因**：当时把原因写成"凭训练数据编造 X 帖子"，**这个归因是错的**。
+真实原因是 grok2api 的**上游通道差异**，与模型版本无关：
+
+| 通道（`model_routes.provider`） | 服务端工具 | 覆盖 |
+|---|---|---|
+| `grok_console` | ✅ `x_search` | 4.3、4.20 全系、`Console/grok-4.5` |
+| `grok_build` | ❌ 被 `buildXSearchResponseFilter` 过滤 | 4.7、4.6、`Build/grok-4.5` |
+
+判据是通道：同一 `grok-4.5` 走 `Console/grok-4.5` 时实测正常发出
+`custom_tool_call`，走 `Build/grok-4.5` 则没有。`grok_build` 是 xAI 的
+agent/coding 通道，工具集是 shell/文件类，不含 `x_search`。
+4.6/4.7 搜不了是因为 xAI 只提供 Build 版本（`Console/grok-4.7` 实测 404）。
+
+**这不改变本模块的行为**：探测仍是必要的——它按实际输出裁定，天然覆盖通道差异。
+只验 200 仍会让这类模型被选为搜索主模型，产出看似正常实则无依据的结果。
+探测必须发送真实的 `x_search` 工具并断言：
 
 1. 响应含 tool_call 类 output item，**且**
 2. 响应含真实 status ID
@@ -136,7 +149,9 @@ def evaluate_search_probe(payload: Any) -> dict[str, Any]:
     """判定一次探测响应是否证明该模型**真的能搜索**。
 
     只看 HTTP 状态是不够的：实测 `grok-4.6` 返回 200 却完全不调用 `x_search`，
-    而是编造帖子。必须同时看到工具调用与真实 status ID。
+    正文里只有 ` ```invoke tool ` / `<tool_call>` 这类**文本形态的调用意图**
+    （原因是它走 grok2api 的 `grok_build` 通道，该通道不含 x_search 工具，
+    见模块文档的 2026-09-22 更正）。必须同时看到工具调用与真实 status ID。
     """
     tool_calls = count_tool_calls(payload)
     status_ids = extract_status_ids(payload)
