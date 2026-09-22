@@ -51,9 +51,30 @@ class GrokModelSpec:
       `GET /v1/models` 含实测 404 的 `grok-4.20-0309`；`GET /api/admin/v1/models`
       的 `capability=responses` 只列 4 项，却漏掉实测 200 的 `-non-reasoning`。
     - **"能返回 200" 不等于 "能搜索"**：`grok-4.6` / `grok-4.5` 对
-      `/v1/responses` 返回 200，但 output 里没有任何 tool_call——它们不调用
-      `x_search`，而是凭训练数据编造 X 帖子（实测编出整千假 status ID、整点时间戳，
-      以及"Sam Altman 称赞 Claude"这类事实错误）。**不得**把它们放进本清单。
+      `/v1/responses` 返回 200，但 output 里没有任何 tool_call，正文里却出现
+      ` ```invoke tool ` / `<tool_call>` 这类**文本形态的调用意图**。
+
+      **2026-09-22 更正归因**：这**不是**模型在"凭训练数据编造 X 帖子"，而是
+      grok2api 的**上游通道差异**。grok2api 有两条通道，由 `model_routes.provider`
+      决定，与模型版本无关：
+
+      | 通道 | 服务端工具 | 覆盖 |
+      |---|---|---|
+      | `grok_console` | ✅ `x_search` | 4.3、4.20 全系、`Console/grok-4.5` |
+      | `grok_build` | ❌ 被 `buildXSearchResponseFilter` 过滤 | 4.7、4.6、`Build/grok-4.5` |
+
+      判据是**通道**而非模型：同一 `grok-4.5`，走 `Console/grok-4.5` 时实测正常
+      发出 `custom_tool_call`（`x_keyword_search`），走 `Build/grok-4.5` 则没有。
+      `grok_build` 是 xAI 的 agent/coding 通道，工具集是 shell/文件类，不含
+      `x_search`。审计表印证：`grok_build` 的 `num_server_side_tools_used` 恒为
+      0，`grok_console` 则持续非零。
+
+      因此 `grok-4.6` / `grok-4.7` 搜不了的原因是 **xAI 侧只提供 Build 版本**
+      （`Console/grok-4.7` 实测 404 `model_not_found`），不是模型能力缺陷。
+      `grok-4.5` 则两条通道都有。**本清单仍不收 4.5/4.6/4.7**：4.5 的 Console
+      版本实测 75.8s，比 `non-reasoning` 的 7.3s 慢约 10 倍；且 `grok-4.5` 这个
+      publicId 对应两条路由，客户端无法从 `/v1/models` 区分，依赖未文档化的
+      `Console/` 前缀不可靠。
     - 实测**支持 x_search** 的模型：`grok-4.3`(21.5s)、`grok-4.20-0309-non-reasoning`(14.9s)、
       `grok-4.20-0309-reasoning`(40.6s)、`grok-4.20-multi-agent-0309`(53.8s)。
       本清单按"能搜索 + 偏好顺序"选取，`non-reasoning` 优先（比 reasoning 快约 3 倍）。
