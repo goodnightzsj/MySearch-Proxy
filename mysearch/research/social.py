@@ -106,6 +106,20 @@ def _normalize_social_gateway_response(
                 or item.get("body")
                 or ""
             )
+            author = (
+                item.get("author")
+                or item.get("username")
+                or item.get("handle")
+                or ""
+            )
+            # 上游偶尔返回**只有 url** 的条目（实测 2026-09-23，
+            # `failure-social-fields-01`：3 条里 1 条除 url 外全空）。
+            # 丢弃它，因为 `title` 下面会回退成 url，于是这个空壳在输出里
+            # 表现为"title 非空"，把 social 字段缺陷伪装成正常结果 ——
+            # benchmark 的 `_header_grounding_ratio` 正是这样抓到它的。
+            # 判据取"正文与作者都为空"：只缺正文的条目仍可能是有效引用。
+            if not str(content).strip() and not str(author).strip():
+                continue
             title = (
                 item.get("title")
                 or item.get("author")
@@ -122,7 +136,7 @@ def _normalize_social_gateway_response(
                     "url": url,
                     "snippet": snippet,
                     "content": content,
-                    "author": item.get("author") or item.get("username") or item.get("handle") or "",
+                    "author": author,
                     "created_at": item.get("created_at") or item.get("published_at") or "",
                 }
             )

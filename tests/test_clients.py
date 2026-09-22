@@ -4246,6 +4246,49 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(result["provider"], "tavily_social_fallback")
         self.assertEqual(result["results"][0]["url"], "https://x.com/OpenAI/status/123")
 
+    def test_normalize_social_gateway_response_drops_url_only_entries(self) -> None:
+        """上游只给 url 的空壳条目必须丢弃。
+
+        实测（2026-09-23，`failure-social-fields-01`）：3 条结果里 1 条除
+        url 外全空。`title` 会回退成 url，于是这个空壳在输出里表现为
+        "title 非空"，把字段缺陷伪装成正常结果 —— benchmark 的
+        `_header_grounding_ratio` 正是这样抓到它的。
+        """
+        client = MySearchClient()
+
+        result = client._normalize_social_gateway_response(
+            response={
+                "query": "GPT-6 reactions on X",
+                "results": [
+                    {"url": "https://x.com/OpenAI/status/1", "author": "OpenAI", "text": "One"},
+                    {"url": "https://x.com/i/status/2"},
+                ],
+            },
+            query="GPT-6 reactions on X",
+            transport="env",
+        )
+
+        self.assertEqual(
+            [item["url"] for item in result["results"]],
+            ["https://x.com/OpenAI/status/1"],
+        )
+
+    def test_normalize_social_gateway_response_keeps_text_only_entries(self) -> None:
+        """只缺作者、但有正文的条目是有效引用，不得丢弃。"""
+        client = MySearchClient()
+
+        result = client._normalize_social_gateway_response(
+            response={
+                "query": "q",
+                "results": [{"url": "https://x.com/i/status/9", "text": "text only"}],
+            },
+            query="q",
+            transport="env",
+        )
+
+        self.assertEqual(len(result["results"]), 1)
+        self.assertEqual(result["results"][0]["content"], "text only")
+
     def test_normalize_social_gateway_response_diversifies_repeated_handles(self) -> None:
         client = MySearchClient()
 
