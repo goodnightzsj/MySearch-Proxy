@@ -1555,5 +1555,60 @@ class MatrixContractTests(unittest.TestCase):
         )
 
 
+class ExplicitYearWindowTests(unittest.TestCase):
+    """点名年份的查询不该被时间窗过滤 —— 那是在排除答案本身。
+
+    实测（loop34 隔离复现）：`2026 Oscars best picture winner` 配 30 天窗只返回
+    1 条结果，抽出的答案是**奖项定义**；去掉窗口后返回
+    `Best Picture winner: One Battle after Another`。2026 奥斯卡在 3 月，
+    按定义就在窗口外。
+    """
+
+    def _row(self, query: str, domain: str = "新闻") -> dict[str, str]:
+        return {"query": query, "domain": domain}
+
+    def test_year_named_query_drops_the_window(self) -> None:
+        for query in (
+            "2026 Oscars best picture winner",
+            "2026 Grammy Album of the Year winner",
+            "2026 highest grossing movie opening weekend",
+        ):
+            with self.subTest(query=query):
+                self.assertIsNone(
+                    run_remote_mcp_benchmark.map_tavily_time_range(self._row(query))
+                )
+
+    def test_latest_query_keeps_the_window_even_with_a_year(self) -> None:
+        """年份只是语境、查询要的是"最新"时，窗口必须保留。
+
+        反例 `latest celebrity breakup rumors 2026`：去掉窗口会把它要测的
+        新鲜度能力一起删掉。
+        """
+        row = self._row("latest celebrity breakup rumors 2026", domain="八卦")
+        self.assertEqual(run_remote_mcp_benchmark.map_tavily_time_range(row), "month")
+
+    def test_latest_query_without_a_year_keeps_the_window(self) -> None:
+        row = self._row("OpenAI background mode latest status", domain="技术动态 / status")
+        self.assertEqual(run_remote_mcp_benchmark.map_tavily_time_range(row), "month")
+
+    def test_release_rows_still_get_the_year_window(self) -> None:
+        row = self._row("Next.js 16 release notes official", domain="更新日志 / release")
+        self.assertEqual(run_remote_mcp_benchmark.map_tavily_time_range(row), "year")
+
+    def test_dates_and_time_range_stay_aligned_across_providers(self) -> None:
+        """两侧必须同源：去掉窗口时两边都要去掉，否则又是不对等。"""
+        for query in ("2026 Oscars best picture winner", "latest celebrity breakup rumors 2026"):
+            with self.subTest(query=query):
+                row = self._row(query, domain="八卦")
+                from_date, _ = run_remote_mcp_benchmark.map_mysearch_date_bounds(row)
+                time_range = run_remote_mcp_benchmark.map_tavily_time_range(row)
+                self.assertEqual(
+                    bool(from_date),
+                    bool(time_range),
+                    "MySearch 与 Tavily 的时间过滤必须同时有或同时无",
+                )
+
+
+
 if __name__ == "__main__":
     unittest.main()

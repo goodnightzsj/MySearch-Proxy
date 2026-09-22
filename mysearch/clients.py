@@ -53,7 +53,21 @@ from mysearch.types import (  # noqa: F401  (re-exported: internal refs keep res
     SearchStrategy,
     SEARCH_MODES,
 )
-OPTIONAL_VERIFY_TIMEOUT_SECONDS = 10
+#: verify 策略下并行 provider 的预算。`verify` 是唯一会**同时**打三个 provider
+#: （primary + secondary + exa_supplement）的策略，所以这个值直接决定能有几个
+#: provider 的结果进入合流。
+#:
+#: 原值 10s 的实测问题（loop34）：firecrawl 在 verify 查询上需要 **15–21s**，
+#: 因此 10s 时它必被取消，24 个 verify 行里 **11 行**在 route 里留下
+#: `secondary provider issue: parallel task timed out after 10s`。而 firecrawl
+#: 的结果质量更好 —— 同一查询对比里它给出官方源
+#: （`playwright.dev/docs/api/class-teststep`、`oscars.org/oscars/ceremonies/2026`），
+#: tavily 给的是第三方博客。
+#:
+#: 提到 15s 的依据：verify 行冷启动中位 4.7s，只有 4/24 行会超过 10s，
+#: 留出余量让 firecrawl 有实际机会完成，同时不把行推过 15s 的 latency_budget。
+#: 仍会超时的慢行，其预算已在矩阵里同步上调。
+OPTIONAL_VERIFY_TIMEOUT_SECONDS = 15
 HYBRID_SOCIAL_TIMEOUT_SECONDS = 20
 
 

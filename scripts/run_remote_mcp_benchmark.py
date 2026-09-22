@@ -284,9 +284,45 @@ def map_tavily_search_depth(row: dict[str, str]) -> str:
     return "fast"
 
 
+import re as _re
+
+#: 查询里点名了年份时，时间过滤就是在排除答案本身。
+#:
+#: 实测（loop34，隔离复现）：`2026 Oscars best picture winner` 配
+#: `from_date=2026-08-23 .. to_date=2026-09-22` 只返回 1 条结果，抽出的答案是
+#: **奖项定义**（britannica 的 "presented annually by the Academy…"）；同一查询
+#: 去掉窗口后返回 `Best Picture winner: One Battle after Another`（正确，且
+#: oscars.org 有直接证据）。原因是 2026 奥斯卡在 **3 月**、格莱美在 **2 月**，
+#: 都在 30 天窗之外 —— 这类查询的答案按定义就在窗口外，硬过滤它等于制造
+#: 不可能任务，测的不是能力。
+#:
+#: **注意**：Tavily 的 `time_range` 在它那一侧同样是硬过滤（parse 成 start_date），
+#: 所以这个缺陷对两侧**对称**存在，不是单边不公平。修正的是"行本身不可满足"。
+#:
+#: 只对**点名年份**的行生效。"latest …" 类查询不带年份，仍然保留窗口 ——
+#: 那正是它们要测的新鲜度能力。
+_EXPLICIT_YEAR_RE = _re.compile(r"\b(?:19|20)\d{2}\b")
+
+#: 明确要求"最新"的行，即使顺带提了年份也要保留窗口。
+#: 反例：`latest celebrity breakup rumors 2026` —— 年份只是语境，它要测的正是
+#: 能不能找到**当下**的八卦；按年份去窗会把这个能力一起删掉。
+_FRESHNESS_ASK_RE = _re.compile(r"\blatest\b|\bcurrent\b|\brecent\b|\bnow\b|最新|最近|当前")
+
+
+def _row_names_a_year(row: dict[str, str]) -> bool:
+    return bool(_EXPLICIT_YEAR_RE.search(row.get("query", "")))
+
+
+def _row_wants_freshness(row: dict[str, str]) -> bool:
+    return bool(_FRESHNESS_ASK_RE.search(row.get("query", "").lower()))
+
+
 def map_tavily_time_range(row: dict[str, str]) -> Optional[str]:
     domain = row["domain"]
     if domain in {"新闻", "技术动态 / status", "娱乐", "八卦", "纯 Social / X"}:
+        # 点名年份且**不**要求"最新"的行不做时间过滤（见上面 _EXPLICIT_YEAR_RE 的说明）。
+        if _row_names_a_year(row) and not _row_wants_freshness(row):
+            return None
         return "month"
     if domain in {"更新日志 / release"}:
         return "year"

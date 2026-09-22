@@ -14,6 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from mysearch import clients as clients_module
 from mysearch.clients import MySearchClient, MySearchError, MySearchHTTPError, RouteDecision
 from mysearch.research import sections
 
@@ -345,7 +346,13 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertLess(time.monotonic() - started, 0.15)
-        self.assertEqual(captured_timeouts, {"tavily": 10, "firecrawl": 10, "exa": 10})
+        # 断言的是"预算被下发到三个 provider 且三者一致"，而不是某个具体秒数——
+        # 原实现硬写 10，改预算时会让这条测试假装是行为契约。用常量本身表达。
+        expected_timeout = clients_module.OPTIONAL_VERIFY_TIMEOUT_SECONDS
+        self.assertEqual(
+            captured_timeouts,
+            {"tavily": expected_timeout, "firecrawl": expected_timeout, "exa": expected_timeout},
+        )
         self.assertEqual(observed["evidence"]["verification"], "cross-provider")
         self.assertEqual(observed["evidence"]["providers_consulted"], ["tavily", "exa"])
 
