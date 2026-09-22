@@ -1692,6 +1692,83 @@ class ScoringReplayTests(unittest.TestCase):
         self.assertEqual(scored["mysearch_assertion_pass_rate"], 1.0)
 
 
+class MatrixAssertionAuditTests(unittest.TestCase):
+    """体检脚本自己必须可证伪 —— 否则它只是一个恒真的检查器。
+
+    判据沿用同一条纪律：**"注入后失败"才算检出**。
+    """
+
+    def _audit(self):
+        from scripts import audit_matrix_assertions
+
+        return audit_matrix_assertions
+
+    def test_a_row_without_assertions_is_reported_as_tautological(self) -> None:
+        """没有 answer / url 期望、又不是 social 的行，断言恒真。"""
+        result = self._audit().audit_row(
+            {"benchmark_id": "x", "domain": "生活", "expected_answer_patterns": "",
+             "expected_url_patterns": ""}
+        )
+        self.assertFalse(result["falsifiable"])
+
+    def test_a_url_assertion_is_detected_when_results_are_blanked(self) -> None:
+        result = self._audit().audit_row(
+            {"benchmark_id": "x", "domain": "官方 web", "expected_answer_patterns": "",
+             "expected_url_patterns": "/api/pricing"}
+        )
+        self.assertTrue(result["blank_results_detected"])
+        self.assertTrue(result["falsifiable"])
+
+    def test_an_answer_assertion_is_detected_when_the_answer_is_blanked(self) -> None:
+        result = self._audit().audit_row(
+            {"benchmark_id": "x", "domain": "事实型", "expected_answer_patterns": "Canberra",
+             "expected_url_patterns": ""}
+        )
+        self.assertTrue(result["blank_answer_detected"])
+        self.assertTrue(result["falsifiable"])
+
+    def test_the_baseline_is_self_consistent(self) -> None:
+        """基线必须满足它自己的断言。
+
+        否则三项注入全都"未被检出"，会把被测行误判成恒真 —— 那是体检脚本的
+        缺陷，不是矩阵的。这里用一条有答案期望的行钉住。
+        """
+        for bid, ans, url in (
+            ("factual-accuracy-01", "3.14", ""),
+            ("news-01", "one battle after another", "oscar"),
+        ):
+            with self.subTest(benchmark_id=bid):
+                result = self._audit().audit_row(
+                    {"benchmark_id": bid, "domain": "新闻",
+                     "expected_answer_patterns": ans, "expected_url_patterns": url}
+                )
+                self.assertTrue(
+                    result["baseline_satisfies_assertions"],
+                    f"{bid}: baseline does not satisfy its own assertions",
+                )
+                self.assertTrue(result["falsifiable"])
+
+    def test_the_real_matrix_reports_a_tautology_count(self) -> None:
+        """对真实矩阵跑一遍，确认能跑完并给出可证伪计数。
+
+        不断言具体比例 —— 那是随矩阵演进的观测值，钉死会变成易腐契约。
+        """
+        matrix = (
+            REPO_ROOT / ".codex-tasks" / "20260530-provider-optimization-loop-v2"
+            / "raw" / "loop11-benchmark-input-final.csv"
+        )
+        if not matrix.exists():
+            self.skipTest("benchmark matrix not present")
+        rows = list(csv.DictReader(matrix.open(encoding="utf-8")))
+        audit = self._audit()
+        results = [audit.audit_row(row) for row in rows]
+        self.assertEqual(len(results), len(rows))
+        self.assertTrue(
+            any(item["falsifiable"] for item in results),
+            "没有任何一行可证伪 —— 体检脚本很可能失效了",
+        )
+
+
 class MatrixContractTests(unittest.TestCase):
     """守护矩阵必须持续覆盖几个"机制修了、覆盖没修"的口子。
 
