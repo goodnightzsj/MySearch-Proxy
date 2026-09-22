@@ -3680,13 +3680,28 @@ def normalize_social_search_response(query, payload, max_results, *, model=None)
             break
 
     if trusted_citations:
+        # 模型在正文里描述过的帖子优先。annotations 是上游工具结果的原始顺序
+        # （实测 14 条），与模型实际挑选并写进 results[] 的子集（3 条）不同步；
+        # 直接切前 max_results 条会返回一批模型从未提及的 URL，matched 取不到，
+        # title/text/author 全空——这正是"看不到具体结果"的来源。
+        #
+        # `matched_results` 的插入顺序就是模型在 results[] 里的排序，直接复用。
+        # 未匹配的 citations 随后补足，防编造语义不变：候选集仍全部来自
+        # trusted_citations，模型自造的 ID 依然进不来。
+        matched_citations = [
+            trusted_map[key] for key in matched_results if key in trusted_map
+        ]
+        unmatched_citations = [
+            item for item in trusted_citations if item["match_url"] not in matched_results
+        ]
+        ordered = (matched_citations + unmatched_citations)[:max_results]
         citations = [
             {"title": item.get("title", ""), "url": item.get("url", "")}
-            for item in trusted_citations[:max_results]
+            for item in ordered
         ]
         results = [
             build_social_result(citation=item, matched=matched_results.get(item["match_url"]))
-            for item in trusted_citations[:max_results]
+            for item in ordered
         ]
     else:
         results = fallback_results[:max_results]

@@ -209,6 +209,41 @@ class SocialNormalizationTests(unittest.TestCase):
             self.assertEqual(item["handle"], "QCodecc")
             self.assertEqual(item["why_relevant"], "directly about the query")
 
+    def test_described_posts_outrank_bare_annotations(self) -> None:
+        """模型在正文里描述过的帖子必须排在前，即使 annotations 里它们在后面。
+
+        annotations 是上游工具结果的原始顺序，可能远多于模型实际挑选的条目
+        （实测 14 vs 3）。按 annotations 顺序切前 N 条会返回模型从未提及的
+        URL，matched 取不到，字段全空。
+        """
+        payload = _payload(
+            text='{"answer":"summary","results":['
+            '{"url":"https://x.com/author3/status/2100000000000000003",'
+            '"title":"described third","text":"body three","author":"A3"}]}',
+            citations=[
+                {"url": "https://x.com/i/status/2100000000000000001",
+                 "title": "https://x.com/i/status/2100000000000000001"},
+                {"url": "https://x.com/i/status/2100000000000000002",
+                 "title": "https://x.com/i/status/2100000000000000002"},
+                {"url": "https://x.com/i/status/2100000000000000003",
+                 "title": "https://x.com/i/status/2100000000000000003"},
+            ],
+        )
+
+        for module in (social_gateway, proxy_server):
+            result = module.normalize_social_search_response("q", payload, 2)
+            self.assertEqual(len(result["results"]), 2)
+            # 被描述过的那条必须排第一
+            first = result["results"][0]
+            self.assertEqual(first["url"], "https://x.com/i/status/2100000000000000003")
+            self.assertEqual(first["text"], "body three")
+            self.assertEqual(first["author"], "A3")
+            # 未描述的补足位仍然保留（防编造语义不变）
+            self.assertEqual(
+                result["results"][1]["url"],
+                "https://x.com/i/status/2100000000000000001",
+            )
+
     def test_matching_twitter_alias_merges_model_fields_into_trusted_citation(self) -> None:
         payload = _payload(
             text='{"answer":"summary","results":[{"url":"https://twitter.com/openai/status/1901234567890123456","text":"real post text","author":"OpenAI","handle":"@OpenAI","created_at":"2026-03-19T12:00:00Z","why_relevant":"launch context"}]}',
