@@ -494,11 +494,26 @@ _AWARD_ENTITY_STOPWORDS = frozenset({
 #: 失败都以介词开头（`at the Academy Awards`、`for "Luther" at 2026 Grammys`），
 #: 介词已足够把它们拦下。
 
+#: **小写**不定冠词开头 —— 描述性从句的特征形态。
+#:
+#: 实测（2026-09-23，`news-01/02`）：`The eventual winner of Best Picture was
+#: a surprisingly thoughtful political drama.` 被宽松模式捕获成片名，输出的
+#: `Best Picture winner: a surprisingly thoughtful political drama` 是一句
+#: 影评描述，而真正的片名 `'One Battle After Another'` 就带引号在同句前面。
+#:
+#: 为什么是**小写**：`A Complete Unknown`（2024 真实片名）以大写 `A` 开头，
+#: 句中描述性从句的冠词则总是小写。用 IGNORECASE 会误杀前者。
+#: 为什么不是所有小写开头：`luther`、`debi tirar mas fotos` 是真实的小写
+#: 标题，只拒绝 `a`/`an` + 后接内容这一种形态。
+_DESCRIPTIVE_CLAUSE_HEAD_RE = re.compile(r"^(?:a|an)\s+\S")
+
 
 def _looks_like_fragment(entity: str) -> bool:
     """捕获串是否是从句子中间切出来的碎片。"""
     stripped = entity.strip().strip("\"“”'‘’ \t")
     if not stripped:
+        return True
+    if _DESCRIPTIVE_CLAUSE_HEAD_RE.match(stripped):
         return True
     first = re.split(r"[\s,]+", stripped, maxsplit=1)[0].lower()
     return first in _AWARD_ENTITY_STOPWORDS

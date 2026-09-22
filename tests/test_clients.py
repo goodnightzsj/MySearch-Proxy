@@ -752,6 +752,74 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(result["answer"], "Best Picture winner: One Battle After Another")
 
+    def test_a_descriptive_clause_is_not_mistaken_for_a_film_title(self) -> None:
+        """`… winner of Best Picture was <形容词短语>` 里的是描述，不是片名。
+
+        实测（2026-09-23，benchmark `news-01/02`，loop37 全量）：
+
+            The eventual winner of Best Picture was a surprisingly thoughtful
+            political drama. "One Battle After Another" follows Bob …
+
+        宽松模式抽出了 `Best Picture winner: a surprisingly thoughtful
+        political drama` —— 一句影评描述。真正的片名 `One Battle After Another`
+        带引号就在**同一句前面**。loop36 没暴露它只是因为那轮结果集恰好
+        没带这个页面，不是修复。
+
+        判据要求**小写** `a`/`an` 开头：`A Complete Unknown`（2024 真实片名）
+        以大写 `A` 开头，句中描述性从句的冠词则总是小写。
+        """
+        client = MySearchClient()
+
+        result = client._apply_result_event_answer_override(
+            query="2026 Oscars best picture winner",
+            mode="news",
+            intent="news",
+            strategy="verify",
+            result={
+                "answer": "",
+                "results": [
+                    {
+                        "title": "Revisiting the 2026 Best Picture Nominees",
+                        "url": "https://example.com/revisiting-nominees",
+                        "snippet": (
+                            "## No. 3: 'One Battle After Another'  Ranking: 4/5  "
+                            "The eventual winner of Best Picture was a surprisingly "
+                            "thoughtful political drama."
+                        ),
+                        "content": "",
+                    }
+                ],
+                "evidence": {},
+            },
+        )
+
+        self.assertNotIn("surprisingly thoughtful", str(result.get("answer") or ""))
+
+    def test_a_real_title_starting_with_a_capital_article_survives(self) -> None:
+        """`A Complete Unknown` 是真片名 —— 判定必须区分大小写。"""
+        client = MySearchClient()
+
+        result = client._apply_result_event_answer_override(
+            query="2026 Oscars best picture winner",
+            mode="news",
+            intent="news",
+            strategy="verify",
+            result={
+                "answer": "",
+                "results": [
+                    {
+                        "title": "'A Complete Unknown' is the Best Picture winner at the Academy Awards",
+                        "url": "https://example.com/a-complete-unknown",
+                        "snippet": "",
+                        "content": "",
+                    }
+                ],
+                "evidence": {},
+            },
+        )
+
+        self.assertEqual(result["answer"], "Best Picture winner: A Complete Unknown")
+
     def test_nominee_list_does_not_beat_an_explicit_winner_statement(self) -> None:
         """严格模式必须**跨全部候选**先扫一遍，否则名单式表述会抢答。
 
