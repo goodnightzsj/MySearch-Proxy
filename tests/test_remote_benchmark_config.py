@@ -1796,6 +1796,69 @@ class MatrixContractTests(unittest.TestCase):
         with self.MATRIX.open(encoding="utf-8") as fh:
             return list(csv.DictReader(fh))
 
+    def test_failure_mode_rows_exist_for_both_real_defects(self) -> None:
+        """两次由真实使用发现的缺陷，各自必须有专门的失效模式行。
+
+        benchmark 的价值取决于它能否覆盖**已经发生过的**缺陷。两次都漏过，
+        所以新行是补偿，不是扩张。
+
+        规格在 `scripts/benchmark_failure_modes.py`（仓库内、CI 可见），
+        这里校验矩阵确实**按规格**落进了那几行 —— 只校验规格存在，
+        矩阵漂移就会无人发现。
+        """
+        from scripts import benchmark_failure_modes
+
+        rows = {row["benchmark_id"]: row for row in self._rows()}
+        for spec in benchmark_failure_modes.FAILURE_MODE_ROWS:
+            with self.subTest(benchmark_id=spec.benchmark_id):
+                self.assertIn(spec.benchmark_id, rows)
+                actual = rows[spec.benchmark_id]
+                self.assertEqual(actual["query"], spec.query)
+                self.assertEqual(
+                    actual["expected_answer_patterns"], spec.expected_answer_patterns
+                )
+                self.assertEqual(
+                    actual["expected_url_patterns"], spec.expected_url_patterns
+                )
+
+    def test_version_attribution_spec_asserts_attribution_not_a_bare_number(self) -> None:
+        """版本行的断言必须**带主语**，否则放行张冠李戴。
+
+        实测：`pattern=['25']` 会让编造的 `25.12`（Aspose.Cells for Node.js
+        via Java 的版本）通过；`pattern=['java 25']` 对四个变体全部拒绝。
+        裸版本号断言等于没有断言。
+
+        这条只依赖仓库内规格，所以 CI 里不会因矩阵缺失而跳过。
+        """
+        from scripts import benchmark_failure_modes
+
+        spec = benchmark_failure_modes.VERSION_ATTRIBUTION
+        patterns = [
+            value.strip().lower()
+            for value in run_remote_mcp_benchmark.parse_pipe_list(spec.expected_answer_patterns)
+        ]
+        self.assertTrue(patterns, "版本行必须有答案断言")
+        for pattern in patterns:
+            with self.subTest(pattern=pattern):
+                self.assertRegex(
+                    pattern,
+                    r"[a-z]",
+                    "断言里必须含主语（字母），不能只是裸版本号",
+                )
+        # 反向确认：裸版本号确实放行编造 —— 这是上面规则的依据，
+        # 不是推测，所以钉在测试里。
+        self.assertTrue(
+            run_remote_mcp_benchmark._summary_matches_expected_answer(
+                "The latest stable version of Java is 25.12.", ["25"]
+            ),
+            "若裸版本号不再放行 25.12，这条断言的理由需要重新评估",
+        )
+        self.assertFalse(
+            run_remote_mcp_benchmark._summary_matches_expected_answer(
+                "The latest stable version of Java is 25.12.", ["java 25"]
+            )
+        )
+
     def test_matrix_has_a_row_that_resolves_to_auto_strategy(self) -> None:
         rows = self._rows()
         auto = [row["benchmark_id"] for row in rows if run_remote_mcp_benchmark.map_strategy(row) == "auto"]
