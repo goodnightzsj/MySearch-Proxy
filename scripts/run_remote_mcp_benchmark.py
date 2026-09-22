@@ -56,7 +56,20 @@ BENCHMARK_DIMENSIONS = (
     "traceability",
     "resilience",
     "efficiency",
+    "claim_groundedness",
+    "assertion_pass_rate",
 )
+
+#: `claim_groundedness` 提取专名时排除的词。取的是**句首高频词**：
+#: 英文答案几乎都以 `The` 开头，若不排除，"The latest stable version of
+#: Java is 26.1.2" 会因为 `The` 恰好在正文里而虚高比例。
+_GROUNDING_STOPWORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "based", "be", "been", "but", "by",
+    "current", "for", "from", "has", "have", "however", "in", "is", "it",
+    "its", "latest", "new", "no", "not", "of", "on", "or", "per", "please",
+    "released", "stable", "that", "the", "their", "there", "these", "this",
+    "to", "version", "was", "were", "which", "with",
+})
 
 FIELDNAMES = [
     "benchmark_id",
@@ -105,6 +118,12 @@ FIELDNAMES = [
     "tavily_duplicate_url_count",
     "tavily_published_date_count",
     "tavily_expected_answer_match",
+    "mysearch_claim_groundedness_ratio",
+    "mysearch_grounded_token_count",
+    "mysearch_assertion_pass_rate",
+    "tavily_claim_groundedness_ratio",
+    "tavily_grounded_token_count",
+    "tavily_assertion_pass_rate",
     "tavily_latency_ms",
     "tavily_repeat_variance",
     "tavily_repeat_observations",
@@ -1749,6 +1768,153 @@ def _efficiency_score(
     return _clamp_score(3.0 + (1.0 - ratio) * 2.0), False
 
 
+def _grounding_tokens(answer: str) -> list[str]:
+    """`answer` 里必须能回查出处的事实性 token：版本号与专名。
+
+    只取这两类，是因为它们**可证伪**且**易漂移**：版本号是本轮真实缺陷的载体
+    （Java 被答成 `26.1.2`，那是 Minecraft Java Edition 的版本），而专名是
+    奖项/产品类答案的载体。普通词汇不取 —— 它们在任何语料里都"能找到"，
+    会让这个指标恒真。
+    """
+    text = str(answer or "")
+    if not text.strip():
+        return []
+    found: list[str] = []
+    # 尾部断言只排除"后面还接着数字"（`1.2.3` 这种整体），句末句号必须放行 ——
+    # 答案几乎总以 `26.1.2.` 结尾，用 `(?![\w.])` 会把版本号整个漏掉，
+    # 使这一项退化成"只查专名"。
+    for match in re.finditer(r"(?<![\w.])v?\d+(?:\.\d+)+(?!\.?\d)", text):
+        found.append(match.group(0))
+    for match in re.finditer(r"\b[A-Z][A-Za-z0-9]*(?:\.[A-Za-z0-9]+)*\b", text):
+        token = match.group(0)
+        if len(token) >= 3 and token.lower() not in _GROUNDING_STOPWORDS:
+            found.append(token)
+    # 保序去重，避免重复 token 把比例算歪。
+    seen: set[str] = set()
+    unique: list[str] = []
+    for token in found:
+        key = token.lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(token)
+    return unique
+
+
+def _grounding_haystack(row: dict[str, object], prefix: str) -> str:
+    """该 provider **自己**返回的正文，作为回查依据。
+
+    用 `raw_text` 而不是 `summary`：summary 就是被检的 `answer` 本身，
+    拿它做依据会变成恒真判定。两侧各查各的，所以对 Tavily 同样成立。
+    """
+    raw = str(row.get(f"{prefix}_raw", "") or "")
+    if not raw:
+        return ""
+    parts = [raw]
+    parsed = _json_value(raw, None)
+    if isinstance(parsed, dict):
+        # 正文既可能在顶层，也可能在 results[].content/snippet 里。
+        parts.append(json.dumps(parsed, ensure_ascii=False))
+    return " ".join(parts).lower()
+
+
+def _claim_groundedness(row: dict[str, object], prefix: str) -> tuple[float, int]:
+    """`answer` 里的事实 token 有多少能在这家 provider 的正文里找到。
+
+    返回 `(比例, token 数)`。**没有 answer 或没有事实 token 时返回比例 1.0**：
+    不发明断言就不该被扣分 —— 该给分的是 `assertion_pass_rate`，
+    这里只惩罚"说了源里没有的话"。
+
+    **实测边界（2026-09-23，必须记住）**：这个指标**抓不住 Java 那个案例** ——
+    编造的 `26.1.2` 确实出现在源文本里（那是 Minecraft Java Edition 的版本），
+    所以它 grounded=1.00。它能抓住的是另一类：答案里出现**源里根本没有**的 token
+    （`4.5` / `10.7.3` 这两个用户报告的旧值正是如此，ratio=0.50）。
+    两个缺陷所以需要两个指标：这里管"凭空捏造"，`assertion_pass_rate`
+    与主语归属（产品侧的 `_version_is_anchored_to_subject`）管"张冠李戴"。
+    """
+    answer = str(row.get(f"{prefix}_summary", "") or "").strip()
+    tokens = _grounding_tokens(answer)
+    if not tokens:
+        return 1.0, 0
+    haystack = _grounding_haystack(row, prefix)
+    if not haystack:
+        return 1.0, len(tokens)
+    grounded = sum(1 for token in tokens if token.lower() in haystack)
+    return grounded / len(tokens), len(tokens)
+
+
+#: social 结果**应当**携带的文本字段。判据是"这些字段有没有内容"，
+#: 不是"已存在的键里几个非空"—— 后者对"整个字段被丢掉"是盲的：
+#: loop32 的 payload 只有 `provider/source/title/url`，缺 author/snippet，
+#: 而 title 非空会让"已存在键的填充率"算出 1.0，缺陷照样满分。
+_SOCIAL_REQUIRED_FIELDS = ("title", "snippet", "author")
+
+
+def _header_grounding_ratio(row: dict[str, object], prefix: str) -> float:
+    """social 结果**应有文本字段**的填充率 —— social 缺陷的判据。
+
+    social 真实缺陷（2026-09-22）：`results[]` 除 url 外全为空 —— 先是
+    `title`/`snippet`/`author` 全是空串，再往前是这些键**根本不存在**。
+    `semantic_discovery` / `site_coverage` 只看条数与域名数，所以
+    "5 条全空"与"5 条齐全"得分完全相同。
+
+    **只在 url 非空时**计入，避免把"没有结果"算成"字段填写很差"；
+    没有结果由 `empty_result` / `assertion_pass_rate` 表达。
+    """
+    raw = str(row.get(f"{prefix}_raw", "") or "")
+    parsed = _json_value(raw, None)
+    if not isinstance(parsed, dict):
+        return 1.0
+    items = parsed.get("results")
+    if not isinstance(items, list) or not items:
+        return 1.0
+    ratios: list[float] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if not str(item.get("url") or "").strip():
+            continue
+        filled = sum(
+            1 for key in _SOCIAL_REQUIRED_FIELDS if str(item.get(key) or "").strip()
+        )
+        ratios.append(filled / len(_SOCIAL_REQUIRED_FIELDS))
+    if not ratios:
+        return 1.0
+    return sum(ratios) / len(ratios)
+
+
+def _assertion_pass_rate(row: dict[str, object], prefix: str, input_row: dict[str, str]) -> float:
+    """该行**断言**的通过比例。目前是三组可证伪判据的等权平均。
+
+    这是"只测有没有东西、不测东西对不对"这个盲区的修法：断言不通过就掉分，
+    而断言必须能在**旧代码上失败、新代码上通过**才允许进矩阵。
+    """
+    checks: list[float] = []
+
+    urls = _row_urls(row, prefix)
+    expected_url_patterns = [
+        value.lower() for value in parse_pipe_list(input_row.get("expected_url_patterns", ""))
+    ]
+    if expected_url_patterns:
+        matched = any(
+            any(pattern in url.lower() for pattern in expected_url_patterns) for url in urls
+        )
+        checks.append(1.0 if matched else 0.0)
+
+    expected_answer_patterns = [
+        value.lower() for value in parse_pipe_list(input_row.get("expected_answer_patterns", ""))
+    ]
+    if expected_answer_patterns:
+        summary = str(row.get(f"{prefix}_summary", "") or "")
+        checks.append(1.0 if _summary_matches_expected_answer(summary, expected_answer_patterns) else 0.0)
+
+    if str(input_row.get("domain", "")).strip().lower() == "纯 social / x":
+        checks.append(_header_grounding_ratio(row, prefix))
+
+    if not checks:
+        return 1.0
+    return sum(checks) / len(checks)
+
+
 def _summary_matches_expected_answer(summary: str, patterns: list[str]) -> bool:
     normalized_summary = summary.lower()
     for raw_pattern in patterns:
@@ -1882,8 +2048,14 @@ def _score_provider(
     has_explicit_date = bool(re.search(r"\b20\d{2}(?:[-/]\d{1,2})?\b", summary))
     if expected_answer_patterns:
         freshness_signal = 5.0 if expected_answer_match else 0.0
+    elif published_date_count:
+        # 没有断言时**不给满分**：只要页面上有一个日期就能拿 5.0，等于从不校验
+        # 答案是否正确。loop34 里 5 行正是这样拿到假 5.0，把净优势抬高约 94 分。
+        freshness_signal = 3.0
+    elif has_explicit_date:
+        freshness_signal = 2.5
     else:
-        freshness_signal = 5.0 if published_date_count else 4.0 if has_explicit_date else 2.5
+        freshness_signal = 1.5
     site_coverage = 2.0 + min(2.0, citation_count / 3.0) + min(1.0, domain_count / 2.0)
     traceability = 1.5 + (1.5 if trace else 0.0) + min(1.5, citation_count / 3.0) + (0.5 if urls else 0.0)
 
@@ -1892,6 +2064,16 @@ def _score_provider(
         resilience = 0.0
     elif fallback_attempted and not fallback_used:
         resilience = min(resilience, 4.0)
+
+    # 两个断言类计分项：前十个维度只数"有没有东西"，这两项问"东西对不对"。
+    # social 字段全空与版本号编造两次都是从这个缺口漏过去的。
+    groundedness_ratio, groundedness_token_count = _claim_groundedness(row, prefix)
+    claim_groundedness_score = 5.0 * groundedness_ratio
+    assertion_rate = _assertion_pass_rate(row, prefix, input_row)
+    assertion_pass_rate_score = 5.0 * assertion_rate
+    row[f"{prefix}_claim_groundedness_ratio"] = round(groundedness_ratio, 4)
+    row[f"{prefix}_grounded_token_count"] = groundedness_token_count
+    row[f"{prefix}_assertion_pass_rate"] = round(assertion_rate, 4)
 
     scores = {
         "authority_precision": authority,
@@ -1904,6 +2086,8 @@ def _score_provider(
         "traceability": traceability,
         "resilience": resilience,
         "efficiency": efficiency,
+        "claim_groundedness": claim_groundedness_score,
+        "assertion_pass_rate": assertion_pass_rate_score,
     }
     return {dimension: _clamp_score(scores[dimension]) for dimension in BENCHMARK_DIMENSIONS}
 
@@ -2042,6 +2226,11 @@ def build_output_row(
         )
         if tavily_failure:
             row["structural_failure"] = tavily_failure
+    # `claim_groundedness` 必须回查 provider 自己的正文，而正文只在 raw 里。
+    # 这两列**留在内存**供计分（`merge_output_rows` 还会再算一遍），
+    # 由 `write_output` 在落盘时过滤掉 —— CSV 不存 raw（体积大且与 raw/ 目录重复）。
+    for prefix, raw_text in (("mysearch", mysearch_raw), ("tavily", tavily_raw)):
+        row[f"{prefix}_raw"] = raw_text
     score_output_row(input_row, row)
     return row
 
@@ -2095,7 +2284,7 @@ def merge_output_rows(
 
 def write_output(path: Path, rows: list[dict[str, str]]) -> None:
     with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
+        writer = csv.DictWriter(f, fieldnames=FIELDNAMES, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
 

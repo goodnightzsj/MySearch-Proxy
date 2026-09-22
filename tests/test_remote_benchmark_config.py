@@ -1468,6 +1468,230 @@ class ContentMetricsFairnessTests(unittest.TestCase):
         self.assertEqual(metrics(blob)["char_count"], 500)
 
 
+class ClaimGroundednessTests(unittest.TestCase):
+    """答案里的事实 token 必须能在**该 provider 自己的正文**里找到。
+
+    针对的真实缺陷：`latest stable version of Java` 答出 `4.5` / `10.7.3`，
+    两个数字在整个响应里都不存在。
+
+    **实测边界**：这个指标抓不住"张冠李戴"—— 编造的 `26.1.2` 确实出现在
+    源文本里（Minecraft Java Edition 的版本），所以它 grounded=1.00。
+    抓"张冠李戴"的是产品侧的 `_version_is_anchored_to_subject`，不是这里。
+    """
+
+    def _row(self, answer: str, raw: dict) -> dict[str, object]:
+        row = {key: "" for key in run_remote_mcp_benchmark.FIELDNAMES}
+        row["mysearch_summary"] = answer
+        row["mysearch_raw"] = json.dumps(raw, ensure_ascii=False)
+        return row
+
+    def test_a_number_absent_from_the_sources_scores_below_full(self) -> None:
+        raw = {"answer": "", "results": [{"url": "https://x", "snippet": "Java 25 is out."}]}
+        row = self._row("The latest stable version of Java is 4.5.", raw)
+        ratio, token_count = run_remote_mcp_benchmark._claim_groundedness(row, "mysearch")
+        self.assertEqual(token_count, 2)
+        self.assertAlmostEqual(ratio, 0.5)
+
+    def test_the_sentence_final_version_number_is_actually_extracted(self) -> None:
+        """尾部正则若用 `(?![\\w.])`，句末的 `26.1.2.` 会被整个漏掉。
+
+        那样这一项会退化成"只查专名"，永远满分。这里钉住版本号必须被取到。
+        """
+        tokens = run_remote_mcp_benchmark._grounding_tokens(
+            "The latest stable version of Java is 26.1.2."
+        )
+        self.assertIn("26.1.2", tokens)
+
+    def test_an_answer_without_facts_is_not_punished(self) -> None:
+        """不发明断言就不扣分 —— 那是 `assertion_pass_rate` 的职责。"""
+        row = self._row("", {"results": []})
+        ratio, token_count = run_remote_mcp_benchmark._claim_groundedness(row, "mysearch")
+        self.assertEqual((ratio, token_count), (1.0, 0))
+
+    def test_each_side_is_checked_against_its_own_sources(self) -> None:
+        """对称性：同一句答案，源里有则满分、源里无则半分。"""
+        answer = "The latest stable version of Java is 4.5."
+        with_source = self._row(answer, {"results": [{"url": "https://x", "snippet": "Java 4.5 stable"}]})
+        without_source = self._row(answer, {"results": [{"url": "https://x", "snippet": "Java 25 is out"}]})
+        with_source["tavily_summary"] = answer
+        with_source["tavily_raw"] = with_source["mysearch_raw"]
+        without_source["tavily_summary"] = answer
+        without_source["tavily_raw"] = without_source["mysearch_raw"]
+        self.assertEqual(
+            run_remote_mcp_benchmark._claim_groundedness(with_source, "mysearch")[0], 1.0
+        )
+        self.assertEqual(
+            run_remote_mcp_benchmark._claim_groundedness(with_source, "tavily")[0], 1.0
+        )
+        self.assertAlmostEqual(
+            run_remote_mcp_benchmark._claim_groundedness(without_source, "tavily")[0], 0.5
+        )
+
+
+class AssertionPassRateTests(unittest.TestCase):
+    """social 结果缺陷：`results[]` 除 url 外全空，旧矩阵照样给 39.53 分。
+
+    判据必须是"应有字段有没有内容"，**不是**"已存在的键里几个非空"——
+    后者对"整个字段被丢掉"是盲的：缺陷期 payload 只有
+    `provider/source/title/url`，缺 author/snippet，而 title 非空会算出 1.0。
+    """
+
+    def _row(self, raw: dict) -> dict[str, object]:
+        row = {key: "" for key in run_remote_mcp_benchmark.FIELDNAMES}
+        row["mysearch_raw"] = json.dumps(raw, ensure_ascii=False)
+        return row
+
+    def test_a_social_result_missing_author_and_snippet_is_penalised(self) -> None:
+        # 缺陷期的真实形状。
+        raw = {
+            "results": [
+                {"provider": "x", "source": "x", "title": "Some post", "url": "https://x.com/i/status/1"}
+            ]
+        }
+        self.assertAlmostEqual(
+            run_remote_mcp_benchmark._header_grounding_ratio(self._row(raw), "mysearch"),
+            1 / 3,
+        )
+
+    def test_a_fully_populated_social_result_scores_full(self) -> None:
+        raw = {
+            "results": [
+                {
+                    "url": "https://x.com/u/status/1",
+                    "title": "A post",
+                    "snippet": "post body",
+                    "author": "someone",
+                }
+            ]
+        }
+        self.assertEqual(
+            run_remote_mcp_benchmark._header_grounding_ratio(self._row(raw), "mysearch"), 1.0
+        )
+
+    def test_empty_string_fields_do_not_count_as_filled(self) -> None:
+        raw = {
+            "results": [
+                {"url": "https://x.com/u/status/1", "title": "", "snippet": "", "author": ""}
+            ]
+        }
+        self.assertEqual(
+            run_remote_mcp_benchmark._header_grounding_ratio(self._row(raw), "mysearch"), 0.0
+        )
+
+    def test_no_results_is_not_a_field_filling_failure(self) -> None:
+        """没有结果由 empty_result 表达，不该在这里二次惩罚。"""
+        self.assertEqual(
+            run_remote_mcp_benchmark._header_grounding_ratio(self._row({"results": []}), "mysearch"),
+            1.0,
+        )
+
+
+class FreshnessSignalCapTests(unittest.TestCase):
+    """无断言时 `freshness_signal` 不得给满分。
+
+    原实现是 `5.0 if published_date_count else ...` —— 页面上有一个日期就拿
+    5.0，**从不校验答案是否正确**。loop34 有 5 行因此拿假 5.0，把净优势抬高
+    约 94 分（那 5 行贡献 −94.31，其余 40 行 +19.52）。
+    """
+
+    def _score(self, **kwargs) -> float:
+        input_row = {
+            "benchmark_id": "x", "domain": "技术", "query": "q", "prompt_variant": "auto",
+            "primary_dimensions": "freshness_signal", "secondary_dimensions": "",
+            "expected_answer_patterns": kwargs.get("expected_answer_patterns", ""),
+            "expected_url_patterns": "",
+        }
+        row = {key: "" for key in run_remote_mcp_benchmark.FIELDNAMES}
+        row.update({
+            "run_status": "captured",
+            "mysearch_summary": kwargs.get("summary", "something"),
+            "mysearch_top_urls": "https://a.example/x",
+            "mysearch_citation_count": 1,
+            "mysearch_latency_ms": 1000,
+            "mysearch_published_date_count": kwargs.get("published_date_count", 0),
+        })
+        scored = run_remote_mcp_benchmark.score_output_row(input_row, row)
+        return scored["mysearch_freshness_signal_score"]
+
+    def test_a_published_date_alone_no_longer_earns_full_marks(self) -> None:
+        self.assertEqual(self._score(published_date_count=3), 3.0)
+
+    def test_matching_a_declared_expectation_still_earns_full_marks(self) -> None:
+        self.assertEqual(
+            self._score(
+                published_date_count=3,
+                expected_answer_patterns="3.14.7",
+                summary="The latest stable version of Python is 3.14.7.",
+            ),
+            5.0,
+        )
+
+    def test_a_declared_expectation_that_does_not_match_scores_zero(self) -> None:
+        self.assertEqual(
+            self._score(
+                published_date_count=3,
+                expected_answer_patterns="3.14.7",
+                summary="The latest stable version of Python is 3.9.0.",
+            ),
+            0.0,
+        )
+
+
+class ScoringReplayTests(unittest.TestCase):
+    """回放证明：历史缺陷 payload 在**旧矩阵**下通过、在**新矩阵**下失分。
+
+    这是新度量有效性的直接证据。旧矩阵的分数取自实际落盘的
+    loop33/loop34/loop35 CSV，不是估算。
+    """
+
+    RAW_DIR = REPO_ROOT / ".codex-tasks" / "20260530-provider-optimization-loop-v2" / "raw"
+
+    def _social_row(self, loop: str) -> tuple[dict[str, str], dict[str, object]]:
+        path = self.RAW_DIR / f"{loop}-remote-compare-raw" / "social-x-01.mysearch.json"
+        if not path.exists():
+            self.skipTest(f"missing raw payload: {path}")
+        raw_text = path.read_text(encoding="utf-8")
+        raw = json.loads(raw_text)
+        input_row = {
+            "benchmark_id": "social-x-01", "domain": "纯 Social / X",
+            "query": "x", "prompt_variant": "auto",
+            "primary_dimensions": "semantic_discovery",
+            "secondary_dimensions": "site_coverage",
+            "expected_answer_patterns": "", "expected_url_patterns": "",
+        }
+        row = {key: "" for key in run_remote_mcp_benchmark.FIELDNAMES}
+        row.update({
+            "run_status": "captured",
+            "mysearch_summary": raw.get("answer", ""),
+            "mysearch_top_urls": " | ".join(
+                str(item.get("url", "")) for item in (raw.get("results") or [])
+            ),
+            "mysearch_citation_count": 5,
+            "mysearch_latency_ms": 3000,
+            "mysearch_raw": raw_text,
+        })
+        return input_row, row
+
+    def test_the_social_field_defect_fails_the_new_matrix(self) -> None:
+        """loop32 是缺陷期：results 只有 4 个键、author/snippet 缺失。
+
+        旧矩阵（loop32 CSV 落盘值）给 `39.53`，`semantic_discovery=4.5`、
+        `site_coverage=4.17` —— 全是满分级，因为那两个维度只数条数和域名数。
+        """
+        input_row, row = self._social_row("loop32")
+        scored = run_remote_mcp_benchmark.score_output_row(input_row, row)
+        self.assertLess(scored["mysearch_assertion_pass_rate"], 1.0)
+        self.assertLess(scored["mysearch_assertion_pass_rate_score"], 5.0)
+        # 旧维度确实抓不到 —— 这是"为什么需要新指标"的证据，不是断言缺陷。
+        self.assertGreater(scored["mysearch_semantic_discovery_score"], 4.0)
+
+    def test_the_fixed_social_payload_passes_the_new_matrix(self) -> None:
+        """loop35 已修复：author/snippet 齐备，断言必须满分。"""
+        input_row, row = self._social_row("loop35")
+        scored = run_remote_mcp_benchmark.score_output_row(input_row, row)
+        self.assertEqual(scored["mysearch_assertion_pass_rate"], 1.0)
+
+
 class MatrixContractTests(unittest.TestCase):
     """守护矩阵必须持续覆盖几个"机制修了、覆盖没修"的口子。
 
