@@ -636,5 +636,167 @@ class ConflictingVersionClaimsTests(unittest.TestCase):
         self.assertIn("26 (www.oracle.com)", prompt)
 
 
+class AssertedMajorVersionAnswerTests(unittest.TestCase):
+    """官方页只写**裸主版本号**时，答案不能只靠透传上游。
+
+    生产实测（2026-09-24）：`latest stable version of Java` 答 `JDK 25`
+    （上游透传的过期值），而同一结果集里 oracle.com 写着
+    `JDK 27 is the latest release of the Java SE Platform.`。
+    根因：`_software_version_candidates_from_text` 只认带点版本号，官方页
+    通篇裸主版本号 → 零候选 → 直接返回空。
+
+    这里全部走 `_apply_software_version_answer_override` 这条**真实入口**：
+    只测 `_extract_software_version_answer` 的返回值，无法证明调用方用上了它。
+    """
+
+    ORACLE_LIVE = [
+        {
+            "url": "https://ops.java/releases/",
+            "title": "JDK Releases - Ops.java",
+            "snippet": "# JDK Releases\n| | 2028-09-19 | JDK 31 | |",
+        },
+        {
+            "url": "https://www.oracle.com/java/technologies/downloads/",
+            "title": "Java Downloads | Oracle",
+            "snippet": (
+                "JDK 27 is the latest release of the Java SE Platform. "
+                "JDK 25 is the latest Long-Term Support (LTS) release of the Java SE Platform."
+            ),
+        },
+        {
+            "url": "https://en.wikipedia.org/wiki/Java_version_history",
+            "title": "Java version history - Wikipedia",
+            "snippet": "| Latest version:Java SE 27 | | 71 | September 15, 2026 |",
+        },
+    ]
+
+    def _override(self, *, query: str, results: list[dict[str, object]], answer: str = ""):
+        client = MySearchClient()
+        return client._apply_software_version_answer_override(
+            query=query,
+            mode="web",
+            intent="factual",
+            result={"answer": answer, "results": results, "evidence": {}},
+        )
+
+    def test_stale_upstream_answer_is_corrected_from_official_page(self) -> None:
+        updated = self._override(
+            query="latest stable version of Java",
+            results=self.ORACLE_LIVE,
+            answer=(
+                "The latest stable version of Java is JDK 25. "
+                "It is an LTS release with long-term support."
+            ),
+        )
+        self.assertEqual(updated["answer"], "The latest stable version of Java is 27.")
+        self.assertEqual(
+            updated["evidence"]["answer_source"], "software-version-extraction"
+        )
+
+    def test_official_spellings_are_read_in_all_three_forms(self) -> None:
+        for text in (
+            "JDK 27 is the latest release of the Java SE Platform.",
+            "Latest version: Java SE 27",
+            "Latest version:Java SE 27",
+            "The latest version of Java is JDK 27.",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    software_version._asserted_versions_from_text(
+                        text, subject_tokens=("Java", "java")
+                    ),
+                    [27],
+                )
+
+    def test_disagreeing_sources_are_not_guessed(self) -> None:
+        """多个来源各执一词时不猜 —— 那该由冲突检测与 confidence 表达。
+
+        这条同时守住本模块"宁可不说也不编造"的既有契约。
+        """
+        results = list(self.ORACLE_LIVE) + [
+            {
+                "url": "https://www.jrebel.com/blog/java-lts",
+                "title": "What is Java LTS?",
+                "snippet": "> The latest version of Java is Java 25, which is also a Java LTS version.",
+            }
+        ]
+        updated = self._override(query="latest stable version of Java", results=results)
+        self.assertEqual(updated["answer"], "")
+
+    def test_other_products_version_still_cannot_answer(self) -> None:
+        """loop36 的保护不能因为接进应答路径而失守。
+
+        `Minecraft Java Edition 27 is the latest release` 的紧邻实词是
+        `Edition`（既非主语也非版本标记）。放宽锚点会重新放行这类编造，
+        所以修法是**句法**而不是放宽锚点。
+        """
+        results = [
+            {
+                "url": "https://gamercubic.com/latest-version-of-minecraft-java",
+                "title": "Latest Version of Minecraft: Java, Bedrock",
+                "snippet": "The latest stable Java version covered here is Minecraft Java Edition 26.1.2.",
+            },
+            {
+                "url": "https://gamercubic.com/other",
+                "title": "Minecraft Java Edition",
+                "snippet": "Minecraft Java Edition 27 is the latest release.",
+            },
+            {
+                "url": "https://forum.aspose.com/t/example",
+                "title": "Aspose.Cells for Node.js via Java",
+                "snippet": "Aspose.Cells for Node.js via Java 27 is the latest release.",
+            },
+        ]
+        self.assertEqual(self._override(query="latest stable version of Java", results=results)["answer"], "")
+
+    def test_a_different_subject_cannot_borrow_java_s_marker(self) -> None:
+        """`JDK` / `SE` 是 Java 专属标记，不能被别的主语借走。
+
+        实测泄漏：一个 Python 查询把 `JDK 27 is the latest release of the
+        Java SE Platform` 读成 Python 的最新版 —— 官方页里主语名在数字
+        **右侧**，左侧只剩标记，所以标记锚点还要求句内出现被问主语。
+        """
+        for query in ("what is the latest stable version of Python",
+                      "latest stable version of Kubernetes"):
+            with self.subTest(query=query):
+                updated = self._override(query=query, results=self.ORACLE_LIVE)
+                self.assertEqual(updated["answer"], "")
+
+    def test_thousands_separator_is_not_a_version(self) -> None:
+        """千分位数字不是版本号：`36,954,000` 会被 `current` 左侧命中形态 2。"""
+        results = [
+            {
+                "url": "https://www.macrotrends.net/global-metrics/cities/tokyo/population",
+                "title": "Tokyo, Japan Metro Area Population",
+                "snippet": (
+                    "The current metro area population of Tokyo in 2026 is 36,954,000, "
+                    "a 0.22% decline from 2025."
+                ),
+            }
+        ]
+        self.assertEqual(
+            software_version._asserted_versions_from_text(
+                results[0]["snippet"], subject_tokens=("Tokyo", "population")
+            ),
+            [],
+        )
+
+    def test_python_dotted_versions_are_unaffected(self) -> None:
+        """带点版本号仍由原有路径处理，回退分支不改变既有行为。"""
+        updated = self._override(
+            query="what is the latest stable version of Python",
+            results=[
+                {
+                    "url": "https://www.python.org/downloads/",
+                    "title": "Python downloads",
+                    "snippet": "The latest stable version of Python is 3.14.7.",
+                }
+            ],
+        )
+        self.assertEqual(
+            updated["answer"], "The latest stable version of Python is 3.14.7."
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

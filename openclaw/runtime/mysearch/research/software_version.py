@@ -114,7 +114,11 @@ def _extract_software_version_answer(
                 )
 
         if not candidates:
-            return ""
+            return _asserted_major_version_answer(
+                subject=subject,
+                subject_tokens=subject_tokens,
+                results=results,
+            )
 
         best_score = max(item[0] for item in candidates)
         shortlist = [item for item in candidates if item[0] >= best_score - 1]
@@ -134,6 +138,47 @@ def _extract_software_version_answer(
         if subject:
             return f"The latest stable version of {subject} is {version_text}."
         return f"The latest stable version is {version_text}."
+
+
+def _asserted_major_version_answer(
+    *,
+    subject: str,
+    subject_tokens: tuple[str, ...],
+    results: list[dict[str, Any]],
+) -> str:
+    """带点版本号一个都没读到时，退回**断言式裸主版本号**。
+
+    这是生产实测的缺口（2026-09-24）：`latest stable version of Java` 答
+    `JDK 25`（上游透传的过期值），而同一结果集里 oracle.com 写着
+    `JDK 27 is the latest release of the Java SE Platform.`。
+    `_software_version_candidates_from_text` 只认带点版本号（`\\d+\\.\\d+`），
+    官方页通篇是裸主版本号，所以它一个候选都挑不出来、直接返回空 ——
+    答案于是完全依赖上游，产品自己没能发现池里已有正确答案。
+
+    这里复用冲突检测那套**已验证**的谓词 `_asserted_versions_from_text`：
+    它按句法认"最新"声明的宾语，全 48 行零误报，且结构上放不进带点版本号，
+    因此 loop36 的 `Minecraft Java Edition 26.1.2` 一类编造进不来。
+
+    只在**一个**主版本号被断言时作答。多个来源各执一词时不猜 ——
+    那种情形该由 `conflicting_version_claims` 报冲突、由 confidence 降级表达，
+    而不是让答案随手挑一个。
+    """
+    claimed: set[int] = set()
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        for field in ("title", "snippet", "content"):
+            claimed.update(
+                _asserted_versions_from_text(
+                    str(item.get(field) or ""), subject_tokens=subject_tokens
+                )
+            )
+    if len(claimed) != 1:
+        return ""
+    version = next(iter(claimed))
+    if subject:
+        return f"The latest stable version of {subject} is {version}."
+    return f"The latest stable version is {version}."
 
 
 def _software_version_item_is_version_index(
@@ -441,6 +486,60 @@ _VERSION_CLAIM_NEGATIVE = (
 )
 
 
+def _claim_number_belongs_to_subject(
+    *,
+    text: str,
+    start: int,
+    subject_tokens: tuple[str, ...],
+) -> bool:
+    """形态 1 的归属校验：数字左侧紧邻的实词是被问软件，或该软件的**官方版本标记**。
+
+    与 `_version_is_anchored_to_subject` 的区别只有一处：额外接受 `JDK` / `SE`
+    这类标记作为锚点。
+
+    为什么必须接受标记：官方写法的原文是 `JDK 27 is the latest release of the
+    Java SE Platform` —— 主语 `Java` 出现在**数字右侧**，左侧只剩标记 `JDK`。
+    只认主语会整类误杀官方页（实测 oracle.com 今日原文）。
+
+    为什么接受标记仍然安全：标记是**产品专属**的（`jdk`/`se` 只属于 Java），
+    所以标记锚点还要求**同一句里**出现被问主语名 —— 这句的
+    `Java SE Platform` 正好满足。否则一个 Python 查询会把 Java 的 27
+    读成 Python 的最新版（实测该泄漏）。
+
+    挡住的是**别的产品的版本号**：`Minecraft Java Edition 27 is the latest
+    release` 的紧邻实词是 `Edition`（既非主语也非标记）→ 拒绝；
+    `JavaFX 27 …` → `JavaFX` → 拒绝；
+    `Aspose.Cells for Node.js via Java 27 …` → 紧邻是 `Java`，但再往前是
+    限定语介词 `via` → 拒绝。
+    """
+    if not subject_tokens:
+        return True
+    tokens = {token.lower().rstrip(".") for token in subject_tokens}
+    words = list(re.finditer(r"[A-Za-z][A-Za-z0-9.+#-]*", text[:start]))
+    index = len(words)
+    while index > 0 and words[index - 1].group(0).lower() in _VERSION_ANCHOR_CONNECTORS:
+        index -= 1
+    if index == 0:
+        return False
+    anchor = words[index - 1].group(0).lower().rstrip(".")
+    if anchor not in tokens and anchor not in _VERSION_EDITION_MARKERS:
+        return False
+    if index >= 2 and words[index - 2].group(0).lower() in _SUBJECT_QUALIFIER_PREPOSITIONS:
+        return False
+    # 标记是**产品专属**的：`jdk` / `se` 只属于 Java。仅凭标记就放行，会让
+    # 一个 Python 查询把 `JDK 27 is the latest release of the Java SE Platform`
+    # 读成 Python 的最新版（实测该泄漏）。因此标记锚点还要求**同一句里**
+    # 出现被问主语 —— 官方写法里 `Java SE Platform` 正好在句内。
+    if anchor in _VERSION_EDITION_MARKERS:
+        clause_tokens = {
+            word.group(0).lower().rstrip(".")
+            for word in re.finditer(r"[A-Za-z][A-Za-z0-9.+#-]*", text)
+        }
+        if not (clause_tokens & tokens):
+            return False
+    return True
+
+
 def _asserted_versions_from_text(
     text: str,
     *,
@@ -490,7 +589,16 @@ def _asserted_versions_from_text(
         clause_lower = clause.lower()
         if any(marker in clause_lower for marker in _VERSION_CLAIM_NEGATIVE):
             continue
-        for match in re.finditer(r"(?<![\d.])(\d{1,2})(?![\d.])", clause):
+        # 裸主版本号：1-2 位，且**不是**带点版本号的一部分。
+        # 右侧守卫写作 `(?!\d|\.\d|,\d)` 而不是 `(?![\d.])`：
+        #  - 去掉 `.` 单字符：否则句末句点也算"属于更长的版本号"，
+        #    `…is JDK 27.`（句号结尾）整类不匹配 —— 实测 oracle.com 与
+        #    wikipedia 的原文都是句子形态，这条守卫错一格就等于谓词在真实
+        #    输入上永远读不到数。改为只挡 `.` 后**紧跟数字**的情形。
+        #  - 加 `,\d`：千分位不是版本号。实测
+        #    `The current metro area population of Tokyo in 2026 is 36,954,000`
+        #    会把 `36` 读成"当前版本"（`current` 在左侧，形态 2 命中）。
+        for match in re.finditer(r"(?<![\d.])(\d{1,2})(?!\d|\.\d|,\d)", clause):
             start = match.start()
             before = clause_lower[max(0, start - 90):start]
             after = clause_lower[match.end():match.end() + 50]
@@ -500,36 +608,62 @@ def _asserted_versions_from_text(
             if re.match(
                 r"\s*(?:is|was)?\s*(?:the\s+)?(?:latest|current|newest)\s+(?:release|version|stable)\b",
                 after,
+            ) and _claim_number_belongs_to_subject(
+                text=clause,
+                start=start,
+                subject_tokens=subject_tokens,
             ):
                 found.append(int(match.group(1)))
                 continue
-            # 形态 2：`the latest version of Java is JDK 26` —— 版本号落在声明右侧。
+            # 形态 2：`the latest version of Java is SDK 26` —— 版本号落在声明右侧。
             if re.search(
                 r"\b(?:latest|current|newest)\b[^.\n]{0,60}?\b(?:is|:)\s*(?:the\s+)?"
                 r"(?:[A-Za-z.+#]+\s+){0,3}$",
                 before,
             ):
+                # 锚点回看时跳过产品标记与连接词：`…of Java is JDK 27` 的
+                # 紧邻实词是 `JDK`，不跳就整类误杀官方写法。
                 words = list(re.finditer(r"[A-Za-z][A-Za-z0-9.+#_-]*", clause[:start]))
-                if words and (
-                    words[-1].group(0).lower().rstrip(".") in tokens
-                    or (len(words) >= 2 and words[-2].group(0).lower().rstrip(".") in tokens)
-                ):
+                index = len(words)
+                while index > 0:
+                    word = words[index - 1].group(0).lower().rstrip(".")
+                    if word in _VERSION_ANCHOR_CONNECTORS or word in _VERSION_EDITION_MARKERS:
+                        index -= 1
+                        continue
+                    break
+                if index > 0 and words[index - 1].group(0).lower().rstrip(".") in tokens:
                     found.append(int(match.group(1)))
                     continue
             # 形态 3：`Latest version: Java SE 27`。
+            # 冒号**不是**本函数的断句符（见 `_claim_clauses`）—— 若把
+            # `Latest version:` 与 `Java SE 27` 切成两句，本条整类失效。
+            #
+            # 同样要过归属校验：`Latest version: Java SE 27` 里没有任何主语名，
+            # 光看左侧前缀会让**任意**主语读到 Java 的 27（实测该泄漏）。
+            # `_claim_number_belongs_to_subject` 会要求句内出现主语名。
             if re.search(
                 r"\b(?:latest|current|newest)\s+version\s*:?\s*(?:[A-Za-z.+#]+\s+){0,3}$",
                 before,
+            ) and _claim_number_belongs_to_subject(
+                text=clause,
+                start=start,
+                subject_tokens=subject_tokens,
             ):
                 found.append(int(match.group(1)))
     return found
 
 
 def _claim_clauses(text: str) -> list[str]:
-    """把一段结果文本切成条款级片段，供声明判定逐条检查。"""
+    """把一段结果文本切成条款级片段，供声明判定逐条检查。
+
+    切分符**不含冒号**：`Latest version: Java SE 27` 是一个声明，把冒号当
+    断句符会拆成 `Latest version:` 与 `Java SE 27` 两句，形态 3 整类失效。
+    反向也成立 —— 冒号常引出的是**限定语**（`Upcoming: JDK 27 is the latest
+    release`），拆开会让否定判据看不见 `Upcoming`，把预告当成已发布。
+    """
     parts: list[str] = []
     for chunk in re.split(r"\n+|\|", text or ""):
-        for clause in re.split(r"(?<=[.!?;:])\s+", chunk):
+        for clause in re.split(r"(?<=[.!?;])\s+", chunk):
             stripped = clause.strip()
             if stripped:
                 parts.append(stripped)
