@@ -429,3 +429,151 @@ def _extract_semantic_version(
         patch = int(match.group(3) or 0)
         return (major, minor, patch)
 
+
+#: 版本号前的**产品版本标记**。`Java SE 27` / `JDK 26` 这类官方写法里，
+#: 紧邻数字的实词是标记而不是产品名，产品名在它前面一格。
+_VERSION_EDITION_MARKERS = frozenset({"se", "jdk", "jre", "me", "ee", "lts", "sdk"})
+
+#: 否定与开发分支语境 —— 出现在文本里就整条不取。
+_VERSION_CLAIM_NEGATIVE = (
+    "alpha", "beta", "preview", "prerelease", "pre-release", "release candidate",
+    "upcoming", "planned", "scheduled", "future", "development branch", "main branch",
+)
+
+
+def _asserted_versions_from_text(
+    text: str,
+    *,
+    subject_tokens: tuple[str, ...] = (),
+) -> list[int]:
+    """文本里**被断言为最新版**的主版本号。
+
+    与 `_software_version_candidates_from_text` 的区别是**目的相反**：
+    那个要挑出"该软件的最新版"并据此作答，所以把判据收得极紧 —— 只认带点的
+    语义版本号，且锚点必须是主语本身。这个要给**冲突检测**用：它恰恰要在
+    "官方页说 26、维基说 27"这种**回答者自己都看不见**的情形下报警，
+    因此必须认官方写法里的**裸主版本号**（`JDK 26`、`Java SE 27`）。
+
+    收紧的办法不是放宽锚点，而是改看**句法**：版本号必须是"最新"这个
+    声明的**宾语**，才是一句声明。只认三种形态：
+
+    - `X 26 is the latest release`（版本号在左，latest 直接修饰 release/version）
+    - `the latest version of Java is JDK 26`（版本号在右，落在声明之后）
+    - `Latest version: Java SE 27`
+
+    实测（loop38，`failure-version-attribution-01`）：源里三处互相矛盾的声明
+    —— oracle.com 的 `JDK 26 is the latest release`、wikipedia 的
+    `Latest version:Java SE 27`、jrebel 的 `The latest version of Java is Java 25`
+    —— 本函数取到 `{oracle: 26, wikipedia: 27}`。
+
+    **刻意不取 jrebel 的 25**：那句的 `latest` 修饰的是 `version of Java`，
+    而 25 出现在句尾从句 `which is also a Java LTS version` 里。收成"latest
+    必须直接修饰 release/version/stable"之后，这句话反而正确排除了
+    `JDK 25 is the latest Long-Term Support (LTS) release`（latest 修饰 LTS）
+    这类**不是**在断言主版本的情形。
+
+    全 48 行实测**零误报**：只有本行触发。
+    """
+    if not text:
+        return []
+    flattened = re.sub(r"\s+", " ", text)
+    lowered = flattened.lower()
+    tokens = {token.lower().rstrip(".") for token in subject_tokens}
+    found: list[int] = []
+    # 版本号是否处在**条款**范围内（`|` 与换行分栏、句读断句）。
+    # 只看条款而不看整篇：实测 jrebel 那句 `The latest version of Java is Java 25`
+    # 所在页面的**别处**写着 "Java 21 is scheduled to receive premier support"，
+    # 整篇级的否定判据会因此把正确答案排除掉 —— 排除得对，理由却不对，
+    # 换个页面就会漏报。本模块其它地方（`_software_version_candidates_from_text`）
+    # 也是按句取上下文。
+    for clause in _claim_clauses(flattened):
+        clause_lower = clause.lower()
+        if any(marker in clause_lower for marker in _VERSION_CLAIM_NEGATIVE):
+            continue
+        for match in re.finditer(r"(?<![\d.])(\d{1,2})(?![\d.])", clause):
+            start = match.start()
+            before = clause_lower[max(0, start - 90):start]
+            after = clause_lower[match.end():match.end() + 50]
+            # 形态 1：`<产品> [SE|JDK|LTS] 26 is the latest release`。
+            # `latest` 必须直接修饰版本名词，否则 `latest LTS release` 会把
+            # `JDK 25`（LTS 版本号）也当成"最新正式版"的声明。
+            if re.match(
+                r"\s*(?:is|was)?\s*(?:the\s+)?(?:latest|current|newest)\s+(?:release|version|stable)\b",
+                after,
+            ):
+                found.append(int(match.group(1)))
+                continue
+            # 形态 2：`the latest version of Java is JDK 26` —— 版本号落在声明右侧。
+            if re.search(
+                r"\b(?:latest|current|newest)\b[^.\n]{0,60}?\b(?:is|:)\s*(?:the\s+)?"
+                r"(?:[A-Za-z.+#]+\s+){0,3}$",
+                before,
+            ):
+                words = list(re.finditer(r"[A-Za-z][A-Za-z0-9.+#_-]*", clause[:start]))
+                if words and (
+                    words[-1].group(0).lower().rstrip(".") in tokens
+                    or (len(words) >= 2 and words[-2].group(0).lower().rstrip(".") in tokens)
+                ):
+                    found.append(int(match.group(1)))
+                    continue
+            # 形态 3：`Latest version: Java SE 27`。
+            if re.search(
+                r"\b(?:latest|current|newest)\s+version\s*:?\s*(?:[A-Za-z.+#]+\s+){0,3}$",
+                before,
+            ):
+                found.append(int(match.group(1)))
+    return found
+
+
+def _claim_clauses(text: str) -> list[str]:
+    """把一段结果文本切成条款级片段，供声明判定逐条检查。"""
+    parts: list[str] = []
+    for chunk in re.split(r"\n+|\|", text or ""):
+        for clause in re.split(r"(?<=[.!?;:])\s+", chunk):
+            stripped = clause.strip()
+            if stripped:
+                parts.append(stripped)
+    return parts
+
+
+def conflicting_version_claims(
+    *,
+    query: str,
+    results: list[dict[str, Any]],
+) -> dict[int, list[str]]:
+    """同一版本问题在**不同来源**上得到不同主版本号时返回 `{版本号: [域名]}`。
+
+    这是 `_detect_evidence_conflicts` 缺失的那一类冲突：它现有的判据全是
+    **来源结构**（多样性、provider 数、官方源覆盖），没有一条看**内容是否
+    一致**。于是实测这一行 `evidence.conflicts` 为空、`confidence` 还是
+    `high`，而池子里 oracle 说 26、wikipedia 说 27、jrebel 说 25。
+
+    只在**多个域名**各执一词时算冲突 —— 同一个域名内部前后矛盾不算
+    （那是页面本身在列举版本，不是来源分歧）。
+
+    非版本类查询、或只有一个主版本号时返回空。全 48 行实测只在本行触发。
+    """
+    if not query_routing._looks_like_software_version_query(query.lower()):
+        return {}
+    subject = _software_version_subject(query)
+    subject_tokens = _software_version_subject_tokens(query, subject)
+    claimed: dict[int, list[str]] = {}
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "")
+        host = urlparse(url).hostname or ""
+        if not host:
+            continue
+        for field in ("title", "snippet", "content"):
+            for version in _asserted_versions_from_text(
+                str(item.get(field) or ""), subject_tokens=subject_tokens
+            ):
+                hosts = claimed.setdefault(version, [])
+                if host not in hosts:
+                    hosts.append(host)
+    distinct_hosts = {host for hosts in claimed.values() for host in hosts}
+    if len(claimed) < 2 or len(distinct_hosts) < 2:
+        return {}
+    return claimed
+

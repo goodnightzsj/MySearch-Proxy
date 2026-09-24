@@ -20,6 +20,7 @@ from mysearch import query_routing
 from mysearch.provider_contract import ProviderResponse
 from mysearch.research import sections
 from mysearch.research import selection
+from mysearch.research import software_version
 from mysearch.types import ResolvedSearchIntent, SearchMode
 def _trim_search_payload(
     result: dict[str, Any],
@@ -89,6 +90,7 @@ def _augment_evidence_summary(
             include_domains=include_domains,
         )
         conflicts = _detect_evidence_conflicts(
+            query=query,
             mode=mode,
             intent=intent,
             results=results,
@@ -123,6 +125,11 @@ def _augment_evidence_summary(
             social_identity_diversity_applies=social_identity_diversity_applies,
         )
         evidence["conflicts"] = conflicts
+        # 冲突的**具体值**：标签只说"有分歧"，这里说"26 对 27"。
+        # 同一个 `conflicting_version_claims` 谓词，不另起一套判据。
+        conflict_detail = _conflicting_version_claims_detail(query=query, results=results)
+        if conflict_detail:
+            evidence["conflicting_version_claims"] = conflict_detail
         enriched["evidence"] = evidence
         return enriched
 
@@ -620,6 +627,7 @@ def _count_official_resource_results(
 
 def _detect_evidence_conflicts(
     *,
+    query: str,
     mode: SearchMode,
     intent: ResolvedSearchIntent,
     results: list[dict[str, Any]],
@@ -648,7 +656,38 @@ def _detect_evidence_conflicts(
                 conflicts.append("domain-filter-returned-empty")
         if official_mode == "strict" and results and official_source_count <= 0:
             conflicts.append("strict-official-unmet")
+        # 内容级冲突：同一版本问题在不同来源上得到不同主版本号。
+        # 上面几条判据看的全是**来源结构**（多样性、provider 数、官方源覆盖），
+        # 没有一条看内容是否一致 —— 所以实测这一行 conflicts 为空、confidence
+        # 还是 high，而池子里 oracle 说 JDK 26、wikipedia 说 Java SE 27。
+        # 版本类查询之外恒为空（`software_version` 里有查询谓词守卫）。
+        version_claims = software_version.conflicting_version_claims(
+            query=query,
+            results=results,
+        )
+        if version_claims:
+            conflicts.append("conflicting-version-claims")
         return conflicts
+
+
+def _conflicting_version_claims_detail(
+    *,
+    query: str,
+    results: list[dict[str, Any]],
+) -> dict[str, list[str]]:
+    """冲突的**具体值**，供 evidence 与仲裁使用。
+
+    只写一个 `conflicting-version-claims` 标签的话，"哪里不一致"是不可见的：
+    evidence 里看不出是 26 还是 27，`_apply_xai_arbitration` 拼出的仲裁问题
+    也只会给出一个没有内容的标签 —— 等于让仲裁方重新猜一遍分歧在哪。
+    """
+    claims = software_version.conflicting_version_claims(query=query, results=results)
+    if not claims:
+        return {}
+    return {
+        str(version): sorted(hosts)
+        for version, hosts in sorted(claims.items(), reverse=True)
+    }
 
 
 def _estimate_search_confidence(
@@ -671,17 +710,22 @@ def _estimate_search_confidence(
             return "low"
         if official_mode == "strict" and official_source_count <= 0:
             return "low"
+        # 来源结构再漂亮也不能盖过**内容层面的分歧**：多个域名对同一个版本问题
+        # 各执一词时，答案本身不可信，封顶 medium。不加这一条的话，下面两处
+        # `return "high"` 会照旧放行 —— 实测本行正是 conflicts 为空、confidence
+        # 为 high，而池子里 oracle 说 26、wikipedia 说 27。
+        content_conflict = "conflicting-version-claims" in conflicts
         if query_routing._should_rerank_resource_results(mode=mode, intent=intent):
             if official_source_count > 0 and "official-source-not-confirmed" not in conflicts:
                 if (
                     verification == "cross-provider"
                     or (effective_diversity >= 2 and "mixed-official-and-third-party" not in conflicts)
                 ):
-                    return "high"
+                    return "medium" if content_conflict else "high"
                 return "medium"
             return "medium" if effective_diversity >= 2 else "low"
         if verification == "cross-provider" and effective_diversity >= 2:
-            return "high"
+            return "medium" if content_conflict else "high"
         if effective_diversity >= 2:
             return "medium"
         return "low" if conflicts else "medium"

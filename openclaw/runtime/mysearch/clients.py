@@ -2852,6 +2852,17 @@ class MySearchClient(ProviderTransport):
             "Prefer the most credible and current conclusion. "
             "Briefly explain which evidence should be trusted and why."
         )
+        # 带上**具体分歧**：只有标签的话，仲裁方拿到的就是一句没内容的
+        # "conflicting-version-claims"，只能把分歧重新猜一遍。
+        claim_detail = evidence.get("conflicting_version_claims")
+        if isinstance(claim_detail, dict) and claim_detail:
+            rendered = "; ".join(
+                f"{version} ({', '.join(hosts)})"
+                for version, hosts in claim_detail.items()
+                if hosts
+            )
+            if rendered:
+                arbitration_query += f"\nReported versions: {rendered}."
         try:
             arbitration_result = self._search_xai(
                 query=arbitration_query,
@@ -6407,6 +6418,7 @@ class MySearchClient(ProviderTransport):
     def _detect_evidence_conflicts(
         self,
         *,
+        query: str,
         mode: SearchMode,
         intent: ResolvedSearchIntent,
         results: list[dict[str, Any]],
@@ -6418,7 +6430,7 @@ class MySearchClient(ProviderTransport):
         social_identity_count: int,
         social_identity_diversity_applies: bool,
     ) -> list[str]:
-        return finalize._detect_evidence_conflicts(mode=mode, intent=intent, results=results, include_domains=include_domains, source_domains=source_domains, official_source_count=official_source_count, providers_consulted=providers_consulted, official_mode=official_mode, social_identity_count=social_identity_count, social_identity_diversity_applies=social_identity_diversity_applies)
+        return finalize._detect_evidence_conflicts(query=query, mode=mode, intent=intent, results=results, include_domains=include_domains, source_domains=source_domains, official_source_count=official_source_count, providers_consulted=providers_consulted, official_mode=official_mode, social_identity_count=social_identity_count, social_identity_diversity_applies=social_identity_diversity_applies)
 
     def _estimate_search_confidence(
         self,

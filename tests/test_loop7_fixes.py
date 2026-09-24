@@ -407,5 +407,234 @@ class SoftwareVersionGroundingTests(unittest.TestCase):
         self.assertEqual(self._candidates(text, "Python"), ["3.14.3", "3.14.6"])
 
 
+class ConflictingVersionClaimsTests(unittest.TestCase):
+    """同一版本问题被不同来源用**不同主版本号**回答时必须报警。
+
+    缺陷（loop38 在 `failure-version-attribution-01` 上实测）：该行的
+    `evidence.conflicts` 是 `[]`、`confidence` 是 `high`，而池子里三个来源
+    互相矛盾 —— oracle.com 说 `JDK 26`、wikipedia 说 `Java SE 27`。
+    既有的判据全在看**来源结构**（多样性、provider 数、官方源覆盖），
+    没有一条看内容是否一致。
+    """
+
+    JAVA_RESULTS = [
+        {
+            "url": "https://www.oracle.com/java/technologies/downloads",
+            "title": "Java Downloads - Oracle",
+            "snippet": (
+                "JDK 26 is the latest release of the Java SE Platform. "
+                "JDK 25 is the latest Long-Term Support (LTS) release of the Java SE Platform."
+            ),
+        },
+        {
+            "url": "https://en.wikipedia.org/wiki/Java_version_history",
+            "title": "Java version history",
+            "snippet": "| Latest version:Java SE 27 | | 71 | September 15, 2026 |",
+        },
+        {
+            "url": "https://www.jrebel.com/blog/java-lts",
+            "title": "What is Java LTS and Why Does It Matter?",
+            "snippet": (
+                "## What is the Latest Version of Java?\n\n"
+                "> The latest version of Java is Java 25, which is also a Java LTS version.\n\n"
+                "### Java 21\n\nJava 21 was released in September 2023. "
+                "Java 21 is scheduled to receive premier support through September 2028."
+            ),
+        },
+    ]
+
+    def test_official_and_third_party_disagreement_is_reported(self) -> None:
+        claims = software_version.conflicting_version_claims(
+            query="latest stable version of Java",
+            results=self.JAVA_RESULTS,
+        )
+        self.assertEqual(
+            claims,
+            {25: ["www.jrebel.com"], 26: ["www.oracle.com"], 27: ["en.wikipedia.org"]},
+        )
+
+    def test_future_support_clause_does_not_suppress_the_whole_page(self) -> None:
+        """否定判据必须按**条款**生效，不能按整篇。
+
+        实测 jrebel 那段里 `The latest version of Java is Java 25` 是有效声明，
+        而同一页面的**别处**写着 "Java 21 is scheduled to receive premier support"。
+        整篇级判据会因为那个 `scheduled` 把 25 一起丢掉 —— 结论碰巧对，
+        理由却是错的：换成任何一页提到未来版本的真实声明都会被连带漏掉。
+        """
+        claims = software_version.conflicting_version_claims(
+            query="latest stable version of Java",
+            results=[self.JAVA_RESULTS[2]],
+        )
+        self.assertEqual(claims.get(21), None)
+        self.assertIn(25, software_version._asserted_versions_from_text(
+            self.JAVA_RESULTS[2]["snippet"], subject_tokens=("Java", "java")
+        ))
+
+    def test_bare_major_versions_are_read_from_official_spellings(self) -> None:
+        """`JDK 26` / `Java SE 27` 是官方写法，不能因为"没带点"就看不见。
+
+        与 `_software_version_candidates_from_text` 的目的**相反**：那个要挑出
+        正确答案所以收得极紧（只认带点的语义版本号）；这个要在"回答者自己都看
+        不见"时报警，必须认裸主版本号。收紧靠**句法**（版本号必须是"最新"的
+        宾语），不靠放宽主语锚点 —— 放宽锚点会同时放行
+        `Minecraft Java Edition 26.1.2`，那是 loop36 刚建立起来的保护。
+        """
+        claims = software_version.conflicting_version_claims(
+            query="latest stable version of Java",
+            results=self.JAVA_RESULTS,
+        )
+        self.assertIn(26, claims)
+        self.assertIn(27, claims)
+
+    def test_lts_version_is_not_mistaken_for_the_latest_release(self) -> None:
+        """`JDK 25 is the latest Long-Term Support (LTS) release` 不是主版本声明。
+
+        这句里的 `latest` 修饰的是 `LTS`，断言的是"哪个是最新 LTS"，
+        而不是"哪个是最新正式版"。实测把 25 也算进来的话，
+        oracle 单页就会自报 26 与 25 两个值。
+        """
+        oracle_only = [self.JAVA_RESULTS[0]]
+        claims = software_version.conflicting_version_claims(
+            query="latest stable version of Java",
+            results=oracle_only,
+        )
+        self.assertEqual(claims, {})
+
+    def test_agreement_across_sources_is_not_a_conflict(self) -> None:
+        results = [
+            {
+                "url": "https://docs.python.org/3/",
+                "title": "Python docs",
+                "snippet": "The latest version of Python is 3.14.7.",
+            },
+            {
+                "url": "https://www.python.org/downloads",
+                "title": "Python downloads",
+                "snippet": "Python 3.14.7 is the latest release of Python.",
+            },
+        ]
+        self.assertEqual(
+            software_version.conflicting_version_claims(
+                query="what is the latest stable version of Python", results=results
+            ),
+            {},
+        )
+
+    def test_non_version_queries_are_ignored(self) -> None:
+        self.assertEqual(
+            software_version.conflicting_version_claims(
+                query="2026 Oscars best picture winner", results=self.JAVA_RESULTS
+            ),
+            {},
+        )
+
+    def test_conflict_defers_confidence_and_surfaces_in_evidence(self) -> None:
+        """冲突必须**走到 evidence**：标签、具体值、confidence 三者齐备。
+
+        只测检测函数的返回值是"通过得不对"——实测按这个写法做的变异
+        （把写 evidence 的那两行注释掉）测试**依然全绿**，因为它验的是
+        函数返回了什么，不是调用方有没有用上。这里走 `_augment_evidence_summary`
+        这条真实入口。
+        """
+        from mysearch.clients import MySearchClient
+
+        client = MySearchClient()
+        enriched = client._augment_evidence_summary(
+            result={
+                "provider": "hybrid",
+                "results": self.JAVA_RESULTS,
+                "citations": [
+                    {"title": item["title"], "url": item["url"]} for item in self.JAVA_RESULTS
+                ],
+                "evidence": {
+                    "providers_consulted": ["tavily", "firecrawl"],
+                    "verification": "cross-provider",
+                },
+            },
+            query="latest stable version of Java",
+            mode="web",
+            intent="factual",
+            include_domains=None,
+        )
+
+        evidence = enriched["evidence"]
+        self.assertIn("conflicting-version-claims", evidence["conflicts"])
+        self.assertEqual(
+            evidence["conflicting_version_claims"],
+            {
+                "27": ["en.wikipedia.org"],
+                "26": ["www.oracle.com"],
+                "25": ["www.jrebel.com"],
+            },
+        )
+        self.assertEqual(evidence["confidence"], "medium")
+
+    def test_conflict_detail_names_the_competing_values(self) -> None:
+        """只给标签的话"哪里不一致"是不可见的。
+
+        `conflicting-version-claims` 这个标签和 `low-source-diversity` 之类
+        形状相同、内容不同：前者必须带出**具体是哪几个版本、谁在说**，
+        否则用户看不到分歧在哪，仲裁方也只能把分歧重新猜一遍。
+        """
+        from mysearch.research import finalize
+
+        detail = finalize._conflicting_version_claims_detail(
+            query="latest stable version of Java",
+            results=self.JAVA_RESULTS,
+        )
+        self.assertEqual(
+            detail,
+            {
+                "27": ["en.wikipedia.org"],
+                "26": ["www.oracle.com"],
+                "25": ["www.jrebel.com"],
+            },
+        )
+        self.assertEqual(
+            finalize._conflicting_version_claims_detail(
+                query="2026 Oscars best picture winner", results=self.JAVA_RESULTS
+            ),
+            {},
+        )
+
+    def test_arbitration_prompt_carries_the_competing_values(self) -> None:
+        """仲裁问题里要出现具体版本号，不能只有标签。"""
+        from mysearch.clients import MySearchClient
+        from mysearch.research import finalize
+
+        client = MySearchClient()
+        captured: dict[str, object] = {}
+        client._search_xai = lambda **kwargs: (  # type: ignore[method-assign]
+            captured.update(kwargs),
+            {"answer": "", "citations": []},
+        )[1]
+        client._provider_can_serve = lambda provider: True  # type: ignore[method-assign]
+        client.config.xai.search_mode = "official"
+
+        client._apply_xai_arbitration(
+            query="latest stable version of Java",
+            result={
+                "provider": "hybrid",
+                "results": self.JAVA_RESULTS,
+                "evidence": {
+                    "providers_consulted": ["tavily", "firecrawl"],
+                    "conflicts": ["conflicting-version-claims"],
+                    "conflicting_version_claims": finalize._conflicting_version_claims_detail(
+                        query="latest stable version of Java", results=self.JAVA_RESULTS
+                    ),
+                },
+            },
+            include_domains=None,
+            exclude_domains=None,
+            from_date=None,
+            to_date=None,
+        )
+
+        prompt = str(captured.get("query") or "")
+        self.assertIn("Reported versions:", prompt)
+        self.assertIn("27 (en.wikipedia.org)", prompt)
+        self.assertIn("26 (www.oracle.com)", prompt)
+
+
 if __name__ == "__main__":
     unittest.main()
