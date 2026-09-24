@@ -1163,11 +1163,49 @@ def repeat_variance(observations):
     }
 
 
+def _median_sample_index(samples: list[dict[str, object]]) -> int:
+    #
+    # 为什么需要它：`repeat_runs` 的重复现在是真正独立的请求（bench 容器缓存关闭，
+    # 实测同一 query 三次返回不同 URL 集与不同答案），于是「取第 1 个样本」
+    # 等于让行分数由单次抽样决定 —— 实测 46/48 行至少有一个计分输入在样本间变化
+    # （正文长度相对波动最高 29.5%，citation 如 38/18/17）。
+    #
+    # **为什么是中位而不是多数票**：实测分布形状是「**单峰 + 连续抖动**」而非双峰 ——
+    # 在带断言的行里 9 行 3/3 全过、2 行 0/3 全败、**0 行部分通过**，
+    # 即正确性本身是稳定的，变化的只是内容量这类连续量。
+    # 多数票是为双峰准备的，这里没有要投票解决的分裂；
+    # 中位正是单峰连续抖动的标准选择，且 3 个样本下天然抗单个离群。
+    #
+    # 取中位的键是一组**连续量**（正文字符数为主，citation 次之），
+    # 而不是合成一个任意分数 —— 这样「中位」有明确含义：内容量居中的那一次。
+    if not samples:
+        return -1
+
+    def key(item: dict[str, object]) -> tuple[float, float]:
+        # 就地转换而**不调用 `_as_float`**：本函数与 `timed_tool_runs` 一样定义在
+        # `REMOTE_SCRIPT` 里（远端进程执行的独立程序），而 `_as_float` 是**外层
+        # 模块**的函数，远端看不到 —— 实测调用它会 `NameError`。远端脚本必须自足。
+        def num(value: object) -> float:
+            try:
+                return float(value or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        return (
+            num(item.get("content_char_count")),
+            num(item.get("citation_count")),
+        )
+
+    ordered = sorted(range(len(samples)), key=lambda i: key(samples[i]))
+    return ordered[len(ordered) // 2]
+
+
 def timed_tool_runs(client, tool_name, arguments, repeat_runs, latency_budget_ms=0):
     latencies = []
     errors = []
     timeout_flag = False
     first_success = None
+    success_samples: list[dict[str, object]] = []
     raw_text = ""
     observations = []
     fallback_reasons = []
@@ -1226,6 +1264,7 @@ def timed_tool_runs(client, tool_name, arguments, repeat_runs, latency_budget_ms
             if first_success is None:
                 first_success = summarized
                 raw_text = text
+            success_samples.append(summarized)
         except Exception as exc:
             elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
             message = str(exc)
@@ -1253,19 +1292,23 @@ def timed_tool_runs(client, tool_name, arguments, repeat_runs, latency_budget_ms
     observation_latencies = [float(item["latency_ms"]) for item in observations]
     warm_latencies = observation_latencies[1:]
     budget_ms = float(latency_budget_ms or 0)
+    # 计分样本取**中位**而非第 1 个：重复现在是独立请求，取首个等于让行分数
+    # 由单次抽样决定（实测 46/48 行的计分输入在样本间变化）。见 `_median_sample_index`
+    # 里对"为什么是中位而不是多数票"的实测依据。
+    scored = success_samples[_median_sample_index(success_samples)] if success_samples else first_success
     return {
-        "summary": first_success["summary"],
-        "urls": first_success["urls"],
-        "provider_trace": first_success["provider_trace"],
-        "citation_count": first_success["citation_count"],
-        "content_char_count": first_success["content_char_count"],
-        "content_item_count": first_success["content_item_count"],
-        "content_noise_hits": first_success["content_noise_hits"],
-        "duplicate_url_count": first_success["duplicate_url_count"],
-        "published_date_count": first_success["published_date_count"],
-        "official_mode": first_success["official_mode"],
-        "conflicts": first_success["conflicts"],
-        "empty_result": first_success["empty_result"],
+        "summary": scored["summary"],
+        "urls": scored["urls"],
+        "provider_trace": scored["provider_trace"],
+        "citation_count": scored["citation_count"],
+        "content_char_count": scored["content_char_count"],
+        "content_item_count": scored["content_item_count"],
+        "content_noise_hits": scored["content_noise_hits"],
+        "duplicate_url_count": scored["duplicate_url_count"],
+        "published_date_count": scored["published_date_count"],
+        "official_mode": scored["official_mode"],
+        "conflicts": scored["conflicts"],
+        "empty_result": scored["empty_result"],
         "orchestration_used": used_orchestration,
         "fallback_attempted": fallback_attempted,
         "fallback_reason": " | ".join(fallback_reasons),
