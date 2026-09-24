@@ -1934,6 +1934,46 @@ class MatrixContractTests(unittest.TestCase):
                     f"编造被放行: {answer}",
                 )
 
+    def test_version_patterns_cover_the_official_spellings_not_just_one(self) -> None:
+        """`Java SE NN` 与 `JDK NN` 是**两种**官方写法，只覆盖一种就误杀。
+
+        实测（2026-09-24，生产 oracle.com 原文）：页面写的是
+        `JDK 27 is the latest release of the Java SE Platform.` —— 主语后
+        直接跟 `JDK`，不属于 `java NN` 形态。原来只有 `java se NN` /
+        `java NN`，答成 `JDK 27` 会被判 0 分。
+
+        值更新到 `27` 这件事本身**不改变**该行分数：产品侧的合成答案是
+        `…is 27.`（不含主语），任何带主语的断言都不会匹配它 —— 这一点已实测。
+        更新的意义是**不再把答对的判成 0 分**，那是过期期望值真正造成的伤害。
+        详见 `feedback_benchmark_expectations_drift`。
+        """
+        from scripts import benchmark_failure_modes
+
+        patterns = run_remote_mcp_benchmark.parse_pipe_list(
+            benchmark_failure_modes.VERSION_ATTRIBUTION.expected_answer_patterns
+        )
+        for answer in (
+            "The latest stable version of Java is Java SE 27, released in September 2026.",
+            "The latest stable version of Java is JDK 27.",
+            "The latest stable version of Java is Java 27 LTS.",
+        ):
+            with self.subTest(answer=answer[:52]):
+                self.assertTrue(
+                    run_remote_mcp_benchmark._summary_matches_expected_answer(answer, patterns),
+                    f"官方写法被误杀: {answer}",
+                )
+        # 值换新之后，编造仍必须全部拒绝 —— 扩表不能顺手放宽判据。
+        for answer in (
+            "The latest stable version of Java is 27.1.2.",
+            "The latest stable version of Java is 26.1.2.",
+            "The latest stable version of Java is 25.12.",
+        ):
+            with self.subTest(kind="fabricated", answer=answer[:52]):
+                self.assertFalse(
+                    run_remote_mcp_benchmark._summary_matches_expected_answer(answer, patterns),
+                    f"编造被放行: {answer}",
+                )
+
     def test_matrix_has_a_row_that_resolves_to_auto_strategy(self) -> None:
         rows = self._rows()
         auto = [row["benchmark_id"] for row in rows if run_remote_mcp_benchmark.map_strategy(row) == "auto"]

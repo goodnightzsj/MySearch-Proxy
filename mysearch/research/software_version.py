@@ -57,6 +57,31 @@ def _apply_software_version_answer_override(
             return result
 
         current_answer = str(result.get("answer") or "").strip()
+        # 防降级：裸主版本号回退**不能**覆盖一个已经答对的答案。
+        #
+        # 上游给出正确的官方写法 `…is JDK 27.` 时，回退会把它改写成 `…is 27.`
+        # —— 版本号没错，但归属信息（`JDK`/`Java SE`）丢了，断言
+        # `java se 27` / `jdk 27` 从匹配变不匹配。实测确认过这个降级。
+        #
+        # 判据必须是"当前答案**断言**了这个版本"，不能是"答案里出现过这个数"：
+        # 实测反例 `…is JDK 25, the current LTS. JDK 27 is the newest feature
+        # release.` —— 27 只是被提到，被断言的仍是过期的 25。按出现判断会
+        # 拒绝覆盖，把过期答案留在原地；正是"提及 vs 断言"这个本模块反复
+        # 处理的区别，所以复用同一个谓词而不是另写一套。
+        #
+        # 只在回退路径上生效：带点路径产出的答案本身就是规范写法，
+        # 不存在归属变弱的问题。判据是"提取出的答案里没有带点版本号"。
+        extracted_bare = re.search(r"(?<![\d.])(\d{1,2})(?!\d|\.\d|,\d)", extracted_answer)
+        if extracted_bare and _extract_semantic_version(extracted_answer) is None:
+            asserted = _asserted_versions_from_text(
+                current_answer,
+                subject_tokens=_software_version_subject_tokens(
+                    query, _software_version_subject(query)
+                ),
+            )
+            if int(extracted_bare.group(1)) in asserted:
+                return result
+
         current_version = _extract_semantic_version(current_answer)
         extracted_version = _extract_semantic_version(extracted_answer)
         should_override = not current_answer

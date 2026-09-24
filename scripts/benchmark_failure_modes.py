@@ -42,6 +42,16 @@ class FailureModeRow(NamedTuple):
 #: `Java SE 25`，而 `pattern='java 25'` 因为中间隔着 `SE` 匹配不上 ——
 #: 那是误杀答对的产品。列举 `java se NN` 与 `java NN` 两种写法后，
 #: 正确答案全部匹配、四个编造变体全部拒绝（已在测试里钉住）。
+#:
+#: **期望值必须随事实更新（2026-09-24）**：原来钉的是 `26`/`25`，而
+#: Java SE 27 已于 2026-09-15 发布。过期期望的代价不是"少给分"而是
+#: **把答对的判成 0 分** —— 实测 `Java SE 27` 与 `JDK 27` 两种正确写法
+#: 对旧 pattern 全部不匹配。这类期望值是可腐契约，每轮必须复核；
+#: 与 `feedback_benchmark_expectations_drift` 记录同一类问题。
+#:
+#: 保留 `25`（LTS）与 `26` 是**刻意**的：它们仍是被断言过的真实版本号，
+#: 加进去不会放行任何编造变体，却能让"答成上一个 LTS"这类**可解释的
+#: 近义答案**不被判成 0 —— 判据的重点是归属正确，不是版本号必须最新。
 VERSION_ATTRIBUTION = FailureModeRow(
     benchmark_id="failure-version-attribution-01",
     domain="事实型版本查询",
@@ -52,10 +62,13 @@ VERSION_ATTRIBUTION = FailureModeRow(
     secondary_dimensions="authority_precision|traceability",
     latency_budget_ms="20000",
     expected_url_patterns="",
-    expected_answer_patterns="java se 26|java 26|java se 25|java 25",
+    expected_answer_patterns=(
+        "java se 27|java 27|jdk 27|java se 26|java 26|java se 25|java 25"
+    ),
     notes=(
         "失效模式行。断言必须带主语（裸版本号会放行张冠李戴的 25.12），"
-        "且要覆盖 `Java SE NN` 这一官方写法（否则误杀答对的产品）。"
+        "且要覆盖 `Java SE NN` / `JDK NN` 两种官方写法（否则误杀答对的产品）。"
+        "期望值随事实更新：Java SE 27 于 2026-09-15 发布。"
     ),
 )
 

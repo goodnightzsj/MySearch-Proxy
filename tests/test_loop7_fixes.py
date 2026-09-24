@@ -797,6 +797,98 @@ class AssertedMajorVersionAnswerTests(unittest.TestCase):
             updated["answer"], "The latest stable version of Python is 3.14.7."
         )
 
+    def test_a_correct_upstream_answer_is_not_downgraded(self) -> None:
+        """回退分支**不能**把上游已经答对的官方写法改写成裸版本号。
+
+        这是本轮自己引入又自己发现的降级：上游给出
+        `…is JDK 27.`（正确且带归属），裸主版本号回退又把它改写成
+        `…is 27.` —— 版本号没错，但 `JDK` 这个归属信息丢了，断言
+        `java se 27` / `jdk 27` 从匹配变不匹配。实测确认过。
+
+        守卫取"提取出的版本号是否**都已出现**在当前答案里"：已出现就原样返回。
+        """
+        results = [
+            {
+                "url": "https://www.oracle.com/java/technologies/downloads/",
+                "title": "Java Downloads | Oracle",
+                "snippet": (
+                    "JDK 27 is the latest release of the Java SE Platform. "
+                    "JDK 25 is the latest Long-Term Support (LTS) release of the Java SE Platform."
+                ),
+            }
+        ]
+        for upstream in (
+            "The latest stable version of Java is JDK 27.",
+            "The latest stable version of Java is Java SE 27, released in September 2026.",
+        ):
+            with self.subTest(upstream=upstream[:52]):
+                updated = self._override(
+                    query="latest stable version of Java",
+                    results=results,
+                    answer=upstream,
+                )
+                self.assertEqual(updated["answer"], upstream)
+                self.assertNotIn(
+                    "answer_source", updated.get("evidence") or {}
+                )
+
+    def test_a_stale_upstream_answer_is_still_corrected(self) -> None:
+        """反向确认：守卫不能把"该覆盖"的也一起放过。
+
+        上游答 `JDK 25`（过期）时必须仍然被覆盖成 27 —— 否则上一条测试
+        可以靠"永不覆盖"通过，那就把整个修复废掉了。
+        """
+        results = [
+            {
+                "url": "https://www.oracle.com/java/technologies/downloads/",
+                "title": "Java Downloads | Oracle",
+                "snippet": "JDK 27 is the latest release of the Java SE Platform.",
+            }
+        ]
+        updated = self._override(
+            query="latest stable version of Java",
+            results=results,
+            answer=(
+                "The latest stable version of Java is JDK 25. "
+                "It is an LTS release with long-term support."
+            ),
+        )
+        self.assertEqual(updated["answer"], "The latest stable version of Java is 27.")
+        self.assertEqual(
+            updated["evidence"]["answer_source"], "software-version-extraction"
+        )
+
+    def test_mentioning_the_new_version_is_not_asserting_it(self) -> None:
+        """防降级守卫必须区分「提到」与「断言」—— 这是本模块反复处理的区别。
+
+        第一版守卫写成"提取出的版本号都**出现过**在当前答案里就跳过覆盖"，
+        实测被这句打穿：
+
+            `…is JDK 25, the current LTS. JDK 27 is the newest feature release.`
+
+        27 只是被提到，被断言的仍是过期的 25。按"出现"判断会拒绝覆盖，
+        把过期答案留在原地 —— 等于修复失效。按**断言**判断则正确覆盖。
+        """
+        results = [
+            {
+                "url": "https://www.oracle.com/java/technologies/downloads/",
+                "title": "Java Downloads | Oracle",
+                "snippet": "JDK 27 is the latest release of the Java SE Platform.",
+            }
+        ]
+        updated = self._override(
+            query="latest stable version of Java",
+            results=results,
+            answer=(
+                "The latest stable version of Java is JDK 25, the current LTS. "
+                "JDK 27 is the newest feature release."
+            ),
+        )
+        self.assertEqual(updated["answer"], "The latest stable version of Java is 27.")
+        self.assertEqual(
+            updated["evidence"]["answer_source"], "software-version-extraction"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
