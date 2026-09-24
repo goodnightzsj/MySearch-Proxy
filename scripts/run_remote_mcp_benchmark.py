@@ -1462,6 +1462,91 @@ print(json.dumps(output, ensure_ascii=False))
 """
 
 
+def _remote_ssh(host: str, command: str, *, timeout: int = 60, input_text: str | None = None):
+    """一次**短** SSH 调用。每次调用都是独立连接，断了不影响远端已启动的作业。"""
+    return subprocess.run(
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, command],
+        check=False,
+        capture_output=True,
+        text=True,
+        input=input_text,
+        timeout=timeout,
+    )
+
+
+def _run_remote_detached(*, host: str, remote_source: str, timeout_seconds: int):
+    """在远端**脱离 SSH 流**执行批次，返回与旧实现同形的 `proc`。
+
+    为什么必须这样：这台宿主上的 SSH 流**任何时长都可能被重置** ——
+    实测连 60 秒的流都断在 `Broken pipe`，而**单行**就要约 59 秒。
+    旧实现把整批结果经 SSH 的 stdout 传回，于是流一断整批工作全丢，
+    三次整轮失败（24/16/0 行）都是这个机制，与测量内容无关。
+
+    做法：脚本上传成文件 → `setsid` 脱离终端启动 → SSH 立即返回 →
+    之后只用短连接轮询远端结果文件。远端进程与客户端连接彻底解耦，
+    所以中途断连只是"这次轮询没问到"，不是"工作丢了"。
+
+    用 `setsid` 而**不是** `nohup`：这台 busybox 宿主**没有 `nohup`**
+    （`setsid: can't execute 'nohup': No such file or directory`）——
+    实测踩过，已由 detached survival 测试确认 `setsid` 单独可用。
+
+    超时返回 `None`，调用方按原有的 timeout 语义处理。
+    """
+    token = f"mysearch-bench-{os.getpid()}-{abs(hash(remote_source)) % 10**8}"
+    work = f"/tmp/{token}"
+    script_path = f"{work}/run.py"
+    out_path = f"{work}/out.json"
+
+    try:
+        _remote_ssh(host, f"mkdir -p {work}", timeout=30)
+        upload = _remote_ssh(host, f"cat > {script_path}", timeout=120, input_text=remote_source)
+        if upload.returncode != 0:
+            raise RuntimeError(f"upload failed: {upload.stderr[:200]}")
+        launch = _remote_ssh(
+            host,
+            f"cd {work} && rm -f {out_path} err.log && "
+            f"setsid python3 run.py > {out_path} 2> err.log < /dev/null & echo launched",
+            timeout=30,
+        )
+        if launch.returncode != 0:
+            raise RuntimeError(f"launch failed: {launch.stderr[:200]}")
+    except (subprocess.TimeoutExpired, RuntimeError):
+        return None
+
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        time.sleep(8)
+        try:
+            probe = _remote_ssh(
+                host,
+                f"cd {work} && if [ -s {out_path} ]; then echo DONE; "
+                f"elif ! pgrep -f 'python3 run.py' > /dev/null; then echo DEAD; "
+                f"else echo RUNNING; fi",
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            continue  # 本次轮询没问到，下轮再问；远端作业不受影响
+        state = (probe.stdout or "").strip().splitlines()
+        state = state[-1].strip() if state else ""
+        if state == "DONE":
+            break
+        if state == "DEAD":
+            err = _remote_ssh(host, f"tail -20 {work}/err.log", timeout=30)
+            raise RuntimeError(f"remote benchmark process died: {(err.stdout or '')[:400]}")
+    else:
+        return None
+
+    try:
+        fetched = _remote_ssh(host, f"cat {out_path}", timeout=180)
+    except subprocess.TimeoutExpired:
+        return None
+    if fetched.returncode != 0:
+        raise RuntimeError(f"fetch failed: {fetched.stderr[:200]}")
+    return subprocess.CompletedProcess(
+        args=["detached"], returncode=0, stdout=fetched.stdout, stderr=""
+    )
+
+
 def run_remote_cases(
     host: str,
     mysearch_url: str,
@@ -1480,31 +1565,15 @@ def run_remote_cases(
     }
     payload_b64 = base64.b64encode(json.dumps(payload, ensure_ascii=False).encode()).decode()
     remote_source = f"PAYLOAD_B64 = {payload_b64!r}\n{REMOTE_SCRIPT}"
-    cmd = [
-        "ssh",
-        "-o",
-        "ConnectTimeout=10",
-        "-o",
-        "ServerAliveInterval=30",
-        "-o",
-        "ServerAliveCountMax=6",
-        host,
-        "python3",
-        "-",
-    ]
     timeout_seconds = estimate_remote_batch_timeout_seconds(cases)
-    try:
-        proc = subprocess.run(
-            cmd,
-            check=False,
-            capture_output=True,
-            text=True,
-            input=remote_source,
-            timeout=timeout_seconds,
-        )
-    except subprocess.TimeoutExpired as exc:
+    proc = _run_remote_detached(
+        host=host,
+        remote_source=remote_source,
+        timeout_seconds=timeout_seconds,
+    )
+    if proc is None:
         timeout_rows: list[dict[str, str]] = []
-        message = f"remote-benchmark-timeout after {int(exc.timeout)}s"
+        message = f"remote-benchmark-timeout after {int(timeout_seconds)}s"
         for case in cases:
             timeout_rows.append(
                 {

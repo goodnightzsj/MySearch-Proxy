@@ -25,12 +25,27 @@ TEST_BENCHMARK_HOST = "root@172.16.0.10"
 
 class RemoteBenchmarkConfigTests(unittest.TestCase):
     def test_run_remote_cases_keeps_bearer_out_of_process_arguments(self) -> None:
+        """bearer 只能走**上传的脚本文本**，绝不能出现在任何进程参数里。
+
+        这条断言在 loop40 改变执行方式后仍然成立，而且更重要了：批次现在
+        是**脱离 SSH 流**在远端跑的（`_run_remote_detached`），于是一批结果
+        变成"上传脚本 → setsid 启动 → 轮询 → 取回文件"四类短连接调用。
+        断言因此改为检查**全部** ssh 调用的 argv，而不只是最后那一次 ——
+        只查一次会漏掉 mkdir / cat / 启动 / 取回 里可能混入的凭证。
+        """
         bearer = "th-sensitive-bearer"
-        with patch.object(
-            run_remote_mcp_benchmark.subprocess,
-            "run",
-            return_value=SimpleNamespace(stdout="[]", stderr="", returncode=0),
-        ) as run:
+        calls: list[list[str]] = []
+        uploads: list[str] = []
+
+        def fake_ssh(host, command, *, timeout=60, input_text=None):
+            calls.append(["ssh", host, command])
+            if input_text is not None:
+                uploads.append(input_text)
+            # 第一次探测就报 DONE，让流程走到"取回结果"。
+            stdout = "[]" if ("cat" in command and "out.json" in command) else "DONE"
+            return SimpleNamespace(stdout=stdout, stderr="", returncode=0)
+
+        with patch.object(run_remote_mcp_benchmark, "_remote_ssh", side_effect=fake_ssh):
             result = run_remote_mcp_benchmark.run_remote_cases(
                 host="root@example.test",
                 mysearch_url="http://127.0.0.1:18000/mcp",
@@ -40,11 +55,13 @@ class RemoteBenchmarkConfigTests(unittest.TestCase):
             )
 
         self.assertEqual(result, [])
-        command = run.call_args.args[0]
-        self.assertEqual(command[-2:], ["python3", "-"])
-        self.assertNotIn(bearer, " ".join(command))
+        self.assertTrue(calls, "应当至少发生一次远程调用")
+        for argv in calls:
+            self.assertNotIn(bearer, " ".join(argv), f"bearer 出现在进程参数: {argv}")
 
-        remote_source = run.call_args.kwargs["input"]
+        # bearer 必须经**上传的脚本**送达，且仍可从 PAYLOAD_B64 解出。
+        self.assertTrue(uploads, "应当有一次上传")
+        remote_source = uploads[0]
         namespace: dict[str, object] = {}
         exec(remote_source.splitlines()[0], namespace)
         payload = json.loads(
