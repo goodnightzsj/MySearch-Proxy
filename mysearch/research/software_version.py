@@ -26,6 +26,30 @@ from mysearch.types import ResolvedSearchIntent, SearchMode
 #: "supported"）2 分，给真正的 "latest stable release" 措辞 4 分；版本索引页的
 #: 表格行永远只到 2 分。见 `_software_version_item_is_version_index`。
 MIN_VERSION_ASSERTION_SCORE = 4
+def version_evidence_pool(result: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """版本判定的**证据池**：顶层结果 + 各分支的候选。
+
+    版本号的分歧**不在**顶层结果里。顶层 `results` 是去重、裁剪过的展示集
+    （通常 5 条），而互相矛盾的那几页往往在 `primary_search` /
+    `secondary_search` 的候选池里。实测（2026-09-25，生产部署后复测）：
+
+    - 应答路径看的是本函数给的**并集** → 看到 25 与 27 两个值 → 按设计**不猜**、拒绝作答；
+    - 冲突检测当时只拿到顶层 `results` → 一个断言都看不到 → `conflicts: []`，
+      `confidence` 还是 `high`。
+
+    净效果是**两个来源在打架，而产品一个字都没说** —— 既没答对，也没承认有分歧。
+    两处消费同一个池子，所以池子的构造只留这一个实现。
+    """
+    items = [item for item in (result.get("results") or []) if isinstance(item, dict)]
+    for branch_name in ("primary_search", "secondary_search"):
+        branch = result.get(branch_name)
+        if isinstance(branch, dict):
+            items.extend(
+                item for item in (branch.get("results") or []) if isinstance(item, dict)
+            )
+    return items
+
+
 def _apply_software_version_answer_override(
     *,
     query: str,
@@ -43,11 +67,7 @@ def _apply_software_version_answer_override(
         if not result_items:
             return result
 
-        version_evidence_items = list(result_items)
-        for branch_name in ("primary_search", "secondary_search"):
-            branch = result.get(branch_name)
-            if isinstance(branch, dict):
-                version_evidence_items.extend(list(branch.get("results") or []))
+        version_evidence_items = version_evidence_pool(result)
 
         extracted_answer = _extract_software_version_answer(
             query=query,

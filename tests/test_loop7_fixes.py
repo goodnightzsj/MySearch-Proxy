@@ -569,9 +569,88 @@ class ConflictingVersionClaimsTests(unittest.TestCase):
         )
         self.assertEqual(evidence["confidence"], "medium")
 
+    def test_conflict_is_found_in_the_candidate_pool_not_just_the_top_results(self) -> None:
+        """冲突藏在**候选池**里，只看顶层 `results` 会全部漏掉。
+
+        实测（2026-09-25，部署 `786d7d9` 后在生产上复测）：`latest stable
+        version of Java` 的答案仍是过期的 `JDK 25`，而且一个冲突信号都没有。
+        根因是作用域不一致 ——
+
+        - 应答路径看的是**并集**（顶层 + `primary_search` + `secondary_search`），
+          于是同时看到 25 与 27，按设计拒绝作答；
+        - 冲突检测只拿到**去重裁剪后的顶层 5 条**，一条断言都看不到，
+          于是 `conflicts: []`、`confidence: high`。
+
+        净效果是"两个来源在打架，产品一个字都没说"。这条把它钉住：
+        下面这份 payload 的顶层结果里**没有任何**版本断言，矛盾只在
+        `primary_search` / `secondary_search` 里。
+        """
+        from mysearch.clients import MySearchClient
+
+        top_level = [
+            {
+                "url": "https://ops.java/releases/",
+                "title": "JDK Releases - Ops.java",
+                "snippet": "# JDK Releases\n| | 2028-09-19 | JDK 31 | |",
+            },
+            {
+                "url": "https://coderanch.com/t/789017/java/version-JAVA-days",
+                "title": "Which version of JAVA is best to use these days?",
+                "snippet": "You usually should use one of the LTS versions, Java 8, 11, 17, or 21.",
+            },
+        ]
+        oracle = {
+            "url": "https://www.oracle.com/java/technologies/downloads/",
+            "title": "Java Downloads | Oracle",
+            "snippet": "JDK 27 is the latest release of the Java SE Platform.",
+        }
+        jrebel = {
+            "url": "https://www.jrebel.com/blog/java-lts",
+            "title": "What is Java LTS?",
+            "snippet": "The latest version of Java is Java 25, which is also a Java LTS version.",
+        }
+
+        # 先确认前提：只看顶层确实什么都看不到（否则这条测试失去意义）。
+        self.assertEqual(
+            software_version.conflicting_version_claims(
+                query="latest stable version of Java", results=top_level
+            ),
+            {},
+            "顶层若已含断言，这条测试就不再证明作用域问题",
+        )
+
+        client = MySearchClient()
+        enriched = client._augment_evidence_summary(
+            result={
+                "provider": "hybrid",
+                "results": top_level,
+                "citations": [
+                    {"title": item["title"], "url": item["url"]}
+                    for item in top_level + [oracle, jrebel]
+                ],
+                "primary_search": {"provider": "tavily", "results": [jrebel]},
+                "secondary_search": {"provider": "firecrawl", "results": [oracle]},
+                "evidence": {
+                    "providers_consulted": ["tavily", "firecrawl"],
+                    "verification": "cross-provider",
+                },
+            },
+            query="latest stable version of Java",
+            mode="web",
+            intent="factual",
+            include_domains=None,
+        )
+
+        evidence = enriched["evidence"]
+        self.assertIn("conflicting-version-claims", evidence["conflicts"])
+        self.assertEqual(
+            evidence["conflicting_version_claims"],
+            {"27": ["www.oracle.com"], "25": ["www.jrebel.com"]},
+        )
+        self.assertEqual(evidence["confidence"], "medium")
+
     def test_conflict_detail_names_the_competing_values(self) -> None:
         """只给标签的话"哪里不一致"是不可见的。
-
         `conflicting-version-claims` 这个标签和 `low-source-diversity` 之类
         形状相同、内容不同：前者必须带出**具体是哪几个版本、谁在说**，
         否则用户看不到分歧在哪，仲裁方也只能把分歧重新猜一遍。

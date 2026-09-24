@@ -89,11 +89,16 @@ def _augment_evidence_summary(
             results=results,
             include_domains=include_domains,
         )
+        version_pool = software_version.version_evidence_pool(enriched)
         conflicts = _detect_evidence_conflicts(
             query=query,
             mode=mode,
             intent=intent,
             results=results,
+            # 只有**版本号一致性**这一条判据需要候选池：其余几条看的是来源结构
+            # （多样性、官方源覆盖率），必须在**去重后的展示集**上算，否则会把
+            # 同一页面的多个候选算成多来源。
+            version_claims_pool=version_pool,
             include_domains=include_domains,
             source_domains=source_domains,
             official_source_count=official_source_count,
@@ -125,9 +130,12 @@ def _augment_evidence_summary(
             social_identity_diversity_applies=social_identity_diversity_applies,
         )
         evidence["conflicts"] = conflicts
-        # 冲突的**具体值**：标签只说"有分歧"，这里说"26 对 27"。
-        # 同一个 `conflicting_version_claims` 谓词，不另起一套判据。
-        conflict_detail = _conflicting_version_claims_detail(query=query, results=results)
+        # 冲突的**具体值**：标签只说"有分歧"，这里说"27 对 25、谁在说"。
+        # 同一个 `conflicting_version_claims` 谓词、同一个证据池，
+        # 否则会出现"标签说冲突、值却是空的"这种自相矛盾。
+        conflict_detail = _conflicting_version_claims_detail(
+            query=query, results=version_pool
+        )
         if conflict_detail:
             evidence["conflicting_version_claims"] = conflict_detail
         enriched["evidence"] = evidence
@@ -631,6 +639,7 @@ def _detect_evidence_conflicts(
     mode: SearchMode,
     intent: ResolvedSearchIntent,
     results: list[dict[str, Any]],
+    version_claims_pool: list[dict[str, Any]],
     include_domains: list[str] | None,
     source_domains: list[str],
     official_source_count: int,
@@ -658,12 +667,18 @@ def _detect_evidence_conflicts(
             conflicts.append("strict-official-unmet")
         # 内容级冲突：同一版本问题在不同来源上得到不同主版本号。
         # 上面几条判据看的全是**来源结构**（多样性、provider 数、官方源覆盖），
-        # 没有一条看内容是否一致 —— 所以实测这一行 conflicts 为空、confidence
-        # 还是 high，而池子里 oracle 说 JDK 26、wikipedia 说 Java SE 27。
+        # 没有一条看内容是否一致。
+        #
+        # 判据必须跑在**证据池**（顶层结果 + 各分支候选）上，不能只看 `results`：
+        # 顶层是去重裁剪后的展示集，互相矛盾的那几页常在候选池里。实测
+        # 2026-09-25 生产：只看顶层 → 一条断言都看不到 → `conflicts: []` 且
+        # `confidence: high`，而 oracle 说 27、jrebel 说 25 在打架。应答路径
+        # 用的是同一个池子，两处共用一个构造（`version_evidence_pool`）。
+        #
         # 版本类查询之外恒为空（`software_version` 里有查询谓词守卫）。
         version_claims = software_version.conflicting_version_claims(
             query=query,
-            results=results,
+            results=version_claims_pool,
         )
         if version_claims:
             conflicts.append("conflicting-version-claims")
@@ -688,7 +703,6 @@ def _conflicting_version_claims_detail(
         str(version): sorted(hosts)
         for version, hosts in sorted(claims.items(), reverse=True)
     }
-
 
 def _estimate_search_confidence(
     *,
