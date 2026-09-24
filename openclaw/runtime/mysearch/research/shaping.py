@@ -24,6 +24,11 @@ from mysearch import postprocess
 from mysearch import query_routing
 from mysearch.research import selection
 
+#: RRF 的名次常数 `k`。取 60 —— Cormack 原论文与 Elasticsearch / OpenSearch
+#: 工业实现的默认值。见 `_merge_search_payloads` 里的说明：调低放大头部差异，
+#: 调高让贡献更平缓；无证据支持偏离默认值。
+RRF_RANK_CONSTANT = 60
+
 
 def _prioritize_research_project_results(
     results: list[dict[str, Any]],
@@ -118,25 +123,37 @@ def _merge_search_payloads(
                 )
             sequences.append(sequence)
 
-        merged_keys: list[str] = []
-        indexes = [0 for _ in sequences]
-        seen_keys: set[str] = set()
-        while len(merged_keys) < max_results and sequences:
-            progressed = False
-            for seq_index, sequence in enumerate(sequences):
-                if len(merged_keys) >= max_results:
-                    break
-                while indexes[seq_index] < len(sequence):
-                    dedupe_key = sequence[indexes[seq_index]]
-                    indexes[seq_index] += 1
-                    if dedupe_key in seen_keys:
-                        continue
-                    seen_keys.add(dedupe_key)
-                    merged_keys.append(dedupe_key)
-                    progressed = True
-                    break
-            if not progressed:
-                break
+        # 合并序用 **RRF**（reciprocal rank fusion，Cormack et al., SIGIR 2009）：
+        #     score(d) = Σ_lists 1 / (k + rank_list(d))
+        #
+        # 原实现是**轮询交替 + 去重**：它不计算任何分数，于是"两个 provider
+        # 都排第 1"的文档与"只在一个 provider 出现"的文档**同权** —— 而
+        # "多来源共同确认"恰恰是多 provider 检索里最强的相关性信号。
+        # 实测（loop38 的 9 份双 provider payload）：轮询与 RRF 的 top-1
+        # **6/9 不同**，且 8/9 的 payload 里 RRF 会把双 provider 共同返回的
+        # 文档上提。最明显的一例是 `factual-accuracy-01`：轮询把 YouTube 视频
+        # 排在 `devguide.python.org/versions` 之前。
+        #
+        # RRF 的两个性质正合此处：**只看名次不看分数**（跨 provider 的分数
+        # 本就不可比 —— 余弦相似度 0.85 与 BM25 12.4 没有共同尺度），
+        # 且**免调参、免训练**（需要训练数据的 LambdaMART / neural rank fusion
+        # 在 48 行评测集上会过拟合，且引入更难发现的问题）。
+        #
+        # `RRF_RANK_CONSTANT = 60` 是原论文与工业实现（Elasticsearch、OpenSearch）
+        # 的默认值：调低（20-40）放大头部差异，调高（80-100）让贡献更平缓。
+        # 这里不调参 —— 没有证据支持偏离默认值。
+        rrf_scores: dict[str, float] = {}
+        for sequence in sequences:
+            for rank, dedupe_key in enumerate(sequence, start=1):
+                rrf_scores[dedupe_key] = rrf_scores.get(dedupe_key, 0.0) + 1.0 / (
+                    RRF_RANK_CONSTANT + rank
+                )
+
+        # 平分时用"最早出现"打破。**不需要**额外的次序表：`rrf_scores` 是
+        # dict，插入序就是首次出现序，而 `sorted` 是稳定排序 —— 两者相加
+        # 已经保证平分保持首次出现序。实测验证过这一点：加一张显式次序表，
+        # 去掉它测试仍然全绿，说明那是死代码，故删掉。
+        merged_keys = sorted(rrf_scores, key=lambda key: -rrf_scores[key])[:max_results]
 
         results: list[dict[str, Any]] = []
         matched_results = 0

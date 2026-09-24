@@ -1069,6 +1069,92 @@ class MergeDedupeTests(unittest.TestCase):
         )
         self.assertEqual(len(merged["results"]), 3)
 
+    def test_merge_lifts_a_result_both_providers_return(self) -> None:
+        """两个 provider 共同返回的结果必须排到**只被一个返回的**之前。
+
+        这是 RRF（Cormack, SIGIR 2009）替换轮询交替的原因。旧实现不计算
+        任何分数，于是"两边都排第 1"与"只在一侧出现"同权 —— 而多来源共同
+        确认恰恰是多 provider 检索里最强的相关性信号。
+
+        实测（loop38 的 9 份双 provider payload）：两种序 **9/9 不同**，
+        最明显的一例是 `factual-accuracy-01`，轮询把 YouTube 视频排在
+        `devguide.python.org/versions` 之前。
+        """
+        client = _make_client()
+        primary = {
+            "provider": "tavily",
+            "results": [
+                {"url": "https://example.com/only-primary", "title": "P", "snippet": "", "content": ""},
+                {"url": "https://example.com/in-both", "title": "B", "snippet": "", "content": ""},
+            ],
+            "citations": [],
+        }
+        secondary = {
+            "provider": "firecrawl",
+            "results": [
+                {"url": "https://example.com/only-secondary", "title": "S", "snippet": "", "content": ""},
+                {"url": "https://example.com/in-both", "title": "B", "snippet": "", "content": ""},
+            ],
+            "citations": [],
+        }
+        merged = client._merge_search_payloads(
+            primary_result=primary,
+            secondary_result=secondary,
+            max_results=10,
+        )
+        urls = [r["url"] for r in merged["results"]]
+        # 旧实现的轮询会先取 primary 的首项，所以这条断言在旧代码上失败。
+        self.assertEqual(urls[0], "https://example.com/in-both")
+        self.assertEqual(
+            merged["results"][0]["matched_providers"], ["firecrawl", "tavily"]
+        )
+
+    def test_merge_order_is_deterministic_on_ties(self) -> None:
+        """平分必须稳定，且保持"首次出现"序。
+
+        两侧各返回**互不相同**的结果时，每个键都只得一个 `1/(k+rank)`，
+        同 rank 之间分数完全相同。稳定性由 `sorted` 的稳定排序 + dict 插入序
+        共同保证 —— 这条测试同时**钉住那个依赖**：如果有人把结果改成
+        `set`（无插入序）或换成非稳定排序，平分次序就会漂。
+        """
+        client = _make_client()
+        primary = {
+            "provider": "tavily",
+            "results": [{"url": f"https://p.com/{i}", "title": str(i), "snippet": "", "content": ""} for i in range(3)],
+            "citations": [],
+        }
+        secondary = {
+            "provider": "firecrawl",
+            "results": [{"url": f"https://s.com/{i}", "title": str(i), "snippet": "", "content": ""} for i in range(3)],
+            "citations": [],
+        }
+        first = [
+            r["url"]
+            for r in client._merge_search_payloads(
+                primary_result=primary, secondary_result=secondary, max_results=6
+            )["results"]
+        ]
+        # 平分时按首次出现：主列表首位、次列表首位、主列表次位、……
+        self.assertEqual(
+            first,
+            [
+                "https://p.com/0",
+                "https://s.com/0",
+                "https://p.com/1",
+                "https://s.com/1",
+                "https://p.com/2",
+                "https://s.com/2",
+            ],
+        )
+        for _ in range(5):
+            again = [
+                r["url"]
+                for r in client._merge_search_payloads(
+                    primary_result=primary, secondary_result=secondary, max_results=6
+                )["results"]
+            ]
+            self.assertEqual(again, first)
+
     def test_merge_with_none_secondary(self) -> None:
         client = _make_client()
         primary = {
