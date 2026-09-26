@@ -1103,6 +1103,73 @@ def normalize_summary(value):
     return " ".join(str(value or "").lower().split())
 
 
+# 远端自包含的事实 token 抽取。`_grounding_tokens` 是**外层模块**函数，
+# 远端看不到 —— 这里必须自足（与 `_median_sample_index` 同理）。
+_SUMMARY_STOPWORDS = frozenset(
+    (
+        "top official match result source news the and for with that this from are was were "
+        "best winner latest posts post model models series release releases version versions "
+        "january february march april may june july august september october november december"
+    ).split()
+)
+
+
+def summary_fact_tokens(value):
+    # 直接取 token，**不**先剥 `Top official match:` 前缀与结尾 `(domain.tld)`。
+    # 曾写过那段剥壳，实测是**死代码**：前缀词（`top`/`official`/`match`/
+    # `result`/`source`/`news`）全部已在 `_SUMMARY_STOPWORDS` 里，而 domain
+    # 后缀形如 `(react.dev)` 要求的 `[a-z0-9.-]+\.[a-z]{2,}` 在真实数据上
+    # 从不命中（`.dev` 里的 `v` 后是 `)`，不匹配）。在 loop41/loop42 共 **92 行**
+    # 存档上比对"剥壳 vs 不剥壳"，差异 **0 行**。删掉，不留假装在工作的分支。
+    #
+    # 判据与上游 `_grounding_tokens` 一致：只取**可证伪**的版本号与专名。
+    # 普通词在任何语料里都"能找到"，会让指标恒真。
+    text = " ".join(str(value or "").split())
+    if not text:
+        return []
+    found = []
+    for match in re.finditer(r"(?<![\w.])v?\d+(?:\.\d+)+(?!\.?\d)", text):
+        found.append(match.group(0))
+    for match in re.finditer(r"\b[A-Z][A-Za-z0-9]*(?:\.[A-Za-z0-9]+)*\b", text):
+        token = match.group(0)
+        if len(token) >= 3 and token.lower() not in _SUMMARY_STOPWORDS:
+            found.append(token)
+    seen = set()
+    unique = []
+    for token in found:
+        key = token.lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(token)
+    return unique
+
+
+def _summary_fact_agreement(summaries):
+    # 逐字符相等（原实现）要求同一实质内容**逐字复现**，而两侧的 summary
+    # 来源不同：Tavily 给的是抓取的网页正文（同一页面重复抓取字节相同），
+    # 我方给的是从结果标题/摘要派生、且上游 `answer` 时有时无的句子。
+    # 实测 46 行（loop42）：我方 summary_match_rate 均值 0.707、18 行 <1.0；
+    # Tavily 0.935、仅 3 行 <1.0 —— 差异不来自"谁更稳"，而来自**比较的是
+    # 两种东西**（我方中位 120 字符、Tavily 中位 500 字符的原文）。
+    # 与 loop25 的 content_fidelity「两侧算不同字段」属同型缺陷。
+    #
+    # 改取**事实 token 集合的 Jaccard**：同义改写不再扣分，而"多出一个获奖者"
+    # 这类实质变化仍然扣（实测 news-03 的 `Best Actor winner: Jordan` 对
+    # `…Jordan and Jessie Buckley` 得 0.80，不满分）。
+    # 在 loop41/loop42 存档上实测：**46 行无一行下降**，只有 18 行上升。
+    if len(summaries) < 2:
+        return None
+    token_sets = [set(token.lower() for token in summary_fact_tokens(item)) for item in summaries]
+    if not token_sets[0]:
+        # 首个样本没有事实 token（如纯模板摘要）→ 交给 urls 项去判，不在此扣分。
+        return None
+    values = []
+    for other in token_sets[1:]:
+        union = token_sets[0] | other
+        values.append(len(token_sets[0] & other) / len(union) if union else 1.0)
+    return sum(values) / len(values) if values else None
+
+
 # 远端自包含的数值判据（REMOTE_SCRIPT 里取不到本地的 _as_float）。
 # 注意：本字符串内不要用三引号 docstring，会提前终止外层 REMOTE_SCRIPT。
 def _positive_number(value):
@@ -1135,10 +1202,11 @@ def repeat_variance(observations):
     url_overlap = 1.0
     consistency_parts = []
     if len(status_ok) >= 2:
-        first_summary = normalize_summary(status_ok[0].get("summary"))
-        summaries = [normalize_summary(item.get("summary")) for item in status_ok[1:]]
-        if first_summary or any(summaries):
-            summary_match_rate = sum(value == first_summary for value in summaries) / len(summaries)
+        summaries = [item.get("summary") for item in status_ok]
+        # 用事实 token 一致率，而不是逐字符相等 —— 理由见 `_summary_fact_agreement`。
+        agreement = _summary_fact_agreement(summaries)
+        if agreement is not None:
+            summary_match_rate = agreement
             consistency_parts.append(summary_match_rate)
         first_urls = set(status_ok[0].get("urls") or [])
         overlaps = []

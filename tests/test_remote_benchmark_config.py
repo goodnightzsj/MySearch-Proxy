@@ -1485,6 +1485,153 @@ class ContentMetricsFairnessTests(unittest.TestCase):
         self.assertEqual(metrics(blob)["char_count"], 500)
 
 
+class SummaryAgreementTests(unittest.TestCase):
+    """`summary_match_rate` 不能是**逐字符相等** —— 两侧比的是两种东西。
+
+    真实缺陷（loop42 实测 46 行）：Tavily 的 summary 是**抓取的网页正文**
+    （中位 500 字符，同一页面重复抓取字节相同），我方的 summary 是
+    `_build_search_summary_fallback` 从结果标题/摘要**派生**的句子
+    （中位 120 字符），且上游 `answer` 时有时无会整句顶替它。
+    于是同一内容会被判不匹配：实测我方该项均值 0.707 / 18 行 <1.0，
+    Tavily 0.935 / 仅 3 行 <1.0 —— 这不是"谁更稳"。
+
+    这与 loop25 的 `content_fidelity`「两侧算不同字段」属同型缺陷。
+    """
+
+    def _load(self):
+        source = (REPO_ROOT / "scripts" / "run_remote_mcp_benchmark.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "REMOTE_SCRIPT":
+                namespace = {"PAYLOAD_B64": ""}
+                try:
+                    exec(compile(node.value.value, "<remote>", "exec"), namespace)
+                except Exception:
+                    pass
+                # 断言 `repeat_variance` 的**产出**，而不是孤立测那个 helper ——
+                # 只测 helper 时，"把调用点换回逐字符相等"的变异不会被抓到
+                # （实测 6/6 仍绿，即测试是假的）。
+                return namespace["repeat_variance"], namespace["summary_fact_tokens"]
+        raise AssertionError("REMOTE_SCRIPT not found")
+
+    @staticmethod
+    def _observations(summaries, urls=None):
+        # `urls` 可以给一个共享列表，也可以给**每个样本各自的**列表 ——
+        # 后者是压低 url_overlap、从而让 summary 项的取舍可观测所必需的。
+        if urls and len(urls) == len(summaries) and all(isinstance(item, list) for item in urls):
+            per_sample = [list(item) for item in urls]
+        else:
+            shared = list(urls or ["https://example.com/a"])
+            per_sample = [list(shared) for _ in summaries]
+        return [
+            {
+                "run": index + 1,
+                "cache_state": "cold" if index == 0 else "warm",
+                "success": True,
+                "latency_ms": 100 + index,
+                "summary": summary,
+                "urls": per_sample[index],
+                "content_char_count": 10,
+            }
+            for index, summary in enumerate(summaries)
+        ]
+
+    def _rate(self, summaries):
+        repeat_variance, _ = self._load()
+        return repeat_variance(self._observations(summaries))["summary_match_rate"]
+
+    def test_identical_summaries_agree_fully(self) -> None:
+        self.assertEqual(self._rate(["Top result: Mount Everest (wikipedia.org)"] * 3), 1.0)
+
+    def test_paraphrase_no_longer_scores_zero(self) -> None:
+        # 同义改写（social-x-01 实测形态）：旧实现给 0.0。
+        observed = self._rate(
+            [
+                "Latest OpenAI posts referencing GPT-5 series models (e.g. GPT-5.5, GPT-5.6) in context of newer GPT-6 releases and API updates, primarily from @OpenAI in September 2026.",
+                "Latest OpenAI posts referencing GPT-5 series models (e.g. GPT-5.5, GPT-5.6) mainly appear in context of GPT-6 launches, pricing comparisons, and API usage as of Sep 2026.",
+                "Latest OpenAI posts reference GPT-5.x models (e.g. GPT-5.5 retirement, GPT-5.6 comparisons) mainly in context of newer GPT-6 releases and API updates as of Sep 2026.",
+            ]
+        )
+        self.assertGreater(observed, 0.5)
+
+    def test_a_substantive_change_is_still_penalised(self) -> None:
+        # `Best Actor winner: Jordan` vs `... Jordan and Jessie Buckley` 是**实质变化**
+        # （多出一个获奖者），不能因为"措辞放宽"就满分级放行。
+        observed = self._rate(
+            [
+                "Best Actor winner: Jordan",
+                "Best Actor winner: Jordan",
+                "Best Actor winner: Jordan and Jessie Buckley",
+            ]
+        )
+        self.assertLess(observed, 1.0)
+        self.assertGreater(observed, 0.0)
+        # 基准必须是**首个**样本（与 `url_overlap` 的 `status_ok[0]` 一致）：
+        # 以首个为基准得 mean(1.0, 0.5) = 0.75；若把基准换成末个样本则为 0.5。
+        # 这个精确值就是锁住"基准方向"的那条断言。
+        self.assertAlmostEqual(observed, 0.75, places=6)
+
+    def test_our_side_boilerplate_words_are_not_fact_tokens(self) -> None:
+        # 我方模板词（`Top official match:`、`Top result:`）不承载语义，必须被排除。
+        # 曾写过一段"先剥前缀再抽"的代码，实测是死代码 —— 这些词本来就在
+        # `_SUMMARY_STOPWORDS` 里；这个测试锁住的是**结果**（模板词不出现在 token 里），
+        # 而不是某个特定的排除手法。
+        _, tokens = self._load()
+        for summary in (
+            "Top official match: React useActionState (react.dev)",
+            "Top result: Best Web Search MCP Servers (mcp.directory)",
+            "Top source: Releases openai/openai-python (github.com)",
+        ):
+            extracted = [token.lower() for token in tokens(summary)]
+            for boilerplate in ("top", "official", "match", "result", "source"):
+                self.assertNotIn(boilerplate, extracted)
+
+    def test_capitalisation_survives_extraction(self) -> None:
+        # 专名抽取依赖首字母大写；若先小写化，`Jordan`/`Everest` 这类 token
+        # 会全部消失（曾实测退化为只剩版本号、甚至提取不到 token）。
+        _, tokens = self._load()
+        self.assertIn("Jordan", tokens("Best Actor winner: Jordan"))
+        self.assertIn("Everest", tokens("Top result: 8,848.86 metres, the height of Mt Everest now"))
+
+    def test_no_fact_tokens_does_not_default_to_a_full_score(self) -> None:
+        # 首个样本没有事实 token 时该项**不计入**，而不是"空集 Jaccard = 1.0"
+        # 式地默认满分。要让这个区别**可观测**，必须同时压低 urls 项：
+        # 只在 summary 项被正确跳过时，consistency 才完全由 url_overlap 决定。
+        repeat_variance, _ = self._load()
+        observations = self._observations(
+            ["Top result: a page", "Top result: another page"],
+            urls=[["https://example.com/a"], ["https://example.com/b"]],
+        )
+        # 两个样本的 urls 完全不同 → 若 summary 项被**默认满分**，
+        # consistency 会是 mean(1.0, 0.0) = 0.5；被正确跳过则是 0.0。
+        self.assertEqual(repeat_variance(observations)["result_stability"], 0.0)
+        _, tokens = self._load()
+        self.assertEqual(tokens("Top result: a page"), [])
+
+    def test_skip_does_not_flip_a_row_that_has_no_token_in_sample_one_only(self) -> None:
+        # 只有**首个**样本无 token 才跳过；后续样本有 token 不影响判定基准。
+        _, tokens = self._load()
+        self.assertEqual(tokens("Top result: a page"), [])
+        self.assertNotEqual(tokens("Top result: Mount Everest (wikipedia.org)"), [])
+
+    def test_repeated_tokens_do_not_distort_agreement(self) -> None:
+        # 事实在样本里重复出现不得扭曲一致率：两个样本的事实**集合**相同
+        # （只是措辞与重复次数不同）→ 一致率恰为 1.0。
+        #
+        # 注：`summary_fact_tokens` 末尾那段"保序去重"对集合比较是**冗余**的
+        # （下游 `set()` 本就吸收重复）。实测把去重整段删掉，本类 9 个测试
+        # **全部仍绿** —— 所以它不是缺陷、也无需为它造一个假断言。
+        # 保留它只为让 `summary_fact_tokens` 单独使用时（如诊断打印）
+        # 输出稳定可读。
+        observed = self._rate(["Qwen3 2505.09388 Qwen3", "Qwen3 2505.09388"])
+        self.assertAlmostEqual(observed, 1.0, places=6)
+
+    def test_a_token_present_only_in_one_sample_lowers_agreement(self) -> None:
+        # 反向：某事实只在一个样本里出现 → 一致率必须 <1.0。
+        observed = self._rate(["Qwen3 2505.09388", "Qwen3 2505.09388 2606.10392"])
+        self.assertLess(observed, 1.0)
+
+
 class ClaimGroundednessTests(unittest.TestCase):
     """答案里的事实 token 必须能在**该 provider 自己的正文**里找到。
 
