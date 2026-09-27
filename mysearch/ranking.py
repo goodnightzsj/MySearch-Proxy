@@ -225,7 +225,15 @@ def _web_result_rank(
             query_tokens=query_tokens,
         )
     )
-    host_brand_match = int(any(token in hostname for token in query_tokens))
+    # 同 `_resource_result_flags`：带点号品牌名（`Next.js`）需归一化才能匹配域名
+    # （`nextjs.org`）。判据在 `query_routing._brand_matches_host`。
+    host_brand_match = int(
+        query_routing._brand_matches_host(
+            query_tokens=query_tokens,
+            hostname=hostname,
+            registered_domain=registered_domain,
+        )
+    )
     title_brand_match = int(any(token in title_text for token in query_tokens))
     path_precision_hits, total_precision_hits = query_routing._query_precision_hit_counts(
         hostname=hostname,
@@ -759,6 +767,15 @@ def _resource_result_rank(
             and query_routing._looks_like_noncanonical_react_docs_hostname(hostname, query=query)
         )
     )
+    # 工作副本路径（`/docs-wip/` 这类未发布版本）必须排在同站点的发布版之后。
+    #
+    # 位置很关键：既有两个同类判据（`non_locale_variant` / `non_preview_react_variant`）
+    # 都在键的**第 33/34 位**，而 `docs-02` 的胜负在**第 19 位**（`topic_total_hits`）
+    # 就已经决出 —— 所以把它们扩展成覆盖 `docs-wip` 也**救不了**。
+    # 这一个因此插在 `topic_total_hits` 之前。
+    non_working_copy = int(
+        not (strict_official and query_routing._looks_like_working_copy_path(path))
+    )
     matched_provider_count = len(item.get("matched_providers") or [])
     content_score, snippet_score, title_score = postprocess._result_quality_score(item)
     return (
@@ -779,6 +796,7 @@ def _resource_result_rank(
         paper_compound_match,
         non_paper_compound_mismatch,
         paper_landing_bonus,
+        non_working_copy,
         topic_path_hits,
         topic_total_hits,
         tutorial_brand_aligned_resource,
@@ -827,8 +845,14 @@ def _resource_result_flags(
         include_domains
         and any(postprocess._domain_matches(hostname, domain) for domain in include_domains or [])
     )
-    host_brand_match = any(
-        token in hostname or token in registered_domain for token in query_tokens
+    # 品牌名在 query 里常带点号（`Next.js`/`Node.js`），而域名用点号分隔标签、
+    # 裸子串匹配会漏（`next.js` 匹配不上 `nextjs.org`）。实测 loop43 因此在
+    # `docs-02`/`changelog-01` 上让 official 通路整体短路。判据收在
+    # `query_routing._brand_matches_host` 的单一权威处。
+    host_brand_match = query_routing._brand_matches_host(
+        query_tokens=query_tokens,
+        hostname=hostname,
+        registered_domain=registered_domain,
     )
     registered_domain_label_match = query_routing._registered_domain_label_matches(
         registered_domain=registered_domain,

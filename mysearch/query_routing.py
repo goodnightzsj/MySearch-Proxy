@@ -1348,6 +1348,43 @@ def _is_social_unavailable_result(result: dict[str, Any] | None) -> bool:
     return False
 
 
+_WORKING_COPY_PATH_SEGMENTS = frozenset(
+    {
+        "docs-wip",
+        "docs-preview",
+        "docs-next",
+        "wip",
+        "preview",
+        "staging",
+        "canary",
+        "nightly",
+        "unstable",
+        "draft",
+    }
+)
+
+
+def _looks_like_working_copy_path(path: str) -> bool:
+    """路径里是否带"工作副本 / 预览"段 —— 同一站点的非发布版本。
+
+    实测（loop43 `docs-02`）：`nextjs.org/docs-wip/app/api-reference/functions/
+    generate-metadata` 与期望的 `nextjs.org/docs/app/...` 是**同一页的两个版本**，
+    前者是未发布的写作副本，后者才是官方发布版。但排序把它顶到了第 1 位 ——
+    因为它的**标题**里多了一个 `Next.js`（`Functions: generateMetadata | Next.js`
+    vs `Functions: generateMetadata`），而 `nextjs` 属于 topic token
+    （本来就在域名里），于是 `topic_total_hits` 4 > 3。
+
+    即：**它赢在"标题重复了域名"，与权威性无关**。
+
+    判据只认**独立的路径段**（`/docs-wip/` 而不是 `docs-wip` 出现在别处），
+    避免误伤含这些词的正常 slug。只对 `strict_official` 生效，与既有的
+    `_looks_like_locale_prefixed_path` / `_looks_like_noncanonical_react_docs_hostname`
+    同一层级。
+    """
+    segments = [item for item in (path or "").split("/") if item]
+    return any(segment.strip().lower() in _WORKING_COPY_PATH_SEGMENTS for segment in segments)
+
+
 def _looks_like_locale_prefixed_path(path: str) -> bool:
     parts = [item for item in (path or "").split("/") if item]
     if len(parts) < 2:
@@ -1414,12 +1451,76 @@ def _registered_domain(hostname: str) -> str:
     return postprocess._registered_domain(hostname)
 
 
+def _brand_match_key(text: str) -> str:
+    """品牌匹配用的归一化形式：去点号/连字符/下划线/空白并小写。
+
+    为什么需要它：品牌名在 query 里带点号是常见写法（`Next.js`、`Node.js`、
+    `Vue.js`），而域名里点号是**标签分隔符**、从不出现 —— 域名写成
+    `nextjs.org`、`nodejs.org`。所以裸子串匹配必然失败：
+
+        token  `next.js`   域名 `nextjs.org`   -> `"next.js" in "nextjs.org"` 为假
+
+    归一化后是 `nextjs` 与 `nextjsorg` —— 用**包含**判断（不是相等），
+    因为域名还带着 TLD 标签。
+
+    实测（loop43）：`docs-02`（query `Next.js generateMetadata docs`）与
+    `changelog-01` 的期望页面都在 `nextjs.org`，却因这一处匹配失败而
+    `host_brand_match=False` / `registered_domain_label_match=False`，
+    连带 `_is_probably_official_resource_result` 判 False
+    -> official 通路整体短路 -> `docs-wip`（工作副本页）留在第 1 位，
+    `docs-02` 的 `assertion_pass_rate` 掉到 0.0、margin 由 +5 翻成 −9.22。
+
+    对照：`playwright.dev`（token `playwright`）与 `react.dev`（token `react`）
+    不带点号，本就能匹配，所以只有 `nextjs.org` 这两行受害。
+    """
+    return re.sub(r"[.\-_\s]+", "", str(text or "")).lower()
+
+
+# 归一化匹配要求 token 至少这么长才允许"包含"判定。
+# 太短会大面积误命中（`js` 是 `nextjsorg` 的子串、`or` 也是）。
+_BRAND_NORMALIZED_MIN_LENGTH = 4
+
+
+def _brand_token_matches_normalized_host(token: str, *, hostname: str, registered_domain: str) -> bool:
+    """**只看归一化分支**：带点号品牌名（`next.js`）匹配域名（`nextjs.org`）。
+
+    与既有裸子串分支分开，是为了让"门槛"可被独立测试 —— 合在一起时
+    `js` 会先命中裸子串分支并返回 True，把归一化分支的行为完全掩盖
+    （实测：把门槛从 4 降到 1，合并写法下测试全绿）。
+    """
+    normalized_token = _brand_match_key(token)
+    if len(normalized_token) < _BRAND_NORMALIZED_MIN_LENGTH:
+        return False
+    return normalized_token in _brand_match_key(hostname) or normalized_token in _brand_match_key(
+        registered_domain
+    )
+
+
+def _brand_matches_host(*, query_tokens: list[str], hostname: str, registered_domain: str) -> bool:
+    """query 的品牌 token 是否命中该主机（含点号品牌名的归一化匹配）。"""
+    for token in query_tokens:
+        if token in hostname or token in registered_domain:
+            return True
+        if _brand_token_matches_normalized_host(
+            token, hostname=hostname, registered_domain=registered_domain
+        ):
+            return True
+    return False
+
+
 def _registered_domain_label_matches(*, registered_domain: str, query_tokens: list[str]) -> bool:
     labels = [item for item in _clean_hostname(registered_domain).split(".") if item]
+    normalized_labels = [_brand_match_key(label) for label in labels]
     return any(
-        label == token or label.startswith(f"{token}-") or label.startswith(f"{token}_")
+        label == token
+        or label.startswith(f"{token}-")
+        or label.startswith(f"{token}_")
+        or (
+            len(_brand_match_key(token)) >= 4
+            and _brand_match_key(token) == normalized_label
+        )
         for token in query_tokens
-        for label in labels
+        for label, normalized_label in zip(labels, normalized_labels)
     )
 
 
