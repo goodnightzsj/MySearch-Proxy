@@ -4810,7 +4810,59 @@ class MySearchClientTests(unittest.TestCase):
             result["pages"][0]["url"],
             "https://fastapi.tiangolo.com/tutorial/background-tasks/",
         )
-        sleep.assert_called_once_with(1.5)
+        # 瞬时错误的重试延迟 1.5s 必须出现（另有 2.0s 的轮询间隔，属正常行为）。
+        self.assertIn(1.5, [call.args[0] for call in sleep.call_args_list])
+
+    def test_crawl_poll_intervals_grow_and_cap(self) -> None:
+        """轮询必须退避，且**先睡再问**，而不是固定间隔地立刻开问。
+
+        上游 crawl 实测固定要 13–15s（与 limit / crawl_entire_domain 无关：返回 1 页
+        也要 15.18s），而单 key 配额可能只有 3 请求/分钟。固定 2s 间隔会发 5–7 个请求，
+        跑完一次 crawl 就打满整个窗口，下一次调用立刻 429。
+        """
+        client = MySearchClient()
+        client._get_key_or_raise = lambda provider: SimpleNamespace(key="fc-key", source="env")  # type: ignore[method-assign]
+
+        def fake_request_json(**kwargs):  # type: ignore[no-untyped-def]
+            if kwargs["method"] == "POST":
+                return {"id": "job-pending"}
+            return {"status": "processing", "data": []}
+
+        client._request_json_once = fake_request_json  # type: ignore[method-assign]
+
+        with patch("mysearch.clients.time.sleep") as sleep:
+            with self.assertRaisesRegex(MySearchError, "terminal state before deadline"):
+                client._crawl_firecrawl(
+                    url="https://fastapi.tiangolo.com",
+                    max_poll_attempts=6,
+                )
+
+        intervals = [call.args[0] for call in sleep.call_args_list]
+        # 固定 2s 会是 [2.0] * 6；先睡再问 + 2 倍退避给出下面这个序列（10.0 封顶）。
+        self.assertEqual(intervals, [2.0, 4.0, 8.0, 10.0, 10.0, 10.0])
+
+    def test_crawl_sleeps_before_the_first_status_poll(self) -> None:
+        """提交后的第一次轮询必须发生在 sleep 之后。
+
+        作业刚提交时必然还是 processing，立刻问一次纯属浪费配额 ——
+        而单 key 可能只有 3 请求/分钟。
+        """
+        client = MySearchClient()
+        client._get_key_or_raise = lambda provider: SimpleNamespace(key="fc-key", source="env")  # type: ignore[method-assign]
+        order: list[str] = []
+
+        def fake_request_json(**kwargs):  # type: ignore[no-untyped-def]
+            order.append(f"req:{kwargs['method']}")
+            if kwargs["method"] == "POST":
+                return {"id": "job-1"}
+            return {"status": "completed", "data": []}
+
+        client._request_json_once = fake_request_json  # type: ignore[method-assign]
+
+        with patch("mysearch.clients.time.sleep", side_effect=lambda s: order.append("sleep")):
+            client.crawl_site(url="https://s", limit=1)
+
+        self.assertEqual(order, ["req:POST", "sleep", "req:GET"])
 
     def test_crawl_site_fails_when_polling_ends_without_terminal_state(self) -> None:
         client = MySearchClient()
@@ -4925,7 +4977,9 @@ class MySearchClientTests(unittest.TestCase):
                 )
 
         self.assertEqual(calls, 2)
-        sleep.assert_not_called()
+        # 契约是"不为超出剩余预算的 retry_after 傻等 60s"，不是"从不 sleep"。
+        # 第一次 sleep 是 2.0s 的轮询间隔（正常行为），不得出现 60s 那种等法。
+        self.assertNotIn(60, [call.args[0] for call in sleep.call_args_list])
 
     def test_extract_url_exa_fallback_rejects_different_domain_content(self) -> None:
         client = MySearchClient()

@@ -35,6 +35,16 @@ DEFAULT_KEY_COOLDOWN_SECONDS = 60
 #: 固定密钥重试延迟的上限；超过就直接失败而不是继续等。
 MAX_PINNED_KEY_RETRY_DELAY_SECONDS = 120
 
+#: 轮询 crawl 状态的起步间隔。上游 crawl 作业实测**固定要 13–15s**（与 `limit`
+#: 和 `crawl_entire_domain` 无关 —— 返回 1 页也要 15.18s），所以这个间隔只是
+#: **检测滞后**的粒度，不是吞吐旋钮。
+CRAWL_POLL_INTERVAL_SECONDS = 2.0
+#: 轮询退避倍率。2.0 → 4.0 → 8.0 …（上限见 `CRAWL_POLL_MAX_INTERVAL_SECONDS`）。
+CRAWL_POLL_BACKOFF_FACTOR = 2.0
+#: 退避上限。上游 crawl 实测固定 13–15s，所以超过这个间隔就纯粹是在增加
+#: 检测滞后、却几乎不再省请求。
+CRAWL_POLL_MAX_INTERVAL_SECONDS = 10.0
+
 
 def request_json_with_transient_retry(
     transport: Any,
@@ -162,7 +172,7 @@ def crawl_firecrawl(
     limit: int = 20,
     max_depth: int | None = None,
     crawl_entire_domain: bool = True,
-    poll_interval_seconds: float = 2.0,
+    poll_interval_seconds: float = CRAWL_POLL_INTERVAL_SECONDS,
     max_poll_attempts: int = 30,
     timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
@@ -250,7 +260,24 @@ def crawl_firecrawl(
     status_path = f"{provider.path('crawl')}/{job_id}"
     status_payload: dict[str, Any] = start
     terminal = False
+    # 退避轮询。一次 crawl 实测要在上游跑 13–15s（与 `limit` / `crawl_entire_domain`
+    # 无关：返回 1 页也要 15.18s），而单 key 的配额可能是 **3 请求/分钟**
+    # （实测上游报文 `Consumed (req/min): 3, Remaining: 0`）。固定 2s 间隔会发
+    # 5–7 个请求，光是跑完一次 crawl 就打满整个窗口，于是下一次调用立刻 429
+    # （实测：连续第 3 次必然失败。这也是 loop41-44 两行连续失败的根因）。
+    #
+    # **先睡再问**：作业刚提交时必然还是 processing，立刻问一次纯属浪费配额。
+    # 实测把一次 crawl 的请求数从 5–7 降到 3–4（四次连续调用零 429），
+    # 墙钟 13.7s → ~19s，全部是检测滞后。
+    # ponytail: 固定倍率退避，没有按上游 `duration` 自适应；后者要等实测出
+    # 各站点 duration 的分布才值得做。
+    poll_interval = float(poll_interval_seconds)
     for _ in range(max(1, max_poll_attempts)):
+        time.sleep(min(max(0.0, poll_interval), max(0.0, deadline - time.monotonic())))
+        poll_interval = min(
+            poll_interval * CRAWL_POLL_BACKOFF_FACTOR,
+            CRAWL_POLL_MAX_INTERVAL_SECONDS,
+        )
         status_payload = request_with_deadline(
             method="GET",
             path=status_path,
@@ -262,10 +289,8 @@ def crawl_firecrawl(
         if state in {"completed", "failed", "cancelled"}:
             terminal = True
             break
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        if deadline - time.monotonic() <= 0:
             raise MySearchError("firecrawl crawl deadline exceeded")
-        time.sleep(min(max(0.0, poll_interval_seconds), remaining))
     if not terminal:
         raise MySearchError("firecrawl crawl did not reach a terminal state before deadline")
     return query_routing._build_firecrawl_crawl_result(
