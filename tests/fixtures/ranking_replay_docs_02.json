@@ -1,0 +1,43 @@
+{
+  "_note": "Frozen upstream result set for the Next.js generateMetadata query, captured 2026-09-27 (loop43 run). Reranking must be replayable on a fixed candidate set: live upstream returns a different set every run, so total-score comparisons cannot attribute changes to code. See tests/test_ranking_replay.py.",
+  "query": "Next.js generateMetadata docs",
+  "mode": "docs",
+  "strict_official": true,
+  "candidates": [
+    {
+      "url": "https://nextjs.org/docs-wip/app/api-reference/functions/generate-metadata",
+      "title": "Functions: generateMetadata | Next.js",
+      "content_len": 39381,
+      "snippet_len": 6428,
+      "provider": "exa"
+    },
+    {
+      "url": "https://nextjs.org/docs/messages/blocking-prerender-metadata-dynamic",
+      "title": "Next.js encountered uncached data in generateMetadata()",
+      "content_len": 8178,
+      "snippet_len": 5042,
+      "provider": "exa"
+    },
+    {
+      "url": "https://nextjs.org/docs/messages/blocking-prerender-metadata-runtime",
+      "title": "Next.js encountered runtime data in generateMetadata()",
+      "content_len": 7408,
+      "snippet_len": 4259,
+      "provider": "exa"
+    },
+    {
+      "url": "https://nextjs.org/docs/app/api-reference/functions/generate-metadata",
+      "title": "Functions: generateMetadata",
+      "content_len": 38617,
+      "snippet_len": 6440,
+      "provider": "exa"
+    },
+    {
+      "url": "https://nextjs.org/docs/15/app/api-reference/functions/generate-metadata",
+      "title": "",
+      "content_len": 35120,
+      "snippet_len": 5994,
+      "provider": "exa"
+    }
+  ]
+}
