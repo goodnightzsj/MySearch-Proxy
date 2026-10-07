@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+import shutil
+import subprocess
 from pathlib import Path
 
 
@@ -8,6 +10,42 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class ProxySocialConsoleTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for console behavior checks")
+    def test_firecrawl_disable_reasons_render_safely_in_list_and_details(self) -> None:
+        source = (REPO_ROOT / "proxy/static/js/console.js").read_text(encoding="utf-8")
+        functions = []
+        for name in ("getKeyAvailability", "formatDisabledDetail", "renderKeyStatusSummary", "escapeHtml", "formatTime"):
+            start = source.index(f"function {name}(")
+            end = source.index("\n}", start) + 2
+            functions.append(source[start:end])
+        script = "\n".join(functions) + """
+const assert = require('node:assert/strict');
+const fmtNum = (value) => String(value);
+const labels = {
+  sponsor_verification_expired: '赞助验证过期',
+  unverified_credit_limit_reached: '未验证额度用尽',
+  account_holder_blocked: '持有人已封禁',
+  account_banned: '账户被封禁',
+  pay_as_you_go_limit: '按量付费上限',
+  api_key_budget_exceeded: 'Key 预算用尽',
+  team_budget_exceeded: '团队预算用尽',
+};
+for (const [reason, label] of Object.entries(labels)) {
+  const key = {active: 0, disabled_reason: reason, disabled_detail: '<img src=x onerror=alert(1)> upstream details'};
+  assert.equal(getKeyAvailability(key).label, label);
+  assert.ok(formatDisabledDetail(key).includes('upstream details'));
+  const html = renderKeyStatusSummary('firecrawl', key);
+  assert.ok(html.includes(label));
+  assert.ok(html.includes('&lt;img'));
+  assert.ok(!html.includes('<img'));
+}
+assert.ok(formatDisabledDetail({active: 0, disabled_reason: 'auth_rejected', disabled_detail: 'precise upstream cause'}).includes('precise upstream cause'));
+assert.equal(formatDisabledDetail({active: 1, disabled_reason: 'rate_limited', disabled_detail: 'stale', schedule_until: '2000-01-01'}), '');
+assert.ok(formatDisabledDetail({active: 1, disabled_reason: 'rate_limited', disabled_detail: 'retry later', schedule_until: '2999-01-01'}).includes('retry later'));
+"""
+        result = subprocess.run(["node"], input=script, text=True, capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_social_console_uses_grok2api_v3_defaults(self) -> None:
         javascript = (REPO_ROOT / "proxy/static/js/console.js").read_text(encoding="utf-8")
         settings = (REPO_ROOT / "proxy/templates/components/_settings_modal.html").read_text(

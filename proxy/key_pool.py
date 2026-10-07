@@ -14,54 +14,7 @@ from database import (
     update_key_usage,
 )
 
-_QUOTA_MARKERS = (
-    "quota_exhausted",
-    "quota exhausted",
-    "insufficient_quota",
-    "insufficient quota",
-    "credits exhausted",
-    "credit exhausted",
-    "credits limit",
-    "credit limit",
-    "exceeded your credits",
-    "no credits remaining",
-    "billing limit",
-    "usage limit",
-    "plan limit",
-    "resource_exhausted",
-)
-_AUTH_MARKERS = (
-    "invalid api key",
-    "invalid_api_key",
-    "api key is invalid",
-    "api key has expired",
-    "expired api key",
-    "revoked api key",
-    "invalid token",
-    "token is invalid",
-    "token has expired",
-    "expired token",
-    "revoked token",
-    "bad credentials",
-    "authentication failed",
-)
-
-
-def classify_upstream_key_failure(status_code, detail=""):
-    """Classify failures that make one credential unschedulable."""
-    normalized = " ".join(str(detail or "").lower().split())
-    has_quota_marker = any(marker in normalized for marker in _QUOTA_MARKERS)
-    if status_code in {402, 432} or (
-        status_code in {403, 429} and has_quota_marker
-    ):
-        return "quota_exhausted"
-    if status_code == 429:
-        return "rate_limited"
-    if status_code == 401 or (
-        status_code == 403 and any(marker in normalized for marker in _AUTH_MARKERS)
-    ):
-        return "auth_rejected"
-    return ""
+from mysearch.errors import classify_upstream_key_failure  # noqa: F401 (public re-export)
 
 
 class ServiceKeyPool:

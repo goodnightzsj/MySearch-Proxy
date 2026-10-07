@@ -236,6 +236,8 @@ docker run -d \
 
 这条链路里不再需要手动先创建 `mysp-` token。容器启动时会通过受限 bootstrap 接口自动创建或复用一个 `mysearch` 代理 token，再交给同容器里的 `mysearch` 运行时使用。
 
+自动获取 token 默认最多等待 300 秒，可通过 `MYSEARCH_PROXY_BOOTSTRAP_TIMEOUT_SECONDS` 调整。获取失败或返回空 token 时，容器会退出并交给 Docker 重启策略处理，不会启动一个缺少代理凭证的 MCP；显式设置 `MYSEARCH_PROXY_API_KEY` 时跳过自动获取。
+
 ### 路线 C：一套 compose 部署 `proxy + mysearch`
 
 ```bash

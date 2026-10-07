@@ -445,6 +445,13 @@ function getKeyAvailability(key) {
   const labels = {
     quota_exhausted: '额度耗尽',
     auth_rejected: '凭证失效',
+    sponsor_verification_expired: '赞助验证过期',
+    unverified_credit_limit_reached: '未验证额度用尽',
+    account_holder_blocked: '持有人已封禁',
+    account_banned: '账户被封禁',
+    pay_as_you_go_limit: '按量付费上限',
+    api_key_budget_exceeded: 'Key 预算用尽',
+    team_budget_exceeded: '团队预算用尽',
     manual: '手动禁用',
     repeated_failure: '连续失败',
     legacy_failure_threshold: '历史失败停用',
@@ -3173,9 +3180,18 @@ function formatDisabledDetail(key) {
     manual: '该 Key 已被手动禁用。',
     quota_exhausted: '上游额度已耗尽，补充额度后可手动恢复。',
     auth_rejected: '上游拒绝了当前凭证，请检查 Key 是否仍然有效。',
+    sponsor_verification_expired: '账号持有人需登录 Firecrawl 完成赞助验证，再手动启用此 Key。',
+    unverified_credit_limit_reached: '此 Agent Key 的 50 点未验证额度已用尽，需账号持有人确认后再启用。',
+    account_holder_blocked: '账号持有人已在 Firecrawl 封禁此 Key，需先由持有人解除。',
+    account_banned: 'Firecrawl 已封禁该账户，需联系上游支持处理。',
+    pay_as_you_go_limit: 'Tavily 按量付费额度已达上限，需在上游调整额度后手动启用。',
+    api_key_budget_exceeded: 'Exa 此 Key 的支出预算已用尽，需管理员调整预算后手动启用。',
+    team_budget_exceeded: 'Exa 团队账期预算已用尽，需预算恢复或管理员调整后手动启用。',
     repeated_failure: '连续请求失败达到保护阈值。',
   };
-  return details[reason] || String(key?.disabled_detail || '').trim();
+  if (getKeyAvailability(key).schedulable) return '';
+  const upstreamDetail = String(key?.disabled_detail || '').trim();
+  return [details[reason] || reason, upstreamDetail].filter(Boolean).join(' · ');
 }
 
 function quotaBar(used, limit) {
@@ -3690,11 +3706,13 @@ function renderTokenSummary(token) {
 
 function renderKeyStatusSummary(service, key) {
   const availability = getKeyAvailability(key);
+  const disabledDetail = formatDisabledDetail(key);
   const remain = key.usage_key_remaining ?? key.usage_account_remaining;
   const remainLabel = remain === null || remain === undefined ? '剩余待同步' : `剩余 ${fmtNum(remain)}`;
   return `
     <div class="table-note"><span class="tag ${availability.schedulable ? 'tag-ok' : 'tag-off'}">${escapeHtml(availability.label)}</span></div>
     <div class="table-note muted">${escapeHtml(availability.detail)}</div>
+    ${disabledDetail ? `<div class="table-note danger">${escapeHtml(disabledDetail)}</div>` : ''}
     <div class="table-note">${remainLabel}</div>
     <div class="table-note muted">${key.usage_synced_at ? `同步 ${formatTime(key.usage_synced_at)}` : (service === 'exa' ? '实时额度暂不可查' : '尚未同步')}</div>
   `;

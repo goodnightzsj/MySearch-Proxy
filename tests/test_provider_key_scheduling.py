@@ -10,6 +10,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
@@ -81,6 +82,66 @@ class DirectKeySchedulingTests(unittest.TestCase):
     def setUp(self) -> None:
         self.config = _minimal_config(["first-key", "second-key"])
         self.ring = MySearchKeyRing(self.config)
+
+    def test_provider_specific_errors_match_proxy_and_direct_runtime(self) -> None:
+        cases = [
+            ("tavily", 433, {"detail": {"error": "This request exceeds the pay-as-you-go limit."}}, "pay_as_you_go_limit"),
+            ("tavily", 432, {"detail": {"error": "This request exceeds your plan's set usage limit."}}, "quota_exhausted"),
+            ("tavily", 429, {"detail": {"error": "Your request has been blocked due to excessive requests."}}, "rate_limited"),
+            ("tavily", 401, {"detail": {"error": "Unauthorized: missing or invalid API key"}}, "auth_rejected"),
+            ("exa", 402, {"tag": "API_KEY_BUDGET_EXCEEDED", "error": "Budget exceeded"}, "api_key_budget_exceeded"),
+            ("exa", 402, {"tag": "TEAM_BUDGET_EXCEEDED", "error": "Budget exceeded"}, "team_budget_exceeded"),
+            ("exa", 402, {"tag": "NO_MORE_CREDITS", "error": "Credits exhausted"}, "quota_exhausted"),
+            ("exa", 401, {"tag": "INVALID_API_KEY", "error": "Invalid credential"}, "auth_rejected"),
+            ("exa", 429, {"tag": "RATE_LIMIT_EXCEEDED", "error": "Request limit exceeded"}, "rate_limited"),
+            ("exa", 403, {"tag": "FEATURE_DISABLED", "error": "invalid api key for this feature"}, ""),
+            ("exa", 403, {"tag": "PROHIBITED_CONTENT", "error": "content about invalid api key"}, ""),
+            ("exa", 403, {"tag": "CONTENT_FILTER_ERROR", "error": "Forbidden"}, ""),
+            ("exa", 402, {"tag": "X402_VERIFICATION_FAILED", "error": "Payment signature failed"}, ""),
+            ("exa", 402, {"tag": "MPP_VERIFICATION_FAILED", "error": "Payment failed"}, ""),
+            ("exa", 503, {"tag": "SERVICE_OVERLOADED", "error": "capacity unavailable"}, ""),
+            ("exa", 200, {"statuses": [{"error": {"tag": "CRAWL_HTTP_403", "httpStatusCode": 403}}]}, ""),
+            ("exa", 433, {"error": "Unknown status"}, ""),
+            ("firecrawl", 403, {"error": "sponsor_verification_expired"}, "sponsor_verification_expired"),
+            ("firecrawl", 403, {"code": "SCRAPE_SITE_ERROR", "error": "invalid token"}, ""),
+            ("xai", 433, {"error": "Unknown status"}, ""),
+        ]
+        for service, status, payload, expected in cases:
+            with self.subTest(service=service, status=status, payload=payload):
+                error = MySearchHTTPError(provider=service, status_code=status, detail=payload, url="https://example.test")
+                self.assertEqual(error.key_failure_kind, expected)
+                self.assertEqual(proxy_key_pool.classify_upstream_key_failure(status, payload, service=service), expected)
+                if service == "tavily" and status == 433:
+                    self.assertTrue(error.is_plan_limit_error)
+
+    def test_proxy_classifier_is_the_runtime_owner(self) -> None:
+        from mysearch.errors import classify_upstream_key_failure
+        self.assertIs(proxy_key_pool.classify_upstream_key_failure, classify_upstream_key_failure)
+
+    def test_new_account_errors_rotate_in_real_transport_and_protect_managed_token(self) -> None:
+        for service, status, payload, expected in [
+            ("tavily", 433, {"detail": {"error": "Pay-as-you-go limit reached"}}, "pay_as_you_go_limit"),
+            ("exa", 402, {"tag": "API_KEY_BUDGET_EXCEEDED", "error": "Budget exceeded"}, "api_key_budget_exceeded"),
+            ("firecrawl", 403, {"error": "sponsor_verification_expired"}, "sponsor_verification_expired"),
+        ]:
+            for managed in (False, True):
+                with self.subTest(service=service, managed=managed):
+                    config = _minimal_config([])
+                    provider = getattr(config, service)
+                    provider.api_keys = ["test-first", "test-second"]
+                    provider.managed_key_pool = managed
+                    ring = MySearchKeyRing(config)
+                    client = MySearchClient(config=config, keyring=ring)
+                    self.addCleanup(client._http.close)
+                    responses = [httpx.Response(status, json=payload), httpx.Response(200, json={"ok": True})]
+                    with patch.object(client._http, "request", side_effect=responses) as request:
+                        if managed:
+                            with self.assertRaises(MySearchHTTPError):
+                                client._request_json(provider=provider, method="POST", path="/search", payload={}, key="test-first")
+                        else:
+                            self.assertEqual(client._request_json(provider=provider, method="POST", path="/search", payload={}, key="test-first"), {"ok": True})
+                    self.assertEqual(request.call_count, 1 if managed else 2)
+                    self.assertEqual(ring.describe()[service]["quarantine_reasons"], [] if managed else [expected])
 
     def test_rate_limited_key_recovers_after_retry_after(self) -> None:
         with patch("mysearch.keyring.time.monotonic", return_value=100.0):
@@ -815,6 +876,49 @@ class ProxyDatabaseSchedulingTests(unittest.TestCase):
         row = self.db.add_key(value, service="tavily")
         return int(row["id"])
 
+    def test_firecrawl_disable_reason_survives_reopen_and_requires_explicit_resume(self) -> None:
+        cases = [
+            (403, "sponsor_verification_expired", "sponsor_verification_expired"),
+            (402, "unverified_credit_limit_reached", "unverified_credit_limit_reached"),
+            (403, "This API key has been blocked by the account holder.", "account_holder_blocked"),
+            (403, "Unauthorized: This account has been banned.", "account_banned"),
+        ]
+        for index, (status, detail, expected) in enumerate(cases):
+            with self.subTest(expected=expected):
+                value = "fc-" + str(index) * 24
+                key_id = self.db.ingest_key(value, service="firecrawl")["id"]
+                reason = proxy_key_pool.classify_upstream_key_failure(status, detail, service="firecrawl")
+                self.db.update_key_usage(key_id, False, failure_kind=reason, failure_detail=detail)
+                self.db.close_conn()
+                row = dict(self.db.get_key_by_id(key_id))
+                self.assertEqual(row["active"], 0)
+                self.assertEqual(row["disabled_reason"], expected)
+                self.assertEqual(row["disabled_detail"], detail)
+                self.assertTrue(row["disabled_at"])
+                self.assertEqual(self.db.ingest_key(value, service="firecrawl")["status"], "disabled")
+                self.db.toggle_key(key_id, 1)
+                restored = dict(self.db.get_key_by_id(key_id))
+                self.assertEqual(restored["active"], 1)
+                self.assertEqual(restored["disabled_reason"], "")
+                self.assertEqual(restored["disabled_detail"], "")
+
+    def test_tavily_exa_disable_and_cooldown_are_persisted(self) -> None:
+        for service, status, detail, expected in [
+            ("tavily", 433, {}, "pay_as_you_go_limit"),
+            ("exa", 402, {"tag": "API_KEY_BUDGET_EXCEEDED"}, "api_key_budget_exceeded"),
+            ("exa", 402, {"tag": "TEAM_BUDGET_EXCEEDED"}, "team_budget_exceeded"),
+            ("exa", 429, {"tag": "RATE_LIMIT_EXCEEDED"}, "rate_limited"),
+        ]:
+            with self.subTest(service=service, expected=expected):
+                key_id = self.db.add_key("test-" + expected, service=service)["id"]
+                reason = proxy_key_pool.classify_upstream_key_failure(status, detail, service=service)
+                self.db.update_key_usage(key_id, False, failure_kind=reason, failure_detail=json.dumps(detail), retry_after_seconds=30)
+                self.db.close_conn()
+                row = dict(self.db.get_key_by_id(key_id))
+                self.assertEqual(row["disabled_reason"], expected)
+                self.assertEqual(row["active"], int(expected == "rate_limited"))
+                self.assertEqual(bool(row["schedule_until"]), expected == "rate_limited")
+
     def test_rate_limit_cools_down_without_permanent_disable(self) -> None:
         key_id = self._add_key()
         self.db.update_key_usage(
@@ -1111,6 +1215,79 @@ class ProxyPoolCooldownTests(unittest.TestCase):
             "quota_exhausted",
         )
 
+    def test_firecrawl_account_failures_are_provider_scoped(self) -> None:
+        cases = [
+            (403, {"error": "sponsor_verification_expired"}, "sponsor_verification_expired"),
+            (403, {"message": "Sponsor verification has expired. The account holder needs to log in to confirm."}, "sponsor_verification_expired"),
+            (402, {"error": "unverified_credit_limit_reached"}, "unverified_credit_limit_reached"),
+            (403, {"error": "This API key has been blocked by the account holder."}, "account_holder_blocked"),
+            (403, {"error": "Unauthorized: This account has been banned. Contact support@firecrawl.com if you believe this is a mistake."}, "account_banned"),
+            (401, {"error": "Unauthorized: Invalid token"}, "auth_rejected"),
+            (402, {"error": "Insufficient credits to perform this request."}, "quota_exhausted"),
+            (429, {"error": "Rate limit exceeded. Consumed (req/min): 10, Remaining (req/min): 0."}, "rate_limited"),
+        ]
+        for status, payload, expected in cases:
+            with self.subTest(status=status, payload=payload):
+                self.assertEqual(proxy_key_pool.classify_upstream_key_failure(
+                    status, payload, service="firecrawl",
+                ), expected)
+                self.assertEqual(proxy_key_pool.classify_upstream_key_failure(
+                    200, payload, service="firecrawl",
+                ), "")
+        self.assertEqual(proxy_key_pool.classify_upstream_key_failure(
+            403, {"error": "sponsor_verification_expired"},
+        ), "")
+
+    def test_firecrawl_request_errors_do_not_disable_a_credential(self) -> None:
+        cases = [
+            (403, {"code": "SCRAPE_SITE_ERROR", "error": "Target returned invalid api key"}),
+            (403, {"code": "UNSUPPORTED_SITE", "error": "Forbidden"}),
+            (402, {"code": "AGENT_INDEX_ONLY", "error": "Index-only restriction"}),
+            (403, {"error": {"code": "SCRAPE_MEDIA_ACCESS_DENIED", "message": "invalid token"}}),
+            (500, {"code": "SCRAPE_TIMEOUT", "error": "Timed out"}),
+            (503, {"error": "OAuth authentication is temporarily unavailable"}),
+            (403, {"error": "Request blocked: IP address 192.0.2.1 is not on this team's allowed IP list."}),
+            (403, {"error": "Request blocked: this API key is restricted to the following endpoints: scrape."}),
+            (403, {"error": "Request blocked: this API key is restricted to the following formats: markdown."}),
+            (403, {"error": "Unknown policy failure", "data": {"markdown": "sponsor_verification_expired"}}),
+            (403, "<html>Forbidden</html>"),
+        ]
+        for status, payload in cases:
+            with self.subTest(status=status, payload=payload):
+                self.assertEqual(proxy_key_pool.classify_upstream_key_failure(
+                    status, payload, service="firecrawl",
+                ), "")
+
+    def test_all_firecrawl_builtin_request_codes_remain_request_scoped(self) -> None:
+        # ErrorCodes from firecrawl/firecrawl 9ae2451 apps/api/src/lib/error.ts.
+        codes = """
+            THIRD_PARTY_DATA_TERMS_REQUIRED THIRD_PARTY_DATA_NOT_FOUND
+            THIRD_PARTY_DATA_NOT_ENABLED THIRD_PARTY_DATA_ENRICHMENT_NOT_ENABLED
+            SCRAPE_TIMEOUT MAP_TIMEOUT UNKNOWN_ERROR SCRAPE_ALL_ENGINES_FAILED
+            SCRAPE_SSL_ERROR SCRAPE_SITE_ERROR SCRAPE_PROXY_SELECTION_ERROR
+            SCRAPE_PDF_PREFETCH_FAILED SCRAPE_DOCUMENT_PREFETCH_FAILED
+            SCRAPE_JOB_CANCELLED SCRAPE_RETRY_LIMIT SCRAPE_ZDR_VIOLATION_ERROR
+            SCRAPE_DNS_RESOLUTION_ERROR SCRAPE_PDF_INSUFFICIENT_TIME_ERROR
+            SCRAPE_PDF_ANTIBOT_ERROR SCRAPE_PDF_FETCH_PROXY_ERROR SCRAPE_PDF_OCR_REQUIRED
+            SCRAPE_DOCUMENT_ANTIBOT_ERROR SCRAPE_DOCUMENT_FETCH_PROXY_ERROR
+            SCRAPE_UNSUPPORTED_FILE_ERROR SCRAPE_ACTION_ERROR SCRAPE_RACED_REDIRECT_ERROR
+            SCRAPE_NO_CACHED_DATA SCRAPE_LOCKDOWN_CACHE_MISS SCRAPE_SITEMAP_ERROR
+            SCRAPE_ACTIONS_NOT_SUPPORTED SCRAPE_BRANDING_NOT_SUPPORTED AGENT_INDEX_ONLY
+            SCRAPE_AUDIO_UNSUPPORTED_URL SCRAPE_VIDEO_UNSUPPORTED_URL SCRAPE_MEDIA_ACCESS_DENIED
+            SCRAPE_PROMPT_INJECTION_DETECTED SCRAPE_JSON_CONTENT_TOO_LARGE
+            SCRAPE_X_TWITTER_CONFIGURATION_ERROR PARSE_UNSUPPORTED_OPTIONS CRAWL_DENIAL
+            UNSUPPORTED_SITE MAP_FAILED BAD_REQUEST_INVALID_JSON BAD_REQUEST
+            CONCURRENCY_QUEUE_TIMEOUT SAFE_MODE_BLOCKED SCRAPE_SITE_RESTRICTION_BLOCKED
+            unsafe_domain_blocked thread_not_found thread_busy thread_expired
+            threads_disabled exchange_not_enabled
+        """.split()
+        for code in codes:
+            with self.subTest(code=code):
+                self.assertEqual(proxy_key_pool.classify_upstream_key_failure(
+                    403, {"code": code, "error": "Target says invalid api key or quota exhausted"},
+                    service="firecrawl",
+                ), "")
+
 class ProxyForwardingSchedulingTests(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -1138,6 +1315,108 @@ class ProxyForwardingSchedulingTests(unittest.IsolatedAsyncioTestCase):
         self.server.social_upstream_key_schedule.clear()
         self.server.social_upstream_key_cursor = 0
         self.setting_patch.stop()
+
+    async def test_firecrawl_disables_account_failure_and_preserves_details(self) -> None:
+        class Request:
+            method = "POST"
+            headers = {"authorization": "Bearer test-client"}
+            query_params = {}
+
+            async def body(self):
+                return b'{"url":"https://example.com"}'
+
+        payload = {
+            "error": "sponsor_verification_expired",
+            "message": "Sponsor verification has expired. test-upstream-secret",
+        }
+        first = httpx.Response(403, json=payload)
+        for recovered in (True, False):
+            with self.subTest(recovered=recovered):
+                keys = [{"id": 1, "key": "test-upstream-secret", "_pool_generation": 3}]
+                responses = [first]
+                if recovered:
+                    keys.append({"id": 2, "key": "test-working-key", "_pool_generation": 3})
+                    responses.append(httpx.Response(200, json={"success": True}))
+                with patch.object(self.server, "get_token_row_or_401", return_value={"id": 9}), patch.object(
+                    self.server.pool, "get_next_key", side_effect=keys + [None],
+                ), patch.object(self.server.pool, "report_result") as report, patch.object(
+                    self.server.db, "log_usage",
+                ), patch.object(self.server.http_client, "request", new=AsyncMock(side_effect=responses)):
+                    response = await self.server.proxy_firecrawl("v2/scrape", Request())
+                failure = report.call_args_list[0].kwargs
+                self.assertEqual(failure["failure_kind"], "sponsor_verification_expired")
+                self.assertEqual(failure["generation"], 3)
+                self.assertIn("Sponsor verification has expired", failure["failure_detail"])
+                self.assertNotIn("test-upstream-secret", failure["failure_detail"])
+                self.assertEqual(response.status_code, 200 if recovered else 503)
+                self.assertNotIn("test-upstream-secret", response.body.decode())
+
+    def test_firecrawl_error_details_keep_code_and_message(self) -> None:
+        response = httpx.Response(403, json={
+            "code": "SCRAPE_SITE_ERROR", "error": "Target authentication failed",
+            "message": "test-secret is not accepted by target", "data": "not an error field",
+        })
+        kind, detail, _ = self.server._upstream_key_failure(response, "test-secret", service="firecrawl")
+        self.assertEqual(kind, "")
+        self.assertIn("SCRAPE_SITE_ERROR", detail)
+        self.assertIn("Target authentication failed", detail)
+        self.assertIn("<redacted>", detail)
+        self.assertNotIn("test-secret", detail)
+        self.assertNotIn("not an error field", detail)
+
+    async def test_tavily_433_and_exa_budget_errors_rotate_proxy_keys(self) -> None:
+        class Request:
+            method = "POST"
+            headers = {"authorization": "Bearer test-client"}
+            query_params = {}
+            url = SimpleNamespace(path="/api/search")
+
+            async def body(self):
+                return b'{"query":"test"}'
+
+            async def json(self):
+                return {"query": "test"}
+
+        for service, status, payload, expected in [
+            ("tavily", 433, {"detail": {"error": "pay-as-you-go limit"}}, "pay_as_you_go_limit"),
+            ("exa", 402, {"tag": "API_KEY_BUDGET_EXCEEDED", "error": "test-first budget exceeded"}, "api_key_budget_exceeded"),
+            ("exa", 402, {"tag": "TEAM_BUDGET_EXCEEDED", "error": "test-first budget exceeded"}, "team_budget_exceeded"),
+        ]:
+            with self.subTest(service=service, expected=expected):
+                keys = [{"id": 1, "key": "test-first"}, {"id": 2, "key": "test-second"}, None]
+                responses = [httpx.Response(status, json=payload), httpx.Response(200, json={"ok": True})]
+                async def tavily_response(**kwargs):
+                    return responses.pop(0), "https://example.test/search", False
+                config = {"upstream_search_path": "/search", "upstream_extract_path": "/extract"}
+                with patch.object(self.server, "get_token_row_or_401", return_value={"id": 9}), patch.object(
+                    self.server.pool, "get_next_key", side_effect=keys,
+                ), patch.object(self.server.pool, "report_result") as report, patch.object(
+                    self.server.db, "log_usage",
+                ), patch.object(self.server.db, "get_all_keys", return_value=[]), patch.object(
+                    self.server, "get_runtime_tavily_config", return_value=config,
+                ), patch.object(self.server, "resolve_tavily_runtime_mode", return_value={"effective_mode": "pool"}), patch.object(
+                    self.server, "_post_tavily_with_gateway_fallback", new=AsyncMock(side_effect=tavily_response),
+                ), patch.object(self.server.http_client, "post", new=AsyncMock(side_effect=responses)):
+                    response = await (self.server.proxy_tavily(Request()) if service == "tavily" else self.server.proxy_exa_search(Request()))
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(report.call_args_list[0].kwargs["failure_kind"], expected)
+                self.assertNotIn("test-first", report.call_args_list[0].kwargs["failure_detail"])
+                if service == "exa":
+                    self.assertIn(payload["tag"], report.call_args_list[0].kwargs["failure_detail"])
+
+    def test_exa_payment_and_feature_errors_are_forwarded_without_disabling_pool(self) -> None:
+        for status, tag in [(403, "FEATURE_DISABLED"), (402, "X402_VERIFICATION_FAILED")]:
+            upstream = httpx.Response(status, json={"tag": tag, "error": "request not allowed"})
+            response = self.server._safe_upstream_error_response(upstream, service="exa", gateway_pool_exhausted=True)
+            self.assertEqual(response.status_code, status)
+            self.assertIn(tag, response.body.decode())
+
+    def test_tavily_pay_as_you_go_failure_does_not_invalidate_gateway_token(self) -> None:
+        response = self.server._safe_upstream_error_response(
+            httpx.Response(433, json={"detail": {"error": "pay-as-you-go limit"}}),
+            service="tavily", gateway_pool_exhausted=True,
+        )
+        self.assertEqual(response.status_code, 503)
 
     async def test_exa_429_retries_next_unique_key(self) -> None:
         class Request:

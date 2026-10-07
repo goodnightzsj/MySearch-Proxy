@@ -16,7 +16,7 @@ def main() -> int:
     base_url = _normalize_base_url(os.environ.get("MYSEARCH_PROXY_BASE_URL", ""))
     bootstrap_token = os.environ.get("MYSEARCH_PROXY_BOOTSTRAP_TOKEN", "").strip()
     token_name = os.environ.get("MYSEARCH_PROXY_BOOTSTRAP_NAME", "docker-mysearch").strip() or "docker-mysearch"
-    timeout_seconds = max(1.0, float(os.environ.get("MYSEARCH_PROXY_BOOTSTRAP_TIMEOUT_SECONDS", "60")))
+    timeout_seconds = max(1.0, float(os.environ.get("MYSEARCH_PROXY_BOOTSTRAP_TIMEOUT_SECONDS", "300")))
     interval_seconds = max(0.2, float(os.environ.get("MYSEARCH_PROXY_BOOTSTRAP_INTERVAL_SECONDS", "1.5")))
 
     if not base_url:

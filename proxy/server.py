@@ -3424,7 +3424,7 @@ def normalize_social_search_response(query, payload, max_results, *, model=None)
     }
 
 
-def _upstream_key_failure(response, upstream_key=""):
+def _upstream_key_failure(response, upstream_key="", *, service=""):
     detail = response.text.strip()
     try:
         payload = response.json()
@@ -3446,10 +3446,19 @@ def _upstream_key_failure(response, upstream_key=""):
         if isinstance(payload, (dict, list))
         else detail
     )
+    if service in {"tavily", "firecrawl", "exa"} and isinstance(payload, dict):
+        # Preserve machine code AND explanation; do not classify scraped data.
+        classification_detail = {
+            field: payload[field] for field in ("code", "tag", "type", "error", "message", "detail")
+            if field in payload
+        }
+        if service in {"firecrawl", "exa"}:
+            detail = json.dumps(classification_detail, ensure_ascii=False)
     detail = redact_secret_text(detail, upstream_key)[:500]
-    classification_detail = redact_secret_text(classification_detail, upstream_key)
+    if service not in {"tavily", "firecrawl", "exa"}:
+        classification_detail = redact_secret_text(classification_detail, upstream_key)
     return (
-        classify_upstream_key_failure(response.status_code, classification_detail),
+        classify_upstream_key_failure(response.status_code, classification_detail, service=service),
         detail,
         _parse_retry_after_header(response.headers),
     )
@@ -3460,10 +3469,11 @@ def _safe_upstream_error_response(
     upstream_key="",
     *,
     gateway_pool_exhausted=False,
+    service="",
 ):
-    failure_kind, detail, _ = _upstream_key_failure(response, upstream_key)
+    failure_kind, detail, _ = _upstream_key_failure(response, upstream_key, service=service)
     status_code = response.status_code
-    if gateway_pool_exhausted and failure_kind in {"auth_rejected", "quota_exhausted"}:
+    if gateway_pool_exhausted and failure_kind and failure_kind != "rate_limited":
         status_code = 503
         detail = "Upstream API key pool is unavailable; manual key action required"
     return JSONResponse(
@@ -3554,8 +3564,8 @@ async def proxy_tavily(request: Request):
         db.log_usage(
             token_row["id"], None, endpoint, int(resp.status_code < 400), latency, service="tavily"
         )
-        failure_kind, _, _ = _upstream_key_failure(resp, upstream_key)
-        pool_exhausted = failure_kind in {"auth_rejected", "quota_exhausted"}
+        failure_kind, _, _ = _upstream_key_failure(resp, upstream_key, service="tavily")
+        pool_exhausted = bool(failure_kind) and failure_kind != "rate_limited"
     else:
         key_failures = []
         attempted_key_ids = set()
@@ -3598,6 +3608,7 @@ async def proxy_tavily(request: Request):
             failure_kind, failure_detail, retry_after_seconds = _upstream_key_failure(
                 resp,
                 upstream_key,
+                service="tavily",
             )
             success = resp.status_code < 400
             pool.report_result(
@@ -3622,6 +3633,7 @@ async def proxy_tavily(request: Request):
             resp,
             upstream_key,
             gateway_pool_exhausted=pool_exhausted,
+            service="tavily",
         )
     try:
         return JSONResponse(
@@ -3699,6 +3711,7 @@ async def proxy_firecrawl(path: str, request: Request):
         failure_kind, failure_detail, retry_after_seconds = _upstream_key_failure(
             resp,
             key_info["key"],
+            service="firecrawl",
         )
         success = resp.status_code < 400
         pool.report_result(
@@ -3726,6 +3739,7 @@ async def proxy_firecrawl(path: str, request: Request):
             resp,
             last_upstream_key,
             gateway_pool_exhausted=pool_exhausted,
+            service="firecrawl",
         )
     content_type = resp.headers.get("content-type", "").lower()
     if "application/json" in content_type:
@@ -3798,6 +3812,7 @@ async def proxy_exa_search(request: Request):
         failure_kind, failure_detail, retry_after_seconds = _upstream_key_failure(
             resp,
             key_info["key"],
+            service="exa",
         )
         success = resp.status_code < 400
         pool.report_result(
@@ -3822,6 +3837,7 @@ async def proxy_exa_search(request: Request):
             resp,
             last_upstream_key,
             gateway_pool_exhausted=pool_exhausted,
+            service="exa",
         )
     content_type = resp.headers.get("content-type", "").lower()
     if "application/json" in content_type:
