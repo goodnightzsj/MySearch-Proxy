@@ -16,6 +16,7 @@ import os
 import sys
 import tempfile
 import unittest
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -140,6 +141,7 @@ class RefreshFailureTests(unittest.TestCase):
         cls._tmpdir.cleanup()
 
     def setUp(self) -> None:
+        self.server.db.set_setting("social_model_selection_state", "")
         self.server.db.set_setting("social_model", "keep-me")
         self.server.db.set_setting("social_fallback_model", "keep-fallback")
 
@@ -151,15 +153,25 @@ class RefreshFailureTests(unittest.TestCase):
         # 必须同时 patch 两个网络函数：只 patch probe_social_model 的话，
         # fetch_social_upstream_json 会真的去请求 config 里的假主机直到超时
         # （实测让本测试从 0.2s 变成 18.5s）。
-        with patch.object(server, "get_runtime_social_config", return_value=config), \
-             patch.object(server, "collect_text_candidates", return_value=candidates), \
-             patch.object(server, "collect_candidates_from_model_list", return_value=[]), \
-             patch.object(server, "merge_candidates", return_value=candidates), \
-             patch.object(server, "probe_social_model", side_effect=probes), \
-             patch.object(server, "fetch_social_upstream_json", return_value=None), \
-             patch.object(server, "get_social_admin_v3_access_token",
-                          side_effect=RuntimeError("admin disabled in test")):
-            return await server.probe_and_refresh_social_models()
+        base_config = {"mode": "upstream", "upstream_responses_path": "/responses", **config}
+        config = {
+            **base_config,
+            "model": server.get_setting_text("social_model"),
+            "fallback_model": server.get_setting_text("social_fallback_model"),
+        }
+        # 真实跨轮规则：同模型三轮，间隔6h；只模拟外部候选、网络响应与墙钟。
+        started = time.time() - 43202
+        for index in range(3):
+            model_probes = {model: (ok, {"latency_ms": 1000, **evidence})
+                            for model, (ok, evidence) in zip(candidates, probes)}
+            async def probe(_root, _key, model, **kwargs):
+                return model_probes[model]
+            with patch.object(server, "get_runtime_social_config", return_value=config), \
+                 patch.object(server, "collect_social_model_candidates", return_value=(candidates, [])), \
+                 patch.object(server, "probe_social_model", side_effect=probe), \
+                 patch.object(server.time, "time", return_value=started + index * 21601):
+                result = await server.probe_and_refresh_social_models()
+        return result
 
     def test_unconfigured_upstream_keeps_config(self) -> None:
         import asyncio
@@ -186,8 +198,8 @@ class RefreshFailureTests(unittest.TestCase):
             config={"upstream_base_url": "http://h:8000/v1", "upstream_api_key": "k"},
             candidates=["grok-a", "grok-b"],
             probes=[(False, {"tool_calls": 0, "status_ids": 0})] * 2))
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["reason"], "no model passed search probing")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["reason"], "insufficient_search_evidence")
         self.assertEqual(self.server.get_setting_text("social_model", ""), "keep-me")
         self.assertEqual(self.server.get_setting_text("social_fallback_model", ""), "keep-fallback")
 

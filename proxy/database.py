@@ -312,6 +312,21 @@ def set_setting(key, value):
         pass  # connection reused via thread-local
 
 
+def set_settings(values, expected=None):
+    """原子发布一组设置（模型主备与评测证据必须属于同一轮）。"""
+    with get_conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if expected is not None:
+            for key, value in expected.items():
+                row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+                if (row["value"] if row else None) != value:
+                    return False
+        conn.executemany(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", values.items()
+        )
+    return True
+
+
 # ═══ API Keys ═══
 
 def add_key(key, email="", service="tavily"):

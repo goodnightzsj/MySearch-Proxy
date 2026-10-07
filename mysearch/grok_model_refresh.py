@@ -61,6 +61,9 @@ agent/coding 通道，工具集是 shell/文件类，不含 `x_search`。
 from __future__ import annotations
 
 import re
+import math
+from collections import Counter
+from statistics import median
 from typing import Any
 
 # 日期式：grok-<major>.<minor>-<MMDD>[-<suffix>]
@@ -164,6 +167,7 @@ def evaluate_search_probe(payload: Any) -> dict[str, Any]:
 
 def grok_model_sort_key(model_id: str) -> tuple[int, int, int, int, int, str]:
     """越"新"越大。点分式（grok-4.6）整体高于日期式（grok-4.20-0309）。"""
+    model_id = model_id.rsplit("/", 1)[-1]
     dated = _DATED_ID.match(model_id)
     if dated:
         suffix = (dated.group(4) or "").strip()
@@ -185,8 +189,11 @@ def grok_model_sort_key(model_id: str) -> tuple[int, int, int, int, int, str]:
 
 def is_eligible_model(model_id: str, excluded_prefixes=DEFAULT_EXCLUDED_PREFIXES) -> bool:
     """是否是可用于搜索默认值的候选（排除工具型/多模态模型）。"""
-    if not model_id or not model_id.startswith("grok-"):
+    if not isinstance(model_id, str) or not re.fullmatch(
+        r"(?:(?:Console|Build|Web)/)?grok-[A-Za-z0-9._-]{1,100}", model_id
+    ):
         return False
+    model_id = model_id.rsplit("/", 1)[-1]
     return not any(model_id.startswith(prefix) for prefix in excluded_prefixes)
 
 
@@ -212,7 +219,7 @@ def collect_text_candidates(models_payload: Any) -> list[str]:
     `grok-4.20-0309-non-reasoning`），所以这里只把它当候选来源之一，
     最终可用性一律由真实探测决定。因此 `available` 字段不被采信为判据。
     """
-    items = (models_payload or {}).get("items")
+    items = models_payload.get("items") if isinstance(models_payload, dict) else None
     if not isinstance(items, list):
         return []
     candidates: list[str] = []
@@ -220,6 +227,8 @@ def collect_text_candidates(models_payload: Any) -> list[str]:
         if not isinstance(item, dict):
             continue
         if str(item.get("capability") or "") != TEXT_CAPABILITY:
+            continue
+        if item.get("enabled") is False:
             continue
         public_id = str(item.get("publicId") or "").strip()
         if public_id:
@@ -284,6 +293,103 @@ def pick_primary_and_fallback(capable_ids, current_primary: str = "") -> tuple[s
         primary = ranked[0]
     fallback = next((model_id for model_id in ranked if model_id != primary), "")
     return primary, fallback
+
+
+# 按真实搜索交付统计，不按模型名字或一次成功追新。每6h一轮，至少跨12h。
+MODEL_PROBE_INTERVAL_SECONDS = 6 * 3600
+MODEL_PROBE_TIMEOUT_SECONDS = 40
+MODEL_PROBE_LIMIT = 8
+MODEL_HISTORY_SECONDS = 14 * 86400
+MODEL_HISTORY_LIMIT = 20
+MODEL_MIN_SAMPLES = 3
+MODEL_MIN_SPAN_SECONDS = 12 * 3600
+PROBE_QUERIES = (
+    "OpenAI latest announcement",
+    "Anthropic Claude latest announcement",
+    "SpaceX latest launch",
+)
+
+
+def update_probe_history(history: dict, probes: list[dict], now: float) -> dict:
+    """有界滚动窗口；只保存指标，不保存用户查询、响应正文或凭证。"""
+    updated = {
+        model: [row for row in rows if now - MODEL_HISTORY_SECONDS <= row["at"] <= now][-MODEL_HISTORY_LIMIT:]
+        for model, rows in history.items()
+        if is_eligible_model(model)
+    }
+    for probe in probes:
+        model = probe["model"]
+        row = {key: probe[key] for key in (
+            "search_capable", "latency_ms", "reason", "http_status", "tool_calls",
+            "status_ids", "result_count", "query_index",
+        ) if key in probe}
+        row["at"] = now
+        updated[model] = (updated.get(model, []) + [row])[-MODEL_HISTORY_LIMIT:]
+    # ponytail: 最多256个模型；超过后保留最近评测项，需要更大目录时再引入专表。
+    return dict(sorted(
+        ((model, rows) for model, rows in updated.items() if rows),
+        key=lambda item: item[1][-1]["at"], reverse=True,
+    )[:256])
+
+
+def summarize_model_probes(history: dict, candidates: list[str], now: float) -> list[dict]:
+    summaries = []
+    for model in candidates:
+        rows = [row for row in history.get(model, []) if now - MODEL_HISTORY_SECONDS <= row["at"] <= now]
+        good = [row for row in rows if row.get("search_capable")]
+        latency = sorted(row["latency_ms"] for row in good)
+        success_rate = len(good) / len(rows) if rows else 0
+        p90 = latency[math.ceil(len(latency) * .9) - 1] if latency else None
+        # 旧失败不能替同一时段的成功样本凑足长期观察窗口。
+        span = good[-1]["at"] - good[0]["at"] if good else 0
+        latest_ok = bool(rows and rows[-1].get("search_capable"))
+        qualified = (
+            len(good) >= MODEL_MIN_SAMPLES and success_rate >= .8
+            and span >= MODEL_MIN_SPAN_SECONDS and latest_ok
+            and now - rows[-1]["at"] <= 2 * MODEL_PROBE_INTERVAL_SECONDS
+            and p90 is not None and p90 <= MODEL_PROBE_TIMEOUT_SECONDS * 1000
+        )
+        summaries.append({
+            "model": model, "samples": len(rows), "successes": len(good),
+            "success_rate": success_rate, "p50_ms": median(latency) if latency else None,
+            "p90_ms": p90, "span_seconds": span, "qualified": qualified,
+            "last_at": rows[-1]["at"] if rows else None,
+            "failures": dict(Counter(row.get("reason", "search_evidence_missing") for row in rows if not row.get("search_capable"))),
+        })
+    return sorted(summaries, key=lambda row: (
+        not row["qualified"], -row["success_rate"], row["p90_ms"] if row["p90_ms"] is not None else math.inf,
+        row["model"],
+    ))
+
+
+def select_measured_models(summaries: list[dict], current: str, fallback: str) -> tuple[str, str, str]:
+    eligible = [row for row in summaries if row["qualified"]]
+    if not eligible:
+        return current, fallback, "insufficient_search_evidence"
+    best = eligible[0]
+    incumbent = next((row for row in eligible if row["model"] == current), None)
+    if incumbent and best["model"] != current:
+        # 成功率至少高10个百分点，或成功率不降且尾延迟至少快20%，才替换健康主模型。
+        improves = (
+            best["success_rate"] - incumbent["success_rate"] >= .1 - 1e-9
+            or (best["success_rate"] >= incumbent["success_rate"]
+                and best["p90_ms"] <= incumbent["p90_ms"] * .8)
+        )
+        if not improves:
+            best = incumbent
+    primary = best["model"]
+    backup = next((row["model"] for row in eligible if row["model"] != primary), "")
+    return primary, backup, "measured_selection" if primary != current else "retain_measured_primary"
+
+
+def choose_probe_candidates(candidates: list[str], history: dict, current: str, fallback: str) -> list[str]:
+    """主备优先，其余最久未测优先，避免前8个型号永久霸占测试预算。"""
+    prioritized = [model for model in (current, fallback) if model in candidates]
+    rest = sorted(
+        (model for model in candidates if model not in prioritized),
+        key=lambda model: history.get(model, [{}])[-1].get("at", 0),
+    )
+    return list(dict.fromkeys(prioritized + rest))[:MODEL_PROBE_LIMIT]
 
 
 

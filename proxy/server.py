@@ -2,6 +2,7 @@
 多服务 API Proxy — FastAPI 主服务
 """
 import asyncio
+import fcntl
 import hashlib
 import hmac
 import json
@@ -71,7 +72,13 @@ try:
         collect_text_candidates,
         evaluate_search_probe,
         merge_candidates,
-        pick_primary_and_fallback,
+        choose_probe_candidates,
+        select_measured_models,
+        summarize_model_probes,
+        update_probe_history,
+        MODEL_PROBE_INTERVAL_SECONDS,
+        MODEL_PROBE_TIMEOUT_SECONDS,
+        PROBE_QUERIES,
     )
 except ImportError:  # pragma: no cover - 极端隔离部署兜底
     build_probe_payload = None  # type: ignore[assignment]
@@ -79,11 +86,10 @@ except ImportError:  # pragma: no cover - 极端隔离部署兜底
     collect_text_candidates = None  # type: ignore[assignment]
     evaluate_search_probe = None  # type: ignore[assignment]
     merge_candidates = None  # type: ignore[assignment]
-    pick_primary_and_fallback = None  # type: ignore[assignment]
+    select_measured_models = None  # type: ignore[assignment]
 
-# 上游模型线会变（新增/下架/改名）。到期后在后台探测一次，把**确实支持搜索**的
-# 模型写回 social_model / social_fallback_model。默认 24h：探测是真实搜索调用
-# （每个 15-55s），且模型上线节奏以天计，频繁探测没有收益。设为 0 可关闭。
+# 模型目录默认24h同步，真实搜索每6h评测；达到跨轮门槛后才更新主备。
+# 设为0同时关闭自动同步与评测，手动管理入口仍可调用。
 try:
     SOCIAL_MODEL_REFRESH_TTL_SECONDS = max(
         0, int(os.environ.get("SOCIAL_MODEL_REFRESH_TTL_SECONDS", "86400"))
@@ -124,41 +130,74 @@ async def fetch_social_upstream_json(root_base, path, api_key, timeout=30.0):
         return None
 
 
-async def probe_social_model(root_base, api_key, model_id, timeout=None):
-    """真实搜索探测：返回 `(search_capable, 证据)`。
-
-    **必须发送真实的 x_search 工具并校验它被调用**——只看 HTTP 200 不够：
-    实测 `grok-4.6` / `grok-4.5` 返回 200 却完全不调用工具，而是凭训练数据
-    编造 X 帖子（假 status ID、整点时间戳、事实错误）。只验 200 会让这类模型
-    被选为搜索主模型，产出看似正常实则捏造的结果。
-    """
+async def probe_social_model(root_base, api_key, model_id, timeout=None, query=None):
+    """用生产提示词验证搜索交付；网络故障不标记成模型不支持搜索。"""
     if build_probe_payload is None or evaluate_search_probe is None:
         return False, {"reason": "probe helpers unavailable"}
+    query = query or PROBE_QUERIES[0]
+    budget = timeout or MODEL_PROBE_TIMEOUT_SECONDS
+    started = time.monotonic()
+    evidence = {}
     try:
-        response = await http_client.post(
+        response = await asyncio.wait_for(http_client.post(
             f"{root_base}/v1/responses",
-            json=build_probe_payload(model_id),
+            json=build_social_search_upstream_payload({"query": query, "max_results": 3}, model_id),
             headers={"Authorization": f"Bearer {api_key}"},
-            timeout=timeout or max(60.0, float(SOCIAL_GATEWAY_TIMEOUT_SECONDS)),
-        )
-    except Exception as exc:
-        return False, {"reason": f"request failed: {type(exc).__name__}"}
-    if response.status_code != 200:
-        return False, {"http_status": response.status_code, "reason": "http_error"}
-    try:
-        payload = response.json()
-    except Exception:
-        return False, {"http_status": 200, "reason": "invalid_json"}
-    verdict = evaluate_search_probe(payload)
-    verdict["http_status"] = 200
-    return verdict["search_capable"], verdict
+            timeout=budget,
+        ), timeout=budget)
+        evidence["http_status"] = response.status_code
+        if response.status_code != 200:
+            detail = response.text.lower()
+            if "socks" in detail:
+                reason = "network_socks"
+            elif response.status_code in (401, 403):
+                reason = "auth_rejected"
+            elif response.status_code == 429:
+                reason = "rate_limited"
+            elif response.status_code == 404:
+                reason = "model_not_found"
+            elif response.status_code >= 500:
+                reason = "upstream_error"
+            else:
+                reason = "http_error"
+            evidence["reason"] = reason
+        else:
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise ValueError("expected response object")
+            evidence.update(evaluate_search_probe(payload))
+            trusted = build_trusted_social_citations(payload)
+            normalized = normalize_social_search_response(query, payload, 3, model=model_id)
+            evidence["result_count"] = len(normalized["results"])
+            evidence["status_ids"] = len(trusted)
+            named_search_calls = any(
+                isinstance(item, dict) and "tool_call" in str(item.get("type", ""))
+                and str(item.get("name") or (item.get("function") or {}).get("name") or "")
+                in {"x_search", "x_keyword_search", "x_semantic_search", "x_thread_fetch"}
+                for item in payload.get("output", []) if isinstance(item, dict)
+            )
+            evidence["search_capable"] = bool(named_search_calls and trusted and normalized["results"])
+            if not evidence["search_capable"]:
+                evidence["reason"] = "search_evidence_missing"
+    except (asyncio.TimeoutError, httpx.TimeoutException):
+        evidence = {"reason": "timeout"}
+    except httpx.RequestError:
+        evidence = {"reason": "network_error"}
+    except (ValueError, TypeError, AttributeError):
+        evidence = {"reason": "invalid_response"}
+    evidence["latency_ms"] = round((time.monotonic() - started) * 1000)
+    return bool(evidence.get("search_capable", False)), evidence
 
 
 
 def _is_social_model_refresh_stale():
-    """距上次成功刷新是否已超过 TTL。从未刷新过视为 stale（首次启动即触发一次）。"""
+    """评测每6h一次，包括失败轮次；TTL=0同时关闭同步与评测。"""
     if SOCIAL_MODEL_REFRESH_TTL_SECONDS <= 0:
         return False
+    state = get_social_model_selection_state()
+    last_attempt = state.get("last_probe_attempt_at", state.get("last_probe_at"))
+    if last_attempt:
+        return time.time() - last_attempt >= MODEL_PROBE_INTERVAL_SECONDS
     synced_at = get_setting_text("social_model_refreshed_at", "")
     if not synced_at:
         return True
@@ -171,82 +210,183 @@ def _is_social_model_refresh_stale():
     return (datetime.now(timezone.utc) - parsed).total_seconds() >= SOCIAL_MODEL_REFRESH_TTL_SECONDS
 
 
-async def probe_and_refresh_social_models():
-    """探测上游可用模型并写回配置。
+def get_social_model_selection_state():
+    raw = get_setting_text("social_model_selection_state", "")
+    if not raw:
+        return {}
+    state = json.loads(raw)
+    if not isinstance(state, dict) or state.get("version") != 1:
+        raise ValueError("Invalid social model selection state; configuration preserved")
+    return state
 
-    候选取两个端点的并集——实测两边各有漏报与误报，取并集再由真实搜索探测裁定。
-    判定标准是"模型真的调用了 x_search 工具"，不是 HTTP 200（见 probe_social_model）。
-    """
-    if pick_primary_and_fallback is None:
-        return {"ok": False, "reason": "refresh module unavailable"}
 
-    config = get_runtime_social_config()
-    root_base = _root_of_upstream(config.get("upstream_base_url"))
-    api_key = str(config.get("upstream_api_key") or "").strip()
-    if not root_base or not api_key:
-        return {"ok": False, "reason": "social upstream not configured"}
+async def sync_social_upstream_models(config, access_token):
+    """与 grok2api 模型页同一 POST/SSE 合同；EOF、心跳、200 均不等于完成。"""
+    response = await asyncio.wait_for(http_client.post(
+        f"{config['admin_base_url']}{SOCIAL_GATEWAY_V3_ADMIN_PREFIX}/models/sync",
+        headers={"Authorization": f"Bearer {access_token}", "Accept": "text/event-stream"},
+        timeout=180,
+    ), timeout=180)
+    if response.status_code != 200 or "text/event-stream" not in response.headers.get("content-type", ""):
+        raise RuntimeError(f"model sync invalid response (HTTP {response.status_code})")
+    completed = None
+    for block in response.text.replace("\r\n", "\n").split("\n\n"):
+        event = ""
+        data = []
+        for line in block.splitlines():
+            if line.startswith("event:"):
+                event = line[6:].strip()
+            elif line.startswith("data:"):
+                data.append(line[5:].lstrip())
+        if event == "error":
+            raise RuntimeError("grok2api model sync failed")
+        if event == "complete":
+            value = json.loads("\n".join(data))
+            count = value.get("synced") if isinstance(value, dict) else None
+            if type(count) is not int or count < 0:
+                raise ValueError("model sync complete missing valid synced count")
+            completed = count
+    if completed is None:
+        raise RuntimeError("model sync stream ended without complete")
+    return {"ok": True, "synced": completed}
 
-    candidates: list[list[str]] = []
-    if collect_text_candidates is not None:
-        admin_token = ""
-        try:
-            admin_token = await get_social_admin_v3_access_token(config)
-        except Exception as exc:
-            logger.warning("social model refresh: admin login failed: %s", exc)
-        if admin_token:
-            try:
-                payload = await fetch_social_admin_v3_json(
-                    config, f"{SOCIAL_GATEWAY_V3_ADMIN_PREFIX}/models", admin_token
-                )
-            except Exception as exc:
-                logger.warning("social model refresh: models endpoint failed: %s", exc)
-                payload = None
-            if payload:
-                candidates.append(collect_text_candidates(payload.get("data") or payload))
-    list_payload = await fetch_social_upstream_json(root_base, "/v1/models", api_key)
-    if list_payload and collect_candidates_from_model_list is not None:
-        candidates.append(collect_candidates_from_model_list(list_payload))
 
-    ranked = merge_candidates(*candidates)
-    if not ranked:
-        return {"ok": False, "reason": "no candidates"}
-
-    capable: list[str] = []
-    probes: list[dict] = []
-    for model_id in ranked[:8]:
-        ok, evidence = await probe_social_model(root_base, api_key, model_id)
-        probes.append({"model": model_id, "search_capable": ok, **evidence})
-        if ok:
-            capable.append(model_id)
-            # 凑够主+备即可停：探测是真实推理（15-55s），不必探完全部候选。
-            if len(capable) >= 2:
+async def collect_social_model_candidates(config, root_base, api_key, access_token):
+    candidates = []
+    warnings = []
+    if access_token:
+        # 管理接口默认只有20条；必须分页，且不把静态 available 当搜索能力。
+        for page in range(1, 27):
+            payload = await fetch_social_admin_v3_json(
+                config, f"{SOCIAL_GATEWAY_V3_ADMIN_PREFIX}/models?page={page}&pageSize=100", access_token
+            )
+            if not isinstance(payload.get("items"), list) or type(payload.get("total")) is not int:
+                raise ValueError("invalid model catalog page")
+            candidates.extend(collect_text_candidates(payload))
+            size = payload.get("pageSize", 100)
+            if type(size) is not int or size < 1:
+                raise ValueError("invalid model catalog page size")
+            if page * size >= payload["total"]:
                 break
+        else:
+            raise ValueError("model catalog exceeds 26 page limit")
+    else:
+        warnings.append("admin_catalog_unavailable")
+    payload = await fetch_social_upstream_json(root_base, "/v1/models", api_key)
+    if payload:
+        candidates.extend(collect_candidates_from_model_list(payload))
+    else:
+        warnings.append("public_catalog_unavailable")
+    return merge_candidates(candidates), warnings
 
-    current_primary = get_setting_text("social_model", SOCIAL_GATEWAY_MODEL)
-    primary, fallback = pick_primary_and_fallback(capable, current_primary)
-    if not primary:
-        # 全部探测失败不应清空现有配置——保留现值比写入空值安全。
-        return {"ok": False, "reason": "no model passed search probing", "probes": probes}
 
-    current_fallback = get_setting_text("social_fallback_model", SOCIAL_GATEWAY_FALLBACK_MODEL)
-    changed = (primary != current_primary) or (fallback != current_fallback)
+async def probe_and_refresh_social_models(force_sync=False):
+    if select_measured_models is None:
+        return {"ok": False, "reason": "refresh module unavailable"}
+    # 原生文件锁覆盖同一数据卷的多个 worker；退出/取消/崩溃均释放，不持有 SQLite 写锁等网络。
+    with open(db.get_db_path() + ".model-refresh.lock", "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {"ok": False, "reason": "refresh_already_running"}
+        try:
+            return await asyncio.wait_for(_probe_and_refresh_social_models(force_sync), timeout=600)
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
-    db.set_setting("social_model", primary)
-    db.set_setting("social_fallback_model", fallback)
-    db.set_setting("social_model_refreshed_at", datetime.now(timezone.utc).isoformat())
+
+async def _probe_and_refresh_social_models(force_sync):
+    config = get_runtime_social_config()
+    if config.get("mode") != "upstream":
+        return {"ok": False, "reason": "model discovery requires upstream mode"}
+    root_base = _root_of_upstream(config.get("upstream_base_url"))
+    keys = _ordered_social_upstream_keys(parse_secret_values(config.get("upstream_api_key")))
+    if not root_base or not keys:
+        return {"ok": False, "reason": "social upstream not configured or keys unavailable"}
+    if config.get("upstream_responses_path") != "/responses":
+        return {"ok": False, "reason": "model probing requires /v1/responses"}
+    expected = {key: db.get_setting(key) for key in (
+        "social_mode", "social_upstream_base_url", "social_upstream_responses_path",
+        "social_upstream_api_key", "social_admin_base_url", "social_admin_username",
+        "social_admin_password", "social_model", "social_fallback_model",
+    )}
+    api_key = keys[0]
+    now = time.time()
+    scope = hashlib.sha256(json.dumps({key: config.get(key) for key in (
+        "mode", "upstream_base_url", "upstream_responses_path", "upstream_api_key", "admin_base_url",
+    )}, sort_keys=True).encode()).hexdigest()
+    state = get_social_model_selection_state()
+    if state.get("scope") != scope:
+        state = {"version": 1, "scope": scope, "history": {}}
+    # 开始即记录尝试时间；中断或总预算超时也不会每30分钟重打一轮。
+    state["last_probe_attempt_at"] = now
+    state["reason"] = "probe_in_progress_or_interrupted"
+    if not db.set_settings({"social_model_selection_state": json.dumps(state)}, expected=expected):
+        return {"ok": False, "reason": "configuration_changed_during_probe"}
+    sync_due = force_sync or now - state.get("last_sync_attempt_at", 0) >= SOCIAL_MODEL_REFRESH_TTL_SECONDS
+    warnings = []
+    access_token = ""
+    if config.get("admin_username") and config.get("admin_password"):
+        try:
+            access_token = await get_social_admin_v3_access_token(config)
+        except (RuntimeError, httpx.HTTPError):
+            warnings.append("admin_login_failed")
+    if sync_due:
+        state["last_sync_attempt_at"] = now
+        state["sync"] = {"ok": False, "reason": "admin_not_configured"}
+        if access_token:
+            try:
+                state["sync"] = await sync_social_upstream_models(config, access_token)
+                state["last_sync_at"] = time.time()
+            except (RuntimeError, ValueError, httpx.HTTPError, asyncio.TimeoutError) as exc:
+                state["sync"] = {"ok": False, "reason": f"sync_failed:{type(exc).__name__}"}
+    if not state.get("sync", {}).get("ok"):
+        warnings.append("upstream_sync_not_successful")
+
+    try:
+        candidates, catalog_warnings = await collect_social_model_candidates(config, root_base, api_key, access_token)
+        warnings.extend(catalog_warnings)
+    except (RuntimeError, ValueError, httpx.HTTPError) as exc:
+        candidates = []
+        warnings.append(f"catalog_failed:{type(exc).__name__}")
+    current, fallback = config["model"], config["fallback_model"]
+    history = update_probe_history(state.get("history", {}), [], now)
+    probes = []
+    # 同轮全部候选用同一题目，轮次之间轮换，避免靠单一热门查询选模型。
+    query_index = int(state.get("round", 0)) % len(PROBE_QUERIES)
+    for model_id in choose_probe_candidates(candidates, history, current, fallback):
+        ok, evidence = await probe_social_model(root_base, api_key, model_id, query=PROBE_QUERIES[query_index])
+        probes.append({"model": model_id, **evidence, "search_capable": ok, "query_index": query_index})
+        if evidence.get("reason") in {"rate_limited", "auth_rejected"}:
+            break
+    finished = time.time()
+    history = update_probe_history(history, probes, finished)
+    ranking = summarize_model_probes(history, candidates, finished)
+    primary, backup, reason = select_measured_models(ranking, current, fallback)
+    if not any(probe["search_capable"] for probe in probes):
+        primary, backup, reason = current, fallback, "insufficient_search_evidence"
+    changed = (primary, backup) != (current, fallback)
+    state.update({
+        "history": history, "ranking": ranking, "probes": probes, "warnings": warnings,
+        "last_probe_at": finished, "round": state.get("round", 0) + 1,
+        "primary": primary, "fallback": backup, "reason": reason,
+    })
+    # 管理员若在长探测期间改过接线或手动模型，本轮绝不覆盖；下轮按新配置重新采样。
+    if get_runtime_social_config() != config:
+        return {"ok": False, "reason": "configuration_changed_during_probe", "probes": probes}
+    values = {"social_model_selection_state": json.dumps(state)}
+    if reason != "insufficient_search_evidence":
+        values.update({
+            "social_model": primary, "social_fallback_model": backup,
+            "social_model_refreshed_at": datetime.now(timezone.utc).isoformat(),
+        })
+    if not db.set_settings(values, expected=expected):
+        return {"ok": False, "reason": "configuration_changed_during_probe", "probes": probes}
     if changed:
-        logger.warning(
-            "social model refreshed: primary %s -> %s (fallback %s -> %s)",
-            current_primary, primary, current_fallback, fallback,
-        )
-    return {
-        "ok": True,
-        "primary": primary,
-        "fallback": fallback,
-        "changed": changed,
-        "search_capable": capable,
-        "probes": probes,
-    }
+        reset_social_gateway_cache()
+        reset_stats_cache()
+        logger.warning("social measured models: %s -> %s (fallback %s -> %s)", current, primary, fallback, backup)
+    return {"ok": bool(probes), "changed": changed, **{key: value for key, value in state.items() if key not in {"history", "scope"}}}
 
 
 def _default_social_model() -> str:
@@ -762,7 +902,7 @@ async def lifespan(_: FastAPI):
 async def _social_model_refresh_loop():
     """周期性探测上游可用模型并写回配置。
 
-    首次启动即触发一次（从未刷新过视为 stale），之后每 TTL 检查一次。
+    从未刷新过则首次启动触发；每30分钟检查6h评测周期与目录同步TTL。
     任何失败都不应影响主服务，因此整轮包在 try/except 里。
     """
     # 让服务先完成启动；探测是慢操作，不该拖慢 readiness。
@@ -1039,7 +1179,6 @@ def get_runtime_social_config():
         "model": get_setting_text("social_model", SOCIAL_GATEWAY_MODEL) or SOCIAL_GATEWAY_MODEL,
         "fallback_model": (
             get_setting_text("social_fallback_model", SOCIAL_GATEWAY_FALLBACK_MODEL)
-            or SOCIAL_GATEWAY_FALLBACK_MODEL
         ),
         "fallback_min_results": fallback_min_results,
         "gateway_token": get_setting_text("social_gateway_token", SOCIAL_GATEWAY_TOKEN),
@@ -4243,6 +4382,29 @@ async def update_tavily_settings(request: Request, _=Depends(verify_admin)):
         "ok": True,
         **(await build_settings_payload()),
     }
+
+
+@app.get("/api/settings/social/models")
+async def social_model_selection_status(_=Depends(verify_admin)):
+    state = get_social_model_selection_state()
+    return {
+        "enabled": SOCIAL_MODEL_REFRESH_TTL_SECONDS > 0,
+        "probe_interval_seconds": MODEL_PROBE_INTERVAL_SECONDS,
+        "sync_interval_seconds": SOCIAL_MODEL_REFRESH_TTL_SECONDS,
+        **{key: value for key, value in state.items() if key not in {"history", "scope"}},
+    }
+
+
+@app.post("/api/settings/social/models/refresh")
+async def refresh_social_model_selection(_=Depends(verify_admin)):
+    try:
+        result = await probe_and_refresh_social_models(force_sync=True)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Model sync/probe deadline exceeded; models preserved")
+    if not result["ok"]:
+        status = 409 if result["reason"] in {"refresh_already_running", "configuration_changed_during_probe"} else 503
+        return JSONResponse(status_code=status, content=result)
+    return result
 
 
 @app.put("/api/settings/social")
