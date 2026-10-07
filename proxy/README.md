@@ -127,15 +127,19 @@ Social/X 模式保存在 Proxy 的 `settings` 表中。旧配置没有 `social_m
 
 上游模式复用已有后台任务：每 6 小时一轮真实搜索评测，默认每 24 小时先调用 grok2api 的 `POST /api/admin/v1/models/sync`，必须收到 SSE `complete` 才记同步成功，然后分页读取模型目录。单轮最多 8 个候选、每次 40 秒、整轮 600 秒；主备优先，其余按最久未测试顺序轮换。三个固定搜索题目按轮次轮换，同轮所有模型用同题。同步会调用 grok2api 的全账号模型发现功能，账号很多时可能触及 180 秒同步预算；超时会明确记账，不冒充同步完成。
 
-筛选保留 Grok 文本模型及 `Console/`、`Build/`、`Web/` 路由 ID，排除图像、视频、语音、嵌入等模型。HTTP 200 不代表搜索通过：必须有命名的 X 搜索工具调用、上游结构化 citation 和可返回的 X 帖子结果。使用与 `/social/search` 相同的提示词和结果归一化；不改用户显式指定的请求模型，不把 Tavily 降级计为 Grok 成功。只凭这些自动证据不能证明内容事实准确或完整相关。
+筛选保留 Grok 文本模型及 `Console/`、`Build/`、`Web/` 路由 ID，排除图像、视频、语音、嵌入等模型。HTTP 200 不代表搜索通过：必须有命名的 X 搜索工具调用、上游结构化 citation，且至少一条与引用匹配的帖子具有非空正文，只有引用的空壳结果不合格。使用与 `/social/search` 相同的提示词和结果归一化；不改用户显式指定的请求模型，不把 Tavily 降级计为 Grok 成功。只凭这些自动证据不能证明内容事实准确或完整相关。
 
-选模窗口为最近 14 天、每模型最多 20 次：至少 3 次成功且成功样本跨 12 小时，成功率 ≥80%，最近一次成功且不超过 12 小时，成功响应 p90 ≤40 秒。合格者先比成功率，再比 p90；替换仍合格的主模型需成功率至少提高 10 个百分点，或成功率不降且 p90 至少降低 20%。无合格候选、整轮全失败或评测期间配置变化时保留现有主备。只有一个合格者时备用留空，不悄悄恢复内置备用。
+管理目录失败时记录 `admin_catalog_failed` 并继续读取公共目录；目录漏报不能证明配置主备已下线，主备仍参加真实探测。目录降级有明确 warning，不等于同步成功。
+
+选模窗口为最近 14 天、每模型最多 20 次：至少 3 次成功且成功样本跨 12 小时，成功率 ≥80%，最近一次成功且不超过 12 小时，成功响应 p90 ≤40 秒。合格者先比成功率，再比 p90；替换仍合格的主模型需成功率至少提高 10 个百分点，或成功率不降且 p90 至少降低 20%。无合格候选、整轮全失败或评测期间配置变化时保留现有主备。只有一个合格者时备用留空，不悄悄恢复内置备用。当前 `probe_version=2`；旧规则样本保留为 `unscored_samples`，不能用于新规则晋级，需重新积累观察窗口。
 
 `timeout`、`network_socks`、`network_error`、鉴权/限流、上游错误和 `search_evidence_missing` 分开记录；网络失败降低该链路实用成功率，但不宣称模型本身无搜索能力，也不修改 OpenClash 或账号状态。统计存于现有 SQLite `settings.social_model_selection_state`，容器重启后保留；不保存响应正文或凭证。Linux/macOS 数据卷文件锁防止重复评测，主备与证据用单事务发布，配置变更做并发校验。
 
 管理员可用 `GET /api/settings/social/models` 查看同步结果、逐轮探测与排名，`POST /api/settings/social/models/refresh` 立即触发一轮“同步→评测→选择”（需要为请求留出 600 秒；不会绕过跨时间样本门槛）。`SOCIAL_MODEL_REFRESH_TTL_SECONDS=0` 关闭自动同步与自动评测；手动触发仍可用。观察结果应至少覆盖几天，12 小时只是上线门槛，不是长期统计结论。旧的 `scripts/refresh_grok_models.py --apply` 是单次应急工具，不使用跨轮门槛，不应与自动评测同时运行。
 
 同步协议依据：[grok2api 模型页调用](https://github.com/chenyme/grok2api/blob/7c889a960e2638341b4dae9a5c81af0e0f38c87f/frontend/src/entities/model/model-api.ts)、[同步接口](https://github.com/chenyme/grok2api/blob/7c889a960e2638341b4dae9a5c81af0e0f38c87f/backend/internal/transport/http/model/handler.go)。本功能不主动修改上游模型的启用状态或路由绑定。
+
+独立质量实验可使用 `scripts/benchmark_grok_search.py`：在已配置 Proxy 环境中传 `--cases-json` 和 `--models` 捕获真实响应，或本地传 `--replay capture.jsonl` 离线重放。每轮最多 6 个题目/模型组合，单次 40 秒，401/403/429 立即中止该轮；输出公开题目的原始成功响应，勿用私人查询。不会写选模历史或主备配置。每轮应冻结新的题集，再看响应；旧题用于回归，不作为新题。`probe_ok` 只表示基本搜索交付，过滤检查另看 `constraint_violations` 和 `constraint_unknown`：匿名引用作者及模型自报日期不是独立验证证据，畸形响应按失败记录，不中断后续回放。
 
 ## 当前推荐用法
 

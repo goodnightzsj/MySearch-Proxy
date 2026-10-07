@@ -303,6 +303,7 @@ MODEL_HISTORY_SECONDS = 14 * 86400
 MODEL_HISTORY_LIMIT = 20
 MODEL_MIN_SAMPLES = 3
 MODEL_MIN_SPAN_SECONDS = 12 * 3600
+MODEL_PROBE_VERSION = 2  # v2 additionally requires citation-matched post content.
 PROBE_QUERIES = (
     "OpenAI latest announcement",
     "Anthropic Claude latest announcement",
@@ -321,7 +322,7 @@ def update_probe_history(history: dict, probes: list[dict], now: float) -> dict:
         model = probe["model"]
         row = {key: probe[key] for key in (
             "search_capable", "latency_ms", "reason", "http_status", "tool_calls",
-            "status_ids", "result_count", "query_index",
+            "status_ids", "result_count", "query_index", "content_result_count", "probe_version",
         ) if key in probe}
         row["at"] = now
         updated[model] = (updated.get(model, []) + [row])[-MODEL_HISTORY_LIMIT:]
@@ -335,7 +336,9 @@ def update_probe_history(history: dict, probes: list[dict], now: float) -> dict:
 def summarize_model_probes(history: dict, candidates: list[str], now: float) -> list[dict]:
     summaries = []
     for model in candidates:
-        rows = [row for row in history.get(model, []) if now - MODEL_HISTORY_SECONDS <= row["at"] <= now]
+        window = [row for row in history.get(model, []) if now - MODEL_HISTORY_SECONDS <= row["at"] <= now]
+        # Preserve old measurements for diagnosis, but never promote using weaker probe criteria.
+        rows = [row for row in window if row.get("probe_version") == MODEL_PROBE_VERSION]
         good = [row for row in rows if row.get("search_capable")]
         latency = sorted(row["latency_ms"] for row in good)
         success_rate = len(good) / len(rows) if rows else 0
@@ -351,6 +354,7 @@ def summarize_model_probes(history: dict, candidates: list[str], now: float) -> 
         )
         summaries.append({
             "model": model, "samples": len(rows), "successes": len(good),
+            "unscored_samples": len(window) - len(rows),
             "success_rate": success_rate, "p50_ms": median(latency) if latency else None,
             "p90_ms": p90, "span_seconds": span, "qualified": qualified,
             "last_at": rows[-1]["at"] if rows else None,

@@ -78,6 +78,7 @@ try:
         update_probe_history,
         MODEL_PROBE_INTERVAL_SECONDS,
         MODEL_PROBE_TIMEOUT_SECONDS,
+        MODEL_PROBE_VERSION,
         PROBE_QUERIES,
     )
 except ImportError:  # pragma: no cover - 极端隔离部署兜底
@@ -169,6 +170,7 @@ async def probe_social_model(root_base, api_key, model_id, timeout=None, query=N
             trusted = build_trusted_social_citations(payload)
             normalized = normalize_social_search_response(query, payload, 3, model=model_id)
             evidence["result_count"] = len(normalized["results"])
+            evidence["content_result_count"] = sum(bool(row["text"].strip()) for row in normalized["results"])
             evidence["status_ids"] = len(trusted)
             named_search_calls = any(
                 isinstance(item, dict) and "tool_call" in str(item.get("type", ""))
@@ -179,6 +181,9 @@ async def probe_social_model(root_base, api_key, model_id, timeout=None, query=N
             evidence["search_capable"] = bool(named_search_calls and trusted and normalized["results"])
             if not evidence["search_capable"]:
                 evidence["reason"] = "search_evidence_missing"
+            elif not evidence["content_result_count"]:
+                evidence["search_capable"] = False
+                evidence["reason"] = "search_content_missing"
     except (asyncio.TimeoutError, httpx.TimeoutException):
         evidence = {"reason": "timeout"}
     except httpx.RequestError:
@@ -256,24 +261,27 @@ async def collect_social_model_candidates(config, root_base, api_key, access_tok
     warnings = []
     if access_token:
         # 管理接口默认只有20条；必须分页，且不把静态 available 当搜索能力。
-        for page in range(1, 27):
-            payload = await fetch_social_admin_v3_json(
-                config, f"{SOCIAL_GATEWAY_V3_ADMIN_PREFIX}/models?page={page}&pageSize=100", access_token
-            )
-            if not isinstance(payload.get("items"), list) or type(payload.get("total")) is not int:
-                raise ValueError("invalid model catalog page")
-            candidates.extend(collect_text_candidates(payload))
-            size = payload.get("pageSize", 100)
-            if type(size) is not int or size < 1:
-                raise ValueError("invalid model catalog page size")
-            if page * size >= payload["total"]:
-                break
-        else:
-            raise ValueError("model catalog exceeds 26 page limit")
+        try:
+            for page in range(1, 27):
+                payload = await fetch_social_admin_v3_json(
+                    config, f"{SOCIAL_GATEWAY_V3_ADMIN_PREFIX}/models?page={page}&pageSize=100", access_token
+                )
+                if not isinstance(payload.get("items"), list) or type(payload.get("total")) is not int:
+                    raise ValueError("invalid model catalog page")
+                candidates.extend(collect_text_candidates(payload))
+                size = payload.get("pageSize", 100)
+                if type(size) is not int or size < 1:
+                    raise ValueError("invalid model catalog page size")
+                if page * size >= payload["total"]:
+                    break
+            else:
+                raise ValueError("model catalog exceeds 26 page limit")
+        except (RuntimeError, ValueError, httpx.HTTPError) as exc:
+            warnings.append(f"admin_catalog_failed:{type(exc).__name__}")
     else:
         warnings.append("admin_catalog_unavailable")
     payload = await fetch_social_upstream_json(root_base, "/v1/models", api_key)
-    if payload:
+    if isinstance(payload, dict) and any(isinstance(payload.get(key), list) for key in ("data", "models")):
         candidates.extend(collect_candidates_from_model_list(payload))
     else:
         warnings.append("public_catalog_unavailable")
@@ -350,13 +358,16 @@ async def _probe_and_refresh_social_models(force_sync):
         candidates = []
         warnings.append(f"catalog_failed:{type(exc).__name__}")
     current, fallback = config["model"], config["fallback_model"]
+    # Catalog omissions cannot prove a configured model is gone; verify it by searching.
+    candidates = merge_candidates(candidates, [current, fallback])
     history = update_probe_history(state.get("history", {}), [], now)
     probes = []
     # 同轮全部候选用同一题目，轮次之间轮换，避免靠单一热门查询选模型。
     query_index = int(state.get("round", 0)) % len(PROBE_QUERIES)
     for model_id in choose_probe_candidates(candidates, history, current, fallback):
         ok, evidence = await probe_social_model(root_base, api_key, model_id, query=PROBE_QUERIES[query_index])
-        probes.append({"model": model_id, **evidence, "search_capable": ok, "query_index": query_index})
+        probes.append({"model": model_id, **evidence, "search_capable": ok,
+                       "query_index": query_index, "probe_version": MODEL_PROBE_VERSION})
         if evidence.get("reason") in {"rate_limited", "auth_rejected"}:
             break
     finished = time.time()
@@ -367,6 +378,7 @@ async def _probe_and_refresh_social_models(force_sync):
         primary, backup, reason = current, fallback, "insufficient_search_evidence"
     changed = (primary, backup) != (current, fallback)
     state.update({
+        "probe_version": MODEL_PROBE_VERSION,
         "history": history, "ranking": ranking, "probes": probes, "warnings": warnings,
         "last_probe_at": finished, "round": state.get("round", 0) + 1,
         "primary": primary, "fallback": backup, "reason": reason,

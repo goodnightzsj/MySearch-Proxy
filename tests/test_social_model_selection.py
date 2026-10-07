@@ -13,6 +13,7 @@ import httpx
 from mysearch.grok_model_refresh import (
     choose_probe_candidates, collect_text_candidates, is_eligible_model,
     select_measured_models, summarize_model_probes, update_probe_history,
+    MODEL_PROBE_VERSION,
 )
 from test_social_model_refresh import _load_server_module, PROXY_ROOT
 
@@ -22,6 +23,7 @@ class SelectionTests(unittest.TestCase):
 
     def history(self, model="Console/grok-4.5", latency=10000, successes=(True, True, True)):
         return {model: [{"at": self.now - (len(successes) - i - 1) * 21601,
+                         "probe_version": MODEL_PROBE_VERSION,
                          "search_capable": ok, "latency_ms": latency,
                          "reason": "timeout" if not ok else ""}
                         for i, ok in enumerate(successes)]}
@@ -75,6 +77,16 @@ class SelectionTests(unittest.TestCase):
         for offset in (-15 * 86400, 100000):
             shifted = {model: [{**row, "at": row["at"] + offset} for row in rows] for model, rows in history.items()}
             self.assertFalse(summarize_model_probes(shifted, list(shifted), self.now)[0]["qualified"])
+
+    def test_previous_probe_rules_cannot_promote_a_model(self):
+        history = self.history()
+        for row in history["Console/grok-4.5"]:
+            row.pop("probe_version")
+        summary = summarize_model_probes(history, list(history), self.now)[0]
+        self.assertFalse(summary["qualified"])
+        self.assertEqual(summary["samples"], 0)
+        self.assertEqual(summary["unscored_samples"], 3)
+        self.assertEqual(len(update_probe_history(history, [], self.now)["Console/grok-4.5"]), 3)
 
     def test_history_is_bounded_and_does_not_persist_response_or_key(self):
         history = {}
@@ -134,7 +146,8 @@ class RefreshIntegrationTests(unittest.IsolatedAsyncioTestCase):
         server = self.server
         url = "https://x.com/AnthropicAI/status/1970558198109126942"
         payload = {"output": [{"type": "custom_tool_call", "name": "x_keyword_search"},
-                              {"type": "message", "content": [{"type": "output_text", "text": url,
+                              {"type": "message", "content": [{"type": "output_text", "text": json.dumps({
+                                  "results": [{"url": url, "text": "Claude Code release details from the post."}]}),
                                 "annotations": [{"type": "url_citation", "url": url}]}]}]}
         for kind, name, citations, expected in (("custom_tool_call", "x_keyword_search", True, True),
                                                ("custom_tool_call", "shell", True, False),
@@ -152,6 +165,18 @@ class RefreshIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 ok, result = await self.server.probe_social_model("http://upstream", "test", "grok-4.5")
             self.assertFalse(ok)
             self.assertEqual(result["reason"], reason)
+
+    async def test_probe_rejects_citation_only_result_shells(self):
+        url = "https://x.com/AnthropicAI/status/1970558198109126942"
+        payload = {"output": [
+            {"type": "custom_tool_call", "name": "x_keyword_search"},
+            {"type": "message", "content": [{"type": "output_text", "text": url,
+                "annotations": [{"type": "url_citation", "url": url}]}]},
+        ]}
+        with patch.object(self.server.http_client, "post", AsyncMock(return_value=httpx.Response(200, json=payload))):
+            ok, evidence = await self.server.probe_social_model("http://upstream", "test", "grok-4.5")
+        self.assertFalse(ok)
+        self.assertEqual(evidence["reason"], "search_content_missing")
 
     async def test_lock_prevents_overlapping_refresh(self):
         with open(self.server.db.get_db_path() + ".model-refresh.lock", "a") as lock:
@@ -192,6 +217,8 @@ class RefreshIntegrationTests(unittest.IsolatedAsyncioTestCase):
             return {"ok": True, "synced": 1}
         async def probe(*args, **kwargs):
             events.append("probe")
+            if args[2] != "grok-new":
+                return False, {"reason": "model_not_found", "latency_ms": 10}
             return True, {"latency_ms": 12000, "status_ids": 3, "tool_calls": 1}
         with patch.object(server, "get_social_admin_v3_access_token", AsyncMock(return_value="test")), \
              patch.object(server, "sync_social_upstream_models", side_effect=sync), \
@@ -201,7 +228,7 @@ class RefreshIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 with patch.object(server.time, "time", return_value=2_000_000_000 + index * 21601):
                     result = await server.probe_and_refresh_social_models()
                 self.assertEqual(result["primary"], "grok-new" if index == 2 else "grok-old")
-        self.assertEqual(events, ["sync", "probe", "probe", "probe"])
+        self.assertEqual(events, ["sync"] + ["probe"] * 9)
         server.db.close_conn()
         state = server.get_social_model_selection_state()
         self.assertEqual(len(state["history"]["grok-new"]), 3)
@@ -241,6 +268,26 @@ class RefreshIntegrationTests(unittest.IsolatedAsyncioTestCase):
             candidates, _ = await self.server.collect_social_model_candidates({}, "http://upstream", "test", "admin-test")
         self.assertEqual(set(candidates), {"grok-a", "Console/grok-b"})
         self.assertEqual(fetch.await_count, 2)
+
+    async def test_admin_catalog_failure_still_observes_public_candidates(self):
+        with patch.object(self.server, "fetch_social_admin_v3_json", AsyncMock(side_effect=RuntimeError("admin unavailable"))), \
+             patch.object(self.server, "fetch_social_upstream_json", AsyncMock(return_value={"data": [{"id": "grok-live"}]})):
+            candidates, warnings = await self.server.collect_social_model_candidates({}, "http://upstream", "test", "admin-test")
+        self.assertEqual(candidates, ["grok-live"])
+        self.assertIn("admin_catalog_failed:RuntimeError", warnings)
+
+    async def test_catalog_omission_does_not_skip_current_model_probe(self):
+        self.configure()
+        server = self.server
+        probe = AsyncMock(return_value=(False, {"reason": "timeout", "latency_ms": 40000}))
+        with patch.object(server, "get_social_admin_v3_access_token", AsyncMock(return_value="test")), \
+             patch.object(server, "sync_social_upstream_models", AsyncMock(return_value={"ok": True})), \
+             patch.object(server, "collect_social_model_candidates", AsyncMock(return_value=(["grok-new"], []))), \
+             patch.object(server, "probe_social_model", probe):
+            result = await server.probe_and_refresh_social_models()
+        self.assertEqual([call.args[2] for call in probe.await_args_list], ["grok-old", "grok-backup", "grok-new"])
+        self.assertEqual(result["primary"], "grok-old")
+        self.assertEqual(result["fallback"], "grok-backup")
 
 
 if __name__ == "__main__":
