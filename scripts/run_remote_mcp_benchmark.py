@@ -29,6 +29,8 @@ DEFAULT_CODEX_CONFIG = str((Path(os.getenv("CODEX_HOME", "~/.codex")).expanduser
 DEFAULT_TAVILY_MCP_SERVER = "tavily-hikari"
 FIRECRAWL_CRAWL_MAP_TOOLS = {"map_site", "crawl_site"}
 FIRECRAWL_CRAWL_MAP_COOLDOWN_SECONDS = 65
+DEFAULT_MATRIX = Path(__file__).resolve().parents[1] / "benchmarks" / "search-matrix.csv"
+SCORING_VERSION = "2026-10-09-evidence-v3"
 
 #: 仅作**兜底**：CSV 的 `include_domains` 列优先（见 build_case）。
 #: 这 9 条当前与 CSV 完全重复，所以实际增量为 0。保留是为了 CSV 列被清空时
@@ -58,6 +60,7 @@ BENCHMARK_DIMENSIONS = (
     "efficiency",
     "claim_groundedness",
     "assertion_pass_rate",
+    "ranking_quality",
 )
 
 #: `claim_groundedness` 提取专名时排除的词。取的是**句首高频词**：
@@ -77,10 +80,12 @@ FIELDNAMES = [
     "query",
     "prompt_variant",
     "run_date",
+    "scoring_version",
     "active_dimensions",
     "run_status",
     "latency_budget_ms",
     "expected_answer_patterns",
+    "expected_content_patterns",
     "mysearch_tool",
     "mysearch_mode",
     "mysearch_provider_trace",
@@ -153,7 +158,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run dual MCP benchmark against remote mysearch and tavily-hikari via SSH.")
     parser.add_argument(
         "--input-csv",
-        default=".codex-tasks/20260323-mysearch-vs-tavily-epic/tasks/20260323-baseline-benchmark/batch/workers-input.csv",
+        default=str(DEFAULT_MATRIX),
     )
     parser.add_argument(
         "--output-csv",
@@ -1274,7 +1279,6 @@ def timed_tool_runs(client, tool_name, arguments, repeat_runs, latency_budget_ms
     timeout_flag = False
     first_success = None
     success_samples: list[dict[str, object]] = []
-    raw_text = ""
     observations = []
     fallback_reasons = []
     used_orchestration = False
@@ -1307,6 +1311,7 @@ def timed_tool_runs(client, tool_name, arguments, repeat_runs, latency_budget_ms
                     timeout_flag = True
                 continue
             summarized = summarize(blob)
+            summarized["raw_text"] = text
             latencies.append(elapsed_ms)
             observations.append(
                 {
@@ -1331,7 +1336,6 @@ def timed_tool_runs(client, tool_name, arguments, repeat_runs, latency_budget_ms
                 fallback_reasons.append(summarized["fallback_reason"])
             if first_success is None:
                 first_success = summarized
-                raw_text = text
             success_samples.append(summarized)
         except Exception as exc:
             elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
@@ -1390,7 +1394,7 @@ def timed_tool_runs(client, tool_name, arguments, repeat_runs, latency_budget_ms
         "timeout": timeout_flag,
         "partial_error": bool(errors),
         "error": " ; ".join(errors[:3]),
-        "raw_text": raw_text,
+        "raw_text": scored["raw_text"],
     }
 
 
@@ -1981,19 +1985,25 @@ def _grounding_tokens(answer: str) -> list[str]:
 
 
 def _grounding_haystack(row: dict[str, object], prefix: str) -> str:
-    """该 provider **自己**返回的正文，作为回查依据。
-
-    用 `raw_text` 而不是 `summary`：summary 就是被检的 `answer` 本身，
-    拿它做依据会变成恒真判定。两侧各查各的，所以对 Tavily 同样成立。
-    """
-    raw = str(row.get(f"{prefix}_raw", "") or "")
-    if not raw:
-        return ""
-    parts = [raw]
-    parsed = _json_value(raw, None)
-    if isinstance(parsed, dict):
-        # 正文既可能在顶层，也可能在 results[].content/snippet 里。
-        parts.append(json.dumps(parsed, ensure_ascii=False))
+    """只读真实来源文本，不能让答案、报告或metadata回声给自身作证。"""
+    parsed = _json_value(row.get(f"{prefix}_raw"), {})
+    pending = [parsed] if isinstance(parsed, dict) else []
+    parts: list[str] = []
+    while pending:
+        payload = pending.pop()
+        items = [payload] if payload.get("url") else []
+        for collection in ("results", "pages"):
+            values = payload.get(collection)
+            if isinstance(values, list):
+                items.extend(item for item in values if isinstance(item, dict))
+        for item in items:
+            parts.extend(
+                value for key in ("content", "raw_content", "markdown", "text", "snippet")
+                if isinstance(value := item.get(key), str)
+            )
+        for branch in ("web_search", "social_search", "web", "social", "primary_search", "secondary_search"):
+            if isinstance(value := payload.get(branch), dict):
+                pending.append(value)
     return " ".join(parts).lower()
 
 
@@ -2017,7 +2027,7 @@ def _claim_groundedness(row: dict[str, object], prefix: str) -> tuple[float, int
         return 1.0, 0
     haystack = _grounding_haystack(row, prefix)
     if not haystack:
-        return 1.0, len(tokens)
+        return 0.0, len(tokens)
     grounded = sum(1 for token in tokens if token.lower() in haystack)
     return grounded / len(tokens), len(tokens)
 
@@ -2078,8 +2088,47 @@ def _header_grounding_ratio(row: dict[str, object], prefix: str) -> float:
     return sum(ratios) / len(ratios)
 
 
+def _raw_collection_urls(row: dict[str, object], prefix: str, collection: str) -> list[str]:
+    parsed = _json_value(row.get(f"{prefix}_raw"), {})
+    items = parsed.get(collection, []) if isinstance(parsed, dict) else []
+    if not isinstance(items, list):
+        return []
+    urls = []
+    for item in items:
+        url = item.get("url") if isinstance(item, dict) else item
+        if isinstance(url, str) and url.strip():
+            urls.append(url.strip())
+    return urls
+
+
+def _body_assertion_rate(row: dict[str, object], prefix: str, patterns: list[str]) -> float:
+    parsed = _json_value(row.get(f"{prefix}_raw"), {})
+    if not isinstance(parsed, dict):
+        return 0.0
+    items = [parsed]
+    for collection in ("results", "pages"):
+        value = parsed.get(collection)
+        if isinstance(value, list):
+            items.extend(item for item in value if isinstance(item, dict))
+    # Only extracted source text: generated answers, titles and URL echoes are not evidence.
+    body = " ".join(
+        value for item in items for key in ("content", "raw_content", "markdown", "text")
+        if isinstance(value := item.get(key), str)
+    )
+    normalized = " ".join(body.casefold().split())
+    return sum(" ".join(pattern.casefold().split()) in normalized for pattern in patterns) / len(patterns)
+
+
+def _ranking_mrr_at_3(row: dict[str, object], prefix: str, patterns: list[str]) -> float:
+    # Rank only returned results, never input URLs or a separately ordered citation list.
+    for rank, url in enumerate(_raw_collection_urls(row, prefix, "results")[:3], start=1):
+        if any(pattern in url.lower() for pattern in patterns):
+            return 1.0 / rank
+    return 0.0
+
+
 def _assertion_pass_rate(row: dict[str, object], prefix: str, input_row: dict[str, str]) -> float:
-    """该行**断言**的通过比例。目前是三组可证伪判据的等权平均。
+    """该行声明的 URL、答案、正文和 social 字段断言组的等权平均。
 
     这是"只测有没有东西、不测东西对不对"这个盲区的修法：断言不通过就掉分，
     而断言必须能在**旧代码上失败、新代码上通过**才允许进矩阵。
@@ -2087,6 +2136,9 @@ def _assertion_pass_rate(row: dict[str, object], prefix: str, input_row: dict[st
     checks: list[float] = []
 
     urls = _row_urls(row, prefix)
+    if input_row.get("preferred_tool") == "map_site":
+        root = input_row.get("query", "").rstrip("/")
+        urls = [url for url in _raw_collection_urls(row, prefix, "links") if url.rstrip("/") != root]
     expected_url_patterns = [
         value.lower() for value in parse_pipe_list(input_row.get("expected_url_patterns", ""))
     ]
@@ -2102,6 +2154,10 @@ def _assertion_pass_rate(row: dict[str, object], prefix: str, input_row: dict[st
     if expected_answer_patterns:
         summary = str(row.get(f"{prefix}_summary", "") or "")
         checks.append(1.0 if _summary_matches_expected_answer(summary, expected_answer_patterns) else 0.0)
+
+    content_patterns = parse_pipe_list(input_row.get("expected_content_patterns", ""))
+    if content_patterns:
+        checks.append(_body_assertion_rate(row, prefix, content_patterns))
 
     if str(input_row.get("domain", "")).strip().lower() == "纯 social / x":
         checks.append(_header_grounding_ratio(row, prefix))
@@ -2284,6 +2340,7 @@ def _score_provider(
         "efficiency": efficiency,
         "claim_groundedness": claim_groundedness_score,
         "assertion_pass_rate": assertion_pass_rate_score,
+        "ranking_quality": 5.0 * _ranking_mrr_at_3(row, prefix, expected_url_patterns),
     }
     return {dimension: _clamp_score(scores[dimension]) for dimension in BENCHMARK_DIMENSIONS}
 
@@ -2296,10 +2353,13 @@ def _dimension_weights(input_row: dict[str, str]) -> dict[str, float]:
     for dimension in parse_pipe_list(input_row.get("secondary_dimensions", "")):
         if dimension in BENCHMARK_DIMENSIONS:
             weights.setdefault(dimension, 1.0)
-    return weights or {dimension: 1.0 for dimension in BENCHMARK_DIMENSIONS}
+    if "ranking_quality" in weights and not parse_pipe_list(input_row.get("expected_url_patterns", "")):
+        raise ValueError("ranking_quality requires expected_url_patterns")
+    return weights or {dimension: 1.0 for dimension in BENCHMARK_DIMENSIONS if dimension != "ranking_quality"}
 
 
 def score_output_row(input_row: dict[str, str], row: dict[str, object]) -> dict[str, object]:
+    row["scoring_version"] = SCORING_VERSION
     weights = _dimension_weights(input_row)
     totals: dict[str, float] = {}
     for prefix in ("mysearch", "tavily"):
@@ -2347,7 +2407,12 @@ def load_existing_rows(path: Path) -> tuple[list[str], dict[str, dict[str, str]]
         rows = list(csv.DictReader(f))
     normalized = {}
     for row in rows:
-        normalized[row["benchmark_id"]] = {key: row.get(key, "") for key in FIELDNAMES}
+        restored = {key: row.get(key, "") for key in FIELDNAMES}
+        for note in row.get("notes", "").split(" ; "):
+            key, separator, raw_path = note.strip().partition("=")
+            if separator and key in {"mysearch_raw", "tavily_raw"}:
+                restored[key] = Path(raw_path).read_text(encoding="utf-8")
+        normalized[row["benchmark_id"]] = restored
     return [row["benchmark_id"] for row in rows], normalized
 
 
@@ -2361,6 +2426,7 @@ def sync_input_contract(row: dict[str, object], input_row: dict[str, str]) -> No
             "active_dimensions": active_dimensions(input_row),
             "latency_budget_ms": input_row.get("latency_budget_ms", "") or "",
             "expected_answer_patterns": input_row.get("expected_answer_patterns", "") or "",
+            "expected_content_patterns": input_row.get("expected_content_patterns", "") or "",
         }
     )
 
@@ -2426,7 +2492,10 @@ def build_output_row(
     # 这两列**留在内存**供计分（`merge_output_rows` 还会再算一遍），
     # 由 `write_output` 在落盘时过滤掉 —— CSV 不存 raw（体积大且与 raw/ 目录重复）。
     for prefix, raw_text in (("mysearch", mysearch_raw), ("tavily", tavily_raw)):
-        row[f"{prefix}_raw"] = raw_text
+        row[f"{prefix}_raw"] = (
+            raw_text or existing.get("tavily_raw", "")
+            if prefix == "tavily" and preserve_tavily else raw_text
+        )
     score_output_row(input_row, row)
     return row
 

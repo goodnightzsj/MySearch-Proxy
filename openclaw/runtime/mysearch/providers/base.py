@@ -12,6 +12,10 @@ from __future__ import annotations
 import json
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from contextvars import ContextVar, copy_context
+from dataclasses import dataclass, field
+from functools import wraps
+from threading import Event
 from typing import Any, Callable
 from urllib.error import HTTPError as UrlHTTPError
 from urllib.request import Request, urlopen
@@ -25,6 +29,69 @@ from mysearch.errors import (
     _parse_retry_after_seconds,
     _redact_provider_secret,
 )
+
+
+@dataclass
+class _RequestBudget:
+    deadline: float
+    cancelled: Event = field(default_factory=Event)
+
+
+_request_budget: ContextVar[_RequestBudget | None] = ContextVar("mysearch_request_budget", default=None)
+
+
+def remaining_request_seconds() -> float | None:
+    budget = _request_budget.get()
+    if budget is None:
+        return None
+    remaining = budget.deadline - time.monotonic()
+    if budget.cancelled.is_set() or remaining <= 0:
+        raise MySearchError("research request budget exhausted")
+    return remaining
+
+
+def wait_before_retry(delay: float) -> None:
+    remaining = remaining_request_seconds()
+    if remaining is None:
+        time.sleep(delay)
+        return
+    if delay >= remaining:
+        raise MySearchError("research request budget exhausted before retry")
+    if _request_budget.get().cancelled.wait(delay):
+        raise MySearchError("research request cancelled before retry")
+
+
+def budgeted_research(method):
+    # shortcut: in-flight sync I/O survives cancellation; use cancellable I/O if hard abort is required.
+    @wraps(method)
+    def run(self, *args, **kwargs):
+        started = time.monotonic()
+        timeout = float(self.config.timeout_seconds)
+        parent_remaining = remaining_request_seconds()
+        if parent_remaining is not None:
+            timeout = min(timeout, parent_remaining)
+        budget = _RequestBudget(started + timeout)
+        token = _request_budget.set(budget)
+        try:
+            results, errors = self._execute_parallel(
+                {"research": lambda: method(self, *args, **kwargs)},
+                max_workers=1,
+                timeout_seconds=timeout,
+            )
+            self._raise_parallel_error(errors, "research")
+            remaining_request_seconds()
+            result = results["research"]
+            if isinstance(result, dict) and isinstance(result.get("evidence"), dict):
+                result["evidence"]["request_budget"] = {
+                    "timeout_seconds": timeout,
+                    "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+                }
+            return result
+        finally:
+            budget.cancelled.set()
+            _request_budget.reset(token)
+
+    return run
 
 
 class ProviderTransport:
@@ -47,7 +114,7 @@ class ProviderTransport:
         if not tasks:
             return {}, {}
 
-        if len(tasks) == 1:
+        if len(tasks) == 1 and timeout_seconds is None and _request_budget.get() is None:
             name, task = next(iter(tasks.items()))
             try:
                 return {name: task()}, {}
@@ -56,6 +123,16 @@ class ProviderTransport:
 
         results: dict[str, Any] = {}
         errors: dict[str, Exception] = {}
+        budget = max(
+            0.001,
+            float(timeout_seconds)
+            if timeout_seconds is not None
+            else float(self.config.timeout_seconds + 5),
+        )
+        request_remaining = remaining_request_seconds()
+        if request_remaining is not None:
+            budget = min(budget, request_remaining)
+        deadline = time.monotonic() + budget
         worker_count = max(1, min(max_workers or self.config.max_parallel_workers, len(tasks)))
         executor = self._executor
         temporary_executor: ThreadPoolExecutor | None = None
@@ -66,16 +143,9 @@ class ProviderTransport:
             )
             executor = temporary_executor
         future_map: dict[Future[Any], str] = {
-            executor.submit(task): name for name, task in tasks.items()
+            executor.submit(copy_context().run, task): name for name, task in tasks.items()
         }
         pending = set(future_map)
-        budget = max(
-            0.001,
-            float(timeout_seconds)
-            if timeout_seconds is not None
-            else float(self.config.timeout_seconds + 5),
-        )
-        deadline = time.monotonic() + budget
 
         def cancel_pending(reason: str) -> None:
             for pending_future in pending:
@@ -138,6 +208,7 @@ class ProviderTransport:
         raise MySearchError(str(error))
 
     def _get_key_or_raise(self, provider: ProviderConfig):
+        remaining_request_seconds()
         record = self.keyring.get_next(provider.name)
         if record is None:
             if self.keyring.has_configured_provider(provider.name):
@@ -216,6 +287,9 @@ class ProviderTransport:
         if method.upper() != "GET":
             headers.setdefault("Content-Type", "application/json")
         effective_timeout = timeout_seconds or self.config.timeout_seconds
+        remaining = remaining_request_seconds()
+        if remaining is not None:
+            effective_timeout = min(effective_timeout, remaining)
 
         response_headers: Any = None
         prefer_urlopen = "unittest.mock" in type(urlopen).__module__
@@ -370,6 +444,9 @@ class ProviderTransport:
         timeout_seconds: int | None = None,
     ) -> tuple[int, str]:
         effective_timeout = timeout_seconds or self.config.timeout_seconds
+        remaining = remaining_request_seconds()
+        if remaining is not None:
+            effective_timeout = min(effective_timeout, remaining)
         try:
             response = self._http.get(
                 url,

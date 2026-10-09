@@ -34,13 +34,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from scripts import run_remote_mcp_benchmark as runner  # noqa: E402
 
-DEFAULT_MATRIX = (
-    REPO_ROOT
-    / ".codex-tasks"
-    / "20260530-provider-optimization-loop-v2"
-    / "raw"
-    / "loop11-benchmark-input-final.csv"
-)
+DEFAULT_MATRIX = runner.DEFAULT_MATRIX
 
 #: 注入用的"源里不存在"的假 token。取一个不可能出现在任何真实正文里的形状 ——
 #: 若混进真实语料会让 groundedness 假通过。
@@ -107,6 +101,7 @@ def _passes_any_assertion(
     has_declared = bool(
         (input_row.get("expected_answer_patterns") or "").strip()
         or (input_row.get("expected_url_patterns") or "").strip()
+        or (input_row.get("expected_content_patterns") or "").strip()
     )
     is_social = str(input_row.get("domain", "")).strip().lower() == "纯 social / x"
     if not has_declared and not is_social:
@@ -147,6 +142,8 @@ def audit_row(input_row: dict[str, str]) -> dict[str, object]:
     raw_text = json.dumps(
         {
             "answer": baseline["mysearch_summary"],
+            "content": " ".join(runner.parse_pipe_list(input_row.get("expected_content_patterns", ""))),
+            "links": runner.parse_pipe_list(str(baseline["mysearch_top_urls"])),
             "results": [
                 {
                     "url": "https://example.com/one",

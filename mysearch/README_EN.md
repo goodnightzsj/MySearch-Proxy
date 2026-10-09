@@ -150,6 +150,12 @@ Useful for:
 - trends
 - questions that need search plus extraction plus evidence packaging
 
+Discovery, extraction, retries and supplemental queries share one `MYSEARCH_TIMEOUT_SECONDS` budget. Expiry is an explicit error. In-flight synchronous I/O cannot be forcibly aborted, but expired branches cannot start more requests. Standalone `search` budgets are unchanged.
+
+Deep docs research checks the current source-text count and comparison-subject coverage before issuing up to three existing supplemental query variants. It stops when coverage is sufficient or the budget expires, retaining domain/date filters. `evidence.supplemental_search` records queries, the stop reason and errors.
+
+Search and research expose per-URL `evidence.sources`: missing/retrieved/extracted text, fetch outcomes (including prefetched content), and provider matches. Built-in catalog descriptions do not count as retrieved text. `claim_verification=not-assessed` and `verification_scope=source-agreement-not-claim-verification` explicitly separate these signals from claim verification. Research also includes per-request timing in `evidence.request_budget`.
+
 ### `mysearch_health`
 
 Returns provider state, base URLs, key availability, and config summary.

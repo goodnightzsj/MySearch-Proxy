@@ -45,6 +45,12 @@
 - 再抓取前几条正文
 - 可选补充 X / Social 讨论
 
+`research` 的发现、正文抓取、重试和补搜共享 `MYSEARCH_TIMEOUT_SECONDS` 总预算；过期会显式失败。已发出的同步 I/O 不能强杀，但过期分支不能继续发请求，普通 `search` 的默认预算不变。
+
+`deep` 的 docs 补搜先检查本轮已有来源，仅在正文数量或比较对象覆盖不足时执行，最多3个既有查询变体；达到目标或预算耗尽即停止，域名和日期过滤继续生效。`evidence.supplemental_search` 记录查询、停止原因和错误。
+
+`search` / `research` 的 `evidence.sources` 按 URL 区分无来源文本、检索文本与抽取正文，并记录抓取失败／空正文／预取、多 provider 命中。内置目录描述不算检索正文；`claim_verification=not-assessed` 与 `verification_scope=source-agreement-not-claim-verification` 明确表示这些信号不证明结论真实。`research` 另返回本次 `request_budget` 耗时。
+
 ### `mysearch_health`
 
 返回当前 provider 配置、base URL、search mode、auth mode 和 key 可用性。

@@ -22,6 +22,51 @@ from mysearch.research import sections
 from mysearch.research import selection
 from mysearch.research import software_version
 from mysearch.types import ResolvedSearchIntent, SearchMode
+
+
+def source_evidence(
+    *,
+    results: list[dict[str, Any]],
+    pages: list[dict[str, Any]],
+    citations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    sources: dict[str, dict[str, Any]] = {}
+    for kind, items in (("result", results), ("page", pages), ("citation", citations)):
+        for item in items:
+            if not isinstance(item, dict) or not item.get("url"):
+                continue
+            identity = postprocess._result_dedupe_key(item)
+            entry = sources.setdefault(identity, {
+                "url": item["url"], "text_status": "missing",
+                "fetch_status": "not-attempted", "providers": [],
+                "claim_verification": "not-assessed",
+            })
+            for provider in item.get("matched_providers") or [item.get("provider", "")]:
+                if not item.get("error") and ProviderResponse.is_real_provider({"provider": provider}):
+                    if provider not in entry["providers"]:
+                        entry["providers"].append(provider)
+            has_text = any(
+                isinstance(item.get(key), str) and item[key].strip()
+                for key in (("content",) if kind == "page" else ("content", "snippet", "text", "raw_content"))
+            )
+            # Built-in catalog descriptions are not retrieved source text.
+            if item.get("provider") in {"canonical_research_docs", "canonical_research_projects", "canonical-rescue"}:
+                has_text = False
+            if kind == "page":
+                if item.get("error"):
+                    entry["fetch_status"] = "failed"
+                elif has_text:
+                    entry["fetch_status"] = "prefetched" if item.get("provider") == "discovery_prefetch" else "succeeded"
+                    entry["text_status"] = "extracted"
+                else:
+                    entry["fetch_status"] = "empty"
+            elif kind == "result" and has_text and entry["text_status"] == "missing":
+                entry["text_status"] = "retrieved"
+    for entry in sources.values():
+        entry["provider_count"] = len(entry["providers"])
+    return list(sources.values())
+
+
 def _trim_search_payload(
     result: dict[str, Any],
     *,
@@ -138,6 +183,8 @@ def _augment_evidence_summary(
         )
         if conflict_detail:
             evidence["conflicting_version_claims"] = conflict_detail
+        evidence["sources"] = source_evidence(results=results, pages=[], citations=citations)
+        evidence["verification_scope"] = "source-agreement-not-claim-verification"
         enriched["evidence"] = evidence
         return enriched
 
@@ -821,4 +868,3 @@ def _answer_looks_uncertain(
             "未知",
         ]
         return any(marker in answer_lower for marker in markers)
-

@@ -1425,15 +1425,7 @@ class AutoStrategyTests(unittest.TestCase):
         断言精确到 1 行：多行留空会让矩阵大面积变成 auto，
         少到 0 行则缺口重新出现。
         """
-        matrix = (
-            REPO_ROOT
-            / ".codex-tasks"
-            / "20260530-provider-optimization-loop-v2"
-            / "raw"
-            / "loop11-benchmark-input-final.csv"
-        )
-        if not matrix.exists():  # 任务目录可能未随仓库分发
-            self.skipTest("benchmark matrix not present")
+        matrix = run_remote_mcp_benchmark.DEFAULT_MATRIX
         with matrix.open(newline="", encoding="utf-8") as handle:
             rows = list(csv.DictReader(handle))
         auto = [r["benchmark_id"] for r in rows if run_remote_mcp_benchmark.map_strategy(r) == "auto"]
@@ -1954,13 +1946,7 @@ class MatrixAssertionAuditTests(unittest.TestCase):
 
         不断言具体比例 —— 那是随矩阵演进的观测值，钉死会变成易腐契约。
         """
-        matrix = (
-            REPO_ROOT / ".codex-tasks" / "20260530-provider-optimization-loop-v2"
-            / "raw" / "loop11-benchmark-input-final.csv"
-        )
-        if not matrix.exists():
-            self.skipTest("benchmark matrix not present")
-        rows = list(csv.DictReader(matrix.open(encoding="utf-8")))
+        rows = run_remote_mcp_benchmark.read_rows(run_remote_mcp_benchmark.DEFAULT_MATRIX)
         audit = self._audit()
         results = [audit.audit_row(row) for row in rows]
         self.assertEqual(len(results), len(rows))
@@ -1979,19 +1965,7 @@ class MatrixContractTests(unittest.TestCase):
     改机制没有产生任何可观察的差异。这组测试把覆盖本身钉住。
     """
 
-    MATRIX = (
-        REPO_ROOT
-        / ".codex-tasks"
-        / "20260530-provider-optimization-loop-v2"
-        / "raw"
-        / "loop11-benchmark-input-final.csv"
-    )
-
-    def setUp(self) -> None:
-        # `.codex-tasks/` 被 gitignore，矩阵不随仓库分发；CI 的全新 clone 里
-        # 没有这个文件。缺文件时跳过，而不是让整套测试崩掉。
-        if not self.MATRIX.exists():
-            self.skipTest("benchmark matrix not present")
+    MATRIX = run_remote_mcp_benchmark.DEFAULT_MATRIX
 
     def _rows(self) -> list[dict[str, str]]:
         with self.MATRIX.open(encoding="utf-8") as fh:
@@ -2169,21 +2143,13 @@ class MatrixContractTests(unittest.TestCase):
         )
         self.assertEqual(missing, [], f"这些新闻行没有答案期望值: {missing}")
 
-    def test_extract_and_crawl_rows_document_why_they_have_no_url_expectation(self) -> None:
-        """抽取/爬取行**无法**用 expected_url_patterns 证伪 —— 记录这个缺口。
-
-        `collect_urls` 对 extract_url/map_site/crawl_site 的响应会先取
-        `blob["url"]`，而输入就是那个 URL（实测 loop33：
-        `extract-01` 的 top_urls[0] == 查询 URL）。所以给这些行填
-        `expected_url_patterns` 会是一个**恒真断言**，还给
-        authority_precision 白送 +1.5 分。真正的缺口在 runner：
-        没有任何计分项检查"抽取到的正文是否包含某个事实"。
-        """
+    def test_extract_and_crawl_rows_require_body_assertions_not_url_echoes(self) -> None:
+        """抽取/crawl 要读正文；map 单独验证发现的页面而非输入 URL。"""
         rows = {row["benchmark_id"]: row for row in self._rows()}
         scoped = sorted(
             bid
             for bid in rows
-            if bid.startswith(("extract-", "hard-extract-", "crawl-map-"))
+            if rows[bid]["preferred_tool"] in {"extract_url", "crawl_site"}
         )
         self.assertTrue(scoped, "矩阵里没有抽取/爬取行")
         # 恒真断言比没有断言更糟：它把一个真空包装成"已覆盖"。
@@ -2196,6 +2162,8 @@ class MatrixContractTests(unittest.TestCase):
             "抽取/爬取行不该有 expected_url_patterns —— 输入 URL 会被回显，"
             f"断言恒真: {offenders}",
         )
+        for bid in scoped:
+            self.assertTrue(rows[bid]["expected_content_patterns"].strip(), bid)
 
 
 class ExplicitYearWindowTests(unittest.TestCase):

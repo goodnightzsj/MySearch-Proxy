@@ -36,7 +36,7 @@ from mysearch.research import selection
 from mysearch.research import shaping
 from mysearch.research import social
 from mysearch.providers import firecrawl_crawl
-from mysearch.providers.base import ProviderTransport
+from mysearch.providers.base import ProviderTransport, budgeted_research, remaining_request_seconds
 from mysearch.provider_contract import ProviderResponse
 
 logger = logging.getLogger(__name__)
@@ -1437,6 +1437,7 @@ class MySearchClient(ProviderTransport):
 
         raise MySearchError(" | ".join(errors) if errors else "no extraction provider available")
 
+    @budgeted_research
     def research(
         self,
         *,
@@ -1535,6 +1536,7 @@ class MySearchClient(ProviderTransport):
                 from_date=from_date,
                 to_date=to_date,
             )
+        rescue_seed_results: list[dict[str, Any]] = []
         if (
             authoritative_research
             or (
@@ -1550,6 +1552,7 @@ class MySearchClient(ProviderTransport):
                 exclude_domains=exclude_domains,
                 from_date=from_date,
                 to_date=to_date,
+                seed_results=rescue_seed_results,
             )
         if include_social:
             research_tasks["social"] = lambda: self.search(
@@ -1580,10 +1583,20 @@ class MySearchClient(ProviderTransport):
                 from_date=from_date,
                 to_date=to_date,
             )
+        deferred_docs_rescue = (
+            research_tasks.pop("docs_rescue", None) if resolved_strategy == "deep" else None
+        )
         research_results, research_errors = self._execute_parallel(
             research_tasks,
             max_workers=len(research_tasks),
         )
+        if deferred_docs_rescue is not None:
+            for name in ("web", "tavily_support", "exa_discovery"):
+                rescue_seed_results.extend((research_results.get(name) or {}).get("results") or [])
+            try:
+                research_results["docs_rescue"] = deferred_docs_rescue()
+            except MySearchError as exc:
+                research_errors["docs_rescue"] = exc
         web_search = research_results.get("web")
         exa_discovery = research_results.get("exa_discovery")
         known_provider_doc_results = self._research_known_provider_doc_results(query)
@@ -1891,6 +1904,12 @@ class MySearchClient(ProviderTransport):
             cross_provider_candidate_count=cross_provider_candidate_count,
             provider_match_depth=provider_match_depth,
         )
+        evidence["sources"] = finalize.source_evidence(
+            results=ordered_research_results, pages=pages, citations=citations,
+        )
+        evidence["verification_scope"] = "source-agreement-not-claim-verification"
+        if docs_rescue and (docs_rescue.get("evidence") or {}).get("supplemental_search"):
+            evidence["supplemental_search"] = docs_rescue["evidence"]["supplemental_search"]
 
         executive_summary = ""
         if (
@@ -2049,10 +2068,43 @@ class MySearchClient(ProviderTransport):
         exclude_domains: list[str] | None,
         from_date: str | None = None,
         to_date: str | None = None,
+        seed_results: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         merged_result: dict[str, Any] | None = None
+
+        def sufficient_source_text() -> bool:
+            candidates = self._dedupe_research_results_for_report(
+                seed_results or [], (merged_result or {}).get("results") or [],
+            )
+            text_candidates = [
+                item for item in candidates if item.get("url") and any(
+                    str(item.get(key) or "").strip() for key in ("snippet", "content")
+                )
+            ]
+            return len(text_candidates) >= max_results and all(
+                any(self._research_result_matches_comparison_subject(
+                    item={**item, "snippet": item.get("content") or item.get("snippet") or ""},
+                    entity_tokens=subject,
+                ) for item in text_candidates)
+                for subject in self._research_comparison_entities(query)
+            )
+
         primary_vendor_brand = self._research_primary_vendor_brand(query)
-        for rescue_query in self._research_authoritative_rescue_queries(query):
+        queries = self._research_authoritative_rescue_queries(query)
+        query_limit = 3 if strategy == "deep" else len(queries)
+        attempted_queries: list[str] = []
+        errors: list[str] = []
+        stop_reason = "query-limit" if len(queries) > query_limit else "queries-exhausted"
+        if strategy == "deep" and sufficient_source_text():
+            stop_reason = "sufficient-evidence"
+            queries = []
+        for rescue_query in queries[:query_limit]:
+            try:
+                remaining_request_seconds()
+            except MySearchError:
+                stop_reason = "budget-exhausted"
+                break
+            attempted_queries.append(rescue_query)
             try:
                 current_result = self.search(
                     query=rescue_query,
@@ -2069,7 +2121,8 @@ class MySearchClient(ProviderTransport):
                     from_date=from_date,
                     to_date=to_date,
                 )
-            except MySearchError:
+            except MySearchError as exc:
+                errors.append(str(exc))
                 if primary_vendor_brand:
                     try:
                         current_result = self._run_research_tavily_discovery(
@@ -2085,30 +2138,34 @@ class MySearchClient(ProviderTransport):
                             from_date=from_date,
                             to_date=to_date,
                         )
-                    except MySearchError:
+                    except MySearchError as fallback_error:
+                        errors.append(str(fallback_error))
                         continue
                 else:
                     continue
             if merged_result is None:
                 merged_result = dict(current_result)
-                continue
-            merged_payload = self._merge_search_payloads(
-                primary_result=merged_result,
-                secondary_result=current_result,
-                max_results=max_results,
-            )
-            merged_result["results"] = self._rerank_resource_results(
-                query=query,
-                mode="docs",
-                results=merged_payload["results"],
-                include_domains=include_domains,
-            )
-            merged_result["citations"] = self._align_citations_with_results(
-                results=merged_result["results"],
-                citations=merged_payload["citations"],
-            )
-            merged_result["matched_results"] = merged_payload["matched_results"]
-        return merged_result or {
+            else:
+                merged_payload = self._merge_search_payloads(
+                    primary_result=merged_result,
+                    secondary_result=current_result,
+                    max_results=max_results,
+                )
+                merged_result["results"] = self._rerank_resource_results(
+                    query=query,
+                    mode="docs",
+                    results=merged_payload["results"],
+                    include_domains=include_domains,
+                )
+                merged_result["citations"] = self._align_citations_with_results(
+                    results=merged_result["results"],
+                    citations=merged_payload["citations"],
+                )
+                merged_result["matched_results"] = merged_payload["matched_results"]
+            if strategy == "deep" and sufficient_source_text():
+                stop_reason = "sufficient-evidence"
+                break
+        result = merged_result or {
             "provider": "tavily",
             "query": query,
             "intent": "resource",
@@ -2116,6 +2173,12 @@ class MySearchClient(ProviderTransport):
             "results": [],
             "citations": [],
         }
+        result["evidence"] = dict(result.get("evidence") or {})
+        result["evidence"]["supplemental_search"] = {
+            "queries": attempted_queries, "query_limit": query_limit,
+            "stop_reason": stop_reason, "errors": errors,
+        }
+        return result
 
     def _run_research_web_discovery(
         self,

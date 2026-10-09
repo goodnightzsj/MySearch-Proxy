@@ -29,6 +29,7 @@ from typing import Any
 from mysearch import query_routing
 from mysearch.config import ProviderConfig
 from mysearch.errors import MySearchError, MySearchHTTPError
+from mysearch.providers.base import wait_before_retry
 
 #: 固定密钥（非托管池）在 429 后的默认冷却秒数。
 DEFAULT_KEY_COOLDOWN_SECONDS = 60
@@ -116,7 +117,7 @@ def request_json_with_transient_retry_selected(
                     )
                     if retry_delay > MAX_PINNED_KEY_RETRY_DELAY_SECONDS:
                         raise
-                time.sleep(retry_delay)
+                wait_before_retry(retry_delay)
                 continue
             raise
     raise AssertionError("unreachable")
