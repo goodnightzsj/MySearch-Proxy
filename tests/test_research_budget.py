@@ -3,20 +3,25 @@ from __future__ import annotations
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from threading import Event
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
+import httpx
+
+from mysearch.clients import MySearchClient
 from mysearch.errors import MySearchError
-from mysearch.providers.base import ProviderTransport, budgeted_research, wait_before_retry
+from mysearch.providers.base import budgeted_research, wait_before_retry
 
 
-class ProbeTransport(ProviderTransport):
+class ProbeTransport(MySearchClient):
     def __init__(self, timeout=0.3):
         self.config = SimpleNamespace(timeout_seconds=timeout, max_parallel_workers=2)
         self._executor = ThreadPoolExecutor(max_workers=2)
         self._http = Mock()
-        self._http.get.return_value = SimpleNamespace(status_code=200, text="ok")
+        self._http.timeout = httpx.Timeout(timeout, connect=10.0)
+        self._http.get.return_value = Mock(status_code=200, text="ok")
 
     @budgeted_research
     def research(self, action):
@@ -85,6 +90,85 @@ class ResearchBudgetTests(unittest.TestCase):
         with self.assertRaisesRegex(MySearchError, "budget"):
             client.research(lambda: wait_before_retry(1.5))
         self.assertLess(time.monotonic() - started, 0.3)
+
+    def test_direct_source_fetches_use_remaining_budget(self):
+        client = self.client()
+        client._http.get.return_value.text = '<meta name="citation_title" content="Paper title">'
+
+        def action():
+            time.sleep(0.04)
+            client._extract_github_blob_raw(url="https://github.com/example/project/blob/main/README.md")
+            return client._fetch_arxiv_title("https://arxiv.org/abs/2501.12948")
+
+        self.assertEqual(client.research(action), "Paper title")
+        self.assertEqual(client._http.get.call_count, 2)
+        for call in client._http.get.call_args_list:
+            timeout = call.kwargs["timeout"]
+            self.assertGreater(timeout.read, 0)
+            self.assertLess(timeout.read, 0.28)
+            self.assertLessEqual(timeout.connect, timeout.read)
+
+    def test_direct_source_fetches_cannot_start_after_research_timeout(self):
+        for fetch in ("github", "arxiv"):
+            with self.subTest(fetch=fetch):
+                client = self.client(0.02)
+                release, done = Event(), Event()
+
+                def action():
+                    release.wait(0.4)
+                    try:
+                        if fetch == "github":
+                            client._extract_github_blob_raw(url="https://github.com/example/project/blob/main/README.md")
+                        else:
+                            client._fetch_arxiv_title("https://arxiv.org/abs/2501.12948")
+                    finally:
+                        done.set()
+
+                try:
+                    with self.assertRaises(MySearchError):
+                        client.research(action)
+                finally:
+                    release.set()
+                self.assertTrue(done.wait(0.5))
+                client._http.get.assert_not_called()
+
+    def test_github_branch_fallback_does_not_renew_expired_budget(self):
+        for transport in ("httpx", "urlopen"):
+            with self.subTest(transport=transport):
+                client = self.client(0.02)
+                release, done = Event(), Event()
+
+                def failed_fetch(*args, **kwargs):
+                    release.wait(0.4)
+                    raise OSError("first branch unavailable")
+
+                def action():
+                    try:
+                        return client._extract_github_blob_raw(url="https://github.com/example/project/blob/main/README.md")
+                    finally:
+                        done.set()
+
+                request = client._http.get
+                request.side_effect = failed_fetch
+                request_context = patch("mysearch.clients.urlopen", side_effect=failed_fetch) if transport == "urlopen" else nullcontext(request)
+                with request_context as active_request:
+                    try:
+                        with self.assertRaises(MySearchError):
+                            client.research(action)
+                    finally:
+                        release.set()
+                    self.assertTrue(done.wait(0.5))
+                    self.assertEqual(active_request.call_count, 1)
+                    if transport == "urlopen":
+                        self.assertLessEqual(active_request.call_args.kwargs["timeout"], 0.02)
+
+    def test_direct_source_fetches_preserve_client_timeout_outside_research(self):
+        client = self.client()
+        client._http.get.return_value.text = '<meta name="citation_title" content="Paper title">'
+        client._extract_github_blob_raw(url="https://github.com/example/project/blob/main/README.md")
+        client._fetch_arxiv_title("https://arxiv.org/abs/2501.12948")
+        for call in client._http.get.call_args_list:
+            self.assertIs(call.kwargs.get("timeout", client._http.timeout), client._http.timeout)
 
     def test_json_request_uses_remaining_budget(self):
         client = self.client()

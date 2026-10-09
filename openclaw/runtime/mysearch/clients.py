@@ -5897,19 +5897,26 @@ class MySearchClient(ProviderTransport):
 
         prefer_urlopen = "unittest.mock" in type(urlopen).__module__
         for raw_url in raw_urls:
+            remaining = remaining_request_seconds()
+            timeout = self.config.timeout_seconds
+            http_timeout = self._http.timeout
+            if remaining is not None:
+                timeout = min(timeout, remaining)
+                http_timeout = httpx.Timeout(timeout, connect=min(10.0, timeout))
             try:
                 if prefer_urlopen:
                     request = Request(
                         raw_url,
                         headers={"Accept": "text/plain, text/markdown;q=0.9, */*;q=0.8"},
                     )
-                    with urlopen(request, timeout=self.config.timeout_seconds) as response:
+                    with urlopen(request, timeout=timeout) as response:
                         raw_content = response.read()
                     content = raw_content.decode("utf-8", errors="replace")
                 else:
                     response = self._http.get(
                         raw_url,
                         headers={"Accept": "text/plain, text/markdown;q=0.9, */*;q=0.8"},
+                        timeout=http_timeout,
                     )
                     response.raise_for_status()
                     content = response.text
@@ -6233,8 +6240,12 @@ class MySearchClient(ProviderTransport):
         canonical_url = self._canonical_result_url(url)
         if self._result_hostname({"url": canonical_url}) != "arxiv.org":
             return ""
+        remaining = remaining_request_seconds()
+        timeout = self._http.timeout
+        if remaining is not None:
+            timeout = httpx.Timeout(min(self.config.timeout_seconds, remaining), connect=min(10.0, remaining))
         try:
-            response = self._http.get(canonical_url, headers={"Accept": "text/html"})
+            response = self._http.get(canonical_url, headers={"Accept": "text/html"}, timeout=timeout)
             response.raise_for_status()
         except httpx.HTTPError:
             return ""
