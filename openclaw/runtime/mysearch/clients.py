@@ -1151,12 +1151,12 @@ class MySearchClient(ProviderTransport):
         should_supplement_answer = (
             not (result.get("answer") or "").strip()
             and decision.provider != "xai"
-            and self._provider_can_serve(self.config.xai)
             and self.config.xai.search_mode == "official"
             and (
                 resolved_intent in {"comparison", "status"}
                 or resolved_strategy in {"verify", "deep"}
             )
+            and self._provider_can_serve(self.config.xai)
         )
         if should_supplement_answer:
             try:
@@ -2883,8 +2883,6 @@ class MySearchClient(ProviderTransport):
             return False
         if decision.provider == "xai" or result.get("provider") == "xai":
             return False
-        if not self._provider_can_serve(self.config.xai):
-            return False
         if self.config.xai.search_mode != "official":
             return False
         evidence = result.get("evidence") or {}
@@ -2895,7 +2893,7 @@ class MySearchClient(ProviderTransport):
             return False
         if str(evidence.get("official_mode") or "off") == "strict":
             return False
-        return True
+        return self._provider_can_serve(self.config.xai)
 
     def _apply_xai_arbitration(
         self,

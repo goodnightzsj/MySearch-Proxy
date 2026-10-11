@@ -171,8 +171,8 @@ _STRICT_AWARD_PATTERNS: dict[str, tuple[list[str], list[str]]] = {
             # `… winner: X`：**必须**带分隔符。曾写成可选，于是
             # `Best Picture winner at the Academy Awards` 把 "at the Academy Awards"
             # 当成了实体 —— 由 test_..._from_headline_style_result 抓到。
-            # 标题式现在时：`… Win <category> for "X" at 2026 Grammys`（Pitchfork 等常用）
-            r"(?:win|wins|won)\s+(?:the\s+)?best actor\s+for\s+[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]",
+            # Best Actor names the person before the win verb, not the film after "for".
+            r"(?:^|[\n.!?]\s+)[#* ]*([A-Z][A-Za-z'’.&\- ]{2,100}?)\s+(?:win|wins|won)\s+(?:the\s+)?best actor\b(?!\s+and\s+best actress\b)",
             r"best actor\s+winner\s*[:\-–—]\s*(?:is\s+)?([^\n.;\"”’']{2,100})",
             r"best actor[^\n]{0,30}\b(?:goes to|went to|awarded to)\b\s*[\"“'‘]?([^\n.;\"”’']{2,100})",
         ],
@@ -209,8 +209,9 @@ _STRICT_AWARD_PATTERNS: dict[str, tuple[list[str], list[str]]] = {
             # 当成了实体 —— 由 test_..._from_headline_style_result 抓到。
             # 标题式现在时：`… Win <category> for "X" at 2026 Grammys`（Pitchfork 等常用）
             r"(?:win|wins|won)\s+(?:the\s+)?record of the year\s+for\s+[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]",
+            r"\b(?:accept|accepts|accepted)\s+the\s+award\s+for\s+record of the year\s+for\s+[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]",
             r"record of the year\s+winner\s*[:\-–—]\s*(?:is\s+)?([^\n.;\"”’']{2,100})",
-            r"record of the year[^\n]{0,30}\b(?:goes to|went to|awarded to)\b\s*[\"“'‘]?([^\n.;\"”’']{2,100})",
+            r"record of the year[^\n]{0,30}\b(?:goes to|went to|awarded to)\b\s*[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]",
         ],
         ["nominee", "nominees", "presented annually"],
     ),
@@ -338,6 +339,8 @@ def _extract_result_event_answer_from_text(
             entity = _extract_named_fact_entity(
                 text,
                 patterns=[
+                    # A recipient-only statement must not outrank an explicit winning work.
+                    r"record of the year[^\n]{0,30}\b(?:goes to|went to|awarded to)\b\s*[\"“'‘]?([^\n.;\"”’']{2,100})",
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+(?:won|wins)[^\n]{0,80}\brecord of the year\b",
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+[–—:]\s*record of the year",
                     r"record of the year\s+winner\s+([^\n.;]{2,100})",
@@ -568,4 +571,3 @@ def _clean_extracted_fact_entity(
             if any(token in entity_lower for token in reject_substrings):
                 return ""
         return entity
-

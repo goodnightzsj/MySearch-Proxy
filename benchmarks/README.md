@@ -32,3 +32,7 @@ python scripts/run_remote_mcp_benchmark.py --help
 ```
 
 真实全量对照仍需有效的 SSH host、MySearch/Tavily MCP 端点与 comparator 认证。沿用 `scripts/benchmark.env.example` 的配置约定，不要将实际凭证写入矩阵、命令参数或报告。完整对照须核对运行版本、48 个 ID、两侧 raw 与失败分类；局部 smoke 或合成审计不能算作完整闭环。
+
+远端 runner 上传的脚本不含凭证，载荷仅经 SSH stdin 传入子进程；私有目录和文件权限为 0700/0600，嵌套 JSON 的凭证回显也会脱敏。完整成功输出才会原子发布；超时、上传失败和子进程崩溃保留各自失败语义。
+
+每轮同时保存 runtime revision、runner/矩阵哈希和实际缓存 TTL。`cold/warm` 表示重复顺序，不证明是否命中缓存；独立 bench 关闭 search 缓存时，extract/social 缓存仍可能生效。

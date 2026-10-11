@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import ast
 import csv
+import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from datetime import date
+from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -25,27 +29,26 @@ TEST_BENCHMARK_HOST = "root@172.16.0.10"
 
 class RemoteBenchmarkConfigTests(unittest.TestCase):
     def test_run_remote_cases_keeps_bearer_out_of_process_arguments(self) -> None:
-        """bearer 只能走**上传的脚本文本**，绝不能出现在任何进程参数里。
-
-        这条断言在 loop40 改变执行方式后仍然成立，而且更重要了：批次现在
-        是**脱离 SSH 流**在远端跑的（`_run_remote_detached`），于是一批结果
-        变成"上传脚本 → setsid 启动 → 轮询 → 取回文件"四类短连接调用。
-        断言因此改为检查**全部** ssh 调用的 argv，而不只是最后那一次 ——
-        只查一次会漏掉 mkdir / cat / 启动 / 取回 里可能混入的凭证。
-        """
+        """The bearer travels only through stdin, never argv or uploaded files."""
         bearer = "th-sensitive-bearer"
         calls: list[list[str]] = []
         uploads: list[str] = []
+        launch_inputs: list[str] = []
 
         def fake_ssh(host, command, *, timeout=60, input_text=None):
             calls.append(["ssh", host, command])
             if input_text is not None:
-                uploads.append(input_text)
-            # 第一次探测就报 DONE，让流程走到"取回结果"。
-            stdout = "[]" if ("cat" in command and "out.json" in command) else "DONE"
+                (launch_inputs if "python3 -c" in command else uploads).append(input_text)
+            if "mktemp -d" in command:
+                stdout = "/tmp/mysearch-bench.test1234"
+            elif "python3 -c" in command:
+                stdout = "1234"
+            else:
+                stdout = "[]" if ("cat" in command and "out.json" in command) else "DONE"
             return SimpleNamespace(stdout=stdout, stderr="", returncode=0)
 
-        with patch.object(run_remote_mcp_benchmark, "_remote_ssh", side_effect=fake_ssh):
+        with patch.object(run_remote_mcp_benchmark, "_remote_ssh", side_effect=fake_ssh), \
+             patch.object(run_remote_mcp_benchmark.time, "sleep"):
             result = run_remote_mcp_benchmark.run_remote_cases(
                 host="root@example.test",
                 mysearch_url="http://127.0.0.1:18000/mcp",
@@ -59,15 +62,182 @@ class RemoteBenchmarkConfigTests(unittest.TestCase):
         for argv in calls:
             self.assertNotIn(bearer, " ".join(argv), f"bearer 出现在进程参数: {argv}")
 
-        # bearer 必须经**上传的脚本**送达，且仍可从 PAYLOAD_B64 解出。
-        self.assertTrue(uploads, "应当有一次上传")
-        remote_source = uploads[0]
-        namespace: dict[str, object] = {}
-        exec(remote_source.splitlines()[0], namespace)
-        payload = json.loads(
-            run_remote_mcp_benchmark.base64.b64decode(namespace["PAYLOAD_B64"]).decode()
-        )
+        self.assertEqual(len(uploads), 1)
+        self.assertEqual(len(launch_inputs), 1)
+        encoded_payload = launch_inputs[0]
+        for source in uploads:
+            self.assertNotIn(bearer, source)
+            self.assertNotIn(encoded_payload, source)
+        for argv in calls:
+            self.assertNotIn(encoded_payload, " ".join(argv))
+        payload = json.loads(run_remote_mcp_benchmark.base64.b64decode(encoded_payload))
         self.assertEqual(payload["tavily_bearer"], bearer)
+
+    def test_detached_job_receives_secret_without_persisting_it(self) -> None:
+        import hashlib
+
+        bearer = "test-secret-never-persisted"
+        encoded = run_remote_mcp_benchmark.base64.b64encode(bearer.encode()).decode()
+        source = (
+            "import base64, hashlib, json, os\n"
+            "secret = base64.b64decode(PAYLOAD_B64)\n"
+            "print(json.dumps({'digest': hashlib.sha256(secret).hexdigest(), "
+            "'detached': os.getsid(0) == os.getpid()}))\n"
+        )
+        real_sleep = time.sleep
+        with tempfile.TemporaryDirectory(prefix="mysearch-bench.", dir="/tmp") as directory:
+            def local_ssh(host, command, *, timeout=60, input_text=None):
+                if "mktemp -d" in command:
+                    return SimpleNamespace(stdout=directory, stderr="", returncode=0)
+                self.assertNotIn(bearer, command)
+                self.assertNotIn(encoded, command)
+                return subprocess.run(["sh", "-c", command], input=input_text, text=True,
+                                      capture_output=True, timeout=timeout)
+
+            with patch.object(run_remote_mcp_benchmark, "_remote_ssh", side_effect=local_ssh), \
+                 patch.object(time, "sleep", side_effect=lambda _: real_sleep(0.01)):
+                result = run_remote_mcp_benchmark._run_remote_detached(
+                    host="local-test", remote_source=source, payload_b64=encoded, timeout_seconds=10,
+                )
+            self.assertIsNotNone(result)
+            self.assertEqual(json.loads(result.stdout), {
+                "digest": hashlib.sha256(bearer.encode()).hexdigest(), "detached": True,
+            })
+            self.assertEqual(Path(directory).stat().st_mode & 0o777, 0o700)
+            for path in Path(directory).iterdir():
+                self.assertNotIn(bearer.encode(), path.read_bytes(), path.name)
+                self.assertNotIn(encoded.encode(), path.read_bytes(), path.name)
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600, path.name)
+
+    def test_detached_upload_failure_is_not_reported_as_timeout(self) -> None:
+        responses = [
+            SimpleNamespace(stdout="/tmp/mysearch-bench.test1234", stderr="", returncode=0),
+            SimpleNamespace(stdout="", stderr="upload denied", returncode=1),
+        ]
+        with patch.object(run_remote_mcp_benchmark, "_remote_ssh", side_effect=responses), \
+             self.assertRaisesRegex(RuntimeError, "upload denied"):
+            run_remote_mcp_benchmark._run_remote_detached(
+                host="local-test", remote_source="print('[]')", payload_b64="", timeout_seconds=10,
+            )
+
+    def test_detached_child_failure_is_not_published_as_a_result(self) -> None:
+        real_sleep = time.sleep
+        with tempfile.TemporaryDirectory(prefix="mysearch-bench.", dir="/tmp") as directory:
+            def local_ssh(host, command, *, timeout=60, input_text=None):
+                if "mktemp -d" in command:
+                    return SimpleNamespace(stdout=directory, stderr="", returncode=0)
+                return subprocess.run(["sh", "-c", command], input=input_text, text=True,
+                                      capture_output=True, timeout=timeout)
+
+            with patch.object(run_remote_mcp_benchmark, "_remote_ssh", side_effect=local_ssh), \
+                 patch.object(time, "sleep", side_effect=lambda _: real_sleep(0.01)), \
+                 self.assertRaisesRegex(RuntimeError, "synthetic child failure"):
+                run_remote_mcp_benchmark._run_remote_detached(
+                    host="local-test", remote_source="raise RuntimeError('synthetic child failure')",
+                    payload_b64="", timeout_seconds=10,
+                )
+            self.assertFalse((Path(directory) / "out.json").exists())
+
+    def test_detached_watchdog_preserves_timeout_rows_after_slow_launch(self) -> None:
+        real_sleep = time.sleep
+        with tempfile.TemporaryDirectory(prefix="mysearch-bench.", dir="/tmp") as directory:
+            def local_ssh(host, command, *, timeout=60, input_text=None):
+                if "mktemp -d" in command:
+                    return SimpleNamespace(stdout=directory, stderr="", returncode=0)
+                result = subprocess.run(["sh", "-c", command], input=input_text, text=True,
+                                        capture_output=True, timeout=timeout)
+                if "python3 -c" in command:
+                    real_sleep(0.25)
+                return result
+
+            with patch.object(run_remote_mcp_benchmark, "_remote_ssh", side_effect=local_ssh), \
+                 patch.object(time, "sleep", side_effect=lambda _: real_sleep(0.01)), \
+                 patch.object(run_remote_mcp_benchmark, "REMOTE_SCRIPT", "import time\nprint('[]')\ntime.sleep(2)"), \
+                 patch.object(run_remote_mcp_benchmark, "estimate_remote_batch_timeout_seconds", return_value=1):
+                rows = run_remote_mcp_benchmark.run_remote_cases(
+                    host="local-test", mysearch_url="unused", tavily_url="unused", tavily_bearer="",
+                    cases=[{"benchmark_id": "deadline"}], mysearch_only=True,
+                )
+            self.assertEqual(rows[0]["run_status"], "partial-error")
+            self.assertIn("remote-benchmark-timeout", rows[0]["error"])
+            self.assertTrue((Path(directory) / "timed-out").exists())
+            self.assertFalse((Path(directory) / "out.json").exists())
+
+    def test_detached_late_completion_does_not_pass_the_wait_deadline(self) -> None:
+        now = [0.0]
+
+        def fake_ssh(host, command, *, timeout=60, input_text=None):
+            if "mktemp -d" in command:
+                stdout = "/tmp/mysearch-bench.test1234"
+            elif "python3 -c" in command:
+                stdout = "1234"
+            elif "echo DONE" in command:
+                now[0] = 2.0
+                stdout = "DONE"
+            else:
+                self.assertNotIn("cat /tmp/mysearch-bench.test1234/out.json", command)
+                stdout = ""
+            return SimpleNamespace(stdout=stdout, stderr="", returncode=0)
+
+        with patch.object(run_remote_mcp_benchmark, "_remote_ssh", side_effect=fake_ssh), \
+             patch.object(time, "monotonic", side_effect=lambda: now[0]):
+            result = run_remote_mcp_benchmark._run_remote_detached(
+                host="local-test", remote_source="print('[]')", payload_b64="", timeout_seconds=1,
+            )
+        self.assertIsNone(result)
+
+    def test_remote_script_rejects_multiline_bearer_before_network(self) -> None:
+        payload = {"tavily_bearer": "synthetic-secret\nsecond-line", "cases": [],
+                   "mysearch_url": "http://mysearch.test", "tavily_url": "http://tavily.test"}
+        namespace = {"PAYLOAD_B64": run_remote_mcp_benchmark.base64.b64encode(json.dumps(payload).encode())}
+        with patch("urllib.request.urlopen", side_effect=AssertionError("Network forbidden")) as request, \
+             patch.object(time, "sleep"), redirect_stdout(io.StringIO()), \
+             self.assertRaisesRegex(ValueError, "Invalid comparator bearer"):
+            exec(run_remote_mcp_benchmark.REMOTE_SCRIPT, namespace)
+        request.assert_not_called()
+
+    def test_remote_script_redacts_echoed_bearer_from_errors_and_raw(self) -> None:
+        bearer = 'synthetic-quoted"secret'
+        payload = {"tavily_bearer": bearer, "mysearch_url": "http://mysearch.test",
+                   "tavily_url": "http://tavily.test", "cases": [{
+                       "benchmark_id": "redaction", "mysearch_tool": "search", "mysearch_args": {},
+                       "tavily_tool": "tavily_search", "tavily_args": {}, "repeat_runs": 1,
+                   }]}
+        namespace = {"PAYLOAD_B64": run_remote_mcp_benchmark.base64.b64encode(json.dumps(payload).encode())}
+        helpers, execution = run_remote_mcp_benchmark.REMOTE_SCRIPT.split("\npayload =", 1)
+        exec(helpers, namespace)
+
+        class FailingClient:
+            def __init__(self, *args):
+                pass
+
+            def initialize(self):
+                pass
+
+            def call_tool(self, *args):
+                raise RuntimeError("HTTP 401: upstream echoed " + message)
+
+        namespace["MCPClient"] = FailingClient
+        for message in (bearer, json.dumps({"echoed_authorization": bearer})):
+            with self.subTest(message_is_json=message.startswith("{")):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    exec("payload =" + execution, namespace)
+                rows = json.loads(output.getvalue())
+                self.assertEqual(rows[0]["run_status"], "error")
+                self.assertNotIn(bearer, rows[0]["error"])
+                self.assertIn("HTTP 401", rows[0]["error"])
+                raw = json.loads(rows[0]["tavily_raw"])
+                self.assertNotIn(bearer, raw["error"])
+                self.assertIn("[REDACTED]", raw["error"])
+                if message.startswith("{"):
+                    body = json.loads(raw["error"].split("upstream echoed ", 1)[1])
+                    self.assertEqual(body["echoed_authorization"], "[REDACTED]")
+        unchanged = '{ "sources" : [ { "content": "ordinary text" } ] }'
+        self.assertEqual(namespace["redact_comparator_secret"](unchanged, bearer), unchanged)
+        echoed_key = json.dumps({bearer: bearer})
+        self.assertEqual(json.loads(namespace["redact_comparator_secret"](echoed_key, bearer)),
+                         {"[REDACTED]": "[REDACTED]"})
 
     def test_fieldnames_use_loop9_dimensions_and_explicit_orchestration_contract(self) -> None:
         for provider in ("mysearch", "tavily"):

@@ -5,6 +5,7 @@ import csv
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -1398,7 +1399,34 @@ def timed_tool_runs(client, tool_name, arguments, repeat_runs, latency_budget_ms
     }
 
 
+def redact_comparator_secret(value, secret):
+    if not secret:
+        return value
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            decoded = None
+        if isinstance(decoded, (dict, list)):
+            redacted = redact_comparator_secret(decoded, secret)
+            if redacted != decoded:
+                return json.dumps(redacted, ensure_ascii=False)
+        forms = {secret, repr(secret)[1:-1], json.dumps(secret, ensure_ascii=False)[1:-1]}
+        for form in sorted(forms, key=len, reverse=True):
+            value = value.replace(form, "[REDACTED]")
+        return value
+    if isinstance(value, list):
+        return [redact_comparator_secret(item, secret) for item in value]
+    if isinstance(value, dict):
+        return {redact_comparator_secret(key, secret): redact_comparator_secret(item, secret)
+                for key, item in value.items()}
+    return value
+
+
 payload = json.loads(base64.b64decode(PAYLOAD_B64).decode())
+bearer = payload.get("tavily_bearer", "")
+if "\r" in bearer or "\n" in bearer:
+    raise ValueError("Invalid comparator bearer header")
 mysearch = None
 mysearch_init_error = ""
 try:
@@ -1410,7 +1438,7 @@ tavily = None
 tavily_init_error = ""
 if not payload.get("mysearch_only"):
     try:
-        tavily = MCPClient(payload["tavily_url"], {"Authorization": f'Bearer {payload["tavily_bearer"]}'})
+        tavily = MCPClient(payload["tavily_url"], {"Authorization": f'Bearer {bearer}'})
         tavily.initialize()
     except Exception as exc:
         tavily_init_error = str(exc)
@@ -1573,11 +1601,11 @@ for case in payload["cases"]:
         row["run_status"] = "budget-exceeded"
     output.append(row)
 
-print(json.dumps(output, ensure_ascii=False))
+print(json.dumps(redact_comparator_secret(output, bearer), ensure_ascii=False))
 """
 
 
-def _remote_ssh(host: str, command: str, *, timeout: int = 60, input_text: str | None = None):
+def _remote_ssh(host: str, command: str, *, timeout: float = 60, input_text: str | None = None):
     """一次**短** SSH 调用。每次调用都是独立连接，断了不影响远端已启动的作业。"""
     return subprocess.run(
         ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, command],
@@ -1589,7 +1617,7 @@ def _remote_ssh(host: str, command: str, *, timeout: int = 60, input_text: str |
     )
 
 
-def _run_remote_detached(*, host: str, remote_source: str, timeout_seconds: int):
+def _run_remote_detached(*, host: str, remote_source: str, payload_b64: str, timeout_seconds: int):
     """在远端**脱离 SSH 流**执行批次，返回与旧实现同形的 `proc`。
 
     为什么必须这样：这台宿主上的 SSH 流**任何时长都可能被重置** ——
@@ -1597,66 +1625,95 @@ def _run_remote_detached(*, host: str, remote_source: str, timeout_seconds: int)
     旧实现把整批结果经 SSH 的 stdout 传回，于是流一断整批工作全丢，
     三次整轮失败（24/16/0 行）都是这个机制，与测量内容无关。
 
-    做法：脚本上传成文件 → `setsid` 脱离终端启动 → SSH 立即返回 →
+    做法：无凭证脚本上传 → 管道传递载荷并脱离终端启动 → SSH 立即返回 →
     之后只用短连接轮询远端结果文件。远端进程与客户端连接彻底解耦，
     所以中途断连只是"这次轮询没问到"，不是"工作丢了"。
 
-    用 `setsid` 而**不是** `nohup`：这台 busybox 宿主**没有 `nohup`**
-    （`setsid: can't execute 'nohup': No such file or directory`）——
-    实测踩过，已由 detached survival 测试确认 `setsid` 单独可用。
+    `start_new_session` 复用 setsid 语义，不依赖宿主缺少的 nohup。
 
     超时返回 `None`，调用方按原有的 timeout 语义处理。
     """
-    token = f"mysearch-bench-{os.getpid()}-{abs(hash(remote_source)) % 10**8}"
-    work = f"/tmp/{token}"
-    script_path = f"{work}/run.py"
-    out_path = f"{work}/out.json"
-
     try:
-        _remote_ssh(host, f"mkdir -p {work}", timeout=30)
-        upload = _remote_ssh(host, f"cat > {script_path}", timeout=120, input_text=remote_source)
+        created = _remote_ssh(host, "umask 077 && mktemp -d /tmp/mysearch-bench.XXXXXXXX", timeout=30)
+        work = created.stdout.strip()
+        if created.returncode != 0 or not re.fullmatch(r"/tmp/mysearch-bench\.[A-Za-z0-9_-]+", work):
+            raise RuntimeError("Could not create a private remote benchmark directory")
+        script_path = f"{work}/run.py"
+        out_path = f"{work}/out.json"
+        public_source = (
+            "import atexit, os, signal, sys\nfrom pathlib import Path\n"
+            f"atexit.register(Path({work + '/done'!r}).touch)\n"
+            "def deadline_expired(signum, frame):\n"
+            f"    Path({work + '/timed-out'!r}).touch()\n"
+            "    raise SystemExit(124)\n"
+            "signal.signal(signal.SIGALRM, deadline_expired)\n"
+            f"signal.alarm({timeout_seconds})\n"
+            "PAYLOAD_B64 = sys.stdin.read()\n"
+            + remote_source
+            + f"\nsys.stdout.flush()\nos.replace({work + '/out.part.json'!r}, {out_path!r})\n"
+        )
+        upload = _remote_ssh(host, f"umask 077 && cat > {script_path}", timeout=120, input_text=public_source)
         if upload.returncode != 0:
             raise RuntimeError(f"upload failed: {upload.stderr[:200]}")
+        launcher = (
+            "import os, subprocess, sys\nos.umask(0o077)\n"
+            f"with open({work + '/out.part.json'!r}, 'wb') as out, open({work + '/err.log'!r}, 'wb') as err:\n"
+            f"    child = subprocess.Popen(['python3', {script_path!r}], stdin=subprocess.PIPE, "
+            "stdout=out, stderr=err, start_new_session=True)\n"
+            "    child.stdin.write(sys.stdin.buffer.read())\n"
+            "    child.stdin.close()\n"
+            "    print(child.pid)\n"
+        )
         launch = _remote_ssh(
             host,
-            f"cd {work} && rm -f {out_path} err.log && "
-            f"setsid python3 run.py > {out_path} 2> err.log < /dev/null & echo launched",
+            f"python3 -c {shlex.quote(launcher)}",
             timeout=30,
+            input_text=payload_b64,
         )
         if launch.returncode != 0:
             raise RuntimeError(f"launch failed: {launch.stderr[:200]}")
-    except (subprocess.TimeoutExpired, RuntimeError):
+        pid = launch.stdout.strip()
+        if not pid.isdigit() or int(pid) <= 0:
+            raise RuntimeError("Remote benchmark launcher did not return a process ID")
+    except subprocess.TimeoutExpired:
         return None
 
-    deadline = time.time() + timeout_seconds
-    while time.time() < deadline:
-        time.sleep(8)
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
         try:
             probe = _remote_ssh(
                 host,
-                f"cd {work} && if [ -s {out_path} ]; then echo DONE; "
-                f"elif ! pgrep -f 'python3 run.py' > /dev/null; then echo DEAD; "
+                f"cd {work} && if [ -f timed-out ]; then echo TIMEOUT; "
+                f"elif [ -s {out_path} ]; then echo DONE; "
+                f"elif [ -f done ] || ! kill -0 {pid} 2>/dev/null; then echo DEAD; "
                 f"else echo RUNNING; fi",
-                timeout=30,
+                timeout=min(30, max(0.001, deadline - time.monotonic())),
             )
         except subprocess.TimeoutExpired:
             continue  # 本次轮询没问到，下轮再问；远端作业不受影响
+        if time.monotonic() >= deadline:
+            return None
         state = (probe.stdout or "").strip().splitlines()
         state = state[-1].strip() if state else ""
+        if state == "TIMEOUT":
+            return None
         if state == "DONE":
             break
         if state == "DEAD":
             err = _remote_ssh(host, f"tail -20 {work}/err.log", timeout=30)
             raise RuntimeError(f"remote benchmark process died: {(err.stdout or '')[:400]}")
+        time.sleep(min(8, max(0, deadline - time.monotonic())))
     else:
         return None
 
     try:
-        fetched = _remote_ssh(host, f"cat {out_path}", timeout=180)
+        fetched = _remote_ssh(host, f"cat {out_path}", timeout=min(180, max(0.001, deadline - time.monotonic())))
     except subprocess.TimeoutExpired:
         return None
     if fetched.returncode != 0:
         raise RuntimeError(f"fetch failed: {fetched.stderr[:200]}")
+    if time.monotonic() >= deadline:
+        return None
     return subprocess.CompletedProcess(
         args=["detached"], returncode=0, stdout=fetched.stdout, stderr=""
     )
@@ -1679,11 +1736,11 @@ def run_remote_cases(
         "mysearch_only": mysearch_only,
     }
     payload_b64 = base64.b64encode(json.dumps(payload, ensure_ascii=False).encode()).decode()
-    remote_source = f"PAYLOAD_B64 = {payload_b64!r}\n{REMOTE_SCRIPT}"
     timeout_seconds = estimate_remote_batch_timeout_seconds(cases)
     proc = _run_remote_detached(
         host=host,
-        remote_source=remote_source,
+        remote_source=REMOTE_SCRIPT,
+        payload_b64=payload_b64,
         timeout_seconds=timeout_seconds,
     )
     if proc is None:
