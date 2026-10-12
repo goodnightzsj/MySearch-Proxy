@@ -2653,6 +2653,32 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertIn("Incentivizing Reasoning Capability", ranked[0]["title"])
 
+    def test_pdf_rerank_preserves_primary_match_after_title_variant_merge(self) -> None:
+        client = MySearchClient()
+        self.addCleanup(client.close)
+        title = "DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning"
+        url = "https://arxiv.org/abs/2501.12948"
+        for prefix in ("", "[2501.12948] ", "[PDF] "):
+            with self.subTest(prefix=prefix):
+                merged = client._merge_search_payloads(
+                    primary_result={"provider": "firecrawl", "results": [{
+                        "title": "[PDF] Instruction Finetuning DeepSeek-R1-8B Model Using ...",
+                        "url": "https://arxiv.org/abs/2606.10392",
+                    }]},
+                    secondary_result={"provider": "tavily", "results": [
+                        {"title": prefix + title, "url": url},
+                        {"title": title, "url": "https://arxiv.org/html/2501.12948v1"},
+                    ]},
+                    max_results=5,
+                )
+                ranked = client._rerank_resource_results(
+                    query="DeepSeek R1 paper pdf", mode="pdf",
+                    results=merged["results"], include_domains=["arxiv.org"],
+                )
+                self.assertEqual(ranked[0]["url"], url)
+                self.assertEqual(ranked[0]["title"], prefix + title)
+                self.assertEqual(len(ranked), 2)
+
     def test_pdf_rerank_prefers_non_derivative_abs_page_over_survey_title(self) -> None:
         client = MySearchClient()
         results = [
@@ -5632,6 +5658,38 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertTrue(captured["tavily"]["include_content"])
         self.assertTrue(captured["exa"]["include_content"])
+        self.assertFalse(captured["tavily"]["include_answer"])
+
+    def test_blended_search_preserves_tavily_answer_request_flag(self) -> None:
+        client = MySearchClient()
+        self.addCleanup(client.close)
+        client._provider_can_serve = lambda provider: False  # type: ignore[method-assign]
+        captured: list[bool] = []
+
+        def payload(provider, answer=""):
+            return {"provider": provider, "answer": answer, "results": [{
+                "title": "Source", "url": f"https://example.com/{provider}",
+            }], "citations": []}
+
+        def tavily(**kwargs):
+            captured.append(kwargs["include_answer"])
+            return payload("tavily", "Requested answer" if kwargs["include_answer"] else "")
+
+        client._search_tavily = tavily  # type: ignore[method-assign]
+        client._search_firecrawl = lambda **kwargs: payload("firecrawl")  # type: ignore[method-assign]
+        for provider in ("tavily", "firecrawl"):
+            for requested in (False, True):
+                with self.subTest(provider=provider, requested=requested):
+                    captured.clear()
+                    result = client._search_web_blended(
+                        query="example factual query", mode="web", intent="factual",
+                        strategy="balanced", decision=RouteDecision(provider=provider, reason="test"),
+                        max_results=5, include_content=False, include_answer=requested,
+                        include_domains=None, exclude_domains=None,
+                    )
+                    self.assertEqual(captured, [requested])
+                    self.assertEqual(result["answer"], "Requested answer" if requested else "")
+                    self.assertEqual(len(result["results"]), 2)
 
     def test_docs_blended_search_prioritizes_include_domains(self) -> None:
         client = MySearchClient()

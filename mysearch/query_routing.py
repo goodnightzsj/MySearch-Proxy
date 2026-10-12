@@ -1297,7 +1297,7 @@ def _looks_like_primary_named_paper_result(*,
         token = re.escape(query_tokens[0])
         return re.match(rf"^\s*(?:\[[^\]]+\]\s*)?{token}(?:\b|[\s:()\-])", title_text) is not None
     subject_pattern = r"[\s\-_]*".join(re.escape(token) for token in query_tokens[:2])
-    return re.match(rf"^\s*{subject_pattern}\s*:", title_text) is not None
+    return re.match(rf"^\s*(?:\[[^\]]+\]\s*)?{subject_pattern}\s*:", title_text) is not None
 
 
 def _is_probably_official_resource_result(*,

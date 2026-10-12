@@ -4168,7 +4168,7 @@ class MySearchClient(ProviderTransport):
                     query=query,
                     max_results=max_results,
                     topic="news" if intent in {"news", "status"} else "general",
-                    include_answer=True,
+                    include_answer=include_answer,
                     include_content=include_content,
                     include_domains=include_domains,
                     exclude_domains=exclude_domains,

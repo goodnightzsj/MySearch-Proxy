@@ -300,7 +300,7 @@ def _extract_result_event_answer_from_text(
                     r"([A-Z][A-Za-z0-9'’&.\- ]{2,100})\s+is\s+the\s+(?:20\d{2}\s+)?best actor winner",
                     r"best actor\s+winner\s+([^\n.;]{2,100})",
                     r"best actor[ \t]*[–—:][ \t]*([^\n.;]{2,100})",
-                    r"best actor(?:[ \t]+winner)?(?:[ \t]+was|[ \t]+is|[ \t]+goes to|[ \t]+went to)?[ \t]+([^\n.;]{2,100})",
+                    r"best actor(?:[ \t]+winner)?[ \t]+(?:was|is|goes to|went to)[ \t]+([^\n.;]{2,100})",
                     r"([A-Z][A-Za-z0-9'’&.\- ]{2,100})\s+won\s+best actor",
                 ],
                 reject_substrings=[

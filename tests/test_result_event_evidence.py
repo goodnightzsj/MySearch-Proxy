@@ -126,6 +126,29 @@ class ResultEventEvidenceTests(unittest.TestCase):
         )
         self.assertEqual(answer, "")
 
+    def test_best_actor_does_not_promote_people_without_winner_statement(self):
+        for text in (
+            "Best actor competitors Avery Cole and Casey Morgan greeted each other.",
+            "Best actor candidates Avery Cole and Casey Morgan attended the ceremony.",
+            "Best actor presenters Avery Cole and Casey Morgan took the stage.",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(events._extract_result_event_answer(
+                    query="2026 Oscars best actor winner",
+                    results=[{"title": "2026 Oscars ceremony", "snippet": text}],
+                ), "")
+
+    def test_best_actor_keeps_explicit_winner_and_category_labels(self):
+        for text in (
+            "Best actor winner Casey Morgan.", "Best actor is Casey Morgan.",
+            "Best actor goes to Casey Morgan.", "Best actor: Casey Morgan.",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(events._extract_result_event_answer(
+                    query="2026 Oscars best actor winner",
+                    results=[{"title": "2026 Oscars ceremony", "snippet": text}],
+                ), "Best Actor winner: Casey Morgan")
+
     def test_record_prefers_explicit_work_over_earlier_performers(self):
         answer = events._extract_result_event_answer(
             query="2026 Grammy Record of the Year winner",
