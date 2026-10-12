@@ -95,10 +95,9 @@ def _extract_result_event_answer(
             answer = _strict_award_answer(query_lower=query_lower, text=text)
             if answer:
                 return answer
-        if signal_texts:
-            answer = _strict_award_answer(
-                query_lower=query_lower, text="\n".join(signal_texts)
-            )
+        # Keep structural winner lists within one source, including its combined fields.
+        for text in signal_texts:
+            answer = _strict_award_answer(query_lower=query_lower, text=text)
             if answer:
                 return answer
 
@@ -155,6 +154,7 @@ _STRICT_AWARD_PATTERNS: dict[str, tuple[list[str], list[str]]] = {
             # 当成了实体 —— 由 test_..._from_headline_style_result 抓到。
             # 标题式现在时：`… Win <category> for "X" at 2026 Grammys`（Pitchfork 等常用）
             r"(?:win|wins|won)\s+(?:the\s+)?best picture\s+for\s+[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]",
+            r"\b(?:accept|accepts|accepted)\s+the\s+(?:oscar|academy award|award)\s+for\s+best picture\s+for\s+[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]",
             r"best picture\s+winner\s*[:\-–—]\s*(?:is\s+)?([^\n.;\"”’']{2,100})",
             r"best picture[^\n]{0,30}\b(?:goes to|went to|awarded to)\b\s*[\"“'‘]?([^\n.;\"”’']{2,100})",
         ],
@@ -239,6 +239,22 @@ def _strict_award_answer(*, query_lower: str, text: str) -> str:
         entity = _extract_named_fact_entity(text, patterns=patterns, reject_substrings=reject)
         if entity:
             return f"{_AWARD_LABELS[category]} winner: {entity}"
+        # A list needs a winner marker in this category, never its first nominee.
+        header = rf"(?:^|\[\.\.\.\][ \t]+)[ \t]*(?:\#{{1,6}}[ \t]+|\d+\.[ \t]+)?{re.escape(category)}[ \t]*:?[ \t]*$"
+        for match in re.finditer(header, text, flags=re.IGNORECASE | re.MULTILINE):
+            for line in text[match.end():].splitlines():
+                if not line.strip():
+                    continue
+                entry = re.match(
+                    r"^[ \t*●•✩-]*(?:(WINNER)[ \t:]+)?[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘](.*)$",
+                    line, flags=re.IGNORECASE,
+                )
+                if not entry:
+                    break
+                if entry.group(1) or re.search(r"(?:\|[ \t*]*|^[ \t*]*)WINNER[ \t*]*$", entry.group(3), re.IGNORECASE):
+                    entity = _clean_extracted_fact_entity(entry.group(2), reject_substrings=reject)
+                    if entity:
+                        return f"{_AWARD_LABELS[category]} winner: {entity}"
     return ""
 
 
@@ -265,10 +281,10 @@ def _extract_result_event_answer_from_text(
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+is\s+the\s+(?:20\d{2}\s+)?best picture winner",
                     r"best picture\s+winner\s+([^\n.;]{2,100})",
                     r"best picture\s*\.\s*winner\s*[\.\-–—: ]+\s*([^\n.;]{2,100})",
-                    r"best picture\s*[–—:]\s*[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]",
-                    r"best picture(?:\s+winner)?(?:\s*[–—:]|\s+was|\s+is|\s+goes to|\s+went to)\s+[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]",
-                    r"best picture\s*[–—:]\s*([^\n.;]{2,100})",
-                    r"best picture(?:\s+winner)?(?:\s*[–—:]|\s+was|\s+is|\s+goes to|\s+went to)\s+([^\n.;]{2,100})",
+                    r"best picture[ \t]*[–—:][ \t]*[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]",
+                    r"best picture(?:[ \t]+winner)?(?:[ \t]*[–—:]|[ \t]+was|[ \t]+is|[ \t]+goes to|[ \t]+went to)[ \t]+[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]",
+                    r"best picture[ \t]*[–—:][ \t]*([^\n.;]{2,100})",
+                    r"best picture(?:[ \t]+winner)?(?:[ \t]*[–—:]|[ \t]+was|[ \t]+is|[ \t]+goes to|[ \t]+went to)[ \t]+([^\n.;]{2,100})",
                 ],
             )
             if entity:
@@ -283,8 +299,8 @@ def _extract_result_event_answer_from_text(
                     r"([A-Z][A-Za-z0-9'’&.\- ]{2,100})\s+wins\s+best actor",
                     r"([A-Z][A-Za-z0-9'’&.\- ]{2,100})\s+is\s+the\s+(?:20\d{2}\s+)?best actor winner",
                     r"best actor\s+winner\s+([^\n.;]{2,100})",
-                    r"best actor\s*[–—:]\s*([^\n.;]{2,100})",
-                    r"best actor(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)?\s+([^\n.;]{2,100})",
+                    r"best actor[ \t]*[–—:][ \t]*([^\n.;]{2,100})",
+                    r"best actor(?:[ \t]+winner)?(?:[ \t]+was|[ \t]+is|[ \t]+goes to|[ \t]+went to)?[ \t]+([^\n.;]{2,100})",
                     r"([A-Z][A-Za-z0-9'’&.\- ]{2,100})\s+won\s+best actor",
                 ],
                 reject_substrings=[
@@ -310,8 +326,8 @@ def _extract_result_event_answer_from_text(
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+[–—:]\s*album of the year",
                     r"album of the year\s+winner\s+([^\n.;]{2,100})",
                     r"album of the year\s*\.\s*winner\s*[\.\-–—: ]+\s*([^\n.;]{2,100})",
-                    r"album of the year\s*[·•]\s*([^\n.;]{2,100})",
-                    r"album of the year\s*[–—:]\s*([^\n.;]{2,100})",
+                    r"album of the year[ \t]*[·•][ \t]*([^\n.;]{2,100})",
+                    r"album of the year[ \t]*[–—:][ \t]*([^\n.;]{2,100})",
                     r"album of the year(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)\s+([^\n.;]{2,100})",
                     r"([^\n.;]{2,100})\s+won\s+album of the year",
                     r"([^\n.;]{2,100})\s+(?:won|wins)[^\n]{0,40}\balbum of the year\b",
@@ -344,8 +360,8 @@ def _extract_result_event_answer_from_text(
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+(?:won|wins)[^\n]{0,80}\brecord of the year\b",
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+[–—:]\s*record of the year",
                     r"record of the year\s+winner\s+([^\n.;]{2,100})",
-                    r"record of the year\s*[–—:]\s*([^\n.;]{2,100})",
-                    r"record of the year(?:\s+winner)?(?:\s+was|\s+is|\s+goes to|\s+went to)?\s+([^\n.;]{2,100})",
+                    r"record of the year[ \t]*[–—:][ \t]*([^\n.;]{2,100})",
+                    r"record of the year(?:[ \t]+winner)?[ \t]+(?:was|is|goes to|went to)[ \t]+([^\n.;]{2,100})",
                     r"([^\n.;]{2,100})\s+wins\s+record of the year",
                     r"([^\n.;]{2,100})\s+won\s+record of the year",
                 ],
@@ -366,7 +382,10 @@ def _extract_result_event_answer_from_text(
                 text,
                 patterns=[
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+(?:becomes|become|became|scores|scored|tops|topped)[^\n]{0,80}(?:highest-grossing|biggest opening|opening weekend|box office)",
-                    r"([A-Z][A-Za-z0-9:,'’&\- ]{2,100})\s+(?:becomes|become|became|scores|scored|tops|topped)[^\n]{0,80}(?:highest-grossing|biggest opening|opening weekend|box office)",
+                    # Unquoted titles need a sentence boundary and title case, not a clause fragment.
+                    r"(?:^|\n|[.!?]\s+)[#* ]*((?-i:[A-Z][A-Za-z0-9:,'’&\-]*)"
+                    r"(?:[ \t]+(?-i:[A-Z0-9][A-Za-z0-9:,'’&\-]*|[&-]|a|an|and|at|by|for|from|in|of|on|the|to|with)){0,14})[ \t]+"
+                    r"(?:becomes|become|became|scores|scored|tops|topped)[^\n]{0,80}(?:highest-grossing|biggest opening|opening weekend|box office)",
                 ],
             )
             if entity:

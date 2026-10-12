@@ -4,6 +4,110 @@ from mysearch.research import events
 
 
 class ResultEventEvidenceTests(unittest.TestCase):
+    def test_award_list_uses_explicit_winner_not_first_nominee(self):
+        for category, label in (("Record of the Year", "Record of the Year"),
+                                ("Best Picture", "Best Picture")):
+            for text in (f'## {category}\n\n“Opening Song” — Artist\n“Actual Work” — Artist | WINNER',
+                         f'1. {category}\n\n● "Opening Song" by Artist\n✩ WINNER: "Actual Work" by Artist',
+                         f'{category}\n“Opening Song”\n“Actual Work” WINNER'):
+                with self.subTest(category=category, text=text):
+                    answer = events._extract_result_event_answer(
+                        query=f"2026 {category} winner",
+                        results=[{"title": "2026 winners and nominees", "snippet": text}],
+                    )
+                    self.assertEqual(answer, f"{label} winner: Actual Work")
+
+    def test_nominee_list_does_not_borrow_another_category_winner(self):
+        for heading in ("## Album of the Year", "2. Album of the Year", "Pop solo performance"):
+            for separator in ("\n", ":\n"):
+                with self.subTest(heading=heading, separator=separator):
+                    answer = events._extract_result_event_answer(
+                        query="2026 Record of the Year winner",
+                        results=[{"title": "2026 nominees", "snippet": (
+                            "Record of the Year" + separator + '“Opening Song”\n\n'
+                            + heading + '\n“Other Work” | WINNER'
+                        )}],
+                    )
+                    self.assertEqual(answer, "")
+
+    def test_record_list_work_outranks_recipient_only_statement(self):
+        answer = events._extract_result_event_answer(
+            query="2026 Grammy Record of the Year winner",
+            results=[{"title": "2026 Grammy winners", "snippet": "Record of the Year went to Two Artists."},
+                     {"title": "2026 Grammy winners", "snippet": 'Record of the Year\n"Opening Song"\n"Actual Work" | WINNER'}],
+        )
+        self.assertEqual(answer, "Record of the Year winner: Actual Work")
+
+    def test_other_award_headers_do_not_promote_a_nominee(self):
+        for category in ("Best Picture", "Best Actor", "Album of the Year"):
+            with self.subTest(category=category):
+                self.assertEqual(events._extract_result_event_answer(
+                    query=f"2026 {category} winner",
+                    results=[{"title": "2026 nominees", "snippet": (
+                        f'{category}:\n“Opening Song”\n\nPop solo performance\n“Other Work” | WINNER'
+                    )}],
+                ), "")
+
+    def test_award_list_supports_repeated_numbered_excerpt_heading(self):
+        self.assertEqual(events._extract_result_event_answer(
+            query="2026 Grammy Record of the Year winner",
+            results=[{"title": "2026 Grammy winners", "snippet": (
+                '1. Record of the Year [...] 1. Record of the Year\n'
+                '● "Opening Song" by Artist\n✩ WINNER: "Actual Work" by Artist'
+            )}],
+        ), "Record of the Year winner: Actual Work")
+
+    def test_best_picture_acceptance_identifies_the_film(self):
+        answer = events._extract_result_event_answer(
+            query="2026 Oscars Best Picture winner",
+            results=[{"title": "2026 Oscars winners", "snippet": 'The producers accept the Oscar for best picture for “Actual Film.”'}],
+        )
+        self.assertEqual(answer, "Best Picture winner: Actual Film")
+
+    def test_award_list_does_not_join_different_pages(self):
+        self.assertEqual(events._extract_result_event_answer(
+            query="2026 Record of the Year winner",
+            results=[{"url": "https://a.test/record", "title": "Record of the Year", "snippet": "Record of the Year"},
+                     {"url": "https://b.test/album", "title": "Album of the Year", "snippet": '"Other Work" | WINNER'}],
+        ), "")
+
+    def test_award_list_can_join_fields_of_the_same_page(self):
+        self.assertEqual(events._extract_result_event_answer(
+            query="2026 Record of the Year winner",
+            results=[{"title": "2026 winners", "snippet": "Record of the Year",
+                      "content": '"Actual Work" | WINNER'}],
+        ), "Record of the Year winner: Actual Work")
+
+    def test_box_office_does_not_extract_mid_sentence_fragments(self):
+        for text in (
+            'The film crossed the $1 billion milestone in just four days and became the highest-grossing release.',
+            'Gen Z has also become the biggest opening weekend audience.',
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(events._extract_result_event_answer_from_text(
+                    query_lower="2026 highest grossing movie opening weekend", text=text,
+                ), "")
+
+    def test_box_office_keeps_unquoted_title_and_sentence_boundary(self):
+        for text in (
+            'Project Hail Mary becomes the biggest opening weekend story.',
+            'News update. Project Hail Mary becomes the biggest opening weekend story.',
+            'News update\nProject Hail Mary becomes the biggest opening weekend story.',
+            'News update\r\nProject Hail Mary becomes the biggest opening weekend story.',
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(events._extract_result_event_answer_from_text(
+                    query_lower="2026 highest grossing movie opening weekend", text=text,
+                ), "Top opening-weekend title: Project Hail Mary")
+
+    def test_box_office_keeps_title_numbers_and_connectors(self):
+        for title in ("Toy Story 5", "Solar Harbor - Final Journey", "Thunder & Lightning"):
+            with self.subTest(title=title):
+                self.assertEqual(events._extract_result_event_answer_from_text(
+                    query_lower="2026 highest grossing movie opening weekend",
+                    text=f"{title} becomes the biggest opening weekend story.",
+                ), f"Top opening-weekend title: {title}")
+
     def test_best_actor_uses_person_not_quoted_film(self):
         answer = events._extract_result_event_answer(
             query="2026 Oscars best actor winner",
