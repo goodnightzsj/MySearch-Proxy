@@ -60,6 +60,7 @@ def _minimal_config(tavily_keys: list[str]) -> MySearchConfig:
         server_name="test",
         timeout_seconds=10,
         crawl_timeout_seconds=20,
+        research_timeout_seconds=20,
         xai_social_timeout_seconds=120,
         xai_model="grok-test",
         xai_models=(),

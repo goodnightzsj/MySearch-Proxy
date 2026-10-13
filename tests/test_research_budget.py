@@ -91,6 +91,35 @@ class ResearchBudgetTests(unittest.TestCase):
             client.research(lambda: wait_before_retry(1.5))
         self.assertLess(time.monotonic() - started, 0.3)
 
+    def test_research_uses_its_own_timeout_budget(self):
+        """research 是复合操作（发现+并行抓取+补搜），冷启动天然比单次检索慢。
+
+        与 crawl 同理（A1）：共用检索的 45s 会让贴边的冷启动超时
+        （loop60 research-03 冷启动 45.02s 超时，复测 44.2s）。
+        """
+        client = self.client(0.05)
+        client.config.research_timeout_seconds = 0.3
+        release = Event()
+        try:
+            started = time.monotonic()
+            with self.assertRaises(MySearchError):
+                client.research(lambda: release.wait(0.6))
+            elapsed = time.monotonic() - started
+            # 用 research 预算（0.3s）而不是检索预算（0.05s）
+            self.assertGreaterEqual(elapsed, 0.2)
+            self.assertLess(elapsed, 0.5)
+        finally:
+            release.set()
+
+    def test_research_timeout_falls_back_when_field_absent(self):
+        """没有 research 预算字段的旧 config 必须回退到检索预算。"""
+        client = self.client(0.05)
+        self.assertFalse(hasattr(client.config, "research_timeout_seconds"))
+        started = time.monotonic()
+        with self.assertRaises(MySearchError):
+            client.research(lambda: time.sleep(0.3))
+        self.assertLess(time.monotonic() - started, 0.2)
+
     def test_direct_source_fetches_use_remaining_budget(self):
         client = self.client()
         client._http.get.return_value.text = '<meta name="citation_title" content="Paper title">'

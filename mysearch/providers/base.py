@@ -66,7 +66,13 @@ def budgeted_research(method):
     @wraps(method)
     def run(self, *args, **kwargs):
         started = time.monotonic()
-        timeout = float(self.config.timeout_seconds)
+        # research 是复合操作（多轮发现 + 并行抓取 + 补搜），冷启动天然比单次
+        # 检索慢；与 crawl 同理用独立预算，避免贴边的冷启动周期性超时。回退到
+        # `timeout_seconds` 以兼容没有该字段的旧 config。
+        timeout = float(
+            getattr(self.config, "research_timeout_seconds", 0)
+            or self.config.timeout_seconds
+        )
         parent_remaining = remaining_request_seconds()
         if parent_remaining is not None:
             timeout = min(timeout, parent_remaining)

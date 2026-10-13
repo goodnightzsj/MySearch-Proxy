@@ -293,6 +293,7 @@ class MySearchConfig:
     server_name: str
     timeout_seconds: int
     crawl_timeout_seconds: int
+    research_timeout_seconds: int
     xai_social_timeout_seconds: int
     xai_model: str
     xai_models: tuple[GrokModelSpec, ...]
@@ -348,6 +349,11 @@ class MySearchConfig:
             # crawl-map-02 的 45s 超时即此）。默认 90s，与矩阵该行的 60000ms 预算
             # 留出余量。
             crawl_timeout_seconds=max(5, _get_int("MYSEARCH_CRAWL_TIMEOUT_SECONDS", 90)),
+            # research 同样是**复合操作**：多轮发现 + 并行抓取 + 可能的补搜，
+            # 冷启动实测 23.9–30.6s，最坏撞到 45s（loop60 research-03 冷启动
+            # 45.02s 超时，直接复测同一 query 冷启动 44.2s）。用检索的 45s 会让
+            # 贴边的冷启动周期性失败，所以与 crawl 一样分离出独立预算。
+            research_timeout_seconds=max(5, _get_int("MYSEARCH_RESEARCH_TIMEOUT_SECONDS", 90)),
             xai_social_timeout_seconds=max(30, _get_int("MYSEARCH_XAI_SOCIAL_TIMEOUT_SECONDS", 120)),
             xai_model=_get_str(
                 "MYSEARCH_XAI_MODEL",
