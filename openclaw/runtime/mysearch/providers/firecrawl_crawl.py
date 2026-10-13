@@ -179,10 +179,17 @@ def crawl_firecrawl(
 ) -> dict[str, Any]:
     provider = transport.config.firecrawl
     key = transport._get_key_or_raise(provider)
+    # crawl 的单次请求预算独立于检索预算：上游 crawl 作业实测固定 13–15s，
+    # 用检索的 `timeout_seconds`（默认 45s）去卡单次轮询，会让正常但偏慢的
+    # crawl 被判超时。回退到 `timeout_seconds` 以兼容没有该字段的旧 config。
+    request_timeout_seconds = float(
+        getattr(transport.config, "crawl_timeout_seconds", 0)
+        or transport.config.timeout_seconds
+    )
     configured_crawl_timeout = (
         timeout_seconds
         if timeout_seconds is not None
-        else transport.config.timeout_seconds + MAX_PINNED_KEY_RETRY_DELAY_SECONDS
+        else request_timeout_seconds + MAX_PINNED_KEY_RETRY_DELAY_SECONDS
     )
     crawl_timeout_seconds = max(0.001, float(configured_crawl_timeout))
     deadline = time.monotonic() + crawl_timeout_seconds
@@ -191,7 +198,7 @@ def crawl_firecrawl(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise MySearchError("firecrawl crawl deadline exceeded")
-        return max(0.001, min(float(transport.config.timeout_seconds), remaining))
+        return max(0.001, min(request_timeout_seconds, remaining))
 
     def request_with_deadline(
         *,

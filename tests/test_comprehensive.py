@@ -77,6 +77,7 @@ def _minimal_config(
     return MySearchConfig(
         server_name="test",
         timeout_seconds=10,
+        crawl_timeout_seconds=20,
         xai_social_timeout_seconds=120,
         xai_model="grok-test",
         xai_models=(),
@@ -2009,7 +2010,7 @@ class ParallelExecutionTests(unittest.TestCase):
         results, errors = client._execute_parallel(
             {
                 "primary": lambda: "primary-result",
-                "verifier": lambda: "verifier-result",
+                "secondary": lambda: "verifier-result",
                 "slow-supplement": lambda: (time.sleep(0.2), "late")[1],
             },
             max_workers=3,
@@ -2019,9 +2020,36 @@ class ParallelExecutionTests(unittest.TestCase):
 
         self.assertLess(time.monotonic() - started, 0.15)
         self.assertEqual(results["primary"], "primary-result")
-        self.assertEqual(results["verifier"], "verifier-result")
+        self.assertEqual(results["secondary"], "verifier-result")
         self.assertIn("slow-supplement", errors)
         self.assertIn("quorum", str(errors["slow-supplement"]))
+
+    def test_exa_supplement_does_not_satisfy_the_verifier_quorum(self) -> None:
+        """`exa_supplement` 是补充角色，不能顶替 secondary 触发 quorum。
+
+        loop55 docs-02：tavily 先返回、exa_supplement 也返回，`len(results)>=2`
+        就把 firecrawl(secondary) 取消掉，于是主验证者从未参与，期望 URL 落榜。
+        """
+        client = _make_client()
+
+        started = time.monotonic()
+        results, errors = client._execute_parallel(
+            {
+                "primary": lambda: "primary-result",
+                "exa_supplement": lambda: "supplement-result",
+                "secondary": lambda: (time.sleep(0.3), "verifier-result")[1],
+            },
+            max_workers=3,
+            timeout_seconds=1,
+            stop_after_primary_and_verifier=True,
+        )
+
+        # 必须等 secondary，而不是被 exa_supplement 提前触发取消。
+        self.assertGreaterEqual(time.monotonic() - started, 0.25)
+        self.assertEqual(results["primary"], "primary-result")
+        self.assertEqual(results["secondary"], "verifier-result")
+        self.assertEqual(results["exa_supplement"], "supplement-result")
+        self.assertEqual(errors, {})
 
     def test_raise_parallel_error_reraises_mysearch_error(self) -> None:
         client = _make_client()

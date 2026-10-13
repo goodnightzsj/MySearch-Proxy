@@ -301,7 +301,12 @@ class MySearchClientTests(unittest.TestCase):
             )
         )
 
-    def test_verify_blend_returns_after_first_verifier_and_propagates_timeout(self) -> None:
+    def test_verify_blend_waits_for_secondary_and_propagates_timeout(self) -> None:
+        """verify 必须等 secondary（真正的验证者），不能被 exa_supplement 提前放行。
+
+        loop55 docs-02：exa 先返回就触发 quorum，把慢但更权威的 firecrawl 取消，
+        期望 URL 因此落榜。代价是 secondary 慢时 verify 要等它——这正是取舍。
+        """
         client = MySearchClient()
         captured_timeouts: dict[str, int | None] = {}
         client._provider_can_serve = lambda provider: provider.name == "exa"  # type: ignore[method-assign]
@@ -345,7 +350,9 @@ class MySearchClientTests(unittest.TestCase):
             exclude_domains=None,
         )
 
-        self.assertLess(time.monotonic() - started, 0.15)
+        # exa_supplement 不能提前放行，所以要等 firecrawl(secondary) 跑完。
+        self.assertGreaterEqual(time.monotonic() - started, 0.2)
+        self.assertIn("https://example.com/slow", [row["url"] for row in observed["results"]])
         # 断言的是"预算被下发到三个 provider 且三者一致"，而不是某个具体秒数——
         # 原实现硬写 10，改预算时会让这条测试假装是行为契约。用常量本身表达。
         expected_timeout = clients_module.OPTIONAL_VERIFY_TIMEOUT_SECONDS
@@ -354,7 +361,10 @@ class MySearchClientTests(unittest.TestCase):
             {"tavily": expected_timeout, "firecrawl": expected_timeout, "exa": expected_timeout},
         )
         self.assertEqual(observed["evidence"]["verification"], "cross-provider")
-        self.assertEqual(observed["evidence"]["providers_consulted"], ["tavily", "exa"])
+        # B1 之后 exa_supplement 不再被 quorum 提前取消，所以三者都参与。
+        self.assertEqual(
+            observed["evidence"]["providers_consulted"], ["tavily", "firecrawl", "exa"]
+        )
 
     def test_parse_result_timestamp_supports_rfc822(self) -> None:
         client = MySearchClient()
@@ -4921,7 +4931,34 @@ class MySearchClientTests(unittest.TestCase):
         )
 
     def test_crawl_caps_each_request_timeout_at_provider_timeout(self) -> None:
+        """单次 crawl 请求上限用 crawl 预算，不是检索预算。
+
+        crawl 是异步作业 + 轮询，上游作业本身固定 13–15s；用检索的 45s 去卡
+        单次请求会让正常但偏慢的 crawl 超时（loop55 crawl-map-02）。
+        """
         client = MySearchClient()
+        client._get_key_or_raise = lambda provider: SimpleNamespace(key="fc-key", source="env")  # type: ignore[method-assign]
+        timeouts: list[float] = []
+
+        def fake_request_json(**kwargs):  # type: ignore[no-untyped-def]
+            timeouts.append(float(kwargs["timeout_seconds"]))
+            return {"status": "completed", "data": []}
+
+        client._request_json_once = fake_request_json  # type: ignore[method-assign]
+
+        with patch("mysearch.clients.time.monotonic", side_effect=[100.0, 100.0, 100.0]):
+            client._crawl_firecrawl(url="https://fastapi.tiangolo.com")
+
+        self.assertEqual(timeouts, [float(client.config.crawl_timeout_seconds)])
+        self.assertGreater(client.config.crawl_timeout_seconds, client.config.timeout_seconds)
+
+    def test_crawl_request_timeout_falls_back_when_crawl_budget_absent(self) -> None:
+        """没有 crawl 预算字段的旧 config 必须回退到检索预算，不能抛错。"""
+        client = MySearchClient()
+        client.config = SimpleNamespace(**{
+            **{field: getattr(client.config, field) for field in client.config.__slots__},
+            "crawl_timeout_seconds": 0,
+        })
         client._get_key_or_raise = lambda provider: SimpleNamespace(key="fc-key", source="env")  # type: ignore[method-assign]
         timeouts: list[float] = []
 

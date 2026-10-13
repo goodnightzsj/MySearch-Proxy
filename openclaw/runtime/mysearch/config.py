@@ -292,6 +292,7 @@ class ProviderConfig:
 class MySearchConfig:
     server_name: str
     timeout_seconds: int
+    crawl_timeout_seconds: int
     xai_social_timeout_seconds: int
     xai_model: str
     xai_models: tuple[GrokModelSpec, ...]
@@ -341,6 +342,12 @@ class MySearchConfig:
         return cls(
             server_name=_get_str("MYSEARCH_NAME", "MYSEARCH_SERVER_NAME", default="MySearch"),
             timeout_seconds=max(5, _get_int("MYSEARCH_TIMEOUT_SECONDS", 45)),
+            # crawl 是**异步作业 + 轮询**，天然比单次检索慢：上游作业本身固定跑
+            # 13–15s（见 firecrawl_crawl 的轮询注释），实测整行可达 38s。用检索的
+            # 45s 预算去卡它，会让一个正常但偏慢的 crawl 被判超时（loop55
+            # crawl-map-02 的 45s 超时即此）。默认 90s，与矩阵该行的 60000ms 预算
+            # 留出余量。
+            crawl_timeout_seconds=max(5, _get_int("MYSEARCH_CRAWL_TIMEOUT_SECONDS", 90)),
             xai_social_timeout_seconds=max(30, _get_int("MYSEARCH_XAI_SOCIAL_TIMEOUT_SECONDS", 120)),
             xai_model=_get_str(
                 "MYSEARCH_XAI_MODEL",

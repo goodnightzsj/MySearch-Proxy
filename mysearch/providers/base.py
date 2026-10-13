@@ -182,13 +182,18 @@ class ProviderTransport:
                         errors[name] = exc
 
                 if stop_after_primary_and_verifier:
+                    # quorum 只认 primary + secondary（真正的交叉验证者）。
+                    # `exa_supplement` 是**补充**角色，让它顶替 secondary 会把
+                    # 慢但更权威的 secondary 提前取消掉（loop55 docs-02：tavily
+                    # 与 exa 先返回，firecrawl 从未参与，期望 URL 落榜）。
+                    verifier_succeeded = "secondary" in results
                     primary_completed = "primary" in results or "primary" in errors
-                    verifier_succeeded = any(name != "primary" for name in results)
                     primary_failed_with_verifier = (
                         "primary" in errors and verifier_succeeded
                     )
                     if primary_completed and (
-                        len(results) >= 2 or primary_failed_with_verifier
+                        ("primary" in results and verifier_succeeded)
+                        or primary_failed_with_verifier
                     ):
                         cancel_pending(
                             "parallel task cancelled after primary and verifier quorum"
