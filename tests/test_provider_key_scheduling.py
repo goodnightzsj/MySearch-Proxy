@@ -1553,6 +1553,102 @@ class ProxyForwardingSchedulingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 429)
         self.assertEqual(response.headers.get("retry-after"), "20")
 
+    async def test_crawl_status_polls_the_key_that_created_the_job_first(self) -> None:
+        """创建 crawl 的 key 决定 job 归属，状态查询必须先用它。
+
+        否则代理要从池头逐个试：473 个 key × ~400ms ≈ 190s，必然超时
+        （loop56 crawl-map-02）。上游对错 key 返回 404 Job not found。
+        """
+
+        class CreateRequest:
+            method = "POST"
+            headers = {"authorization": "Bearer fctk-client"}
+            query_params = {}
+
+            async def body(self):
+                return b'{"url":"https://example.com"}'
+
+        class StatusRequest:
+            method = "GET"
+            headers = {"authorization": "Bearer fctk-client"}
+            query_params = {}
+
+            async def body(self):
+                return b""
+
+        keys = [
+            {"id": 1, "key": "firecrawl-first"},
+            {"id": 2, "key": "firecrawl-job-key"},
+        ]
+        selected: list[str] = []
+
+        async def request(*args, **kwargs):  # type: ignore[no-untyped-def]
+            selected.append(kwargs["headers"]["Authorization"])
+            if args[0] == "POST":
+                return httpx.Response(200, json={"id": "job-42"})
+            return httpx.Response(200, json={"status": "completed", "data": []})
+
+        def next_key(_service, *, exclude_ids=None):  # type: ignore[no-untyped-def]
+            excluded = set(exclude_ids or ())
+            return next((key for key in keys if key["id"] not in excluded), None)
+
+        with patch.object(self.server, "get_token_row_or_401", return_value={"id": 9}), patch.object(
+            self.server.pool, "get_next_key", side_effect=next_key,
+        ), patch.object(self.server.pool, "report_result"), patch.object(
+            self.server.db, "log_usage",
+        ), patch.object(
+            self.server.http_client, "request", new=AsyncMock(side_effect=request)
+        ):
+            self.server.crawl_job_keys.clear()
+            await self.server.proxy_firecrawl("v2/crawl", CreateRequest())
+            created_with = selected[-1]
+
+            # 状态查询前把游标推走：只有记住 job 归属才能一次命中。
+            self.server.pool.get_next_key = lambda *a, **k: keys[0]  # type: ignore[assignment]
+            await self.server.proxy_firecrawl("v2/crawl/job-42", StatusRequest())
+
+        self.assertEqual(selected[-1], created_with)
+        self.assertEqual(selected.count(created_with), 2)
+
+    async def test_unknown_crawl_job_still_falls_back_to_pool_walk(self) -> None:
+        """代理重启后没有映射，未知 job 仍须能遍历找到属主 key。"""
+
+        class Request:
+            method = "GET"
+            headers = {"authorization": "Bearer fctk-client"}
+            query_params = {}
+
+            async def body(self):
+                return b""
+
+        keys = [
+            {"id": 1, "key": "firecrawl-first"},
+            {"id": 2, "key": "firecrawl-second"},
+        ]
+        responses = [
+            httpx.Response(404, json={"error": "Job not found"}),
+            httpx.Response(200, json={"status": "completed", "data": []}),
+        ]
+
+        async def request(*args, **kwargs):  # type: ignore[no-untyped-def]
+            return responses.pop(0)
+
+        def next_key(_service, *, exclude_ids=None):  # type: ignore[no-untyped-def]
+            excluded = set(exclude_ids or ())
+            return next((key for key in keys if key["id"] not in excluded), None)
+
+        with patch.object(self.server, "get_token_row_or_401", return_value={"id": 9}), patch.object(
+            self.server.pool, "get_next_key", side_effect=next_key,
+        ), patch.object(self.server.pool, "report_result"), patch.object(
+            self.server.db, "log_usage",
+        ), patch.object(
+            self.server.http_client, "request", new=AsyncMock(side_effect=request)
+        ):
+            self.server.crawl_job_keys.clear()
+            response = await self.server.proxy_firecrawl("v2/crawl/job-unknown", Request())
+
+        self.assertEqual(json.loads(response.body), {"status": "completed", "data": []})
+
     async def test_mixed_rate_and_terminal_failures_prefer_recoverable_key(self) -> None:
         class Request:
             method = "POST"

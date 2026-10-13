@@ -453,6 +453,52 @@ TAVILY_UPSTREAM_ADMIN_COOKIE = os.environ.get("TAVILY_UPSTREAM_ADMIN_COOKIE", ""
 FIRECRAWL_API_BASE = "https://api.firecrawl.dev"
 EXA_API_BASE = "https://api.exa.ai"
 
+#: Firecrawl 的 crawl job 绑定创建它的那个 key；状态查询用别的 key 会得到
+#: `404 Job not found`。不记住归属，代理就只能从池头逐个试 —— 473 个 key ×
+#: ~400ms ≈ 190s，必然超时（loop56 crawl-map-02）。这里记 `job_id -> key`，
+#: 状态查询优先命中；映射是**优化而非必需**，miss 时仍回退池遍历。
+CRAWL_JOB_KEY_TTL_SECONDS = 3600
+CRAWL_JOB_KEY_MAX_ENTRIES = 512
+_crawl_job_keys: dict[str, tuple[str, float]] = {}
+_crawl_job_keys_lock = threading.Lock()
+#: 兼容既有测试的别名（`self.server.crawl_job_keys`）。
+crawl_job_keys = _crawl_job_keys
+
+
+def _remember_crawl_job_key(path: str, method: str, payload: object, upstream_key: str) -> None:
+    """创建 crawl 成功后记下 job 归属；其他路径不动。"""
+    if not upstream_key or not isinstance(payload, dict):
+        return
+    normalized = path.strip("/")
+    if method.upper() != "POST" or normalized != "v2/crawl":
+        return
+    job_id = payload.get("id")
+    if not isinstance(job_id, str) or not job_id:
+        return
+    now = time.monotonic()
+    with _crawl_job_keys_lock:
+        if len(_crawl_job_keys) >= CRAWL_JOB_KEY_MAX_ENTRIES:
+            expired = [k for k, (_, exp) in _crawl_job_keys.items() if exp <= now]
+            for k in expired:
+                del _crawl_job_keys[k]
+            while len(_crawl_job_keys) >= CRAWL_JOB_KEY_MAX_ENTRIES:
+                _crawl_job_keys.pop(next(iter(_crawl_job_keys)))
+        _crawl_job_keys[job_id] = (upstream_key, now + CRAWL_JOB_KEY_TTL_SECONDS)
+
+
+def _preferred_crawl_job_key(job_id: str) -> str:
+    """返回该 job 的属主 key；没有映射或已过期时返回空串。"""
+    now = time.monotonic()
+    with _crawl_job_keys_lock:
+        entry = _crawl_job_keys.get(job_id)
+        if entry is None:
+            return ""
+        key, expires_at = entry
+        if expires_at <= now:
+            del _crawl_job_keys[job_id]
+            return ""
+        return key
+
 
 def _normalize_path(value, default):
     normalized = (value or "").strip() or default
@@ -3817,8 +3863,17 @@ async def proxy_firecrawl(path: str, request: Request):
         re.fullmatch(r"v2/crawl/[^/]+", path.strip("/"))
     )
     attempted_key_ids = set()
-    while True:
+    # crawl 状态查询先试创建该 job 的 key，避免从池头逐个试（473 个 key ≈ 190s）。
+    if crawl_status_request:
+        preferred_key = _preferred_crawl_job_key(path.strip("/").split("/", 2)[-1])
+        key_info = (
+            pool.get_key_by_value("firecrawl", preferred_key) if preferred_key else None
+        )
+        if key_info is None:
+            key_info = pool.get_next_key("firecrawl", exclude_ids=attempted_key_ids)
+    else:
         key_info = pool.get_next_key("firecrawl", exclude_ids=attempted_key_ids)
+    while True:
         if not key_info:
             selected_failure = _select_key_pool_failure(key_failures)
             if selected_failure is not None:
@@ -3879,9 +3934,11 @@ async def proxy_firecrawl(path: str, request: Request):
         )
         if failure_kind:
             key_failures.append((resp, key_info["key"], failure_kind))
+            key_info = pool.get_next_key("firecrawl", exclude_ids=attempted_key_ids)
             continue
         if crawl_status_request and resp.status_code in {403, 404}:
             last_scope_miss = (resp, key_info["key"])
+            key_info = pool.get_next_key("firecrawl", exclude_ids=attempted_key_ids)
             continue
         break
 
@@ -3895,18 +3952,22 @@ async def proxy_firecrawl(path: str, request: Request):
     content_type = resp.headers.get("content-type", "").lower()
     if "application/json" in content_type:
         try:
-            return JSONResponse(
-                content=resp.json(),
-                status_code=resp.status_code,
-                headers=_upstream_retry_headers(resp),
-            )
+            payload = resp.json()
         except Exception:
-            return Response(
-                content=resp.content,
+            payload = None
+        if payload is not None:
+            _remember_crawl_job_key(path, request.method, payload, last_upstream_key)
+            return JSONResponse(
+                content=payload,
                 status_code=resp.status_code,
-                media_type=content_type,
                 headers=_upstream_retry_headers(resp),
             )
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            media_type=content_type,
+            headers=_upstream_retry_headers(resp),
+        )
     return forward_raw_response(resp)
 
 

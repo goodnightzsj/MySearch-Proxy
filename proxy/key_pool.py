@@ -58,6 +58,24 @@ class ServiceKeyPool:
             selected["_pool_generation"] = self._generations[service]
             return selected
 
+    def get_key_by_value(self, service, key_value):
+        """按 key 值取池中该 key；不在池中或已被排除时返回 None。
+
+        crawl job 绑定创建它的 key，状态查询需要精确命中而不是 round-robin。
+        """
+        if not key_value:
+            return None
+        service = normalize_service(service)
+        with self._lock:
+            if service not in self._initialized:
+                self._reload_service_locked(service)
+            for key in self._keys[service]:
+                if key.get("key") == key_value:
+                    selected = dict(key)
+                    selected["_pool_generation"] = self._generations[service]
+                    return selected
+            return None
+
     def invalidate(self, service):
         service = normalize_service(service)
         with self._lock:
