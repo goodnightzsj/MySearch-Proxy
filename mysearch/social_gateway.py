@@ -53,6 +53,7 @@ logger = logging.getLogger(__name__)
 
 # r7 A1: 改从 grok_registry 子模块导入，避免触发 config 顶层 bootstrap 副作用。
 from .grok_registry import _BUILTIN_GROK_MODELS, _resolve_grok_models
+from .errors import classify_upstream_key_failure
 
 
 def _env_str(name: str, default: str = "") -> str:
@@ -922,28 +923,38 @@ def build_social_search_upstream_payload(body: dict[str, Any]) -> dict[str, Any]
     return payload
 
 
-def _classify_social_key_failure(status_code: int, detail: str = "") -> str:
-    normalized = " ".join(str(detail or "").lower().split())
-    quota_markers = (
-        "quota_exhausted", "quota exhausted", "insufficient_quota", "insufficient quota",
-        "credits exhausted", "credit exhausted", "credits limit", "credit limit",
-        "exceeded your credits", "no credits remaining", "billing limit", "usage limit",
-        "plan limit", "resource_exhausted",
-    )
-    auth_markers = (
-        "invalid api key", "invalid_api_key", "api key is invalid", "api key has expired",
-        "expired api key", "revoked api key", "invalid token", "token is invalid",
-        "token has expired", "expired token", "revoked token", "bad credentials",
-        "authentication failed",
-    )
-    has_quota_marker = any(marker in normalized for marker in quota_markers)
-    if status_code in {402, 432} or (status_code in {403, 429} and has_quota_marker):
-        return "quota_exhausted"
-    if status_code == 429:
-        return "rate_limited"
-    if status_code == 401 or (status_code == 403 and any(marker in normalized for marker in auth_markers)):
-        return "auth_rejected"
-    return ""
+def _classify_social_key_failure(status_code: int, detail: Any = "") -> str:
+    return classify_upstream_key_failure(status_code, detail, service="xai")
+
+
+def _social_model_cooldown(state, model, *, claim=False):
+    identity = json.dumps([state["upstream_base_url"], state["upstream_responses_path"], model])
+    scope = "model:" + _social_key_fingerprint(identity)
+    now = time.time()
+    with social_upstream_key_lock:
+        entry = social_upstream_key_schedule.get(scope)
+        if not entry:
+            return scope, 0, None
+        delay = max(0, math.ceil(entry["until"] - now))
+        if delay or not claim:
+            return scope, delay, None
+        until = now + SOCIAL_GATEWAY_TIMEOUT_SECONDS + 5
+        social_upstream_key_schedule[scope] = {**entry, "until": until}
+    return scope, 0, until
+
+
+def _social_model_recovery(state):
+    models = unique_preserve_order([state.get("model"), state.get("fallback_model")])
+    cooldowns = []
+    for model in models:
+        _, delay, _ = _social_model_cooldown(state, model)
+        if delay:
+            cooldowns.append({"model": model, "reason": "upstream_quota_exhausted", "retry_after_seconds": delay})
+    return {
+        "cooldowns": cooldowns,
+        "retry_after_seconds": min(item["retry_after_seconds"] for item in cooldowns)
+        if models and len(cooldowns) == len(models) else 0,
+    }
 
 
 def _available_social_upstream_keys(keys: list[str] | None) -> list[str]:
@@ -981,16 +992,26 @@ def _schedule_social_upstream_key(
     key: str,
     failure_kind: str,
     retry_after_seconds: int | None = None,
+    *,
+    model_scope: str | None = None,
 ) -> None:
     with social_upstream_key_lock:
-        social_upstream_key_schedule[_social_key_fingerprint(key)] = {
+        fingerprint = model_scope or _social_key_fingerprint(key)
+        next_state = {
             "reason": failure_kind,
             "until": (
-                time.time() + max(1, int(retry_after_seconds or 60))
-                if failure_kind == "rate_limited"
+                time.time() + max(1, int(retry_after_seconds or (300 if model_scope else 60)))
+                if failure_kind in {"rate_limited", "upstream_quota_exhausted"}
                 else None
             ),
         }
+        current = social_upstream_key_schedule.get(fingerprint)
+        if current is not None and (
+            current["until"] is None
+            or (next_state["until"] is not None and current["until"] >= next_state["until"])
+        ):
+            return
+        social_upstream_key_schedule[fingerprint] = next_state
 
 
 def _social_upstream_pool_failure(keys: list[str] | None) -> tuple[str, int | None]:
@@ -1157,6 +1178,14 @@ async def execute_social_search_attempt(
             failure_kind=failure_kind,
         )
 
+    model_scope, retry_after, probe_until = _social_model_cooldown(state, model, claim=True)
+    if retry_after:
+        return build_social_attempt_summary(
+            model, False, error="Upstream model quota is waiting for recovery",
+            status_code=429, latency_ms=0, failure_kind="upstream_quota_exhausted",
+            retry_after_seconds=retry_after,
+        )
+
     last_key_failure: dict[str, Any] | None = None
     last_key_failure_kind = ""
     rate_limit_failure: dict[str, Any] | None = None
@@ -1207,10 +1236,15 @@ async def execute_social_search_attempt(
                 ADMIN_PASSWORD,
                 *state.get("accepted_tokens", []),
             )
-            failure_kind = _classify_social_key_failure(response.status_code, classification_detail)
+            failure_kind = _classify_social_key_failure(
+                response.status_code,
+                upstream_body if isinstance(upstream_body, dict) else classification_detail,
+            )
             retry_after_seconds = _parse_retry_after_header(getattr(response, "headers", None))
             if failure_kind == "rate_limited" and retry_after_seconds is None:
                 retry_after_seconds = 60
+            if failure_kind == "upstream_quota_exhausted" and retry_after_seconds is None:
+                retry_after_seconds = 300
             logger.warning("social upstream error %s: %s", response.status_code, safe_error)
             attempt = build_social_attempt_summary(
                 model,
@@ -1222,7 +1256,12 @@ async def execute_social_search_attempt(
                 retry_after_seconds=retry_after_seconds,
             )
             if failure_kind:
-                _schedule_social_upstream_key(upstream_key, failure_kind, retry_after_seconds)
+                _schedule_social_upstream_key(
+                    upstream_key, failure_kind, retry_after_seconds,
+                    model_scope=model_scope if failure_kind == "upstream_quota_exhausted" else None,
+                )
+                if failure_kind == "upstream_quota_exhausted":
+                    return attempt
                 last_key_failure = attempt
                 last_key_failure_kind = failure_kind
                 if failure_kind == "rate_limited" and (
@@ -1271,6 +1310,11 @@ async def execute_social_search_attempt(
             status_code=502,
             latency_ms=latency_ms,
         )
+
+    if probe_until is not None:
+        with social_upstream_key_lock:
+            if social_upstream_key_schedule.get(model_scope, {}).get("until") == probe_until:
+                social_upstream_key_schedule.pop(model_scope, None)
 
     normalized = normalize_search_response(
         query,
@@ -1384,8 +1428,10 @@ async def _build_health_payload() -> dict[str, Any]:
     configured_keys = state.get("upstream_api_keys") or [state.get("resolved_upstream_api_key")]
     configured_keys = unique_preserve_order(configured_keys)
     available_keys = _available_social_upstream_keys(configured_keys)
+    recovery = _social_model_recovery(state)
     return {
-        "ok": bool(available_keys and state["accepted_tokens"]),
+        "ok": bool(available_keys and state["accepted_tokens"] and not recovery["retry_after_seconds"]),
+        "model_recovery": recovery,
         "mode": state["mode"],
         "upstream_base_url": state["upstream_base_url"],
         "upstream_responses_path": state["upstream_responses_path"],
@@ -1490,7 +1536,10 @@ async def social_search(request: Request) -> dict[str, Any]:
             requested_max_results=max_results,
         )
 
-    if has_social_fallback(primary_model, fallback_model) and not primary_attempt.get("failure_kind"):
+    if (
+        has_social_fallback(primary_model, fallback_model)
+        and primary_attempt.get("failure_kind") in {None, "", "upstream_quota_exhausted"}
+    ):
         fallback_reason = "upstream_error"
         fallback_attempt = await execute_social_search_attempt(
             query,

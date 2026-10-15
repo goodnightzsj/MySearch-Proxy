@@ -1043,8 +1043,14 @@ function socialStatusLabel(social) {
   if (social?.mode === 'local' && state.canProxySearch) return '本地模式已就绪';
   if (state.canProxySearch && state.adminConnected) return '推理与管理均已接通';
   if (state.canProxySearch) return '已可转发搜索';
+  if (isSocialModelCoolingDown(state)) return '上游模型额度冷却中';
   if (state.adminConnected) return '管理已接通，推理待配置';
   return '等待配置';
+}
+
+// 冷却与隔离是两回事：冷却期 key 仍可调度，只是模型路由暂时没额度。
+function isSocialModelCoolingDown(state) {
+  return Number(state?.modelRecovery?.retry_after_seconds || 0) > 0;
 }
 
 function getTavilyRuntimeState(payload) {
@@ -1141,6 +1147,9 @@ function getSocialUpstreamState(social) {
     acceptedTokenCount,
     adminConnected: Boolean(visibility.admin_connected ?? social?.admin_connected),
     tokenSource: visibility.token_source || social?.token_source || 'not_configured',
+    // 上游模型额度冷却：key 仍然有效，只是该模型路由暂时没额度。
+    // 与 key 被隔离区分开，否则会误报成“推理待配置”。
+    modelRecovery: visibility.model_recovery || social?.model_recovery || {},
   };
 }
 
@@ -1313,6 +1322,13 @@ function getQuickstartProviderCards(services = latestServices, social = latestSo
       title: '已可转发搜索',
       desc: `上游 key ${fmtNum(socialState.upstreamApiKeyCount)} · 客户端 token ${fmtNum(socialState.acceptedTokenCount)} · 后台统计未接通`,
     });
+  } else if (isSocialModelCoolingDown(socialState)) {
+    cards.push({
+      label: 'Social / X',
+      tone: 'warn',
+      title: '上游模型额度冷却中',
+      desc: `连接 Key 仍然有效；${socialState.modelRecovery.cooldowns.map((item) => item.model).join('、')} 路由额度暂不可用，冷却结束后自动探测恢复`,
+    });
   } else if (social?.admin_connected) {
     cards.push({
       label: 'Social / X',
@@ -1432,6 +1448,14 @@ function workspaceSignal(service, services, social) {
   if (service === 'social') {
     const socialState = getSocialUpstreamState(social || {});
     if (!socialState.canProxySearch) {
+      if (isSocialModelCoolingDown(socialState)) {
+        return {
+          tone: 'warn',
+          label: '模型额度冷却中',
+          summary: `${meta.label} 连接 Key 仍然有效，是上游模型路由额度暂不可用；冷却结束后自动探测恢复。`,
+          snapshot,
+        };
+      }
       return {
         tone: 'danger',
         label: socialState.adminConnected ? '推理待配置' : '待配置',
@@ -3525,7 +3549,9 @@ function renderSocialWorkspace(social) {
       mode,
       `${keyScopeLabel} ${fmtNum(socialState.upstreamAvailableKeyCount)} 可调度 / ${fmtNum(socialState.upstreamApiKeyCount)} 总数`,
       `客户端 token ${fmtNum(socialState.acceptedTokenCount)}`,
-      socialState.canProxySearch ? '已可转发搜索' : '待补鉴权',
+      socialState.canProxySearch
+        ? '已可转发搜索'
+        : (isSocialModelCoolingDown(socialState) ? '上游模型额度冷却中' : '待补鉴权'),
     ].join(' · ');
 
   const syncMeta = document.getElementById('sync-meta-social');

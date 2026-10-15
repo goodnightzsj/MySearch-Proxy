@@ -417,6 +417,8 @@ class ProviderTransport:
                 )
             except MySearchHTTPError as exc:
                 failure_kind = exc.key_failure_kind
+                if failure_kind == "upstream_quota_exhausted":
+                    raise
                 if failure_kind and (
                     not provider.managed_key_pool or failure_kind == "auth_rejected"
                 ):

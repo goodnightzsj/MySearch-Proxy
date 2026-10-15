@@ -96,7 +96,8 @@ class ServiceKeyPool:
             return max(1, min(86400, math.ceil(delay)))
 
     def _reload_service_locked(self, service):
-        self._generations[service] += 1
+        # Refreshing a snapshot must not discard results already in flight.
+        # Explicit administrative resets call invalidate() before reload().
         self._keys[service] = [dict(row) for row in get_active_keys(service)]
         if self._indexes[service] >= len(self._keys[service]):
             self._indexes[service] = 0

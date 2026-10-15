@@ -200,6 +200,9 @@ def classify_upstream_key_failure(status_code: int, detail: Any = "", *, service
         return ""
     fields = [" ".join(field.lower().split()) for field in _provider_error_fields(detail)]
     normalized = " ".join(fields)
+    # The gateway exhausted an upstream route, not the caller's client key.
+    if service == "xai" and status_code == 429 and "upstream_quota_exhausted" in fields:
+        return "upstream_quota_exhausted"
     if service == "firecrawl":
         if _FIRECRAWL_REQUEST_CODES.intersection(fields):
             return ""

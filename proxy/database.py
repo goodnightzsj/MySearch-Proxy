@@ -490,6 +490,8 @@ def update_key_usage(
                     ),
                 )
             elif normalized_kind:
+                # A late quota failure must not turn a manual/auth/account
+                # suspension into one that a later usage sync may auto-resume.
                 conn.execute(
                     """
                     UPDATE api_keys
@@ -499,6 +501,7 @@ def update_key_usage(
                         disabled_at = ?,
                         schedule_until = NULL
                     WHERE id = ?
+                      AND (active = 1 OR disabled_reason IN ('quota_exhausted', 'pay_as_you_go_limit'))
                     """,
                     (normalized_kind, normalized_detail, now, key_id),
                 )
@@ -707,9 +710,11 @@ def update_key_remote_usage(
     account_limit=None,
     account_remaining=None,
     synced_at=None,
+    sync_started_at=None,
 ):
     conn = get_conn()
     try:
+        observed_after = sync_started_at or synced_at or datetime.now(timezone.utc).isoformat()
         conn.execute(
             """
             UPDATE api_keys
@@ -751,8 +756,25 @@ def update_key_remote_usage(
                     disabled_at = ?,
                     schedule_until = NULL
                 WHERE id = ?
+                  AND (active = 1 OR disabled_reason = 'quota_exhausted')
                 """,
                 (now, key_id),
+            )
+        elif account_remaining is not None and account_remaining > 0:
+            # Only authoritative, post-disable quota observations may recover a
+            # quota suspension. Manual/auth/verification states remain untouched.
+            conn.execute(
+                """
+                UPDATE api_keys
+                SET active = 1, consecutive_fails = 0,
+                    disabled_reason = '', disabled_detail = '',
+                    disabled_at = NULL, schedule_until = NULL
+                WHERE id = ? AND active = 0
+                  AND disabled_reason IN ('quota_exhausted', 'pay_as_you_go_limit')
+                  AND disabled_at IS NOT NULL AND disabled_at <= ?
+                  AND (service = 'firecrawl' OR (service = 'tavily' AND ? > 0))
+                """,
+                (key_id, observed_after, key_remaining),
             )
         conn.commit()
     finally:

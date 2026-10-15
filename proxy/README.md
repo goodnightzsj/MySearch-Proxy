@@ -36,7 +36,7 @@
 控制台能力：
 
 - key 池
-- 429 按 `Retry-After` 临时冷却并自动换用其他 key；额度耗尽或明确鉴权失败会停用，需在控制台手工启用、替换或删除
+- 429 按 `Retry-After` 临时冷却并自动换用其他 key；额度耗尽会暂停，确认额度恢复后自动启用；鉴权失败需手工处理
 - token 池
 - 使用量同步
 - 调用统计
@@ -47,6 +47,7 @@
 - 只有补了 Hikari 的 admin 认证（ForwardAuth headers 或内建 admin cookie），控制台才会继续聚合 `/api/keys` 的 key / quota 细项
 - [Tavily 官方错误响应](https://docs.tavily.com/documentation/api-reference/endpoint/search)：`401` 停用无效凭证，`432` 停用套餐额度受限 Key，`433` 停用按量付费额度受限 Key（`pay_as_you_go_limit`）。`429` 只按 `Retry-After` 冷却，未提供时沿用 60 秒默认值；`400/422/5xx` 不停用。
 - 上游模式下 Key 池由 Hikari 等上游管理，MySearch 不会修改其 Key 或把额度不足误判为本地 `mysp-` Token 失效；额度失败返回上游池不可用 `503`。
+- 本地额度同步同时计入套餐与 PAYG；套餐为零、PAYG 未知时不推断账户耗尽。恢复 `quota_exhausted` / `pay_as_you_go_limit` 必须取得禁用之后发起的同步结果，且 Key 与账户余额均为正；不能以缺失值当作余额充足。
 
 ### Firecrawl
 
@@ -58,7 +59,7 @@
 控制台能力：
 
 - key 池
-- 429 按 `Retry-After` 临时冷却并自动换用其他 key；额度耗尽或明确鉴权失败会停用，需手工恢复
+- 429 按 `Retry-After` 临时冷却并自动换用其他 key；额度耗尽暂停后可在 credits 同步确认正余额时恢复，鉴权失败需手工处理
 - token 池
 - credits 同步
 - 调用统计
@@ -67,7 +68,7 @@ Firecrawl 错误分类依据 [官方认证代码](https://github.com/firecrawl/f
 
 - 验证过期 `sponsor_verification_expired`、未验证的 50 点额度用尽 `unverified_credit_limit_reached`、持有人封禁、账户封禁：停用当前 Key 并尝试其他 Key。控制台列表与详情显示原因、处理建议和脱敏上游信息；解决上游问题后需手动启用。
 - 无效凭证、普通额度不足仍使用既有停用策略；普通 429 仅冷却。IP 白名单、接口/格式限制、目标网站拒绝、抓取/任务错误和临时服务故障不永久停用 Key，错误响应保留上游 code/error/message。
-- 未识别的 403 不自动停用；本改动不扫描或恢复历史 Key，不新增数据库字段。额度同步错误仍单独展示，搜索/抓取请求的 Key 调度由代理池处理。
+- 未识别的 403 不自动停用；不扫描历史日志，不新增数据库字段。额度同步错误仍单独展示，搜索/抓取请求的 Key 调度由代理池处理。只有明确 `quota_exhausted` 且有禁用时间、同步确认 credits 为正的 Key 可自动恢复；验证/封禁不可据此恢复。
 
 ### Exa
 
@@ -89,7 +90,7 @@ Firecrawl 错误分类依据 [官方认证代码](https://github.com/firecrawl/f
 - [Exa 官方错误码](https://exa.ai/docs/admin/error-codes) 使用 HTTP 状态与 `tag` 联合判断：`401/INVALID_API_KEY`、`402/NO_MORE_CREDITS` 停用；`402/API_KEY_BUDGET_EXCEEDED` 和 `402/TEAM_BUDGET_EXCEEDED` 分别记录 Key/团队预算耗尽原因并停用。`429/RATE_LIMIT_EXCEEDED` 临时冷却。
 - `403/FEATURE_DISABLED`、`PROHIBITED_CONTENT`、`CONTENT_FILTER_ERROR` 只影响当前功能或内容，不停用整把 Key；`X402_*`/`MPP_*` 支付错误不等同 API Key 额度耗尽。请求参数、服务过载和 `200` 响应里的单 URL 抓取失败也不永久停用。
 
-三平台共用 `mysearch/errors.py` 的分类，Proxy 沿用 SQLite 持久化停用原因，直连 MySearch/OpenClaw 沿用进程内隔离至显式 reload。新规则在真实请求失败时触发，不回扫历史日志；界面显示中文原因与脱敏上游详情。更新不自动恢复已停用 Key，不改变 X 的既有调度规则。
+三平台共用 `mysearch/errors.py` 的分类，Proxy 沿用 SQLite 持久化停用原因，直连 MySearch/OpenClaw 沿用进程内隔离至显式 reload。不回扫历史日志；界面显示中文原因与脱敏上游详情。手工停用、鉴权、封禁、验证和无法确认来源的历史停用不自动恢复；额度同步不得覆盖这些原因。后台仅同步启用或额度暂停项，手动强制同步仍可用于诊断；Exa 无官方额度同步，保持显式恢复。普通池刷新不废弃在途结果，显式管理重置仍保护新状态不被旧请求覆盖。
 
 ### MySearch 通用 token
 
@@ -106,6 +107,10 @@ Firecrawl 错误分类依据 [官方认证代码](https://github.com/firecrawl/f
 - token 只做鉴权与统计，不做配额拦截
 
 ### Social / X
+
+上游结构化 `429/upstream_quota_exhausted` 表示模型路由额度不足，不是 gateway client key 失效。Proxy 与 standalone 均按上游地址、响应路径和模型冷却：优先 `Retry-After`，缺省 300 秒；到期一个请求探测恢复，其余请求等待，成功后解除。同 key 的其他模型与备用模型仍可尝试，`model_recovery` 健康字段显示模型与剩余冷却时间。Proxy 使用既有 SQLite schedule 持久化此状态；standalone 仍为进程内状态。该类 HTTP 错误的 `detail` 保留 `{code, message}` 结构和 `Retry-After`，避免下游再次误隔离连接 Key；其他错误的既有格式不变。
+
+普通 `quota_exhausted` 与鉴权隔离仍需显式恢复，升级不会把旧的无到期隔离直接解封。普通设置保存、只改模型或同值重填凭证不清空隔离；只有实际切换上游身份、替换/显式清空凭证池才重置。乱序的临时限流不能覆盖永久隔离或缩短已有冷却。超时/SOCKS/5xx 不永久停用 key。
 
 代理入口：
 

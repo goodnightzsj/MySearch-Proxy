@@ -393,8 +393,12 @@ def social_attempt_http_exception(attempt: dict[str, Any]) -> HTTPException:
     retry_after_seconds = attempt.get("retry_after_seconds")
     if status_code == 429 and retry_after_seconds is not None:
         headers = {"Retry-After": str(max(1, int(retry_after_seconds)))}
+    detail = attempt.get("error") or "Social search failed"
+    if attempt.get("failure_kind") == "upstream_quota_exhausted":
+        # Keep model quota distinct from client-key quota across the HTTP boundary.
+        detail = {"code": "upstream_quota_exhausted", "message": detail}
     return HTTPException(
         status_code=status_code,
-        detail=attempt.get("error") or "Social search failed",
+        detail=detail,
         headers=headers,
     )

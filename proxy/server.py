@@ -1111,7 +1111,7 @@ def reset_social_gateway_cache(*, clear_key_schedule=False):
             social_upstream_key_schedule.clear()
             social_upstream_key_generation += 1
             social_upstream_key_cursor = 0
-        db.set_setting("social_upstream_key_schedule", "{}")
+            db.set_setting("social_upstream_key_schedule", "{}")
     _clear_social_admin_session()
 
 
@@ -1808,7 +1808,11 @@ def build_social_upstream_visibility(state):
     upstream_available_key_count = len(available_upstream_api_keys)
     upstream_unavailable_key_count = max(0, upstream_api_key_count - upstream_available_key_count)
     accepted_token_count = len(state.get("accepted_tokens") or [])
-    can_proxy_search = bool(available_upstream_api_keys and state.get("accepted_tokens"))
+    recovery = _social_model_recovery(state)
+    can_proxy_search = bool(
+        available_upstream_api_keys and state.get("accepted_tokens")
+        and not recovery["retry_after_seconds"]
+    )
     if state.get("mode") == "local":
         if can_proxy_search:
             level = "basic"
@@ -1840,10 +1844,13 @@ def build_social_upstream_visibility(state):
     else:
         level = "none"
         detail = "当前还没有拿到可用于上游搜索的基础鉴权信息。"
+    if recovery["retry_after_seconds"]:
+        detail = "上游模型额度暂不可用；冷却结束后自动探测恢复，连接 Key 未禁用。"
     return {
         "level": level,
         "detail": detail,
         "can_proxy_search": can_proxy_search,
+        "model_recovery": recovery,
         "upstream_api_key_count": upstream_api_key_count,
         "upstream_available_key_count": upstream_available_key_count,
         "upstream_unavailable_key_count": upstream_unavailable_key_count,
@@ -2351,6 +2358,17 @@ def normalize_usage_payload(service, payload):
         key_limit = parse_usage_number(key_info.get("limit"))
         account_used = parse_usage_number(account_info.get("plan_usage"))
         account_limit = parse_usage_number(account_info.get("plan_limit"))
+        account_remaining = compute_remaining(account_limit, account_used)
+        paygo_used = parse_usage_number(account_info.get("paygo_usage"))
+        paygo_limit = parse_usage_number(account_info.get("paygo_limit"))
+        paygo_known = all(value is not None and value >= 0 for value in (paygo_used, paygo_limit))
+        if paygo_known and account_remaining is not None:
+            account_remaining += compute_remaining(paygo_limit, paygo_used)
+            account_used += paygo_used
+            account_limit += paygo_limit
+        elif account_remaining == 0:
+            # A depleted plan alone cannot prove the PAYG allowance is depleted.
+            account_remaining = None
 
         return {
             "key_used": key_used,
@@ -2359,7 +2377,7 @@ def normalize_usage_payload(service, payload):
             "account_plan": (account_info.get("current_plan") or "").strip(),
             "account_used": account_used,
             "account_limit": account_limit,
-            "account_remaining": compute_remaining(account_limit, account_used),
+            "account_remaining": account_remaining,
         }
 
     current_raw = payload.get("current")
@@ -2415,6 +2433,7 @@ def normalize_usage_payload(service, payload):
 
 async def sync_usage_for_key_row(key_row):
     service = key_row.get("service") or "tavily"
+    sync_started_at = datetime.now(timezone.utc).isoformat()
     try:
         if service == "firecrawl":
             payload = await fetch_remote_usage_firecrawl(key_row["key"])
@@ -2431,6 +2450,7 @@ async def sync_usage_for_key_row(key_row):
             account_used=normalized["account_used"],
             account_limit=normalized["account_limit"],
             account_remaining=normalized["account_remaining"],
+            sync_started_at=sync_started_at,
         )
         return {"key_id": key_row["id"], "status": "synced"}
     except HTTPException as exc:
@@ -2486,7 +2506,11 @@ async def sync_usage_cache(force=False, key_id=None, service=None):
     if not rows:
         return {"requested": 0, "synced": 0, "skipped": 0, "errors": 0}
 
-    to_sync = rows if force else [row for row in rows if is_usage_sync_stale(row)]
+    to_sync = rows if force else [
+        row for row in rows
+        if is_usage_sync_stale(row)
+        and (row.get("active") or row.get("disabled_reason") in {"quota_exhausted", "pay_as_you_go_limit"})
+    ]
     if not to_sync:
         return {"requested": len(rows), "synced": 0, "skipped": len(rows), "errors": 0}
 
@@ -3214,17 +3238,24 @@ def _load_social_upstream_key_schedule():
     restored = {}
     if isinstance(payload, dict):
         for fingerprint, state in payload.items():
-            if not re.fullmatch(r"[0-9a-f]{64}", str(fingerprint)) or not isinstance(state, dict):
+            if not re.fullmatch(r"(?:model:)?[0-9a-f]{64}", str(fingerprint)) or not isinstance(state, dict):
                 continue
             reason = str(state.get("reason") or "").strip()
             until = state.get("until")
-            if reason not in {"rate_limited", "quota_exhausted", "auth_rejected"}:
+            if reason not in {"rate_limited", "quota_exhausted", "auth_rejected", "upstream_quota_exhausted"}:
                 continue
             if until is not None:
                 try:
                     until = float(until)
                 except (TypeError, ValueError):
                     continue
+                if not math.isfinite(until):
+                    continue
+            if str(fingerprint).startswith("model:"):
+                if reason != "upstream_quota_exhausted" or until is None:
+                    continue
+            elif reason == "upstream_quota_exhausted":
+                continue
             restored[str(fingerprint)] = {"reason": reason, "until": until}
     with social_upstream_key_lock:
         social_upstream_key_schedule.clear()
@@ -3242,7 +3273,39 @@ def _persist_social_upstream_key_schedule():
             }
             for fingerprint, state in social_upstream_key_schedule.items()
         }
-    db.set_setting("social_upstream_key_schedule", json.dumps(payload, sort_keys=True))
+        db.set_setting("social_upstream_key_schedule", json.dumps(payload, sort_keys=True))
+
+
+def _social_model_cooldown(state, model, *, claim=False):
+    identity = json.dumps([state["upstream_base_url"], state["upstream_responses_path"], model])
+    scope = "model:" + _social_key_fingerprint(identity)
+    now = time.time()
+    with social_upstream_key_lock:
+        entry = social_upstream_key_schedule.get(scope)
+        if not entry:
+            return scope, 0, None
+        delay = max(0, math.ceil(entry["until"] - now))
+        if delay or not claim:
+            return scope, delay, None
+        # One due request probes recovery; peers wait while it is in flight.
+        until = now + SOCIAL_GATEWAY_TIMEOUT_SECONDS + 5
+        social_upstream_key_schedule[scope] = {**entry, "until": until}
+    _persist_social_upstream_key_schedule()
+    return scope, 0, until
+
+
+def _social_model_recovery(state):
+    models = unique_preserve_order([state.get("model"), state.get("fallback_model")])
+    cooldowns = []
+    for model in models:
+        _, delay, _ = _social_model_cooldown(state, model)
+        if delay:
+            cooldowns.append({"model": model, "reason": "upstream_quota_exhausted", "retry_after_seconds": delay})
+    return {
+        "cooldowns": cooldowns,
+        "retry_after_seconds": min(item["retry_after_seconds"] for item in cooldowns)
+        if models and len(cooldowns) == len(models) else 0,
+    }
 
 
 def _available_social_upstream_keys(keys):
@@ -3283,18 +3346,29 @@ def _schedule_social_upstream_key(
     retry_after_seconds=None,
     *,
     generation=None,
+    model_scope=None,
 ):
     with social_upstream_key_lock:
         if generation is not None and generation != social_upstream_key_generation:
             return False
-        social_upstream_key_schedule[_social_key_fingerprint(key)] = {
+        fingerprint = model_scope or _social_key_fingerprint(key)
+        next_state = {
             "reason": failure_kind,
             "until": (
-                time.time() + db.normalize_retry_after_seconds(retry_after_seconds)
-                if failure_kind == "rate_limited"
+                time.time() + db.normalize_retry_after_seconds(
+                    retry_after_seconds, default=300 if model_scope else 60,
+                )
+                if failure_kind in {"rate_limited", "upstream_quota_exhausted"}
                 else None
             ),
         }
+        current = social_upstream_key_schedule.get(fingerprint)
+        if current is not None and (
+            current["until"] is None
+            or (next_state["until"] is not None and current["until"] >= next_state["until"])
+        ):
+            return True
+        social_upstream_key_schedule[fingerprint] = next_state
     _persist_social_upstream_key_schedule()
     return True
 
@@ -3417,6 +3491,14 @@ async def execute_social_search_attempt(query, body, state, model, max_results):
             failure_kind=failure_kind,
         )
 
+    model_scope, retry_after, probe_until = _social_model_cooldown(state, model, claim=True)
+    if retry_after:
+        return build_social_attempt_summary(
+            model, False, error="Upstream model quota is waiting for recovery",
+            status_code=429, latency_ms=0, failure_kind="upstream_quota_exhausted",
+            retry_after_seconds=retry_after,
+        )
+
     last_key_failure = None
     last_key_failure_kind = ""
     rate_limit_failure = None
@@ -3460,11 +3542,14 @@ async def execute_social_search_attempt(query, body, state, model, max_results):
             )
             failure_kind = classify_upstream_key_failure(
                 response.status_code,
-                classification_detail,
+                upstream_body if isinstance(upstream_body, dict) else classification_detail,
+                service="xai",
             )
             retry_after_seconds = _parse_retry_after_header(
                 getattr(response, "headers", None)
             )
+            if failure_kind == "upstream_quota_exhausted" and retry_after_seconds is None:
+                retry_after_seconds = 300
             logger.warning("social upstream error %s: %s", response.status_code, safe_error)
             attempt = build_social_attempt_summary(
                 model,
@@ -3481,7 +3566,10 @@ async def execute_social_search_attempt(query, body, state, model, max_results):
                     failure_kind,
                     retry_after_seconds=retry_after_seconds,
                     generation=schedule_generation,
+                    model_scope=model_scope if failure_kind == "upstream_quota_exhausted" else None,
                 )
+                if failure_kind == "upstream_quota_exhausted":
+                    return attempt
                 last_key_failure = attempt
                 last_key_failure_kind = failure_kind
                 if failure_kind == "rate_limited" and (
@@ -3531,6 +3619,15 @@ async def execute_social_search_attempt(query, body, state, model, max_results):
             status_code=502,
             latency_ms=latency_ms,
         )
+
+    if probe_until is not None:
+        with social_upstream_key_lock:
+            if (
+                schedule_generation == social_upstream_key_generation
+                and social_upstream_key_schedule.get(model_scope, {}).get("until") == probe_until
+            ):
+                social_upstream_key_schedule.pop(model_scope, None)
+        _persist_social_upstream_key_schedule()
 
     normalized = normalize_social_search_response(
         query,
@@ -4079,8 +4176,10 @@ async def social_health():
 
 def _build_social_health_payload(state):
     available_upstream_keys = _available_social_upstream_keys(state.get("upstream_api_keys") or [])
+    recovery = _social_model_recovery(state)
     return {
-        "ok": bool(available_upstream_keys and state["accepted_tokens"]),
+        "ok": bool(available_upstream_keys and state["accepted_tokens"] and not recovery["retry_after_seconds"]),
+        "model_recovery": recovery,
         "mode": state["mode"],
         "upstream_base_url": state["upstream_base_url"],
         "upstream_responses_path": state["upstream_responses_path"],
@@ -4195,7 +4294,7 @@ async def proxy_social_search(request: Request):
 
     if (
         has_social_fallback(primary_model, fallback_model)
-        and not primary_attempt.get("failure_kind")
+        and primary_attempt.get("failure_kind") in {None, "", "upstream_quota_exhausted"}
     ):
         fallback_reason = "upstream_error"
         fallback_attempt = await execute_social_search_attempt(
@@ -4489,6 +4588,7 @@ async def update_social_settings(request: Request, _=Depends(verify_admin)):
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Expected JSON request body")
 
+    previous = get_runtime_social_config()
     candidate = build_candidate_social_config(body)
     migrate_legacy_local_key = (
         candidate["mode"] == "local"
@@ -4555,8 +4655,15 @@ async def update_social_settings(request: Request, _=Depends(verify_admin)):
         db.set_setting("social_local_api_key", candidate["local_api_key"])
 
     clear_social_key_schedule = any(
-        field in body or body.get(f"clear_{field}")
-        for field in ("mode", "local_api_key", "upstream_api_key", "admin_app_key")
+        field in body and previous.get(field) != candidate.get(field)
+        for field in (
+            "mode", "local_base_url", "local_responses_path",
+            "upstream_base_url", "upstream_responses_path",
+        )
+    ) or any(
+        body.get(f"clear_{field}")
+        or (body.get(field) and candidate.get(field) and previous.get(field) != candidate.get(field))
+        for field in ("local_api_key", "upstream_api_key", "admin_app_key")
     )
     reset_social_gateway_cache(clear_key_schedule=clear_social_key_schedule)
     reset_stats_cache()
