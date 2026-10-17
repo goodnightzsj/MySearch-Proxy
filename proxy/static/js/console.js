@@ -2394,6 +2394,33 @@ async function testSocialSettings(button) {
   }
 }
 
+async function refreshSocialModels(button) {
+  setStatus('settings-social-status', '');
+  try {
+    // 整轮"同步目录 + 逐个真实评测"最坏可达 780s，按钮忙碌态必须撑得住，
+    // 否则用户会以为卡死并重复点击（后端有文件锁，重复调用返回 409）。
+    await runWithBusyButton(button, {
+      busyLabel: '评测中...',
+      successLabel: '评测完成',
+      errorLabel: '评测失败',
+      minBusyMs: 640,
+    }, async () => {
+      const payload = await api('POST', '/api/settings/social/models/refresh');
+      const probes = payload.probes || [];
+      const capable = probes.filter((probe) => probe.search_capable).length;
+      const reason = payload.reason || '';
+      const summary = `已评测 ${probes.length} 个模型，${capable} 个可搜索；主模型 ${payload.primary || '未变'}`
+        + (payload.changed ? '（已切换）' : '（保持）')
+        + (reason === 'insufficient_search_evidence' ? '；样本不足，未更新主备' : '');
+      setStatus('settings-social-status', summary, capable === 0);
+      showToast(capable ? '模型评测完成' : '模型评测完成，但没有可用模型', capable ? 'success' : 'warn');
+      await refresh({ force: true, scope: { core: false, mysearch: false, social: true, services: [] } });
+    });
+  } catch (error) {
+    setStatus('settings-social-status', `模型评测失败：${error.message}`, true);
+  }
+}
+
 function headers() {
   const base = {
     'Content-Type': 'application/json',
