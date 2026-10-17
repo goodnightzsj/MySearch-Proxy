@@ -297,7 +297,12 @@ def pick_primary_and_fallback(capable_ids, current_primary: str = "") -> tuple[s
 
 # 按真实搜索交付统计，不按模型名字或一次成功追新。每6h一轮，至少跨12h。
 MODEL_PROBE_INTERVAL_SECONDS = 6 * 3600
-MODEL_PROBE_TIMEOUT_SECONDS = 40
+# 单次探测的请求预算。实测慢模型（grok-4.7）冷启动 40–52s，原先的 40s 恰好
+# 卡在延迟分布中段，导致它们永远被判 timeout，也就永远进不了晋升候选。
+MODEL_PROBE_TIMEOUT_SECONDS = 90
+# 晋升的尾延迟上限，与请求预算**分开**：预算是"等多久算失败"，门槛是"多慢不算
+# 好模型"。两者原先共用一个常量，调预算会顺带放宽门槛，所以必须独立。
+MODEL_MAX_P90_LATENCY_MS = 40000
 MODEL_PROBE_LIMIT = 8
 MODEL_HISTORY_SECONDS = 14 * 86400
 MODEL_HISTORY_LIMIT = 20
@@ -350,7 +355,7 @@ def summarize_model_probes(history: dict, candidates: list[str], now: float) -> 
             len(good) >= MODEL_MIN_SAMPLES and success_rate >= .8
             and span >= MODEL_MIN_SPAN_SECONDS and latest_ok
             and now - rows[-1]["at"] <= 2 * MODEL_PROBE_INTERVAL_SECONDS
-            and p90 is not None and p90 <= MODEL_PROBE_TIMEOUT_SECONDS * 1000
+            and p90 is not None and p90 <= MODEL_MAX_P90_LATENCY_MS
         )
         summaries.append({
             "model": model, "samples": len(rows), "successes": len(good),

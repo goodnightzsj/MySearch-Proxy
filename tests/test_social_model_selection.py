@@ -88,6 +88,20 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(summary["unscored_samples"], 3)
         self.assertEqual(len(update_probe_history(history, [], self.now)["Console/grok-4.5"]), 3)
 
+    def test_promotion_latency_ceiling_is_independent_of_request_budget(self):
+        """调请求预算不得顺带放宽晋升门槛：门槛与探测预算解耦。
+
+        行为断言而非常量比较——若有人把门槛改回 `MODEL_PROBE_TIMEOUT_SECONDS * 1000`，
+        只要探测预算仍是 90s，45s 的样本就会从"不合格"变成"合格"，这里必须失败。
+        """
+        slow = self.history(latency=45000)
+        summary = summarize_model_probes(slow, list(slow), self.now)[0]
+        self.assertEqual(summary["p90_ms"], 45000)
+        self.assertFalse(summary["qualified"])
+
+        fast = self.history(latency=15000)
+        self.assertTrue(summarize_model_probes(fast, list(fast), self.now)[0]["qualified"])
+
     def test_history_is_bounded_and_does_not_persist_response_or_key(self):
         history = {}
         for i in range(25):
@@ -165,6 +179,61 @@ class RefreshIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 ok, result = await self.server.probe_social_model("http://upstream", "test", "grok-4.5")
             self.assertFalse(ok)
             self.assertEqual(result["reason"], reason)
+
+    async def test_structured_model_quota_is_distinct_from_transient_rate_limit(self):
+        """上游模型额度耗尽必须与普通限流分开，否则整轮探测会被一个模型中止。"""
+        body = '{"error":{"code":"upstream_quota_exhausted","message":"上游账号额度等待恢复"}}'
+        with patch.object(self.server.http_client, "post", AsyncMock(return_value=httpx.Response(429, text=body))):
+            ok, result = await self.server.probe_social_model("http://upstream", "test", "Console/grok-4.5")
+        self.assertFalse(ok)
+        self.assertEqual(result["reason"], "model_quota_exhausted")
+
+    async def test_model_quota_does_not_abort_the_whole_probe_round(self):
+        """当前模型额度耗尽时，其余候选仍须被测到，否则永远只有它一个样本。"""
+        self.configure()
+        server = self.server
+        seen = []
+
+        async def probe(root, key, model_id, **kwargs):
+            seen.append(model_id)
+            if model_id == "grok-old":
+                return False, {"reason": "model_quota_exhausted", "latency_ms": 30, "http_status": 429}
+            return True, {"latency_ms": 12000, "status_ids": 3, "tool_calls": 1, "http_status": 200}
+
+        with patch.object(server, "get_social_admin_v3_access_token", AsyncMock(return_value="test")), \
+             patch.object(server, "sync_social_upstream_models", AsyncMock(return_value={"ok": True, "synced": 1})), \
+             patch.object(server, "collect_social_model_candidates", AsyncMock(return_value=(["grok-new"], []))), \
+             patch.object(server, "probe_social_model", side_effect=probe):
+            await server.probe_and_refresh_social_models()
+        # 旧行为下首个候选 429 即 break，seen 只有 ["grok-old"]。
+        self.assertEqual(seen, ["grok-old", "grok-backup", "grok-new"])
+        server.db.close_conn()
+
+    async def test_auth_rejection_still_aborts_the_round(self):
+        """凭证级故障必须继续中止整轮：key 不可用时其余模型必然同样失败。"""
+        self.configure()
+        server = self.server
+        seen = []
+
+        async def probe(root, key, model_id, **kwargs):
+            seen.append(model_id)
+            return False, {"reason": "auth_rejected", "latency_ms": 20, "http_status": 401}
+
+        with patch.object(server, "get_social_admin_v3_access_token", AsyncMock(return_value="test")), \
+             patch.object(server, "sync_social_upstream_models", AsyncMock(return_value={"ok": True, "synced": 1})), \
+             patch.object(server, "collect_social_model_candidates", AsyncMock(return_value=(["grok-new"], []))), \
+             patch.object(server, "probe_social_model", side_effect=probe):
+            await server.probe_and_refresh_social_models()
+        self.assertEqual(seen, ["grok-old"])
+        server.db.close_conn()
+
+    def test_probe_budget_covers_every_candidate_and_stays_bounded(self):
+        """外层预算必须容得下整轮候选，否则末尾候选会被整体取消、样本丢失。"""
+        server = self.server
+        self.assertGreaterEqual(
+            server.SOCIAL_MODEL_REFRESH_BUDGET_SECONDS,
+            server.MODEL_PROBE_LIMIT * server.MODEL_PROBE_TIMEOUT_SECONDS,
+        )
 
     async def test_probe_rejects_citation_only_result_shells(self):
         url = "https://x.com/AnthropicAI/status/1970558198109126942"

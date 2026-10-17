@@ -77,6 +77,7 @@ try:
         summarize_model_probes,
         update_probe_history,
         MODEL_PROBE_INTERVAL_SECONDS,
+        MODEL_PROBE_LIMIT,
         MODEL_PROBE_TIMEOUT_SECONDS,
         MODEL_PROBE_VERSION,
         PROBE_QUERIES,
@@ -88,6 +89,10 @@ except ImportError:  # pragma: no cover - 极端隔离部署兜底
     evaluate_search_probe = None  # type: ignore[assignment]
     merge_candidates = None  # type: ignore[assignment]
     select_measured_models = None  # type: ignore[assignment]
+    # 预算常量在导入块之外仍被引用（探测预算、外层 wait_for），必须给兜底值，
+    # 否则隔离部署下 import 阶段就 NameError。
+    MODEL_PROBE_LIMIT = 8  # type: ignore[assignment]
+    MODEL_PROBE_TIMEOUT_SECONDS = 90  # type: ignore[assignment]
 
 # 模型目录默认24h同步，真实搜索每6h评测；达到跨轮门槛后才更新主备。
 # 设为0同时关闭自动同步与评测，手动管理入口仍可调用。
@@ -97,6 +102,13 @@ try:
     )
 except (TypeError, ValueError):
     SOCIAL_MODEL_REFRESH_TTL_SECONDS = 86400
+
+# 一轮"同步目录 + 逐个探测"的总预算。必须容得下 MODEL_PROBE_LIMIT 个候选各自
+# 用满 MODEL_PROBE_TIMEOUT_SECONDS，否则末尾候选会因外层 wait_for 被整体取消，
+# 连已完成的样本都写不回历史。探测循环另按剩余时间提前收尾。
+SOCIAL_MODEL_REFRESH_BUDGET_SECONDS = max(
+    60, MODEL_PROBE_LIMIT * MODEL_PROBE_TIMEOUT_SECONDS + 60
+)
 
 
 def _root_of_upstream(base_url):
@@ -154,7 +166,14 @@ async def probe_social_model(root_base, api_key, model_id, timeout=None, query=N
             elif response.status_code in (401, 403):
                 reason = "auth_rejected"
             elif response.status_code == 429:
-                reason = "rate_limited"
+                # 上游模型额度耗尽（结构化 code）是**模型作用域**的，不是
+                # gateway 凭证失效；必须与普通限流区分，否则整轮探测会被
+                # 一个没额度的模型提前中止（见 _probe_and_refresh_social_models）。
+                reason = (
+                    "model_quota_exhausted"
+                    if "upstream_quota_exhausted" in detail
+                    else "rate_limited"
+                )
             elif response.status_code == 404:
                 reason = "model_not_found"
             elif response.status_code >= 500:
@@ -298,7 +317,10 @@ async def probe_and_refresh_social_models(force_sync=False):
         except BlockingIOError:
             return {"ok": False, "reason": "refresh_already_running"}
         try:
-            return await asyncio.wait_for(_probe_and_refresh_social_models(force_sync), timeout=600)
+            return await asyncio.wait_for(
+                _probe_and_refresh_social_models(force_sync),
+                timeout=SOCIAL_MODEL_REFRESH_BUDGET_SECONDS,
+            )
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
 
@@ -364,10 +386,26 @@ async def _probe_and_refresh_social_models(force_sync):
     probes = []
     # 同轮全部候选用同一题目，轮次之间轮换，避免靠单一热门查询选模型。
     query_index = int(state.get("round", 0)) % len(PROBE_QUERIES)
+    # 按剩余总预算收尾：宁可少测几个候选，也不让外层 wait_for 取消整轮，
+    # 否则这一轮已经拿到的样本全部丢失。
+    probe_deadline = time.monotonic() + max(
+        0.0, SOCIAL_MODEL_REFRESH_BUDGET_SECONDS - (time.time() - now) - 5
+    )
     for model_id in choose_probe_candidates(candidates, history, current, fallback):
-        ok, evidence = await probe_social_model(root_base, api_key, model_id, query=PROBE_QUERIES[query_index])
+        remaining = probe_deadline - time.monotonic()
+        if remaining <= 0:
+            warnings.append("probe_budget_exhausted")
+            break
+        ok, evidence = await probe_social_model(
+            root_base, api_key, model_id,
+            timeout=min(MODEL_PROBE_TIMEOUT_SECONDS, remaining),
+            query=PROBE_QUERIES[query_index],
+        )
         probes.append({"model": model_id, **evidence, "search_capable": ok,
                        "query_index": query_index, "probe_version": MODEL_PROBE_VERSION})
+        # 只有**凭证级**故障才该中止整轮：auth_rejected 说明 key 不可用，后续
+        # 模型必然同样失败。模型作用域的额度耗尽（model_quota_exhausted）只影响
+        # 该模型，继续测其他候选；否则当前模型一旦 429，整轮探测就只剩它一个样本。
         if evidence.get("reason") in {"rate_limited", "auth_rejected"}:
             break
     finished = time.time()
