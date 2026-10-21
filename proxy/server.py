@@ -3756,6 +3756,15 @@ def normalize_social_search_response(query, payload, max_results, *, model=None)
     }
 
 
+def _transport_failure_reason(exc: Exception) -> str:
+    """网络层失败的短标签。
+
+    只取异常类名（如 `transport:ConnectTimeout`）——`str(exc)` 里含带 key 的
+    上游 URL（tavily 的 key 在 query string 里），落库即泄露。
+    """
+    return f"transport:{type(exc).__name__}"[:120]
+
+
 def _upstream_key_failure(response, upstream_key="", *, service=""):
     detail = response.text.strip()
     try:
@@ -3830,8 +3839,19 @@ def _select_key_pool_failure(failures):
     return selected[0], selected[1], True
 
 
-def _no_available_key_error(service):
+def _no_available_key_error(service, token_id=None):
+    """池中没有可用 key。
+
+    这条路径此前不留任何 `usage_logs` 记录 —— 池空时整个服务静默 503，事后
+    只能看到"没有调用"，无法与"没有流量"区分。补一条 `key_pool_empty` 记录。
+    """
     retry_after = pool.get_retry_after(service)
+    if token_id is not None:
+        db.log_usage(
+            token_id, None, "key_pool_empty", 0, 0, service=service,
+            failure_reason="key_pool_empty",
+            upstream_status=429 if retry_after else 503,
+        )
     if retry_after:
         return HTTPException(
             status_code=429,
@@ -3887,16 +3907,21 @@ async def proxy_tavily(request: Request):
                 payload=upstream_body,
                 effective_mode=tavily_resolved["effective_mode"],
             )
-        except Exception:
+        except Exception as exc:
             latency = int((time.monotonic() - start) * 1000)
-            db.log_usage(token_row["id"], None, endpoint, 0, latency, service="tavily")
+            db.log_usage(
+                token_row["id"], None, endpoint, 0, latency, service="tavily",
+                failure_reason=_transport_failure_reason(exc),
+            )
             logger.exception("tavily upstream gateway error")
             raise HTTPException(status_code=502, detail="upstream request failed")
         latency = int((time.monotonic() - start) * 1000)
-        db.log_usage(
-            token_row["id"], None, endpoint, int(resp.status_code < 400), latency, service="tavily"
-        )
         failure_kind, _, _ = _upstream_key_failure(resp, upstream_key, service="tavily")
+        db.log_usage(
+            token_row["id"], None, endpoint, int(resp.status_code < 400), latency, service="tavily",
+            failure_reason="" if resp.status_code < 400 else (failure_kind or "upstream_error"),
+            upstream_status=resp.status_code if resp.status_code >= 400 else None,
+        )
         pool_exhausted = bool(failure_kind) and failure_kind != "rate_limited"
     else:
         key_failures = []
@@ -3908,7 +3933,7 @@ async def proxy_tavily(request: Request):
                 if selected_failure is not None:
                     resp, upstream_key, pool_exhausted = selected_failure
                     break
-                raise _no_available_key_error("tavily")
+                raise _no_available_key_error("tavily", token_row["id"])
 
             attempted_key_ids.add(key_info["id"])
             upstream_key = key_info["key"]
@@ -3922,7 +3947,7 @@ async def proxy_tavily(request: Request):
                     payload=upstream_body,
                     effective_mode=tavily_resolved["effective_mode"],
                 )
-            except Exception:
+            except Exception as exc:
                 latency = int((time.monotonic() - start) * 1000)
                 pool.report_result(
                     "tavily",
@@ -3931,7 +3956,8 @@ async def proxy_tavily(request: Request):
                     generation=key_info.get("_pool_generation"),
                 )
                 db.log_usage(
-                    token_row["id"], key_info["id"], endpoint, 0, latency, service="tavily"
+                    token_row["id"], key_info["id"], endpoint, 0, latency, service="tavily",
+                    failure_reason=_transport_failure_reason(exc),
                 )
                 logger.exception("tavily proxy error")
                 raise HTTPException(status_code=502, detail="upstream request failed")
@@ -3953,7 +3979,9 @@ async def proxy_tavily(request: Request):
                 generation=key_info.get("_pool_generation"),
             )
             db.log_usage(
-                token_row["id"], key_info["id"], endpoint, int(success), latency, service="tavily"
+                token_row["id"], key_info["id"], endpoint, int(success), latency, service="tavily",
+                failure_reason="" if success else (failure_kind or "upstream_error"),
+                upstream_status=resp.status_code if not success else None,
             )
             if failure_kind:
                 key_failures.append((resp, upstream_key, failure_kind))
@@ -4017,7 +4045,7 @@ async def proxy_firecrawl(path: str, request: Request):
             if last_scope_miss is not None:
                 resp, last_upstream_key = last_scope_miss
                 break
-            raise _no_available_key_error("firecrawl")
+            raise _no_available_key_error("firecrawl", token_row["id"])
 
         attempted_key_ids.add(key_info["id"])
         last_upstream_key = key_info["key"]
@@ -4036,7 +4064,7 @@ async def proxy_firecrawl(path: str, request: Request):
                 content=forward_content if request.method != "GET" else None,
                 headers=build_forward_headers(request, key_info["key"]),
             )
-        except Exception:
+        except Exception as exc:
             latency = int((time.monotonic() - start) * 1000)
             pool.report_result(
                 "firecrawl",
@@ -4044,7 +4072,10 @@ async def proxy_firecrawl(path: str, request: Request):
                 False,
                 generation=key_info.get("_pool_generation"),
             )
-            db.log_usage(token_row["id"], key_info["id"], path, 0, latency, service="firecrawl")
+            db.log_usage(
+                token_row["id"], key_info["id"], path, 0, latency, service="firecrawl",
+                failure_reason=_transport_failure_reason(exc),
+            )
             logger.exception("firecrawl proxy error")
             raise HTTPException(status_code=502, detail="upstream request failed")
 
@@ -4065,7 +4096,9 @@ async def proxy_firecrawl(path: str, request: Request):
             generation=key_info.get("_pool_generation"),
         )
         db.log_usage(
-            token_row["id"], key_info["id"], path, int(success), latency, service="firecrawl"
+            token_row["id"], key_info["id"], path, int(success), latency, service="firecrawl",
+            failure_reason="" if success else (failure_kind or "upstream_error"),
+            upstream_status=resp.status_code if not success else None,
         )
         if failure_kind:
             key_failures.append((resp, key_info["key"], failure_kind))
@@ -4131,7 +4164,7 @@ async def proxy_exa_search(request: Request):
             if selected_failure is not None:
                 resp, last_upstream_key, pool_exhausted = selected_failure
                 break
-            raise _no_available_key_error("exa")
+            raise _no_available_key_error("exa", token_row["id"])
 
         attempted_key_ids.add(key_info["id"])
         last_upstream_key = key_info["key"]
@@ -4143,7 +4176,7 @@ async def proxy_exa_search(request: Request):
                 content=forward_content,
                 headers=build_exa_forward_headers(request, key_info["key"]),
             )
-        except Exception:
+        except Exception as exc:
             latency = int((time.monotonic() - start) * 1000)
             pool.report_result(
                 "exa",
@@ -4151,7 +4184,10 @@ async def proxy_exa_search(request: Request):
                 False,
                 generation=key_info.get("_pool_generation"),
             )
-            db.log_usage(token_row["id"], key_info["id"], "search", 0, latency, service="exa")
+            db.log_usage(
+                token_row["id"], key_info["id"], "search", 0, latency, service="exa",
+                failure_reason=_transport_failure_reason(exc),
+            )
             logger.exception("exa proxy error")
             raise HTTPException(status_code=502, detail="upstream request failed")
 
@@ -4172,7 +4208,9 @@ async def proxy_exa_search(request: Request):
             generation=key_info.get("_pool_generation"),
         )
         db.log_usage(
-            token_row["id"], key_info["id"], "search", int(success), latency, service="exa"
+            token_row["id"], key_info["id"], "search", int(success), latency, service="exa",
+            failure_reason="" if success else (failure_kind or "upstream_error"),
+            upstream_status=resp.status_code if not success else None,
         )
         if failure_kind:
             key_failures.append((resp, key_info["key"], failure_kind))
@@ -4357,11 +4395,21 @@ async def proxy_social_search(request: Request):
             db.log_usage(social_token_row["id"] if social_token_row else None, None, "social/search", 1, latency_ms, service="mysearch")
             return result
         fail_latency = fallback_attempt.get("latency_ms") or primary_attempt.get("latency_ms") or 0
-        db.log_usage(social_token_row["id"] if social_token_row else None, None, "social/search", 0, fail_latency, service="mysearch")
+        db.log_usage(
+            social_token_row["id"] if social_token_row else None, None, "social/search", 0, fail_latency,
+            service="mysearch",
+            failure_reason=str(fallback_attempt.get("failure_kind") or "upstream_error")[:120],
+            upstream_status=fallback_attempt.get("status_code"),
+        )
         raise social_attempt_http_exception(fallback_attempt)
 
     fail_latency = primary_attempt.get("latency_ms") or 0
-    db.log_usage(social_token_row["id"] if social_token_row else None, None, "social/search", 0, fail_latency, service="mysearch")
+    db.log_usage(
+        social_token_row["id"] if social_token_row else None, None, "social/search", 0, fail_latency,
+        service="mysearch",
+        failure_reason=str(primary_attempt.get("failure_kind") or "upstream_error")[:120],
+        upstream_status=primary_attempt.get("status_code"),
+    )
     raise social_attempt_http_exception(primary_attempt)
 
 

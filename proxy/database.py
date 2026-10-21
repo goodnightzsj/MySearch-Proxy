@@ -42,6 +42,16 @@ KEY_USAGE_COLUMNS = {
     "schedule_until": "TEXT",
 }
 
+#: 失败诊断列。`success` 只有布尔，出事后无法回答"为什么失败"——而
+#: `classify_upstream_key_failure()` 每次都已经算出了失败种类，只是没落库。
+#: `failure_reason` 存失败种类（或网络层异常类名），`upstream_status` 存上游
+#: HTTP 状态码。**只存分类结果与类名，不存异常原文**：异常消息里含带 key 的
+#: 上游 URL（tavily 的 key 在 query 里），落库即泄露。
+USAGE_LOG_COLUMNS = {
+    "failure_reason": "TEXT DEFAULT ''",
+    "upstream_status": "INTEGER",
+}
+
 
 def normalize_service(service):
     service = (service or "tavily").strip().lower()
@@ -128,7 +138,9 @@ def init_db():
             endpoint TEXT,
             success INTEGER,
             latency_ms INTEGER,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            failure_reason TEXT DEFAULT '',
+            upstream_status INTEGER
         );
 
         CREATE INDEX IF NOT EXISTS idx_usage_created ON usage_logs(created_at);
@@ -141,6 +153,7 @@ def init_db():
     """)
     _ensure_service_columns(conn)
     _ensure_usage_columns(conn)
+    _ensure_usage_log_columns(conn)
     _ensure_provider_scoped_key_uniqueness(conn)
     _label_legacy_disabled_keys(conn)
     # 当前产品策略：关闭 token 级调用限流，统一把历史限额字段归零。
@@ -191,6 +204,13 @@ def _ensure_usage_columns(conn):
     for name, definition in KEY_USAGE_COLUMNS.items():
         if name not in existing:
             conn.execute(f"ALTER TABLE api_keys ADD COLUMN {name} {definition}")
+
+
+def _ensure_usage_log_columns(conn):
+    existing = _table_columns(conn, "usage_logs")
+    for name, definition in USAGE_LOG_COLUMNS.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE usage_logs ADD COLUMN {name} {definition}")
 
 
 def _unique_index_columns(conn, table_name):
@@ -854,16 +874,36 @@ def delete_token(token_id):
 
 # ═══ Usage Logs ═══
 
-def log_usage(token_id, api_key_id, endpoint, success, latency_ms, service="tavily"):
+def log_usage(
+    token_id,
+    api_key_id,
+    endpoint,
+    success,
+    latency_ms,
+    service="tavily",
+    *,
+    failure_reason="",
+    upstream_status=None,
+):
     service = normalize_token_service(service)
     conn = get_conn()
     try:
         conn.execute(
             """
-            INSERT INTO usage_logs (service, token_id, api_key_id, endpoint, success, latency_ms)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO usage_logs
+                (service, token_id, api_key_id, endpoint, success, latency_ms, failure_reason, upstream_status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (service, token_id, api_key_id, endpoint, success, latency_ms),
+            (
+                service,
+                token_id,
+                api_key_id,
+                endpoint,
+                success,
+                latency_ms,
+                (failure_reason or "")[:120],
+                upstream_status,
+            ),
         )
         conn.commit()
     finally:

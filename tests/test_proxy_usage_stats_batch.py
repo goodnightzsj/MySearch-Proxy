@@ -118,5 +118,71 @@ class ApiKeysHotPathIndexTests(unittest.TestCase):
         self.assertIn("idx_api_keys_schedule", names)
 
 
+class UsageLogFailureReasonTests(unittest.TestCase):
+    """失败诊断列：`success=0` 的调用必须能回答"为什么失败"。"""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self._tmpdir.name) / "proxy.db"
+        self._env = patch.dict(os.environ, {"MYSEARCH_PROXY_DB_PATH": str(self.db_path)})
+        self._env.start()
+        self.db = _load_database_module("test_database_failure_reason_module")
+        self.db.init_db()
+
+    def tearDown(self) -> None:
+        self._env.stop()
+        self._tmpdir.cleanup()
+
+    def _row(self):
+        return self.db.get_conn().execute(
+            "SELECT service, success, latency_ms, failure_reason, upstream_status FROM usage_logs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+
+    def test_failure_reason_and_status_are_persisted(self) -> None:
+        self.db.log_usage(
+            None, 7, "v2/search", 0, 10005, service="firecrawl",
+            failure_reason="rate_limited", upstream_status=429,
+        )
+        row = self._row()
+        self.assertEqual(row["failure_reason"], "rate_limited")
+        self.assertEqual(row["upstream_status"], 429)
+
+    def test_success_leaves_reason_empty(self) -> None:
+        self.db.log_usage(None, 7, "v2/search", 1, 800, service="firecrawl")
+        row = self._row()
+        self.assertEqual(row["failure_reason"], "")
+        self.assertIsNone(row["upstream_status"])
+
+    def test_migration_adds_columns_to_legacy_table(self) -> None:
+        """老库（无这两列）打开时必须自动补列，且旧行取到默认值。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "legacy.db"
+            with patch.dict(os.environ, {"MYSEARCH_PROXY_DB_PATH": str(db_path)}):
+                module = _load_database_module("test_database_legacy_migration_module")
+                conn = module.get_conn()
+                conn.execute(
+                    "CREATE TABLE usage_logs ("
+                    "id INTEGER PRIMARY KEY, service TEXT NOT NULL DEFAULT 'tavily',"
+                    "token_id INTEGER, api_key_id INTEGER, endpoint TEXT, success INTEGER,"
+                    "latency_ms INTEGER, created_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+                )
+                conn.execute(
+                    "INSERT INTO usage_logs (service, endpoint, success, latency_ms) VALUES ('tavily','/x',0,10)"
+                )
+                conn.commit()
+                module.init_db()
+                columns = {
+                    row["name"]
+                    for row in conn.execute("PRAGMA table_info(usage_logs)").fetchall()
+                }
+                legacy = conn.execute(
+                    "SELECT failure_reason, upstream_status FROM usage_logs"
+                ).fetchone()
+        self.assertIn("failure_reason", columns)
+        self.assertIn("upstream_status", columns)
+        self.assertEqual(legacy["failure_reason"], "")
+        self.assertIsNone(legacy["upstream_status"])
+
+
 if __name__ == "__main__":
     unittest.main()
