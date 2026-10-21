@@ -29,7 +29,7 @@ PROVIDER_NAMES: frozenset[str] = frozenset({"tavily", "firecrawl", "exa", "xai"}
 
 #: Social/X 路径上的 provider 变体：真实 provider 的降级实现。
 SOCIAL_PROVIDER_VARIANTS: frozenset[str] = frozenset(
-    {"exa_social_fallback", "tavily_social_fallback", "custom_social"}
+    {"firecrawl_social_fallback", "exa_social_fallback", "tavily_social_fallback", "custom_social"}
 )
 
 #: 多 provider 交叉检索的合成结果。它不是任何单一 provider 的产物。

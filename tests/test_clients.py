@@ -3284,6 +3284,11 @@ class MySearchClientTests(unittest.TestCase):
             raise MySearchError("xai request timeout after 45s: http://127.0.0.1:9874/social/search")
 
         client._request_json = fake_request_json  # type: ignore[method-assign]
+        # Firecrawl 现在是 social 链路的第一兜底；本用例只验证 Tavily/Exa 行为，
+        # 故显式让它失败，保持原有的兜底顺序假设。
+        client._search_firecrawl_social_fallback = lambda **kwargs: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            MySearchError("firecrawl social fallback disabled in this test")
+        )
         client._search_tavily_social_fallback = lambda **kwargs: {  # type: ignore[method-assign]
             "provider": "tavily_social_fallback",
             "transport": "env",
@@ -3551,7 +3556,6 @@ class MySearchClientTests(unittest.TestCase):
             )
 
         client._request_json = fake_request_json  # type: ignore[method-assign]
-
         def fail_tavily_fallback(**kwargs):  # type: ignore[no-untyped-def]
             raise AssertionError("tavily fallback should not run when last-good social cache exists")
 
@@ -3947,6 +3951,11 @@ class MySearchClientTests(unittest.TestCase):
             raise AssertionError("custom social should not run when gateway outage cache exists")
 
         client._request_json = fail_request_json  # type: ignore[method-assign]
+        # Firecrawl 现在是 social 链路的第一兜底；本用例只验证 Tavily/Exa 行为，
+        # 故显式让它失败，保持原有的兜底顺序假设。
+        client._search_firecrawl_social_fallback = lambda **kwargs: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            MySearchError("firecrawl social fallback disabled in this test")
+        )
         client._search_tavily_social_fallback = lambda **kwargs: {  # type: ignore[method-assign]
             "provider": "tavily_social_fallback",
             "transport": "env",
@@ -4000,6 +4009,11 @@ class MySearchClientTests(unittest.TestCase):
             raise MySearchError("xai request timeout after 120s: http://127.0.0.1:9874/social/search")
 
         client._request_json = fake_request_json  # type: ignore[method-assign]
+        # Firecrawl 现在是 social 链路的第一兜底；本用例只验证 Tavily/Exa 行为，
+        # 故显式让它失败，保持原有的兜底顺序假设。
+        client._search_firecrawl_social_fallback = lambda **kwargs: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            MySearchError("firecrawl social fallback disabled in this test")
+        )
 
         def fail_tavily(**kwargs):  # type: ignore[no-untyped-def]
             raise MySearchError("tavily network error: [Errno 111] Connection refused")
@@ -4114,7 +4128,6 @@ class MySearchClientTests(unittest.TestCase):
             }
 
         client._request_json = fake_request_json  # type: ignore[method-assign]
-
         result = client._search_xai_compatible(
             query="GPT-5.4 reactions on X",
             sources=["x"],
@@ -4186,7 +4199,6 @@ class MySearchClientTests(unittest.TestCase):
             raise AssertionError("tavily fallback should not run when last-good cache is available")
 
         client._request_json = fake_request_json  # type: ignore[method-assign]
-        client._search_tavily = fail_tavily  # type: ignore[method-assign]
 
         result = client._search_xai_compatible(
             query="OpenAI webhooks reactions on X",
@@ -4264,6 +4276,95 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(timeout_calls, [45])
         self.assertEqual(result["provider"], "social_unavailable")
+
+    def test_firecrawl_social_fallback_is_tried_first(self) -> None:
+        """Firecrawl 排在 Tavily/Exa 之前：它是唯一能拿到 X 正文与发布时间的来源。"""
+        client = MySearchClient()
+        provider = client.config.xai
+        provider.search_mode = "compatible"
+        provider.default_paths["social_search"] = "/social/search"
+        provider.alternate_base_urls["social_search"] = "http://gateway.example/v1"
+        client._get_key_or_raise = lambda provider: type(  # type: ignore[method-assign]
+            "Record", (), {"key": "gateway-token", "source": "env"},
+        )()
+        client._request_json = lambda **kwargs: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            MySearchError("xai request timeout after 120s")
+        )
+        calls: list[str] = []
+
+        def fallback(provider_name, payload):
+            def run(**kwargs):
+                calls.append(provider_name)
+                return payload
+            return run
+
+        client._search_firecrawl_social_fallback = fallback("firecrawl", {  # type: ignore[method-assign]
+            "provider": "firecrawl_social_fallback",
+            "transport": "env",
+            "query": "q",
+            "answer": "",
+            "results": [{"provider": "firecrawl_social_fallback", "source": "x",
+                         "title": "OpenAI on X", "url": "https://x.com/OpenAI/status/1",
+                         "snippet": "Posted: 2026-10-20", "content": "# OpenAI", "author": "OpenAI"}],
+            "citations": [{"title": "OpenAI on X", "url": "https://x.com/OpenAI/status/1"}],
+        })
+        client._search_tavily_social_fallback = fallback("tavily", {  # type: ignore[method-assign]
+            "provider": "tavily_social_fallback", "transport": "env", "query": "q",
+            "answer": "", "results": [{"url": "https://x.com/tavily/status/2"}], "citations": [],
+        })
+        client._search_exa_social_fallback = fallback("exa", {  # type: ignore[method-assign]
+            "provider": "exa_social_fallback", "transport": "env", "query": "q",
+            "answer": "", "results": [{"url": "https://mirror.example/x"}], "citations": [],
+        })
+
+        result = client._search_xai_compatible(
+            query="OpenAI latest", sources=["x"], max_results=5,
+            allowed_x_handles=None, excluded_x_handles=None, from_date=None, to_date=None,
+            include_x_images=False, include_x_videos=False,
+        )
+
+        self.assertEqual(result["provider"], "firecrawl_social_fallback")
+        self.assertEqual(calls, ["firecrawl"], "首个兜底一旦有结果就不应再试后续 provider")
+
+    def test_firecrawl_social_fallback_rejects_non_x_domains(self) -> None:
+        """镜像站不是 X 原始内容，混进来会污染 grounding 判据。"""
+        client = MySearchClient()
+        client._search_firecrawl = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "firecrawl", "transport": "env", "query": kwargs["query"], "answer": "",
+            "results": [
+                {"title": "mirror", "url": "https://postcutoff.com/p/x-openai-1/", "snippet": "s", "content": "c"},
+                {"title": "OpenAI on X", "url": "https://x.com/OpenAI/status/2112310345863930168",
+                 "snippet": "# OpenAI (@OpenAI)", "content": "# OpenAI"},
+                {"title": "twitter", "url": "https://twitter.com/OpenAI/status/2112310345863930169",
+                 "snippet": "# OpenAI", "content": "# OpenAI"},
+            ],
+            "citations": [],
+        }
+
+        result = client._search_firecrawl_social_fallback(
+            query="OpenAI latest", max_results=5, from_date=None, to_date=None, fallback_reason="timeout",
+        )
+
+        urls = [item["url"] for item in result["results"]]
+        self.assertNotIn("https://postcutoff.com/p/x-openai-1/", urls)
+        # 同一 handle 的两条按 max_per_identity=1 去重，只留第一条 —— 这是既有
+        # diversify 语义，不是本函数的过滤缺陷。
+        self.assertEqual(urls, ["https://x.com/OpenAI/status/2112310345863930168"])
+        self.assertEqual(result["results"][0]["provider"], "firecrawl_social_fallback")
+
+    def test_firecrawl_social_fallback_falls_through_when_all_results_filtered(self) -> None:
+        """全部被域名过滤掉时必须抛错，让链路继续往 Tavily/Exa 走。"""
+        client = MySearchClient()
+        client._search_firecrawl = lambda **kwargs: {  # type: ignore[method-assign]
+            "provider": "firecrawl", "transport": "env", "query": kwargs["query"], "answer": "",
+            "results": [{"title": "m", "url": "https://mirror.example/a", "snippet": "s", "content": "c"}],
+            "citations": [],
+        }
+
+        with self.assertRaises(MySearchError):
+            client._search_firecrawl_social_fallback(
+                query="OpenAI latest", max_results=5, from_date=None, to_date=None, fallback_reason="timeout",
+            )
 
     def test_tavily_social_fallback_diversifies_repeated_handles(self) -> None:
         client = MySearchClient()
@@ -4683,6 +4784,11 @@ class MySearchClientTests(unittest.TestCase):
             }
 
         client._request_json = fake_request_json  # type: ignore[method-assign]
+        # Firecrawl 现在是 social 链路的第一兜底；本用例只验证 Tavily/Exa 行为，
+        # 故显式让它失败，保持原有的兜底顺序假设。
+        client._search_firecrawl_social_fallback = lambda **kwargs: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            MySearchError("firecrawl social fallback disabled in this test")
+        )
         client._search_tavily_social_fallback = fake_tavily_social_fallback  # type: ignore[method-assign]
 
         result = client._search_xai_compatible(

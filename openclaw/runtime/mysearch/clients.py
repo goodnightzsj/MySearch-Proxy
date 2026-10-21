@@ -5247,7 +5247,8 @@ class MySearchClient(ProviderTransport):
         if (
             cached_social_result
             and cached_social_result.get("results")
-            and str(cached_social_result.get("provider") or "") == "tavily_social_fallback"
+            and str(cached_social_result.get("provider") or "")
+            in {"tavily_social_fallback", "firecrawl_social_fallback", "exa_social_fallback"}
         ):
             return self._annotate_cache(
                 cached_social_result,
@@ -5400,7 +5401,7 @@ class MySearchClient(ProviderTransport):
             )
             social_unavailable_result = self._build_social_unavailable_result(
                 query=query,
-                fallback_reason=f"{fallback_reason} | social budget exhausted before tavily_social_fallback",
+                fallback_reason=f"{fallback_reason} | social budget exhausted before social fallbacks",
             )
             self._cache_set("social_unavailable", social_cache_key, social_unavailable_result)
             return self._annotate_cache(
@@ -5408,92 +5409,63 @@ class MySearchClient(ProviderTransport):
                 namespace="social_unavailable",
                 hit=False,
             )
-        logger.warning(
-            "event=tavily_social_fallback_trigger reason=%s remaining_budget=%ss",
-            fallback_reason,
-            remaining_social_budget,
+
+        # Firecrawl 排第一：它是三者里唯一能抓到 X 页面**正文与发布时间**的来源
+        # （实测 grounding 1.0、带 `Posted:` 时间戳），Tavily 有真实 status ID 但
+        # published_date 恒空、无法判断新旧，Exa 只能拿到镜像站（0 条 x.com）。
+        fallback_chain = (
+            ("firecrawl", self._search_firecrawl_social_fallback),
+            ("tavily", self._search_tavily_social_fallback),
+            ("exa", self._search_exa_social_fallback),
         )
-        try:
-            tavily_fallback_result = self._search_tavily_social_fallback(
-                query=query,
-                max_results=max_results,
-                from_date=from_date,
-                to_date=to_date,
-                fallback_reason=fallback_reason,
-                timeout_seconds=min(remaining_social_budget, social_fallback_reserve),
-            )
-        except MySearchError as fallback_exc:
-            elapsed_after_tavily = max(0.0, time.monotonic() - social_start)
-            remaining_for_exa = max(
-                0, int(math.ceil(total_social_timeout - elapsed_after_tavily))
-            )
+        failures: list[str] = []
+        for name, search in fallback_chain:
+            elapsed_now = max(0.0, time.monotonic() - social_start)
+            remaining = max(0, int(math.ceil(total_social_timeout - elapsed_now)))
+            if remaining <= 0:
+                failures.append(f"{name}_social_fallback skipped: social budget exhausted")
+                break
             logger.warning(
-                "event=exa_social_fallback_trigger reason=%s remaining_budget=%ss",
-                fallback_exc,
-                remaining_for_exa,
+                "event=%s_social_fallback_trigger reason=%s remaining_budget=%ss",
+                name,
+                fallback_reason,
+                remaining,
             )
-            if remaining_for_exa <= 0:
-                social_unavailable_result = self._build_social_unavailable_result(
-                    query=query,
-                    fallback_reason=(
-                        f"{fallback_reason} | tavily_social_fallback failed: {fallback_exc}"
-                        " | social budget exhausted before exa_social_fallback"
-                    ),
-                )
-                self._cache_set("social_unavailable", social_cache_key, social_unavailable_result)
-                return self._annotate_cache(
-                    social_unavailable_result,
-                    namespace="social_unavailable",
-                    hit=False,
-                )
             try:
-                exa_fallback_result = self._search_exa_social_fallback(
+                fallback_result = search(
                     query=query,
                     max_results=max_results,
-                    fallback_reason=f"{fallback_reason} | tavily_social_fallback failed: {fallback_exc}",
                     from_date=from_date,
                     to_date=to_date,
-                    timeout_seconds=remaining_for_exa,
+                    fallback_reason=" | ".join([fallback_reason, *failures]) if failures else fallback_reason,
+                    # 每个兜底都受同一个预留窗口上限约束：既保证单个 provider 不会
+                    # 吃光总预算，也保证后备还有机会跑到。剩余总预算只作为更紧的
+                    # 上限叠加，防止前一个慢响应把后面的全部挤掉。
+                    timeout_seconds=min(remaining, social_fallback_reserve),
                 )
-            except MySearchError as exa_exc:
-                social_unavailable_result = self._build_social_unavailable_result(
-                    query=query,
-                    fallback_reason=(
-                        f"{fallback_reason} | tavily_social_fallback failed: {fallback_exc}"
-                        f" | exa_social_fallback failed: {exa_exc}"
-                    ),
-                )
-                self._cache_set("social_unavailable", social_cache_key, social_unavailable_result)
-                return self._annotate_cache(
-                    social_unavailable_result,
-                    namespace="social_unavailable",
+            except MySearchError as fallback_exc:
+                failures.append(f"{name}_social_fallback failed: {fallback_exc}")
+                continue
+            if fallback_result.get("results"):
+                self._cache_delete("social_unavailable", social_cache_key)
+                self._cache_set("social", social_cache_key, fallback_result)
+                result = self._annotate_cache(
+                    fallback_result,
+                    namespace="social",
                     hit=False,
                 )
-            self._cache_delete("social_unavailable", social_cache_key)
-            self._cache_set("social", social_cache_key, exa_fallback_result)
-            return self._annotate_cache(
-                exa_fallback_result,
-                namespace="social",
-                hit=False,
-            )
-        if tavily_fallback_result.get("results"):
-            self._cache_delete("social_unavailable", social_cache_key)
-            self._cache_set("social", social_cache_key, tavily_fallback_result)
-            result = self._annotate_cache(
-                tavily_fallback_result,
-                namespace="social",
-                hit=False,
-            )
-            if cached_social_gateway_unavailable:
-                result = self._annotate_cache(
-                    result,
-                    namespace="social_gateway",
-                    hit=True,
-                )
-            return result
+                if cached_social_gateway_unavailable:
+                    result = self._annotate_cache(
+                        result,
+                        namespace="social_gateway",
+                        hit=True,
+                    )
+                return result
+            failures.append(f"{name}_social_fallback returned no results")
+
         social_unavailable_result = self._build_social_unavailable_result(
             query=query,
-            fallback_reason=f"{fallback_reason} | tavily_social_fallback returned no results",
+            fallback_reason=" | ".join([fallback_reason, *failures]),
         )
         self._cache_set("social_unavailable", social_cache_key, social_unavailable_result)
         return self._annotate_cache(
@@ -5501,6 +5473,67 @@ class MySearchClient(ProviderTransport):
             namespace="social_unavailable",
             hit=False,
         )
+
+    def _search_firecrawl_social_fallback(
+        self,
+        *,
+        query: str,
+        max_results: int,
+        from_date: str | None,
+        to_date: str | None,
+        fallback_reason: str,
+        timeout_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        """用 Firecrawl 抓 X 域结果，作为 social 的首选兜底。
+
+        X 的帖子页在 Firecrawl 侧走的是普通网页抓取，`include_content` 必须为
+        真才有正文与 `Posted:` 时间戳 —— 那是它相对 Tavily/Exa 的唯一优势。
+        """
+        firecrawl_result = self._search_firecrawl(
+            query=query,
+            max_results=max(max_results * 2, 8),
+            categories=[],
+            include_content=True,
+            include_domains=["x.com", "twitter.com"],
+            exclude_domains=None,
+            from_date=from_date,
+            to_date=to_date,
+            timeout_seconds=timeout_seconds,
+        )
+        normalized = social._normalize_firecrawl_social_fallback_results(
+            results=list(firecrawl_result.get("results") or []),
+        )
+        if not normalized:
+            raise MySearchError("firecrawl social fallback returned no X-domain results")
+        diversified = self._diversify_social_results(
+            normalized,
+            max_results=max_results,
+            max_per_identity=1,
+        )
+        if not diversified:
+            raise MySearchError(
+                "firecrawl social fallback returned no X-domain results after diversification"
+            )
+        return {
+            "provider": "firecrawl_social_fallback",
+            "transport": firecrawl_result.get("transport", ""),
+            "query": query,
+            "answer": "",
+            "results": diversified,
+            "citations": self._align_citations_with_results(
+                results=diversified,
+                citations=[
+                    {"title": item.get("title", ""), "url": item.get("url", "")}
+                    for item in diversified
+                    if item.get("url")
+                ],
+            )[: len(diversified)],
+            "fallback": {
+                "from": "xai_compatible",
+                "to": "firecrawl_social_fallback",
+                "reason": fallback_reason[:200],
+            },
+        }
 
     def _search_exa_social_fallback(
         self,

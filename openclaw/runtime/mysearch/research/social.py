@@ -12,11 +12,45 @@ provider 调用、不读 config、不碰实例状态。
 
 from __future__ import annotations
 
+import re
 from typing import Any
 from urllib.parse import urlparse
 
 from mysearch import postprocess
 from mysearch import query_routing
+
+#: 只认真实 X 域名。Firecrawl 走通用网页抓取，镜像站会混进 `include_domains`。
+_X_DOMAIN_RE = re.compile(r"^https?://(?:www\.|mobile\.)?(?:x|twitter)\.com/", re.IGNORECASE)
+
+
+def _normalize_firecrawl_social_fallback_results(
+    results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+        """把 Firecrawl 的网页结果收敛成 social 形态。
+
+        只保留真实 x.com/twitter.com 域名：Firecrawl 是通用抓取器，`include_domains`
+        在部分路径下会退化成查询词而非硬过滤，镜像站（postcutoff、techtwitter 等）
+        会混进来 —— 那些不是原始 X 内容，冒充 social 结果会污染 grounding 判据。
+        """
+        normalized: list[dict[str, Any]] = []
+        for item in results:
+            url = str(item.get("url") or "").strip()
+            if not _X_DOMAIN_RE.search(url):
+                continue
+            normalized.append(
+                {
+                    "provider": "firecrawl_social_fallback",
+                    "source": "x",
+                    "title": item.get("title", ""),
+                    "url": url,
+                    "snippet": item.get("snippet", ""),
+                    "content": item.get("content", ""),
+                    "author": postprocess._social_result_identity(item),
+                }
+            )
+        return normalized
+
+
 def _normalize_exa_social_fallback_results(
     results: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
