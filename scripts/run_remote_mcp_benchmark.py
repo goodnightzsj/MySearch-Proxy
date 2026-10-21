@@ -1899,6 +1899,47 @@ def classify_tavily_structural_failure(
     return ""
 
 
+def classify_mysearch_upstream_drift(
+    row: dict[str, object],
+    benchmark_id: str,
+) -> str:
+    """识别"抓取成功但上游返回了错误内容"的对照侧漂移。
+
+    只用于**给统计归因**，不改变任何得分：得分仍按真实断言计算，标记只是
+    让 `structural_failures` 不把上游漂移当成我们的功能缺陷。
+
+    判据必须是"工具本身工作正常、只是内容不对"，否则会把真实回归洗白：
+
+    1. 该行是 crawl/map 类（这两类由 Firecrawl 上游做站点发现）；
+    2. 有实质产出 —— `item_count>0` 且 `char_count` 超过一行标题的量级；
+    3. 断言确实没过；
+    4. `run_status` 是 captured，且没有超时/空结果/传输层错误。
+
+    2026-10-21 实测：`crawl-map-02` 直连 Firecrawl `POST /v2/crawl` 传入口
+    URL，上游返回的是同站**其它**教程页，目标页完全不在结果集里；而同一
+    URL 的 `POST /v2/scrape` 正常返回 11123 字符且两个关键词都命中。
+    `crawlEntireDomain` / `maxDiscoveryDepth` / `includePaths` 各变体都无法
+    恢复目标页，换 key 结果相同 —— 属上游发现索引的行为，不是本仓库的代码。
+    """
+    if not any(token in str(benchmark_id).lower() for token in ("crawl", "map")):
+        return ""
+    if str(row.get("run_status", "")) != "captured":
+        return ""
+    if str(row.get("error", "") or "").strip():
+        return ""
+    if str(row.get("mysearch_error", "") or "").strip():
+        return ""
+    if _as_float(row.get("mysearch_assertion_pass_rate")) >= 1.0:
+        return ""
+    # 有实质产出：抓到东西了，只是抓的页不对。阈值取 1KB —— 一页正文远超它，
+    # 而空壳/错误占位只有几十字符。
+    if _as_float(row.get("mysearch_content_item_count")) <= 0:
+        return ""
+    if _as_float(row.get("mysearch_content_char_count")) < 1024:
+        return ""
+    return "mysearch-firecrawl-upstream-crawl-drift"
+
+
 def _as_bool(value: object) -> bool:
     if isinstance(value, bool):
         return value
@@ -2554,6 +2595,12 @@ def build_output_row(
             if prefix == "tavily" and preserve_tavily else raw_text
         )
     score_output_row(input_row, row)
+    # MySearch 侧的漂移判定依赖**已算出的断言率**，所以只能放在评分之后。
+    # 它不改任何得分，只在没有对照侧标记时补一个归因标签。
+    if not row["structural_failure"]:
+        row["structural_failure"] = classify_mysearch_upstream_drift(
+            row, input_row["benchmark_id"]
+        )
     return row
 
 
@@ -2600,6 +2647,12 @@ def merge_output_rows(
         row = merged[benchmark_id]
         sync_input_contract(row, input_row_map[benchmark_id])
         score_output_row(input_row_map[benchmark_id], row)
+        # 评分会重算断言率，漂移判定必须跟着重算；已有标记（对照侧或上轮）
+        # 保持不动，避免覆盖 Tavily 归因。
+        if not str(row.get("structural_failure", "") or "").strip():
+            row["structural_failure"] = classify_mysearch_upstream_drift(
+                row, benchmark_id
+            )
         output_rows.append(row)
     return output_rows
 

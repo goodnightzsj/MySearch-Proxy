@@ -35,6 +35,9 @@ from mysearch.providers.base import wait_before_retry
 DEFAULT_KEY_COOLDOWN_SECONDS = 60
 #: 固定密钥重试延迟的上限；超过就直接失败而不是继续等。
 MAX_PINNED_KEY_RETRY_DELAY_SECONDS = 120
+#: crawl 提交阶段遇到额度耗尽时最多换几个 key。key 全被限流要能停下，
+#: 不能沿池无限轮；4 次足以跨过一个限流窗口内相邻的几把 key。
+MAX_CRAWL_KEY_ROTATIONS = 4
 
 #: 轮询 crawl 状态的起步间隔。上游 crawl 作业实测**固定要 13–15s**（与 `limit`
 #: 和 `crawl_entire_domain` 无关 —— 返回 1 页也要 15.18s），所以这个间隔只是
@@ -208,7 +211,10 @@ def crawl_firecrawl(
         selected_key: str,
         allow_key_rotation: bool,
     ) -> tuple[dict[str, Any], str]:
-        for attempt in range(2):
+        attempt = 0
+        key_rotations = 0
+        while attempt < 2:
+            attempt += 1
             try:
                 result = request_json_with_transient_retry_selected(
                     transport,
@@ -225,14 +231,33 @@ def crawl_firecrawl(
                     raise MySearchError("firecrawl crawl deadline exceeded")
                 return result
             except MySearchError as exc:
-                if attempt or not query_routing._is_retryable_transient_error(exc):
+                if attempt >= 2 or not query_routing._is_retryable_transient_error(exc):
                     raise
                 if (
                     provider.managed_key_pool
                     and isinstance(exc, MySearchHTTPError)
                     and exc.status_code == 429
                 ):
-                    raise
+                    # 托管池下 429 意味着"这个 key 的额度用完了"，`_request_json_selected`
+                    # 已在内部换过 key 但把错误抛了上来（它只轮转一次）。这里再给一轮：
+                    # 重新从 keyring 取一个**不同的** key 重试提交，否则 crawl 会在
+                    # 单 key 的 3 请求/分钟窗口上直接失败。
+                    # 轮询阶段是 allow_key_rotation=False（作业绑定创建它的 key），
+                    # 不会走到这里。
+                    if not allow_key_rotation:
+                        raise
+                    # 硬上限：key 全被限流时必须停下，不能沿池无限轮。
+                    if key_rotations >= MAX_CRAWL_KEY_ROTATIONS:
+                        raise
+                    replacement = transport.keyring.get_next(provider.name)
+                    if replacement is None or replacement.key == selected_key:
+                        raise
+                    selected_key = replacement.key
+                    key_rotations += 1
+                    # 换 key 重试不消耗普通重试预算：额度耗尽是最常见的失败，
+                    # 不该和临时网络错误共用两次机会。
+                    attempt -= 1
+                    continue
                 retry_delay = 1.5
                 if (
                     not allow_key_rotation

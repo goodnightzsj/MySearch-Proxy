@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import httpx
 
@@ -2216,6 +2216,93 @@ class SoftwareVersionRegressionTests(unittest.TestCase):
             updated["answer"],
             "The latest stable version of Python is 3.14.6.",
         )
+
+
+class CrawlKeyRotationTests(unittest.TestCase):
+    """crawl 提交阶段遇到额度耗尽时必须换 key，而不是直接失败。
+
+    回归背景（2026-10-21）：`request_with_deadline` 在 `managed_key_pool=True`
+    且 429 时直接 raise，`_request_json_selected` 内部换过 key 但错误已经抛上
+    来了，外层拿不到新 key。Firecrawl 单 key 配额实测只有 3 请求/分钟，一次
+    crawl 要 3–4 个请求，于是连续第二次调用必然失败。
+    """
+
+    def _transport(self, *, managed: bool = True):
+        transport = MagicMock()
+        transport.config.crawl_timeout_seconds = 90
+        transport.config.timeout_seconds = 45
+        transport._get_key_or_raise.return_value = MagicMock(key="k1", source="env")
+        provider = MagicMock()
+        provider.name = "firecrawl"
+        provider.managed_key_pool = managed
+        provider.path.return_value = "/v2/crawl"
+        transport.config.firecrawl = provider
+        return transport
+
+    @staticmethod
+    def _quota_error() -> MySearchHTTPError:
+        return MySearchHTTPError(
+            provider="firecrawl",
+            status_code=429,
+            detail="rate limited",
+            url="https://api.firecrawl.dev/v2/crawl",
+            retry_after_seconds=60,
+        )
+
+    def test_crawl_rotates_to_next_key_when_quota_exhausted(self) -> None:
+        from mysearch.providers import firecrawl_crawl as fc
+
+        transport = self._transport()
+        used: list[str] = []
+
+        def fake(**kwargs):
+            used.append(kwargs.get("key"))
+            if kwargs.get("key") == "k1":
+                raise self._quota_error()
+            return ({"id": "job1", "data": [], "status": "completed"}, "k2")
+
+        transport._request_json_selected.side_effect = fake
+        transport.keyring.get_next.return_value = MagicMock(key="k2")
+
+        result = fc.crawl_firecrawl(transport, url="https://x.com", limit=1, max_poll_attempts=1)
+
+        self.assertEqual(result["status"], "completed")
+        self.assertIn("k2", used, "429 之后必须换到下一个 key 重试")
+
+    def test_crawl_stops_after_rotation_budget(self) -> None:
+        """key 全被限流要能停下，不能沿池无限轮。"""
+        from mysearch.providers import firecrawl_crawl as fc
+
+        transport = self._transport()
+        transport._request_json_selected.side_effect = lambda **kw: (_ for _ in ()).throw(
+            self._quota_error()
+        )
+        transport.keyring.get_next.side_effect = [
+            MagicMock(key=f"k{i}") for i in range(2, 20)
+        ]
+
+        with self.assertRaises(MySearchHTTPError):
+            fc.crawl_firecrawl(transport, url="https://x.com", limit=1, max_poll_attempts=1)
+
+        self.assertLessEqual(
+            transport._request_json_selected.call_count,
+            fc.MAX_CRAWL_KEY_ROTATIONS + 2,
+            "换 key 次数必须有上限",
+        )
+
+    def test_pinned_key_does_not_rotate(self) -> None:
+        """非托管池（直连固定 key）没有别的 key 可换，必须原样抛出。"""
+        from mysearch.providers import firecrawl_crawl as fc
+
+        transport = self._transport(managed=False)
+        transport._request_json_selected.side_effect = lambda **kw: (_ for _ in ()).throw(
+            self._quota_error()
+        )
+
+        with self.assertRaises(MySearchHTTPError):
+            fc.crawl_firecrawl(transport, url="https://x.com", limit=1, max_poll_attempts=1)
+
+        transport.keyring.get_next.assert_not_called()
 
 
 if __name__ == "__main__":
