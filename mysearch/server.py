@@ -4,12 +4,28 @@ from __future__ import annotations
 
 import atexit
 from dataclasses import replace
+from functools import partial
 from typing import Literal
 
+import anyio.to_thread
 from mcp.server.fastmcp import FastMCP
 
 from mysearch.clients import MySearchClient
 from mysearch.config import MCPTransport, MySearchConfig
+
+
+async def _offload(fn, **kwargs):
+    """Run a blocking provider call on a worker thread.
+
+    Every tool here is a sync function over a sync httpx client. The MCP SDK
+    invokes sync tools inline on the event loop
+    (mcp/server/fastmcp/utilities/func_metadata.py: `return fn(**args)`), so a
+    single search would stall the entire server for its whole duration -
+    including accepting and reading new connections, which is what made
+    concurrent clients see timeouts and connection failures. The client is
+    already thread-safe (httpx.Client, locked CacheStore, own ThreadPoolExecutor).
+    """
+    return await anyio.to_thread.run_sync(partial(fn, **kwargs))
 
 
 def _ensure_list(value: str | list | None) -> list | None:
@@ -36,7 +52,7 @@ def build_mcp(config: MySearchConfig) -> tuple[MySearchClient, FastMCP]:
     )
 
     @mcp.tool()
-    def search(
+    async def search(
         query: str,
         mode: Literal["auto", "web", "news", "social", "docs", "research", "github", "pdf"] = "auto",
         intent: Literal[
@@ -65,7 +81,8 @@ def build_mcp(config: MySearchConfig) -> tuple[MySearchClient, FastMCP]:
         include_x_videos: bool = False,
     ) -> dict:
         """统一搜索入口。按任务类型自动选择 Tavily / Firecrawl / Exa / xAI。"""
-        return client.search(
+        return await _offload(
+            client.search,
             query=query,
             mode=mode,
             intent=intent,
@@ -86,14 +103,15 @@ def build_mcp(config: MySearchConfig) -> tuple[MySearchClient, FastMCP]:
         )
 
     @mcp.tool()
-    def extract_url(
+    async def extract_url(
         url: str,
         formats: str | list[str] | None = None,
         only_main_content: bool = True,
         provider: Literal["auto", "firecrawl", "tavily"] = "auto",
     ) -> dict:
         """抓取单个 URL 的正文，默认优先 Firecrawl；失败或空正文时回退 Tavily extract。"""
-        return client.extract_url(
+        return await _offload(
+            client.extract_url,
             url=url,
             formats=_ensure_list(formats),
             only_main_content=only_main_content,
@@ -101,7 +119,7 @@ def build_mcp(config: MySearchConfig) -> tuple[MySearchClient, FastMCP]:
         )
 
     @mcp.tool()
-    def research(
+    async def research(
         query: str,
         web_max_results: int = 5,
         social_max_results: int = 5,
@@ -127,7 +145,8 @@ def build_mcp(config: MySearchConfig) -> tuple[MySearchClient, FastMCP]:
         to_date: str | None = None,
     ) -> dict:
         """小型研究工作流：网页发现 + 正文抓取 + 可选 X 舆情补充。"""
-        return client.research(
+        return await _offload(
+            client.research,
             query=query,
             web_max_results=web_max_results,
             social_max_results=social_max_results,
@@ -145,23 +164,24 @@ def build_mcp(config: MySearchConfig) -> tuple[MySearchClient, FastMCP]:
         )
 
     @mcp.tool()
-    def map_site(
+    async def map_site(
         url: str,
         limit: int = 50,
         search: str | None = None,
     ) -> dict:
         """获取站点地图：返回某站点下可发现的 URL 列表（基于 Firecrawl map）。"""
-        return client.map_site(url=url, limit=limit, search=search)
+        return await _offload(client.map_site, url=url, limit=limit, search=search)
 
     @mcp.tool()
-    def crawl_site(
+    async def crawl_site(
         url: str,
         limit: int = 20,
         max_depth: int | None = None,
         crawl_entire_domain: bool = True,
     ) -> dict:
         """爬取整站：抓取某站点多页正文并清洗（基于 Firecrawl crawl，正文复用 extract 清洗）。"""
-        return client.crawl_site(
+        return await _offload(
+            client.crawl_site,
             url=url,
             limit=limit,
             max_depth=max_depth,
@@ -169,9 +189,9 @@ def build_mcp(config: MySearchConfig) -> tuple[MySearchClient, FastMCP]:
         )
 
     @mcp.tool()
-    def mysearch_health() -> dict:
+    async def mysearch_health() -> dict:
         """查看 MySearch 当前 provider 配置、search mode、auth 模式、base URL 和 key 可用性。"""
-        return client.health()
+        return await _offload(client.health)
 
     return client, mcp
 
