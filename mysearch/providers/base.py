@@ -10,19 +10,32 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from contextvars import ContextVar, copy_context
-from dataclasses import dataclass, field
+from contextvars import copy_context
 from functools import wraps
-from threading import Event
 from typing import Any, Callable
 from urllib.error import HTTPError as UrlHTTPError
 from urllib.request import Request, urlopen
+from uuid import uuid4
 
 import httpx
 
 from mysearch.config import ProviderConfig
+from mysearch.diagnostics import (
+    RequestState as _RequestBudget,
+    current_request as _request_budget,
+    current_phase,
+    direct_call,
+    elapsed_ms,
+    extract_usage,
+    finish_payload,
+    operation_timeout,
+    phase,
+    remaining_seconds,
+    upstream_request_id,
+)
 from mysearch.errors import (
     MySearchError,
     MySearchHTTPError,
@@ -31,23 +44,11 @@ from mysearch.errors import (
 )
 
 
-@dataclass
-class _RequestBudget:
-    deadline: float
-    cancelled: Event = field(default_factory=Event)
-
-
-_request_budget: ContextVar[_RequestBudget | None] = ContextVar("mysearch_request_budget", default=None)
+logger = logging.getLogger(__name__)
 
 
 def remaining_request_seconds() -> float | None:
-    budget = _request_budget.get()
-    if budget is None:
-        return None
-    remaining = budget.deadline - time.monotonic()
-    if budget.cancelled.is_set() or remaining <= 0:
-        raise MySearchError("research request budget exhausted")
-    return remaining
+    return remaining_seconds()
 
 
 def wait_before_retry(delay: float) -> None:
@@ -76,7 +77,8 @@ def budgeted_research(method):
         parent_remaining = remaining_request_seconds()
         if parent_remaining is not None:
             timeout = min(timeout, parent_remaining)
-        budget = _RequestBudget(started + timeout)
+        parent = _request_budget.get()
+        budget = parent or _RequestBudget(started + timeout)
         token = _request_budget.set(budget)
         try:
             results, errors = self._execute_parallel(
@@ -94,7 +96,8 @@ def budgeted_research(method):
                 }
             return result
         finally:
-            budget.cancelled.set()
+            if parent is None:
+                budget.cancelled.set()
             _request_budget.reset(token)
 
     return run
@@ -109,6 +112,62 @@ class ProviderTransport:
     config: Any
     keyring: Any
 
+    def new_request(self, tool: str, **arguments: Any) -> _RequestBudget:
+        tool = "mysearch_health" if tool == "health" else tool
+        started = time.monotonic()
+        state = _RequestBudget(started + operation_timeout(self.config, tool, arguments), tool=tool, started=started)
+        lifecycle = getattr(self, "_lifecycle", None)
+        if lifecycle is not None:
+            with lifecycle:
+                if self._closing:
+                    raise MySearchError("MySearch client is closing")
+                self._active_requests.add(state)
+        return state
+
+    def finish_request(self, state: _RequestBudget, result: Any = None, error: BaseException | None = None) -> None:
+        payload = finish_payload(state, result, error)
+        if payload is None:
+            return
+        try:
+            base_url = getattr(self.config, "proxy_base_url", "")
+            key = getattr(self.config, "proxy_api_key", "")
+            if base_url and key:
+                try:
+                    response = self._http.post(
+                        f"{base_url.rstrip('/')}/api/mysearch/requests",
+                        json=payload, headers={"Authorization": f"Bearer {key}"},
+                        timeout=2.0, follow_redirects=False,
+                    )
+                    response.raise_for_status()
+                except (httpx.HTTPError, ValueError):
+                    payload["diagnostics"]["warning"] = "telemetry_failed"
+                    logger.warning("MySearch telemetry_failed request_id=%s", state.request_id)
+            logger.info("MySearch request %s", json.dumps(payload, ensure_ascii=True))
+        finally:
+            lifecycle = getattr(self, "_lifecycle", None)
+            if lifecycle is not None:
+                with lifecycle:
+                    self._active_requests.discard(state)
+                    lifecycle.notify_all()
+
+    def _submit_tracked(self, executor: ThreadPoolExecutor, task: Callable[[], Any]) -> Future[Any]:
+        lifecycle = getattr(self, "_lifecycle", None)
+        if lifecycle is None:
+            return executor.submit(task)
+        with lifecycle:
+            if self._closing:
+                raise MySearchError("MySearch client is closing")
+            future = executor.submit(task)
+            self._active_futures.add(future)
+
+        def completed(done: Future[Any]) -> None:
+            with lifecycle:
+                self._active_futures.discard(done)
+                lifecycle.notify_all()
+
+        future.add_done_callback(completed)
+        return future
+
     def _execute_parallel(
         self,
         tasks: dict[str, Callable[[], Any]],
@@ -120,10 +179,12 @@ class ProviderTransport:
         if not tasks:
             return {}, {}
 
-        if len(tasks) == 1 and timeout_seconds is None and _request_budget.get() is None:
+        if len(tasks) == 1 and timeout_seconds is None:
             name, task = next(iter(tasks.items()))
             try:
-                return {name: task()}, {}
+                with phase(name):
+                    remaining_request_seconds()
+                    return {name: task()}, {}
             except Exception as exc:  # pragma: no cover - defensive
                 return {}, {name: exc}
 
@@ -148,9 +209,23 @@ class ProviderTransport:
                 thread_name_prefix="mysearch-branch",
             )
             executor = temporary_executor
-        future_map: dict[Future[Any], str] = {
-            executor.submit(copy_context().run, task): name for name, task in tasks.items()
-        }
+        def run_branch(name, task):
+            with phase(name):
+                remaining_request_seconds()
+                return task()
+
+        future_map: dict[Future[Any], str] = {}
+        try:
+            for name, task in tasks.items():
+                context = copy_context()
+                future = self._submit_tracked(executor, lambda n=name, t=task, c=context: c.run(run_branch, n, t))
+                future_map[future] = name
+        except BaseException:
+            for future in future_map:
+                future.cancel()
+            if temporary_executor is not None:
+                temporary_executor.shutdown(wait=False, cancel_futures=True)
+            raise
         pending = set(future_map)
 
         def cancel_pending(reason: str) -> None:
@@ -161,18 +236,22 @@ class ProviderTransport:
 
         try:
             while pending:
+                try:
+                    remaining_request_seconds()
+                except MySearchError as exc:
+                    cancel_pending(str(exc))
+                    break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     cancel_pending(f"parallel task timed out after {budget:g}s")
                     break
                 completed, _ = wait(
                     pending,
-                    timeout=remaining,
+                    timeout=min(remaining, 0.1),
                     return_when=FIRST_COMPLETED,
                 )
                 if not completed:
-                    cancel_pending(f"parallel task timed out after {budget:g}s")
-                    break
+                    continue
                 for future in completed:
                     pending.discard(future)
                     name = future_map[future]
@@ -205,6 +284,9 @@ class ProviderTransport:
                             "parallel task cancelled after primary and verifier quorum"
                         )
                         break
+        except BaseException:
+            cancel_pending("parallel task cancelled")
+            raise
         finally:
             if temporary_executor is not None:
                 temporary_executor.shutdown(wait=False, cancel_futures=True)
@@ -283,6 +365,45 @@ class ProviderTransport:
         base_url: str | None = None,
         timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
+        remaining_request_seconds()
+        state = _request_budget.get()
+        operation = next((name for name, value in getattr(provider, "default_paths", {}).items() if value == path), "request")
+        if operation == "social_health":
+            operation = "health"
+        if path.startswith(getattr(provider, "default_paths", {}).get("crawl", "\0") + "/"):
+            operation = "crawl_status"
+        call = {
+            "layer": "runtime", "call_id": uuid4().hex, "provider": provider.name,
+            "operation": operation, "phase": current_phase.get(), "elapsed_ms": 0,
+            "status_code": None, "outcome": "pending", "failure_reason": "", "usage": [],
+        }
+        started = time.monotonic()
+        try:
+            return self._request_json_response(
+                provider=provider, method=method, path=path, payload=payload,
+                key=key, base_url=base_url, timeout_seconds=timeout_seconds, call=call,
+            )
+        except BaseException as exc:
+            call["outcome"] = "error"
+            call["failure_reason"] = type(exc).__name__
+            raise
+        finally:
+            call["elapsed_ms"] = elapsed_ms(started)
+            if state is not None:
+                state.complete_call(call)
+
+    def _request_json_response(
+        self,
+        *,
+        provider: ProviderConfig,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None,
+        key: str,
+        base_url: str | None = None,
+        timeout_seconds: float | None = None,
+        call: dict[str, Any],
+    ) -> dict[str, Any]:
         headers: dict[str, str] = {}
         body = dict(payload or {})
 
@@ -295,6 +416,14 @@ class ProviderTransport:
             raise MySearchError(f"unsupported auth mode for {provider.name}: {provider.auth_mode}")
 
         url = f"{(base_url or provider.base_url)}{path}"
+        proxy_base = getattr(self.config, "proxy_base_url", "").rstrip("/")
+        state = _request_budget.get()
+        if state is not None and proxy_base and (base_url or provider.base_url).rstrip("/") == proxy_base:
+            headers.update({
+                "X-MySearch-Request-ID": state.request_id,
+                "X-MySearch-Call-ID": call["call_id"],
+                "X-MySearch-Phase": current_phase.get(),
+            })
         if method.upper() != "GET":
             headers.setdefault("Content-Type", "application/json")
         effective_timeout = timeout_seconds or self.config.timeout_seconds
@@ -304,6 +433,8 @@ class ProviderTransport:
 
         response_headers: Any = None
         prefer_urlopen = "unittest.mock" in type(urlopen).__module__
+        if state is not None:
+            state.start_call(call)
         if prefer_urlopen:
             request_data = None if method.upper() == "GET" else json.dumps(body).encode("utf-8")
             request = Request(url, data=request_data, headers=headers, method=method.upper())
@@ -339,6 +470,7 @@ class ProviderTransport:
             except httpx.HTTPError as exc:
                 raise MySearchError(f"{provider.name} network error: {exc}") from exc
 
+        call["status_code"] = status_code
         try:
             data = json.loads(response_text)
         except ValueError as exc:
@@ -352,6 +484,10 @@ class ProviderTransport:
                 ) from exc
             raise MySearchError(f"non-json response from {url}: {response_text[:300]}") from exc
 
+        call["usage"] = extract_usage(data)
+        request_id = upstream_request_id(data)
+        if request_id:
+            call["upstream_request_id"] = request_id
         if status_code >= 400:
             detail = data
             if isinstance(data, dict):
@@ -372,6 +508,7 @@ class ProviderTransport:
         if not isinstance(data, dict):
             safe_response = _redact_provider_secret(response_text, key)[:200]
             raise MySearchError(f"non-dict JSON response from {provider.name}: {safe_response}")
+        call["outcome"] = "success"
         return data
 
     def _request_json_selected(
@@ -460,14 +597,19 @@ class ProviderTransport:
         remaining = remaining_request_seconds()
         if remaining is not None:
             effective_timeout = min(effective_timeout, remaining)
-        try:
-            response = self._http.get(
-                url,
-                headers={"Accept": "text/html,application/json;q=0.9,*/*;q=0.8"},
-                timeout=effective_timeout,
-            )
-            return response.status_code, response.text
-        except httpx.TimeoutException as exc:
-            return 0, ""
-        except httpx.HTTPError as exc:
-            raise MySearchError(str(exc)) from exc
+        with direct_call() as call:
+            try:
+                response = self._http.get(
+                    url,
+                    headers={"Accept": "text/html,application/json;q=0.9,*/*;q=0.8"},
+                    timeout=effective_timeout,
+                )
+                call["status_code"] = response.status_code
+                call["outcome"] = "success" if response.status_code < 400 else "error"
+                call["failure_reason"] = "" if response.status_code < 400 else "http_error"
+                return response.status_code, response.text
+            except httpx.TimeoutException as exc:
+                call["outcome"], call["failure_reason"] = "error", type(exc).__name__
+                return 0, ""
+            except httpx.HTTPError as exc:
+                raise MySearchError(str(exc)) from exc

@@ -1,6 +1,10 @@
 <!-- r5 P2-12: hero / mysearch 页通用顶栏 actions（theme toggle + 设置）。
      供 _hero.html 与 mysearch.html include 复用，避免 markup 双源漂移。 -->
 <div class="hero-actions">
+  <button class="user-btn" type="button" onclick="openRequestDiagnostics()" aria-label="打开当前工作台请求诊断">
+    <svg aria-hidden="true" focusable="false" width="16" height="16" class="icon" viewBox="0 0 24 24"><path d="M3 3v18h18M7 16v-4M12 16V8M17 16V5"/></svg>
+    <span class="action-label">请求诊断</span>
+  </button>
   <button class="user-btn theme-btn" type="button" onclick="toggleTheme()" id="theme-toggle" aria-label="切换到夜间模式">
     <svg aria-hidden="true" focusable="false" width="16" height="16" class="icon w-4 h-4 mr-1 inline-block" viewBox="0 0 24 24"><path d="M12 3v3"/><path d="M12 18v3"/><path d="M4.22 4.22 6.34 6.34"/><path d="m17.66 17.66 2.12 2.12"/><path d="M3 12h3"/><path d="M18 12h3"/><path d="m4.22 19.78 2.12-2.12"/><path d="m17.66 6.34 2.12-2.12"/><circle cx="12" cy="12" r="4"/></svg>
     <span id="theme-toggle-label">夜间模式</span>

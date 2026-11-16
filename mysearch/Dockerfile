@@ -18,6 +18,8 @@ RUN groupadd --system --gid 10001 app \
  && chown -R app:app /app
 USER app
 
+RUN --network=none python -c "import mysearch.server"
+
 EXPOSE 8000
 
 ENTRYPOINT ["/app/mysearch/docker-entrypoint.sh"]

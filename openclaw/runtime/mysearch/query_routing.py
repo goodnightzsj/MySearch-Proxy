@@ -2911,7 +2911,7 @@ def _clean_extract_content(
 ) -> str:
         if not isinstance(content, str) or not content.strip():
             return content
-        text = content
+        text = _strip_document_hydration(content)
         text = re.sub(r"!\[[^\]]*\]\(\s*<?Base64-Image-Removed>?\s*\)", "", text)
         text = text.replace("<Base64-Image-Removed>", "")
         text = re.sub(r"!\[[^\]]*\]\(\s*data:[^)]*\)", "", text)
@@ -2923,6 +2923,29 @@ def _clean_extract_content(
         text = postprocess._strip_trailing_empty_headings(text)
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
+
+
+def _strip_document_hydration(content: str) -> str:
+    """Remove scraped Mintlify hydration lines, preserving fenced examples and prose."""
+    kept: list[str] = []
+    fence = ""
+    for line in content.splitlines(keepends=True):
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if marker:
+            run, suffix = marker.groups()
+            if not fence:
+                fence = run
+            elif run[0] == fence[0] and len(run) >= len(fence) and not suffix.strip():
+                fence = ""
+            kept.append(line)
+            continue
+        if not fence and line.lstrip().startswith('{"docsConfig":') and all(
+            marker in line
+            for marker in ('"pageMetadata":', '"mdxExtracts":', '"dependencies":', 'mintlify.com/docs.json')
+        ):
+            continue
+        kept.append(line)
+    return "".join(kept)
 
 
 def _strip_trailing_hcaptcha(

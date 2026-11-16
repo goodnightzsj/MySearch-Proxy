@@ -133,10 +133,16 @@ let latestServices = {};
 let latestSocial = {};
 let latestMySearch = {};
 let latestSettings = {};
+let settingsLoadGeneration = 0;
 let latestStatsMeta = {};
+let statsRefreshGeneration = 0;
+let statsMetaGeneration = 0;
+const statsSectionRequests = {};
+const pendingMutations = new Set();
 let activeTheme = localStorage.getItem(THEME_KEY) || 'light';
 let effectiveTheme = 'light';
 let appDialogResolver = null;
+let diagnosticsLoadGeneration = 0;
 let autoThemeIntervalId = 0;
 const tableControls = { tokens: {}, keys: {} };
 const KEY_PAGE_SIZE = 20;
@@ -173,7 +179,7 @@ function getFocusableElements(root) {
   if (!root) return [];
   return Array.from(root.querySelectorAll(
     'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-  )).filter((item) => !item.classList.contains('hidden') && item.offsetParent !== null);
+  )).filter((item) => !item.matches(':disabled') && !item.classList.contains('hidden') && item.offsetParent !== null);
 }
 
 function rememberOverlayFocus(id) {
@@ -557,6 +563,7 @@ function getFilteredKeys(service, keys) {
 }
 
 function handleTableRowKey(event, kind, service, id) {
+  if (event.target !== event.currentTarget) return;
   if (!['Enter', ' '].includes(event.key)) return;
   event.preventDefault();
   if (kind === 'token') {
@@ -635,6 +642,7 @@ function openDetailDrawer({
 } = {}) {
   const shell = document.getElementById('detail-drawer');
   if (!shell) return;
+  diagnosticsLoadGeneration += 1;
   rememberOverlayFocus('detail-drawer');
   shell.dataset.tone = tone;
   document.getElementById('detail-drawer-kicker').textContent = kicker;
@@ -659,6 +667,7 @@ function openDetailDrawer({
 function closeDetailDrawer() {
   const shell = document.getElementById('detail-drawer');
   if (!shell) return;
+  diagnosticsLoadGeneration += 1;
   shell.classList.add('hidden');
   document.getElementById('detail-drawer-summary').innerHTML = '';
   document.getElementById('detail-drawer-body').innerHTML = '';
@@ -696,6 +705,125 @@ function drawerSection(title, body) {
       <div class="drawer-section-body">${body}</div>
     </section>
   `;
+}
+
+function diagnosticDuration(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? `${fmtNum(value)} ms` : '未知';
+}
+
+function renderDiagnosticDistribution(values, emptyText) {
+  const entries = Object.entries(values || {});
+  return entries.length
+    ? entries.map(([name, count]) => `<span class="tag">${escapeHtml(name)} · ${escapeHtml(fmtNum(count))}</span>`).join(' ')
+    : `<span class="hint">${escapeHtml(emptyText)}</span>`;
+}
+
+function renderDiagnosticSummary(title, summary, hint) {
+  return drawerSection(title, `
+    <p class="hint">${escapeHtml(hint)}</p>
+    <div class="drawer-grid drawer-grid-compact">
+      ${drawerMetric('数量', fmtNum(summary.count))}
+      ${drawerMetric('成功 / 失败 / 降级', `${fmtNum(summary.success_count)} / ${fmtNum(summary.failure_count)} / ${fmtNum(summary.degraded_count)}`)}
+      ${drawerMetric('p50', diagnosticDuration(summary.p50_ms))}
+      ${drawerMetric('p95', diagnosticDuration(summary.p95_ms))}
+    </div>
+    <div><strong>结果分布</strong><p>${renderDiagnosticDistribution(summary.outcomes, '暂无样本')}</p></div>
+    <div><strong>失败原因</strong><p>${renderDiagnosticDistribution(summary.failure_reasons, '暂无已记录的失败原因')}</p></div>
+  `);
+}
+
+function renderDiagnosticUsage(usage, provider = '') {
+  if (!usage?.length) return '<p class="hint">用量未知（未上报），不按 0 计。</p>';
+  return `<ul>${usage.map((item) => {
+    const value = typeof item.value === 'number' && Number.isFinite(item.value)
+      ? item.value.toLocaleString(undefined, { maximumFractionDigits: 12 })
+      : '未知';
+    return `<li>${escapeHtml(item.provider || provider)} · ${escapeHtml(item.name)}：${escapeHtml(value)} ${escapeHtml(item.unit)}</li>`;
+  }).join('')}</ul>`;
+}
+
+function renderDiagnosticAttempt(attempt) {
+  return `<li class="drawer-inline-card">
+    <strong>${escapeHtml(attempt.provider)} · ${escapeHtml(attempt.operation)} · ${escapeHtml(attempt.outcome)}</strong>
+    <p>${escapeHtml(diagnosticDuration(attempt.elapsed_ms))} · HTTP ${escapeHtml(attempt.status_code ?? '未知')} · 阶段 ${escapeHtml(attempt.phase)}</p>
+    ${attempt.failure_reason ? `<p>失败：${escapeHtml(attempt.failure_reason)}</p>` : ''}
+    <p class="inline-meta-base-url mono">Request ${escapeHtml(attempt.request_id || '未关联')}<br>Call ${escapeHtml(attempt.call_id || '未关联')}</p>
+    ${renderDiagnosticUsage(attempt.usage, attempt.provider)}
+  </li>`;
+}
+
+function renderDiagnosticRequest(request) {
+  const details = request.diagnostics || {};
+  const calls = details.calls || [];
+  const attempts = request.attempts || [];
+  const truncated = request.attempts_truncated || attempts.length > 20;
+  return `<details class="settings-advanced">
+    <summary>${escapeHtml(request.tool)} · ${escapeHtml(request.outcome)} · ${escapeHtml(diagnosticDuration(request.elapsed_ms))} · ${escapeHtml(formatTime(request.started_at))}</summary>
+    <div class="drawer-section-body">
+      <p class="inline-meta-base-url mono">Request ${escapeHtml(request.request_id)}</p>
+      <p>缓存：${request.cache_hit === true ? '命中' : request.cache_hit === false ? '未命中' : '未知'} · 运行时调用 ${escapeHtml(fmtNum(details.call_count))} 次</p>
+      ${request.failure_reason ? `<p>失败：${escapeHtml(request.failure_reason)}</p>` : ''}
+      ${details.warning ? '<p class="hint">诊断上报存在缺失。</p>' : ''}
+      <strong>运行时已报告用量</strong>
+      ${renderDiagnosticUsage(details.usage)}
+      ${calls.length ? `<strong>运行时调用</strong><ul>${calls.slice(0, 20).map((call) => `<li>${escapeHtml(call.provider)} · ${escapeHtml(call.operation)} · ${escapeHtml(call.outcome)} · ${escapeHtml(diagnosticDuration(call.elapsed_ms))}<p class="inline-meta-base-url mono">Call ${escapeHtml(call.call_id)}</p></li>`).join('')}</ul>` : ''}
+      <strong>关联的物理尝试</strong>
+      <p class="hint">列出本请求关联的所有 Provider；运行时与代理层记录不相加，重试可能使一个 Call 对应多次物理尝试。</p>
+      ${attempts.length ? `<ol class="drawer-section-body">${attempts.slice(0, 20).map(renderDiagnosticAttempt).join('')}</ol>` : '<p class="hint">暂无关联的代理尝试；可能为缓存命中、直连调用或尚未上报。</p>'}
+      ${truncated ? '<p class="hint">关联尝试较多，此处仅显示前 20 条；不代表完整明细。</p>' : ''}
+      ${details.calls_truncated || calls.length > 20 ? '<p class="hint">运行时调用明细已截断，调用总数仍保留。</p>' : ''}
+    </div>
+  </details>`;
+}
+
+function renderRequestDiagnostics(payload) {
+  const requests = payload.recent_requests || [];
+  const attempts = payload.recent_attempts || [];
+  return [
+    `<p class="hint">近 ${escapeHtml(fmtNum(payload.hours))} 小时 · 汇总从 ${escapeHtml(payload.since)}（UTC）起。明细最多 20 条；用量仅展示各条已报告值，不估算窗口总额。</p>`,
+    renderDiagnosticSummary('逻辑请求', payload.logical_requests, '一次 MCP 工具调用计一次；成功包含空结果，降级单列。Provider 筛选保留请求整体耗时。'),
+    renderDiagnosticSummary('物理尝试', payload.physical_attempts, '代理每次实际发送计一次，包括重试与回退；仅统计当前 Provider 范围。'),
+    drawerSection('最近逻辑请求', requests.length ? requests.map(renderDiagnosticRequest).join('') : '<p class="hint">当前范围暂无逻辑请求上报；不能据此判断没有搜索调用。</p>'),
+    drawerSection('最近物理尝试', attempts.length ? `<ol class="drawer-section-body">${attempts.map(renderDiagnosticAttempt).join('')}</ol>` : '<p class="hint">当前范围暂无已记录的物理尝试。</p>'),
+  ].join('');
+}
+
+async function loadRequestDiagnostics(service) {
+  const generation = ++diagnosticsLoadGeneration;
+  const content = document.getElementById('diagnostics-content');
+  const button = document.getElementById('diagnostics-refresh');
+  content.setAttribute('aria-busy', 'true');
+  button.disabled = true;
+  setStatus('diagnostics-status', '正在读取请求诊断...');
+  try {
+    const payload = await api('GET', `/api/diagnostics?service=${encodeURIComponent(service)}&hours=24&limit=20`);
+    if (generation !== diagnosticsLoadGeneration) return;
+    content.innerHTML = renderRequestDiagnostics(payload);
+    setStatus('diagnostics-status', '诊断已更新。');
+    button.textContent = '刷新诊断';
+  } catch (error) {
+    if (generation !== diagnosticsLoadGeneration || error.message === 'Unauthorized') return;
+    setStatus('diagnostics-status', '读取请求诊断失败，请重试。已有内容可能不是最新状态。', true);
+    button.textContent = '重试读取诊断';
+  } finally {
+    if (generation === diagnosticsLoadGeneration) {
+      content.setAttribute('aria-busy', 'false');
+      button.disabled = false;
+    }
+  }
+}
+
+async function openRequestDiagnostics() {
+  const service = PAGE_KIND === 'mysearch' ? 'mysearch'
+    : ['tavily', 'exa', 'firecrawl', 'social'].includes(activeService) ? activeService : 'mysearch';
+  openDetailDrawer({
+    kicker: 'Request Diagnostics',
+    title: `${getServiceDisplayLabel(service)} 请求诊断`,
+    subtitle: '区分工具调用与上游尝试；不展示搜索词、页面地址或凭证。',
+    bodyHtml: '<div id="diagnostics-status" class="settings-status" role="status" aria-live="polite" aria-atomic="true"></div><div id="diagnostics-content" class="drawer-section-body"></div>',
+    actionsHtml: `<button id="diagnostics-refresh" class="btn btn-soft" type="button" onclick="loadRequestDiagnostics('${service}')">刷新诊断</button>`,
+  });
+  await loadRequestDiagnostics(service);
 }
 
 function socialAdminVersionLabel(version) {
@@ -2160,20 +2288,26 @@ function renderMySearchQuickstart(mysearch, social) {
 }
 
 async function createMySearchBootstrapToken(button) {
-  await runWithBusyButton(button, {
-    busyLabel: '创建中...',
-    successLabel: '已创建',
-    errorLabel: '创建失败',
-    minBusyMs: 560,
-  }, async () => {
-    await api('POST', '/api/tokens', {
-      service: 'mysearch',
-      name: 'MySearch General Token',
+  if (button?.disabled) return;
+  try {
+    await runWithBusyButton(button, {
+      busyLabel: '创建中...',
+      successLabel: '已创建',
+      errorLabel: '创建失败',
+      minBusyMs: 560,
+    }, async () => {
+      await api('POST', '/api/tokens', {
+        service: 'mysearch',
+        name: 'MySearch General Token',
+      });
     });
-  });
+  } catch (error) {
+    showToast(`创建 MySearch Token 失败：${error.message}`, 'error');
+    return;
+  }
   await sleep(180);
+  if (!await refreshAfterMutation('MySearch 通用 Token 已创建', { force: true, scope: getRefreshScopeForService('mysearch') })) return;
   showToast('已创建 MySearch 通用 token，下面的 .env 已自动更新。', 'success');
-  await refresh({ force: true, scope: getRefreshScopeForService('mysearch') });
   const envBlock = document.getElementById('mysearch-proxy-env');
   if (envBlock) {
     setQuickstartTab('config', false);
@@ -2395,6 +2529,7 @@ async function testSocialSettings(button) {
 }
 
 async function refreshSocialModels(button) {
+  if (button?.disabled) return;
   setStatus('settings-social-status', '');
   try {
     // 整轮"同步目录 + 逐个真实评测"最坏可达 780s，按钮忙碌态必须撑得住，
@@ -2414,11 +2549,12 @@ async function refreshSocialModels(button) {
         + (reason === 'insufficient_search_evidence' ? '；样本不足，未更新主备' : '');
       setStatus('settings-social-status', summary, capable === 0);
       showToast(capable ? '模型评测完成' : '模型评测完成，但没有可用模型', capable ? 'success' : 'warn');
-      await refresh({ force: true, scope: { core: false, mysearch: false, social: true, services: [] } });
     });
   } catch (error) {
     setStatus('settings-social-status', `模型评测失败：${error.message}`, true);
+    return;
   }
+  await refreshAfterMutation('模型评测已完成', { force: true, scope: { core: false, mysearch: false, social: true, services: [] } });
 }
 
 function headers() {
@@ -2595,9 +2731,7 @@ function renderSocialUpstreamKeySchedule(keys = []) {
   renderSocialKeySchedule(keys, 'upstream', true);
 }
 
-function fillSettingsForm(settings) {
-  const tavily = settings?.tavily || {};
-  const social = settings?.social || {};
+function fillTavilySettingsForm(tavily) {
   setTavilyMode(tavily.mode || 'auto');
   document.getElementById('settings-tavily-upstream-base-url').value = tavily.upstream_base_url || '';
   document.getElementById('settings-tavily-upstream-search-path').value = tavily.upstream_search_path || '/search';
@@ -2622,7 +2756,9 @@ function fillSettingsForm(settings) {
     tavily.upstream_api_key_configured ? '已配置上游凭证' : `本地活跃 Key ${fmtNum(tavily.local_key_count || 0)}`,
     tavily.upstream_admin_headers_configured || tavily.upstream_admin_cookie_configured ? '已配置上游 Admin 认证' : '当前只读 public summary',
   ].filter(Boolean).join(' · ');
+}
 
+function fillSocialSettingsForm(social) {
   setSocialMode(social.mode || 'local');
   document.getElementById('settings-social-local-base-url').value = social.local_base_url || 'https://api.x.ai/v1';
   document.getElementById('settings-social-local-responses-path').value = social.local_responses_path || '/responses';
@@ -2645,7 +2781,10 @@ function fillSettingsForm(settings) {
   document.getElementById('settings-social-clear-local-api-key').checked = false;
   document.getElementById('settings-social-clear-upstream-api-key').checked = false;
   document.getElementById('settings-social-gateway-token').value = '';
+  renderSocialSettingsMeta(social);
+}
 
+function renderSocialSettingsMeta(social) {
   document.getElementById('settings-social-admin-app-key-hint').textContent =
     describeConfiguredSecret(social.admin_app_key_masked, social.admin_app_key_configured);
   document.getElementById('settings-social-admin-password-hint').textContent =
@@ -2667,22 +2806,8 @@ function fillSettingsForm(settings) {
   document.getElementById('settings-social-gateway-token-hint').textContent =
     describeConfiguredSecret(social.gateway_token_masked, social.gateway_token_configured);
 
-  const socialMode = social.mode || 'local';
-  const footerTitle = document.getElementById('settings-social-footer-title');
-  const footerDetail = document.getElementById('settings-social-footer-detail');
-  if (footerTitle) {
-    footerTitle.textContent = socialMode === 'local'
-      ? '本地模式只使用本地 Social/X Key 池。'
-      : '上游模式只使用上游连接凭证。';
-  }
-  if (footerDetail) {
-    footerDetail.textContent = socialMode === 'local'
-      ? '上游 Admin 配置会保留，但不会被调用；保存后刷新本地池状态。'
-      : '本地 Social/X Key 池不会参与请求；保存后刷新上游连接和管理统计。';
-  }
-
   const bits = [
-    `当前模式：${socialModeLabel(socialMode)}`,
+    `当前模式：${socialModeLabel(social.mode || 'local')}`,
     social.model ? `主模型：${social.model}` : '',
     social.fallback_model ? `Fallback：${social.fallback_model} (< ${social.fallback_min_results || 3})` : '',
     social.token_source ? `Token 来源：${social.token_source}` : '',
@@ -2693,18 +2818,42 @@ function fillSettingsForm(settings) {
     bits.push(`最近错误：${social.error}`);
   }
   document.getElementById('settings-social-meta').textContent = bits.join(' · ');
+}
+
+function fillSettingsForm(settings) {
+  fillTavilySettingsForm(settings.tavily || {});
+  fillSocialSettingsForm(settings.social || {});
   renderSettingsSummaries(settings);
 }
 
 async function loadSettings() {
-  const payload = await api('GET', '/api/settings');
-  latestSettings = payload || {};
-  fillSettingsForm(latestSettings);
-  setStatus('settings-password-status', '');
-  setStatus('settings-tavily-status', '');
-  setStatus('settings-social-status', '');
-  clearSettingsProbe('tavily');
-  clearSettingsProbe('social');
+  const generation = ++settingsLoadGeneration;
+  const shell = document.getElementById('settings-modal');
+  const retryButton = document.getElementById('settings-load-retry');
+  const fields = shell.querySelectorAll('fieldset');
+  fields.forEach((fieldset) => { fieldset.disabled = true; });
+  shell.setAttribute('aria-busy', 'true');
+  retryButton.classList.add('hidden');
+  setStatus('settings-load-status', '正在读取当前设置...');
+  try {
+    const payload = await api('GET', '/api/settings');
+    if (generation !== settingsLoadGeneration) return;
+    latestSettings = payload || {};
+    fillSettingsForm(latestSettings);
+    setStatus('settings-password-status', '');
+    setStatus('settings-tavily-status', '');
+    setStatus('settings-social-status', '');
+    clearSettingsProbe('tavily');
+    clearSettingsProbe('social');
+    fields.forEach((fieldset) => { fieldset.disabled = false; });
+    setStatus('settings-load-status', '');
+  } catch (error) {
+    if (generation !== settingsLoadGeneration || error.message === 'Unauthorized') return;
+    setStatus('settings-load-status', `读取设置失败：${error.message}。重试后才能编辑。`, true);
+    retryButton.classList.remove('hidden');
+  } finally {
+    if (generation === settingsLoadGeneration) shell.setAttribute('aria-busy', 'false');
+  }
 }
 
 async function openSettingsModal() {
@@ -2713,19 +2862,11 @@ async function openSettingsModal() {
   setActiveSettingsTab(document.querySelector('.settings-tab.is-active')?.dataset.settingsTab || 'console');
   syncOverlayState();
   focusOverlay('settings-modal');
-  try {
-    await loadSettings();
-  } catch (error) {
-    showAlertDialog({
-      title: '读取设置失败',
-      message: `控制台没能读取当前配置：${error.message}`,
-      tone: 'danger',
-      kicker: 'Settings Error',
-    });
-  }
+  await loadSettings();
 }
 
 function closeSettingsModal() {
+  settingsLoadGeneration += 1;
   document.getElementById('settings-modal').classList.add('hidden');
   syncOverlayState();
   restoreOverlayFocus('settings-modal');
@@ -4011,7 +4152,7 @@ function renderKeys(service, keys) {
         <td data-label="操作">
           <div class="table-actions">
             <!-- r5 P0-2: 删除按钮已挪到抽屉的 Danger Zone，行内只保留启用/禁用。 -->
-            <button class="btn btn-sm" onclick="event.stopPropagation(); toggleKey('${service}', ${key.id}, ${availability.schedulable ? 0 : 1})">${escapeHtml(availability.actionLabel)}</button>
+            <button class="btn btn-sm" onclick="event.stopPropagation(); toggleKey('${service}', ${key.id}, ${availability.schedulable ? 0 : 1}, this)">${escapeHtml(availability.actionLabel)}</button>
           </div>
         </td>
       </tr>
@@ -4081,7 +4222,7 @@ function openTokenDetail(service, tokenId) {
         <button class="btn btn-soft" type="button" onclick="copyTokenById('${service}', ${token.id}, this)">复制 Token</button>
       `),
       renderDrawerActionGroup('危险动作', `
-        <button class="btn btn-danger" type="button" onclick="closeDetailDrawer(); delToken('${service}', ${token.id})">删除 Token</button>
+        <button class="btn btn-danger" type="button" onclick="delToken('${service}', ${token.id}, this)">删除 Token</button>
       `, 'danger'),
     ].join(''),
   });
@@ -4122,10 +4263,10 @@ function openKeyDetail(service, keyId) {
     ].join(''),
     actionsHtml: [
       renderDrawerActionGroup('维护动作', `
-        <button class="btn btn-soft" type="button" onclick="closeDetailDrawer(); toggleKey('${service}', ${key.id}, ${availability.schedulable ? 0 : 1})">${escapeHtml(availability.actionLabel)} Key</button>
+        <button class="btn btn-soft" type="button" onclick="toggleKey('${service}', ${key.id}, ${availability.schedulable ? 0 : 1}, this)">${escapeHtml(availability.actionLabel)} Key</button>
       `),
       renderDrawerActionGroup('危险动作', `
-        <button class="btn btn-danger" type="button" onclick="closeDetailDrawer(); delKey('${service}', ${key.id})">删除 Key</button>
+        <button class="btn btn-danger" type="button" onclick="delKey('${service}', ${key.id}, this)">删除 Key</button>
       `, 'danger'),
     ].join(''),
   });
@@ -4176,16 +4317,55 @@ function renderDashboardScope(scope) {
 }
 
 async function refresh(options = {}) {
-  const force = options.force ? '?force=1' : '';
-  const payload = await api('GET', `/api/stats${force}`);
-  const services = payload.services || {};
-  const social = payload.social || {};
-  const mysearch = payload.mysearch || {};
-  latestStatsMeta = payload.meta || {};
-  latestServices = services;
-  latestSocial = social;
-  latestMySearch = mysearch;
-  renderDashboardScope(options.scope);
+  const scope = normalizeRefreshScope(options.scope);
+  const sections = [...scope.services, ...(scope.mysearch ? ['mysearch'] : []), ...(scope.social ? ['social'] : [])];
+  if (!sections.length) {
+    renderDashboardScope(scope);
+    return;
+  }
+  const generation = ++statsRefreshGeneration;
+  sections.forEach(section => { statsSectionRequests[section] = generation; });
+  const params = new URLSearchParams();
+  if (options.force) params.set('force', '1');
+  if (options.scope) sections.forEach(section => params.append('service', section));
+  const query = params.toString();
+  const payload = await api('GET', `/api/stats${query ? `?${query}` : ''}`);
+  const updated = { core: scope.core, mysearch: false, social: false, services: [] };
+  sections.forEach(section => {
+    if (statsSectionRequests[section] !== generation) return;
+    if (SERVICE_META[section] && payload.services?.[section]) {
+      latestServices = { ...latestServices, [section]: payload.services[section] };
+      updated.services.push(section);
+    } else if (section === 'mysearch' && payload.mysearch) {
+      latestMySearch = payload.mysearch;
+      updated.mysearch = true;
+    } else if (section === 'social' && payload.social) {
+      latestSocial = payload.social;
+      updated.social = true;
+    }
+  });
+  if (updated.services.length || updated.mysearch || updated.social) {
+    if (payload.meta && generation >= statsMetaGeneration) {
+      latestStatsMeta = payload.meta;
+      statsMetaGeneration = generation;
+    }
+    renderDashboardScope(updated);
+  }
+}
+
+async function refreshAfterMutation(message, options) {
+  try {
+    await refresh(options);
+    setDashboardError('');
+    return true;
+  } catch (error) {
+    if (error.message !== 'Unauthorized') {
+      const detail = `${message}，但界面刷新失败：${error.message}。请重试读取状态，勿重复提交。`;
+      setDashboardError(detail);
+      showToast(detail, 'warn');
+    }
+    return false;
+  }
 }
 
 function toggleImport(service, button) {
@@ -4200,53 +4380,77 @@ function toggleImport(service, button) {
 }
 
 async function createToken(service, button) {
+  if (button?.disabled) return;
   const input = document.getElementById(`token-name-${service}`);
   const tokenName = input.value.trim();
-  await runWithBusyButton(button, {
-    busyLabel: '创建中...',
-    successLabel: '已创建',
-    errorLabel: '创建失败',
-    minBusyMs: service === 'mysearch' ? 560 : BUTTON_MIN_BUSY_MS,
-  }, async () => {
-    await api('POST', '/api/tokens', {
-      service,
-      name: tokenName,
+  try {
+    await runWithBusyButton(button, {
+      busyLabel: '创建中...',
+      successLabel: '已创建',
+      errorLabel: '创建失败',
+      minBusyMs: service === 'mysearch' ? 560 : BUTTON_MIN_BUSY_MS,
+    }, async () => {
+      await api('POST', '/api/tokens', {
+        service,
+        name: tokenName,
+      });
+      input.value = '';
     });
-    input.value = '';
-  });
+  } catch (error) {
+    showToast(`创建 Token 失败：${error.message}`, 'error');
+    return;
+  }
   await sleep(service === 'mysearch' ? 180 : 80);
-  await refresh({ force: true, scope: getRefreshScopeForService(service) });
+  await refreshAfterMutation('Token 已创建', { force: true, scope: getRefreshScopeForService(service) });
 }
 
-async function delToken(service, id) {
-  const confirmed = await showConfirmDialog({
-    title: '删除 Token',
-    message: '删除后这个 token 会立即失效，下游客户端会立刻无法继续调用。',
-    confirmText: '确认删除',
-    cancelText: '取消',
-    tone: 'danger',
-    kicker: 'Danger Zone',
-  });
-  if (!confirmed) return;
-  await api('DELETE', `/api/tokens/${id}`);
-  await refresh({ force: true, scope: getRefreshScopeForService(service) });
+async function delToken(service, id, button) {
+  const pendingKey = `token:${id}`;
+  if (pendingMutations.has(pendingKey) || button?.disabled) return;
+  pendingMutations.add(pendingKey);
+  try {
+    const confirmed = await showConfirmDialog({
+      title: '删除 Token',
+      message: '删除后这个 token 会立即失效，下游客户端会立刻无法继续调用。',
+      confirmText: '确认删除',
+      cancelText: '取消',
+      tone: 'danger',
+      kicker: 'Danger Zone',
+    });
+    if (!confirmed) return;
+    await runWithBusyButton(button, { busyLabel: '删除中...', successLabel: '已删除', errorLabel: '删除失败' }, () => api('DELETE', `/api/tokens/${id}`));
+    if (button?.isConnected && button.closest('.detail-drawer')) closeDetailDrawer();
+    showToast('Token 已删除', 'success');
+    await refreshAfterMutation('Token 已删除', { force: true, scope: getRefreshScopeForService(service) });
+  } catch (error) {
+    showToast(`删除 Token 失败：${error.message}`, 'error');
+  } finally {
+    pendingMutations.delete(pendingKey);
+  }
 }
 
 async function addSingleKey(service, button) {
+  if (button?.disabled) return;
   const input = document.getElementById(`single-key-${service}`);
   const key = input.value.trim();
   if (!key) return;
-  const result = await runWithBusyButton(button, {
-    busyLabel: '添加中...',
-    successLabel: '已处理',
-    errorLabel: '添加失败',
-  }, async () => {
-    const payload = await api('POST', '/api/keys', { service, key });
-    input.value = '';
-    return payload;
-  });
+  let result;
+  try {
+    result = await runWithBusyButton(button, {
+      busyLabel: '添加中...',
+      successLabel: '已处理',
+      errorLabel: '添加失败',
+    }, async () => {
+      const payload = await api('POST', '/api/keys', { service, key });
+      input.value = '';
+      return payload;
+    });
+  } catch (error) {
+    showToast(`添加 API Key 失败：${error.message}`, 'error');
+    return;
+  }
   showToast(describeKeyIngestionResult(result, service), result.imported ? 'success' : 'warn');
-  await refresh({ force: true, scope: getRefreshScopeForService(service) });
+  await refreshAfterMutation('API Key 已处理', { force: true, scope: getRefreshScopeForService(service) });
 }
 
 function describeKeyIngestionResult(result, service) {
@@ -4263,41 +4467,71 @@ function describeKeyIngestionResult(result, service) {
 }
 
 async function importKeys(service, button) {
+  if (button?.disabled) return;
   const textarea = document.getElementById(`import-text-${service}`);
   const text = textarea.value.trim();
   if (!text) return;
-  const result = await runWithBusyButton(button, {
-    busyLabel: '导入中...',
-    successLabel: '已处理',
-    errorLabel: '导入失败',
-  }, async () => {
-    return api('POST', '/api/keys', { service, file: text });
-  });
+  let result;
+  try {
+    result = await runWithBusyButton(button, {
+      busyLabel: '导入中...',
+      successLabel: '已处理',
+      errorLabel: '导入失败',
+    }, async () => {
+      return api('POST', '/api/keys', { service, file: text });
+    });
+  } catch (error) {
+    showToast(`导入 API Key 失败：${error.message}`, 'error');
+    return;
+  }
   if (!(result.invalid || result.disabled)) {
     textarea.value = '';
     document.getElementById(`import-wrap-${service}`).classList.add('hidden');
   }
   showToast(describeKeyIngestionResult(result, service), result.imported ? 'success' : 'warn');
-  await refresh({ force: true, scope: getRefreshScopeForService(service) });
+  await refreshAfterMutation('API Key 导入已处理', { force: true, scope: getRefreshScopeForService(service) });
 }
 
-async function delKey(service, id) {
-  const confirmed = await showConfirmDialog({
-    title: '删除 API Key',
-    message: '删除后这个上游 Key 会从当前服务池中移除，额度同步和代理调用都会停止使用它。',
-    confirmText: '确认删除',
-    cancelText: '取消',
-    tone: 'danger',
-    kicker: 'Danger Zone',
-  });
-  if (!confirmed) return;
-  await api('DELETE', `/api/keys/${id}`);
-  await refresh({ force: true, scope: getRefreshScopeForService(service) });
+async function delKey(service, id, button) {
+  const pendingKey = `key:${id}`;
+  if (pendingMutations.has(pendingKey) || button?.disabled) return;
+  pendingMutations.add(pendingKey);
+  try {
+    const confirmed = await showConfirmDialog({
+      title: '删除 API Key',
+      message: '删除后这个上游 Key 会从当前服务池中移除，额度同步和代理调用都会停止使用它。',
+      confirmText: '确认删除',
+      cancelText: '取消',
+      tone: 'danger',
+      kicker: 'Danger Zone',
+    });
+    if (!confirmed) return;
+    await runWithBusyButton(button, { busyLabel: '删除中...', successLabel: '已删除', errorLabel: '删除失败' }, () => api('DELETE', `/api/keys/${id}`));
+    if (button?.isConnected && button.closest('.detail-drawer')) closeDetailDrawer();
+    showToast('API Key 已删除', 'success');
+    await refreshAfterMutation('API Key 已删除', { force: true, scope: getRefreshScopeForService(service) });
+  } catch (error) {
+    showToast(`删除 API Key 失败：${error.message}`, 'error');
+  } finally {
+    pendingMutations.delete(pendingKey);
+  }
 }
 
-async function toggleKey(service, id, active) {
-  await api('PUT', `/api/keys/${id}/toggle`, { active });
-  await refresh({ force: true, scope: getRefreshScopeForService(service) });
+async function toggleKey(service, id, active, button) {
+  const pendingKey = `key:${id}`;
+  if (pendingMutations.has(pendingKey) || button?.disabled) return;
+  pendingMutations.add(pendingKey);
+  const label = active ? '启用' : '禁用';
+  try {
+    await runWithBusyButton(button, { busyLabel: `${label}中...`, successLabel: `已${label}`, errorLabel: `${label}失败` }, () => api('PUT', `/api/keys/${id}/toggle`, { active }));
+    if (button?.isConnected && button.closest('.detail-drawer')) closeDetailDrawer();
+    showToast(`API Key 已${label}`, 'success');
+    await refreshAfterMutation(`API Key 已${label}`, { force: true, scope: getRefreshScopeForService(service) });
+  } catch (error) {
+    showToast(`${label} API Key 失败：${error.message}`, 'error');
+  } finally {
+    pendingMutations.delete(pendingKey);
+  }
 }
 
 async function syncUsage(service, force, button) {
@@ -4306,6 +4540,7 @@ async function syncUsage(service, force, button) {
     return;
   }
   const actionButton = button || document.getElementById(`sync-btn-${service}`);
+  if (actionButton?.disabled) return;
   try {
     await runWithBusyButton(actionButton, {
       busyLabel: '同步中...',
@@ -4314,21 +4549,26 @@ async function syncUsage(service, force, button) {
     }, async () => {
       await api('POST', '/api/usage/sync', { service, force });
     });
-    await refresh({ force: true, scope: getRefreshScopeForService(service) });
   } catch (error) {
     showToast(`同步 ${SERVICE_META[service].label} 额度失败: ${error.message}`, 'error');
+    return;
   }
+  await refreshAfterMutation(`${SERVICE_META[service].label} 额度同步已完成`, { force: true, scope: getRefreshScopeForService(service) });
 }
 
 async function changePwd(event) {
   event?.preventDefault?.();
   const button = event?.submitter;
+  const fields = document.getElementById('settings-console-fields');
+  if (fields.disabled || button?.disabled) return;
+  const generation = settingsLoadGeneration;
   const input = document.getElementById('settings-new-pwd');
   const password = input.value.trim();
   if (password.length < 4) {
     setStatus('settings-password-status', '密码至少 4 位。', true);
     return;
   }
+  fields.disabled = true;
   try {
     await runWithBusyButton(button, {
       busyLabel: '保存中...',
@@ -4336,22 +4576,29 @@ async function changePwd(event) {
       errorLabel: '保存失败',
     }, async () => {
       await api('PUT', '/api/password', { password });
-      PWD = password;
-      localStorage.setItem(STORAGE_KEY, password);
-      localStorage.removeItem(LEGACY_STORAGE_KEY);
-      input.value = '';
-      setStatus('settings-password-status', '密码已更新，当前会话也已同步。');
+      PWD = '';
+      clearStoredPasswords();
+      if (generation === settingsLoadGeneration) {
+        input.value = '';
+        setStatus('settings-password-status', '密码已更新，当前会话也已同步。');
+      }
     });
   } catch (error) {
-    setStatus('settings-password-status', `保存密码失败：${error.message}`, true);
+    if (generation === settingsLoadGeneration) setStatus('settings-password-status', `保存密码失败：${error.message}`, true);
+  } finally {
+    if (generation === settingsLoadGeneration) fields.disabled = false;
   }
 }
 
 async function saveSocialSettings(event) {
   event?.preventDefault?.();
   const button = event?.submitter;
+  const fields = document.getElementById('settings-social-fields');
+  if (fields.disabled || button?.disabled) return;
+  const generation = settingsLoadGeneration;
   const body = collectSocialSettingsForm();
   clearSettingsProbe('social');
+  fields.disabled = true;
 
   try {
     await runWithBusyButton(button, {
@@ -4360,17 +4607,27 @@ async function saveSocialSettings(event) {
       errorLabel: '保存失败',
     }, async () => {
       const payload = await api('PUT', '/api/settings/social', body);
-      latestSettings = payload || {};
-      fillSettingsForm(latestSettings);
-      setStatus('settings-social-status', 'Social / X 设置已保存，当前控制台状态已刷新。');
+      if (generation === settingsLoadGeneration) {
+        latestSettings.social = payload.social;
+        fillSocialSettingsForm(latestSettings.social);
+        renderSettingsSummaries(latestSettings);
+        setStatus('settings-social-status', 'Social / X 设置已保存。');
+      }
     });
-    await refresh({ force: true, scope: getRefreshScopeForService('social') });
   } catch (error) {
-    setStatus('settings-social-status', `保存 Social / X 设置失败：${error.message}`, true);
+    if (generation === settingsLoadGeneration) setStatus('settings-social-status', `保存 Social / X 设置失败：${error.message}`, true);
+    return;
+  } finally {
+    if (generation === settingsLoadGeneration) fields.disabled = false;
   }
+  await refreshAfterMutation('Social / X 设置已保存', { force: true, scope: getRefreshScopeForService('social') });
 }
 
 async function resumeSocialUpstreamKey(keyId, button) {
+  const fields = document.getElementById('settings-social-fields');
+  if (fields.disabled || button?.disabled) return;
+  const generation = settingsLoadGeneration;
+  fields.disabled = true;
   try {
     await runWithBusyButton(button, {
       busyLabel: '恢复中...',
@@ -4378,13 +4635,20 @@ async function resumeSocialUpstreamKey(keyId, button) {
       errorLabel: '恢复失败',
     }, async () => {
       const payload = await api('PUT', `/api/settings/social/keys/${encodeURIComponent(keyId)}/resume`);
-      latestSettings = payload || {};
-      fillSettingsForm(latestSettings);
+      if (generation === settingsLoadGeneration) {
+        latestSettings.social = payload.social;
+        renderSocialSettingsMeta(latestSettings.social);
+        renderSettingsSummaries(latestSettings);
+        setStatus('settings-social-status', 'Social / X Key 已恢复。');
+      }
     });
-    await refresh({ force: true, scope: getRefreshScopeForService('social') });
   } catch (error) {
-    setStatus('settings-social-status', `恢复 Social / X key 失败：${error.message}`, true);
+    if (generation === settingsLoadGeneration) setStatus('settings-social-status', `恢复 Social / X key 失败：${error.message}`, true);
+    return;
+  } finally {
+    if (generation === settingsLoadGeneration) fields.disabled = false;
   }
+  await refreshAfterMutation('Social / X Key 已恢复', { force: true, scope: getRefreshScopeForService('social') });
 }
 
 function flashButtonLabel(button, label) {
@@ -4618,6 +4882,8 @@ renderServiceShells();
 
 async function initConsole() {
   if (INITIAL_AUTHENTICATED) {
+    PWD = '';
+    clearStoredPasswords();
     showDashboard();
     try {
       await refresh();
@@ -4694,8 +4960,12 @@ function maskToken(token) {
 async function saveTavilySettings(event) {
   event?.preventDefault?.();
   const button = event?.submitter;
+  const fields = document.getElementById('settings-tavily-fields');
+  if (fields.disabled || button?.disabled) return;
+  const generation = settingsLoadGeneration;
   const body = collectTavilySettingsForm();
   clearSettingsProbe('tavily');
+  fields.disabled = true;
 
   try {
     await runWithBusyButton(button, {
@@ -4704,12 +4974,18 @@ async function saveTavilySettings(event) {
       errorLabel: '保存失败',
     }, async () => {
       const payload = await api('PUT', '/api/settings/tavily', body);
-      latestSettings = payload || {};
-      fillSettingsForm(latestSettings);
-      setStatus('settings-tavily-status', 'Tavily 设置已保存。');
+      if (generation === settingsLoadGeneration) {
+        latestSettings.tavily = payload.tavily;
+        fillTavilySettingsForm(latestSettings.tavily);
+        renderSettingsSummaries(latestSettings);
+        setStatus('settings-tavily-status', 'Tavily 设置已保存。');
+      }
     });
-    await refresh({ force: true, scope: getRefreshScopeForService('tavily') });
   } catch (error) {
-    setStatus('settings-tavily-status', `保存失败：${error.message}`, true);
+    if (generation === settingsLoadGeneration) setStatus('settings-tavily-status', `保存失败：${error.message}`, true);
+    return;
+  } finally {
+    if (generation === settingsLoadGeneration) fields.disabled = false;
   }
+  await refreshAfterMutation('Tavily 设置已保存', { force: true, scope: getRefreshScopeForService('tavily') });
 }

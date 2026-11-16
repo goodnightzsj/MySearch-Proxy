@@ -10,6 +10,7 @@ import math
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
+from threading import Condition
 from datetime import datetime, timezone
 from typing import Any, Callable, Literal, Mapping, Sequence, cast
 from urllib.parse import urlparse
@@ -18,6 +19,7 @@ from urllib.request import Request, urlopen
 import httpx
 
 from mysearch.cache import CacheStore
+from mysearch.diagnostics import diagnosed, direct_call
 from mysearch.config import MySearchConfig, ProviderConfig
 from mysearch.keyring import MySearchKeyRing
 from mysearch import postprocess
@@ -209,6 +211,11 @@ class MySearchClient(ProviderTransport):
             max_workers=self.config.max_parallel_workers,
             thread_name_prefix="mysearch",
         )
+        self._lifecycle = Condition()
+        self._active_requests = set()
+        self._active_futures = set()
+        self._closing = False
+        self._closed = False
 
     # 缓存内部状态已搬到 `CacheStore`；这两个属性保留给健康检查与既有测试，
     # 是转发而非第二数据源。
@@ -225,9 +232,24 @@ class MySearchClient(ProviderTransport):
         self._cache.max_entries = value
 
     def close(self) -> None:
-        self._executor.shutdown(wait=False)
-        self._http.close()
+        with self._lifecycle:
+            if self._closing:
+                self._lifecycle.wait_for(lambda: self._closed)
+                return
+            self._closing = True
+            for request in self._active_requests:
+                request.cancel("shutdown")
+        try:
+            self._executor.shutdown(wait=True, cancel_futures=True)
+            with self._lifecycle:
+                self._lifecycle.wait_for(lambda: not self._active_futures and not self._active_requests)
+            self._http.close()
+        finally:
+            with self._lifecycle:
+                self._closed = True
+                self._lifecycle.notify_all()
 
+    @diagnosed("mysearch_health")
     def health(self) -> dict[str, Any]:
         keyring_info = self.keyring.describe()
         cache = self._cache_health()
@@ -424,6 +446,7 @@ class MySearchClient(ProviderTransport):
     ) -> dict[str, Any]:
         return responses._annotate_search_debug(result=result, provider=provider, normalized_sources=normalized_sources, resolved_intent=resolved_intent, resolved_strategy=resolved_strategy, decision=decision, include_content=include_content, include_answer=include_answer, cache_hit=cache_hit, requested_max_results=requested_max_results, candidate_max_results=candidate_max_results)
 
+    @diagnosed("search")
     def search(
         self,
         *,
@@ -1253,6 +1276,7 @@ class MySearchClient(ProviderTransport):
             candidate_max_results=candidate_max_results,
         )
 
+    @diagnosed("extract_url")
     def extract_url(
         self,
         *,
@@ -1260,10 +1284,16 @@ class MySearchClient(ProviderTransport):
         formats: list[str] | None = None,
         only_main_content: bool = True,
         provider: Literal["auto", "firecrawl", "tavily"] = "auto",
+        max_age_seconds: int | None = None,
     ) -> dict[str, Any]:
         parsed_url = urlparse(url)
         if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
             raise MySearchError("url must be an absolute http(s) URL")
+        if max_age_seconds is not None:
+            if type(max_age_seconds) is not int or max_age_seconds < 0:
+                raise MySearchError("max_age_seconds must be a non-negative integer")
+            if provider != "firecrawl":
+                raise MySearchError("max_age_seconds requires provider='firecrawl'")
 
         formats = formats or ["markdown"]
         cache_key = self._build_extract_cache_key(
@@ -1272,7 +1302,8 @@ class MySearchClient(ProviderTransport):
             only_main_content=only_main_content,
             provider=provider,
         )
-        cached_result = self._cache_get("extract", cache_key)
+        # An explicit freshness bound is enforced by Firecrawl, not the local TTL cache.
+        cached_result = self._cache_get("extract", cache_key) if max_age_seconds is None else None
         if cached_result is not None:
             return self._annotate_cache(
                 cached_result,
@@ -1301,10 +1332,12 @@ class MySearchClient(ProviderTransport):
                         url=url,
                         formats=formats,
                         only_main_content=only_main_content,
+                        **({"max_age_seconds": max_age_seconds} if max_age_seconds is not None else {}),
                     )
                     firecrawl_issue = self._extract_quality_issue(firecrawl_result) or ""
                     if not firecrawl_issue:
-                        self._cache_set("extract", cache_key, firecrawl_result)
+                        if max_age_seconds is None:
+                            self._cache_set("extract", cache_key, firecrawl_result)
                         return self._annotate_cache(
                             firecrawl_result,
                             namespace="extract",
@@ -1373,56 +1406,26 @@ class MySearchClient(ProviderTransport):
 
         if provider == "auto" and self._provider_can_serve(self.config.exa):
             try:
-                exa_extract = self._search_exa(
-                    query=url,
-                    max_results=1,
-                    include_domains=None,
-                    exclude_domains=None,
-                    include_content=True,
-                    strategy="fast",
-                )
-                exa_results = exa_extract.get("results") or []
-                if exa_results:
-                    matching_results = [
-                        item
-                        for item in exa_results
-                        if self._extract_candidate_matches_requested_url(
-                            requested_url=url,
-                            candidate_url=str(item.get("url") or ""),
-                        )
-                    ]
-                    if not matching_results:
-                        errors.append("exa extract returned no same-domain URL match")
-                        raise MySearchError("exa extract returned no same-domain URL match")
-                    best = max(matching_results, key=lambda r: len(r.get("content") or ""))
-                    content = (best.get("content") or "").strip()
-                    if content and len(content) >= 100:
-                        actual_url = str(best.get("url") or "").strip() or url
-                        exa_result = {
-                            "provider": "exa",
-                            "transport": exa_extract.get("transport", ""),
-                            "url": actual_url,
-                            "content": content,
-                            "metadata": {
-                                "requested_url": url,
-                                "exa_url": actual_url,
-                            },
-                        }
-                        issue = self._extract_quality_issue(exa_result)
-                        if issue is None:
-                            exa_result = self._annotate_extract_fallback(
-                                exa_result,
-                                fallback_from="firecrawl+tavily",
-                                fallback_reason=" | ".join(errors),
-                            )
-                            self._cache_set("extract", cache_key, exa_result)
-                            return self._annotate_cache(
-                                exa_result,
-                                namespace="extract",
-                                hit=False,
-                            )
-            except MySearchError:
-                pass
+                exa_result = self._exa_contents(url=url)
+                issue = self._extract_quality_issue(exa_result)
+                if issue is None and len(exa_result["content"]) < 100:
+                    issue = "short content"
+                if issue is not None:
+                    errors.append(f"exa contents returned {issue}")
+                else:
+                    exa_result = self._annotate_extract_fallback(
+                        exa_result,
+                        fallback_from="firecrawl+tavily",
+                        fallback_reason=" | ".join(errors),
+                    )
+                    self._cache_set("extract", cache_key, exa_result)
+                    return self._annotate_cache(
+                        exa_result,
+                        namespace="extract",
+                        hit=False,
+                    )
+            except MySearchError as exc:
+                errors.append(f"exa contents failed: {exc}")
 
         if firecrawl_result is not None and provider == "auto":
             result = self._annotate_extract_warning(
@@ -1437,6 +1440,7 @@ class MySearchClient(ProviderTransport):
 
         raise MySearchError(" | ".join(errors) if errors else "no extraction provider available")
 
+    @diagnosed("research")
     @budgeted_research
     def research(
         self,
@@ -4398,10 +4402,15 @@ class MySearchClient(ProviderTransport):
         payload: dict[str, Any] = {
             "query": effective_query,
             "max_results": max_results,
-            "search_depth": "advanced" if include_content or strategy in {"verify", "deep"} else "basic",
+            "search_depth": (
+                "advanced" if include_content or strategy in {"verify", "deep"}
+                else "fast" if strategy == "fast" and topic == "general" and not (days or from_date or to_date or exclude_domains)
+                else "basic"
+            ),
             "topic": topic,
             "include_answer": include_answer,
             "include_raw_content": include_content,
+            "include_usage": True,
         }
         if from_date:
             payload["start_date"] = from_date
@@ -5000,6 +5009,66 @@ class MySearchClient(ProviderTransport):
     def _exa_category(self, mode: str, intent: str) -> str:
         return query_routing._exa_category(mode=mode, intent=intent)
 
+    def _exa_contents(self, *, url: str) -> dict[str, Any]:
+        provider = self.config.exa
+        key = self._get_key_or_raise(provider)
+        response = self._request_json(
+            provider=provider,
+            method="POST",
+            path=provider.path("contents"),
+            payload={"ids": [url], "text": True},
+            key=key.key,
+        )
+        identity = self._result_url_identity(url)
+        # Contents may return HTTP 200 with a per-document fetch error.
+        if "statuses" in response:
+            statuses = response["statuses"]
+            if not isinstance(statuses, list):
+                raise MySearchError("exa contents returned invalid statuses")
+            matching = [
+                item for item in statuses
+                if isinstance(item, dict) and isinstance(item.get("id"), str)
+                and self._result_url_identity(item["id"]) == identity
+            ]
+            if not matching:
+                raise MySearchError("exa contents returned no matching URL status")
+            for item in matching:
+                if item.get("status") != "success":
+                    error = item.get("error")
+                    error = error if isinstance(error, dict) else {}
+                    tag = error.get("tag")
+                    reason = tag if isinstance(tag, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,120}", tag) else "fetch failed"
+                    status_code = error.get("httpStatusCode")
+                    if type(status_code) is int and 100 <= status_code <= 599:
+                        reason += f" (HTTP {status_code})"
+                    raise MySearchError(f"exa contents status error: {reason}")
+
+        results = response.get("results")
+        if not isinstance(results, list):
+            raise MySearchError("exa contents returned invalid results")
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            # A returned URL is authoritative; a matching id cannot excuse a
+            # different page URL. Without a URL, the id must identify the page.
+            actual_url = item.get("url") or item.get("id")
+            if not isinstance(actual_url, str) or self._result_url_identity(actual_url) != identity:
+                continue
+            content = item.get("text")
+            if not isinstance(content, str):
+                raise MySearchError("exa contents returned empty text")
+            content = self._clean_extract_content(content)
+            if not content:
+                raise MySearchError("exa contents returned empty text")
+            return {
+                "provider": "exa",
+                "transport": key.source,
+                "url": actual_url,
+                "content": content,
+                "metadata": {"requested_url": url, "exa_url": actual_url},
+            }
+        raise MySearchError("exa contents returned no exact URL match")
+
     def _search_exa(
         self,
         *,
@@ -5053,6 +5122,14 @@ class MySearchClient(ProviderTransport):
             payload["includeDomains"] = include_domains
         if exclude_domains:
             payload["excludeDomains"] = exclude_domains
+
+        # Only the measured lite subset is enabled; exact queries and richer
+        # filtering/content requests retain their existing fast/auto/deep type.
+        if (
+            strategy == "fast" and search_type == "fast"
+            and not (exa_category or from_date or to_date or exclude_domains or include_content)
+        ):
+            payload["type"] = "lite"
 
         response = self._request_json(
             provider=provider,
@@ -5785,6 +5862,7 @@ class MySearchClient(ProviderTransport):
         url: str,
         formats: list[str],
         only_main_content: bool,
+        max_age_seconds: int | None = None,
     ) -> dict[str, Any]:
         provider = self.config.firecrawl
         key = self._get_key_or_raise(provider)
@@ -5793,6 +5871,8 @@ class MySearchClient(ProviderTransport):
             "formats": formats,
             "onlyMainContent": only_main_content,
         }
+        if max_age_seconds is not None:
+            payload["maxAge"] = max_age_seconds * 1000
         response = self._request_json(
             provider=provider,
             method="POST",
@@ -5818,6 +5898,7 @@ class MySearchClient(ProviderTransport):
             "metadata": metadata,
         }
 
+    @diagnosed("map_site")
     def map_site(
         self,
         *,
@@ -5832,6 +5913,7 @@ class MySearchClient(ProviderTransport):
             search=search,
         )
 
+    @diagnosed("crawl_site")
     def crawl_site(
         self,
         *,
@@ -5909,6 +5991,7 @@ class MySearchClient(ProviderTransport):
             results = []
         first = results[0] if results else {}
         content = first.get("raw_content") or first.get("content") or ""
+        content = self._clean_extract_content(content)
         return {
             "provider": "tavily",
             "transport": key.source,
@@ -5935,22 +6018,26 @@ class MySearchClient(ProviderTransport):
                 timeout = min(timeout, remaining)
                 http_timeout = httpx.Timeout(timeout, connect=min(10.0, timeout))
             try:
-                if prefer_urlopen:
-                    request = Request(
-                        raw_url,
-                        headers={"Accept": "text/plain, text/markdown;q=0.9, */*;q=0.8"},
-                    )
-                    with urlopen(request, timeout=timeout) as response:
-                        raw_content = response.read()
-                    content = raw_content.decode("utf-8", errors="replace")
-                else:
-                    response = self._http.get(
-                        raw_url,
-                        headers={"Accept": "text/plain, text/markdown;q=0.9, */*;q=0.8"},
-                        timeout=http_timeout,
-                    )
-                    response.raise_for_status()
-                    content = response.text
+                with direct_call(provider="web", operation="extract") as call:
+                    if prefer_urlopen:
+                        request = Request(
+                            raw_url,
+                            headers={"Accept": "text/plain, text/markdown;q=0.9, */*;q=0.8"},
+                        )
+                        with urlopen(request, timeout=timeout) as response:
+                            raw_content = response.read()
+                            call["status_code"] = getattr(response, "status", 200)
+                        content = raw_content.decode("utf-8", errors="replace")
+                    else:
+                        response = self._http.get(
+                            raw_url,
+                            headers={"Accept": "text/plain, text/markdown;q=0.9, */*;q=0.8"},
+                            timeout=http_timeout,
+                        )
+                        call["status_code"] = response.status_code
+                        response.raise_for_status()
+                        content = response.text
+                    call["outcome"] = "success"
             except (httpx.HTTPError, ValueError, OSError):
                 continue
 
@@ -6276,8 +6363,11 @@ class MySearchClient(ProviderTransport):
         if remaining is not None:
             timeout = httpx.Timeout(min(self.config.timeout_seconds, remaining), connect=min(10.0, remaining))
         try:
-            response = self._http.get(canonical_url, headers={"Accept": "text/html"}, timeout=timeout)
-            response.raise_for_status()
+            with direct_call(provider="web", operation="text") as call:
+                response = self._http.get(canonical_url, headers={"Accept": "text/html"}, timeout=timeout)
+                call["status_code"] = response.status_code
+                response.raise_for_status()
+                call["outcome"] = "success"
         except httpx.HTTPError:
             return ""
 

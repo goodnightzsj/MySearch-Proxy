@@ -29,7 +29,7 @@ from typing import Any
 from mysearch import query_routing
 from mysearch.config import ProviderConfig
 from mysearch.errors import MySearchError, MySearchHTTPError
-from mysearch.providers.base import wait_before_retry
+from mysearch.providers.base import remaining_request_seconds, wait_before_retry
 
 #: 固定密钥（非托管池）在 429 后的默认冷却秒数。
 DEFAULT_KEY_COOLDOWN_SECONDS = 60
@@ -201,6 +201,9 @@ def crawl_firecrawl(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise MySearchError("firecrawl crawl deadline exceeded")
+        request_remaining = remaining_request_seconds()
+        if request_remaining is not None:
+            remaining = min(remaining, request_remaining)
         return max(0.001, min(request_timeout_seconds, remaining))
 
     def request_with_deadline(
@@ -269,7 +272,7 @@ def crawl_firecrawl(
                         raise
                 if deadline - time.monotonic() <= retry_delay:
                     raise MySearchError("firecrawl crawl deadline exceeded") from exc
-                time.sleep(retry_delay)
+                wait_before_retry(retry_delay)
         raise AssertionError("unreachable")
 
     payload: dict[str, Any] = {"url": url, "limit": limit}
@@ -306,7 +309,7 @@ def crawl_firecrawl(
     # 各站点 duration 的分布才值得做。
     poll_interval = float(poll_interval_seconds)
     for _ in range(max(1, max_poll_attempts)):
-        time.sleep(min(max(0.0, poll_interval), max(0.0, deadline - time.monotonic())))
+        wait_before_retry(min(max(0.0, poll_interval), max(0.0, deadline - time.monotonic())))
         poll_interval = min(
             poll_interval * CRAWL_POLL_BACKOFF_FACTOR,
             CRAWL_POLL_MAX_INTERVAL_SECONDS,

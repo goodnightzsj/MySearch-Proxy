@@ -457,17 +457,19 @@ def _result_url_identity(url: str) -> str:
     fragments (`#/settings`, `#!/posts`) name a different document and are
     kept; so is any fragment we cannot classify.
     """
-    raw = _canonical_result_url((url or "").strip()).lower()
+    raw = _canonical_result_url((url or "").strip())
     if not raw:
         return ""
     parsed = urlparse(raw)
-    if not parsed.netloc or not parsed.path:
+    if not parsed.netloc:
         return raw
     fragment = parsed.fragment
     if fragment and _is_heading_anchor(fragment):
         fragment = ""
     return urlunparse(
-        parsed._replace(path=parsed.path.rstrip("/"), fragment=fragment)
+        parsed._replace(
+            netloc=parsed.netloc.lower(), path=parsed.path.rstrip("/"), fragment=fragment,
+        )
     )
 
 

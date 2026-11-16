@@ -78,7 +78,7 @@ jobs:
         include:
           - target: proxy
             target_label: proxy
-            context: ./proxy
+            context: .
             dockerfile: ./proxy/Dockerfile
             default_image_name: mysearch-proxy
           - target: mysearch

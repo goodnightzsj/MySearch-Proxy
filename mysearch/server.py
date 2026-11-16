@@ -3,29 +3,104 @@
 from __future__ import annotations
 
 import atexit
+import copy
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from functools import partial
-from typing import Literal
+from threading import Event
+from typing import Annotated, Literal
 
-import anyio.to_thread
-from mcp.server.fastmcp import FastMCP
+import anyio
+from mcp.server.fastmcp import Context, FastMCP
+from mcp.types import ToolAnnotations
+from pydantic import Field
 
 from mysearch.clients import MySearchClient
 from mysearch.config import MCPTransport, MySearchConfig
+from mysearch.diagnostics import remaining_seconds, request_context
+from mysearch.mcp_results import CrawlResult, ExtractResult, HealthResult, MapResult, ResearchResult, SearchResult
 
 
-async def _offload(fn, **kwargs):
-    """Run a blocking provider call on a worker thread.
+OUTPUT_MODELS = {
+    "search": SearchResult,
+    "extract_url": ExtractResult,
+    "research": ResearchResult,
+    "map_site": MapResult,
+    "crawl_site": CrawlResult,
+    "health": HealthResult,
+}
 
-    Every tool here is a sync function over a sync httpx client. The MCP SDK
-    invokes sync tools inline on the event loop
-    (mcp/server/fastmcp/utilities/func_metadata.py: `return fn(**args)`), so a
-    single search would stall the entire server for its whole duration -
-    including accepting and reading new connections, which is what made
-    concurrent clients see timeouts and connection failures. The client is
-    already thread-safe (httpx.Client, locked CacheStore, own ThreadPoolExecutor).
-    """
-    return await anyio.to_thread.run_sync(partial(fn, **kwargs))
+
+async def _offload(client, tool, ctx=None, **kwargs):
+    """Include queue time in the budget and cancel future work on disconnect."""
+    state = client.new_request(tool, **kwargs)
+    with state.lock:
+        state.claimed = True  # MCP owns finalization through output validation.
+    finished = anyio.Event()
+    worker_started = Event()
+    result = error = None
+    progress_enabled = False
+    if ctx is not None:
+        try:
+            progress_enabled = bool(ctx.request_context.meta and ctx.request_context.meta.progressToken is not None)
+        except ValueError:
+            pass  # Direct SDK calls have no request context.
+
+    def invoke():
+        worker_started.set()
+        worker_result = worker_error = None
+        try:
+            remaining_seconds()
+            worker_result = getattr(client, tool)(**kwargs)
+            OUTPUT_MODELS[tool].model_validate(worker_result).model_dump(mode="json")
+        except BaseException as exc:
+            worker_error = exc
+            raise
+        finally:
+            # Native Task.cancel may abandon run_sync; retain ownership until I/O really ends.
+            client.finish_request(state, result=worker_result, error=worker_error)
+        return {**worker_result, "diagnostics": copy.deepcopy(state.final["diagnostics"])}
+
+    async def observe():
+        reported = 0
+        try:
+            if progress_enabled:
+                await ctx.report_progress(0, message="queued")
+            while True:
+                phases = state.progress_snapshot()
+                if progress_enabled:
+                    for index in range(reported, len(phases)):
+                        await ctx.report_progress(index + 1, message=phases[index])
+                reported = len(phases)
+                if finished.is_set():
+                    break
+                with anyio.move_on_after(0.1):
+                    await finished.wait()
+            if progress_enabled:
+                await ctx.report_progress(reported + 1, message="failed" if error else "completed")
+        finally:
+            if not finished.is_set():
+                state.cancel()
+
+    try:
+        async with anyio.create_task_group() as group:
+            group.start_soon(observe)
+            try:
+                with request_context(state):
+                    result = await anyio.to_thread.run_sync(invoke)
+            except BaseException as exc:
+                error = exc
+                if isinstance(exc, anyio.get_cancelled_exc_class()):
+                    state.cancel()
+            finally:
+                finished.set()
+        if error is not None:
+            raise error
+        return result
+    finally:
+        if not worker_started.is_set():
+            with anyio.CancelScope(shield=True):
+                await anyio.to_thread.run_sync(partial(client.finish_request, state, result=result, error=error))
 
 
 def _ensure_list(value: str | list | None) -> list | None:
@@ -40,6 +115,15 @@ def _ensure_list(value: str | list | None) -> list | None:
 def build_mcp(config: MySearchConfig) -> tuple[MySearchClient, FastMCP]:
     client = MySearchClient(config)
     atexit.register(client.close)
+
+    @asynccontextmanager
+    async def lifespan(_server):
+        try:
+            yield
+        finally:
+            with anyio.CancelScope(shield=True):
+                await anyio.to_thread.run_sync(client.close, limiter=anyio.CapacityLimiter(1))
+
     mcp = FastMCP(
         config.server_name,
         json_response=True,
@@ -49,9 +133,12 @@ def build_mcp(config: MySearchConfig) -> tuple[MySearchClient, FastMCP]:
         sse_path=config.mcp_sse_path,
         streamable_http_path=config.mcp_streamable_http_path,
         stateless_http=config.mcp_stateless_http,
+        lifespan=lifespan,
     )
 
-    @mcp.tool()
+    read_annotations = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True)
+
+    @mcp.tool(annotations=read_annotations)
     async def search(
         query: str,
         mode: Literal["auto", "web", "news", "social", "docs", "research", "github", "pdf"] = "auto",
@@ -79,10 +166,11 @@ def build_mcp(config: MySearchConfig) -> tuple[MySearchClient, FastMCP]:
         to_date: str | None = None,
         include_x_images: bool = False,
         include_x_videos: bool = False,
-    ) -> dict:
+        ctx: Context = None,
+    ) -> SearchResult:
         """统一搜索入口。按任务类型自动选择 Tavily / Firecrawl / Exa / xAI。"""
         return await _offload(
-            client.search,
+            client, "search", ctx,
             query=query,
             mode=mode,
             intent=intent,
@@ -102,23 +190,37 @@ def build_mcp(config: MySearchConfig) -> tuple[MySearchClient, FastMCP]:
             include_x_videos=include_x_videos,
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=read_annotations)
     async def extract_url(
         url: str,
         formats: str | list[str] | None = None,
         only_main_content: bool = True,
         provider: Literal["auto", "firecrawl", "tavily"] = "auto",
-    ) -> dict:
-        """抓取单个 URL 的正文，默认优先 Firecrawl；失败或空正文时回退 Tavily extract。"""
-        return await _offload(
-            client.extract_url,
+        max_age_seconds: Annotated[int, Field(ge=0, strict=True)] | None = None,
+        offset: Annotated[int, Field(ge=0, strict=True)] = 0,
+        max_chars: Annotated[int, Field(ge=1, strict=True)] | None = None,
+        ctx: Context = None,
+    ) -> ExtractResult:
+        """抓取正文，默认 Firecrawl 后回退 Tavily。max_age_seconds 仅用于显式 Firecrawl，0 请求实时抓取；offset/max_chars 可分页读取，省略时返回全文。"""
+        result = await _offload(
+            client, "extract_url", ctx,
             url=url,
             formats=_ensure_list(formats),
             only_main_content=only_main_content,
             provider=provider,
+            **({"max_age_seconds": max_age_seconds} if max_age_seconds is not None else {}),
         )
+        if offset or max_chars is not None:
+            content = result["content"]
+            end = len(content) if max_chars is None else min(len(content), offset + max_chars)
+            result = {**result, "content": content[offset:end], "content_window": {
+                "offset": offset, "returned_chars": len(content[offset:end]), "total_chars": len(content),
+                "next_offset": end if end < len(content) else None,
+                "truncated": offset > 0 or end < len(content),
+            }}
+        return result
 
-    @mcp.tool()
+    @mcp.tool(annotations=read_annotations)
     async def research(
         query: str,
         web_max_results: int = 5,
@@ -143,10 +245,11 @@ def build_mcp(config: MySearchConfig) -> tuple[MySearchClient, FastMCP]:
         excluded_x_handles: str | list[str] | None = None,
         from_date: str | None = None,
         to_date: str | None = None,
-    ) -> dict:
+        ctx: Context = None,
+    ) -> ResearchResult:
         """小型研究工作流：网页发现 + 正文抓取 + 可选 X 舆情补充。"""
         return await _offload(
-            client.research,
+            client, "research", ctx,
             query=query,
             web_max_results=web_max_results,
             social_max_results=social_max_results,
@@ -163,35 +266,37 @@ def build_mcp(config: MySearchConfig) -> tuple[MySearchClient, FastMCP]:
             to_date=to_date,
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=read_annotations)
     async def map_site(
         url: str,
         limit: int = 50,
         search: str | None = None,
-    ) -> dict:
+        ctx: Context = None,
+    ) -> MapResult:
         """获取站点地图：返回某站点下可发现的 URL 列表（基于 Firecrawl map）。"""
-        return await _offload(client.map_site, url=url, limit=limit, search=search)
+        return await _offload(client, "map_site", ctx, url=url, limit=limit, search=search)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
     async def crawl_site(
         url: str,
         limit: int = 20,
         max_depth: int | None = None,
         crawl_entire_domain: bool = True,
-    ) -> dict:
+        ctx: Context = None,
+    ) -> CrawlResult:
         """爬取整站：抓取某站点多页正文并清洗（基于 Firecrawl crawl，正文复用 extract 清洗）。"""
         return await _offload(
-            client.crawl_site,
+            client, "crawl_site", ctx,
             url=url,
             limit=limit,
             max_depth=max_depth,
             crawl_entire_domain=crawl_entire_domain,
         )
 
-    @mcp.tool()
-    async def mysearch_health() -> dict:
+    @mcp.tool(annotations=read_annotations)
+    async def mysearch_health(ctx: Context = None) -> HealthResult:
         """查看 MySearch 当前 provider 配置、search mode、auth 模式、base URL 和 key 可用性。"""
-        return await _offload(client.health)
+        return await _offload(client, "health", ctx)
 
     return client, mcp
 
@@ -216,8 +321,11 @@ def main(
         mcp_streamable_http_path=streamable_http_path if streamable_http_path is not None else base_config.mcp_streamable_http_path,
         mcp_stateless_http=base_config.mcp_stateless_http if stateless_http is None else stateless_http,
     )
-    _, server = build_mcp(config)
-    server.run(transport=transport, mount_path=config.mcp_mount_path)
+    client, server = build_mcp(config)
+    try:
+        server.run(transport=transport, mount_path=config.mcp_mount_path)
+    finally:
+        client.close()
 
 
 if __name__ == "__main__":

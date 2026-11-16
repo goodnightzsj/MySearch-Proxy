@@ -58,6 +58,11 @@ Default routing:
 
 - `extract_url` prefers Firecrawl
 - if Firecrawl fails or returns empty content, it falls back to Tavily extract
+- if both fail, Exa Contents fetches the exact canonical URL; per-document errors remain failures
+
+For an explicit freshness bound, use `provider="firecrawl"` with `max_age_seconds` (0 requests live content). This bypasses the local extract cache; defaults retain existing caching. MCP callers can read character windows with `offset` and `max_chars`; `content_window` reports the next offset and total length. Omitted options still return the full document. Windows are not immutable snapshots after cache expiry.
+
+All six tools expose output schemas and annotations. Calls with a progress token receive queued, completed-stage and terminal notifications. Queue time counts toward the request budget; cancellation prevents new work, while shutdown waits for in-flight synchronous I/O. Explicit Proxy configurations report one terminal tool event, linked to physical upstream attempts, without query/URL/body/credential storage. Missing usage remains unknown; provider units are not combined. Reporting may add up to 2 seconds to client latency and is excluded from diagnostic elapsed time.
 
 So content extraction is a first-class feature, not an afterthought.
 

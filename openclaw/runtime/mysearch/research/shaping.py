@@ -109,6 +109,7 @@ def _merge_search_payloads(
                 continue
 
             sequence: list[str] = []
+            seen: set[str] = set()
             result_provider = result.get("provider", "")
             for item in result.get("results", []) or []:
                 if not isinstance(item, dict):
@@ -116,10 +117,13 @@ def _merge_search_payloads(
                 dedupe_key = postprocess._result_dedupe_key(item)
                 if not dedupe_key:
                     continue
-                sequence.append(dedupe_key)
+                # One document contributes once per retrieval list; keep richer variants.
+                if dedupe_key not in seen:
+                    seen.add(dedupe_key)
+                    sequence.append(dedupe_key)
                 variants_by_key.setdefault(dedupe_key, []).append(dict(item))
-                providers_by_key.setdefault(dedupe_key, set()).add(
-                    item.get("provider") or result_provider
+                providers_by_key.setdefault(dedupe_key, set()).update(
+                    item.get("matched_providers") or [item.get("provider") or result_provider]
                 )
             sequences.append(sequence)
 

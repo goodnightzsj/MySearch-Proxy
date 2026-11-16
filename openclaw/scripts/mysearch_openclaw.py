@@ -407,6 +407,8 @@ def main() -> int:
     except MySearchError as exc:
         print(str(exc), file=sys.stderr)
         return 1
+    finally:
+        client.close()
 
     if args.format == "json":
         print(json.dumps(payload, ensure_ascii=False, indent=2))

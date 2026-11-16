@@ -1,9 +1,12 @@
 FROM python:3.11-slim
-ENV MYSEARCH_PROXY_DB_PATH=/data/proxy.db
-WORKDIR /app
-COPY requirements.txt .
+ENV MYSEARCH_PROXY_DB_PATH=/data/proxy.db \
+    PYTHONPATH=/app \
+    PYTHONDONTWRITEBYTECODE=1
+WORKDIR /app/proxy
+COPY proxy/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY . .
+COPY proxy /app/proxy
+COPY mysearch /app/mysearch
 
 # r6 C3: 容器不以 root 运行。/data 由 entrypoint 在挂载后 chown，
 # 这里先建非 root 用户并把 /app /data 归属切走。
@@ -12,6 +15,9 @@ RUN groupadd --system --gid 10001 app \
  && mkdir -p /data \
  && chown -R app:app /app /data
 USER app
+
+# Import the packaged entrypoint offline without starting its lifespan or probes.
+RUN --network=none python -c "import os; os.environ['ADMIN_PASSWORD'] = 'container-import-smoke-only'; import server"
 
 EXPOSE 9874
 CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "9874"]

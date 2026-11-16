@@ -1,6 +1,8 @@
 services:
   mysearch-proxy:
-    build: .
+    build:
+      context: ..
+      dockerfile: proxy/Dockerfile
     ports:
       - "9874:9874"
     environment:

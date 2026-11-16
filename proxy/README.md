@@ -75,6 +75,7 @@ Firecrawl 错误分类依据 [官方认证代码](https://github.com/firecrawl/f
 代理入口：
 
 - `POST /exa/search`
+- `POST /exa/contents`（复用同一鉴权、key 轮换、错误分类和用量日志）
 
 控制台能力：
 
@@ -170,7 +171,7 @@ MYSEARCH_PROXY_API_KEY=mysp-...
 
 为避免页面每次刷新都被远程额度同步拖慢，控制台现在默认采用：
 
-- `/api/stats` 快速返回（短缓存）
+- `/api/stats` 快速返回（短缓存）；支持重复 `service` 参数，例如 `?service=exa&service=mysearch`，只构建所选分区；省略时保留全量合同
 - 额度同步改为手动触发（或后台节流同步）
 - 写操作后前端会强制刷新，避免读到旧缓存
 
@@ -187,6 +188,16 @@ DASHBOARD_BACKGROUND_SYNC_MIN_INTERVAL_SECONDS=45
 
 - 如果你更看重“每次刷新都立刻拉最新额度”，可设 `DASHBOARD_AUTO_SYNC_ON_STATS=1`。
 - 默认推荐保持 `0`，然后在页面点击“同步额度”按钮做显式刷新。
+
+## 请求诊断
+
+顶栏“请求诊断”显示当前 provider 的逻辑工具请求、实际上游尝试、失败原因与延迟；展开请求可查看两层关联。MySearch 页显示所有 provider。逻辑请求和物理尝试分别计数，避免将重试或 key 轮换误算成多个用户请求；未知用量明确标注，保留各 provider 原单位。
+
+- `POST /api/mysearch/requests` 使用既有 `mysp-` token 上报终态；相同 token/request ID 的相同内容可重放，不同内容返回 409。
+- `GET /api/diagnostics` 需要管理员认证；支持 `service`、`hours=1..168` 和 `limit=1..100`。与原有 `/api/stats`、`usage_logs` 统计分开。
+- 诊断表仅保存白名单字段，不保存 query、URL、正文或凭证。逻辑耗时不含上报等待；Proxy 物理尝试包含实际重试和 key 切换。历史上游未返回的费用无法补算，现有记录没有自动清理策略。
+
+设置加载失败时保持表单禁用并可重试；写入成功但刷新失败会明确提示，不诱导重复提交。密码变更和已有服务器会话恢复后清除浏览器中的旧明文密码。
 
 ## 部署
 
@@ -216,6 +227,12 @@ http://localhost:9874
 ```bash
 cd proxy
 docker compose up -d
+```
+
+需要保留完整仓库：独立 Proxy 镜像也使用 `mysearch/` 中的共享模块，Compose 会以仓库根目录作为构建上下文。手动构建同样从仓库根目录执行：
+
+```bash
+docker build -f proxy/Dockerfile -t mysearch-proxy:local .
 ```
 
 ### 方式 C：仓库根目录一套部署 `proxy + mysearch`

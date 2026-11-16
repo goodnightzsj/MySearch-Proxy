@@ -6,30 +6,4 @@ BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$BASE/mysearch"
 DST="$BASE/openclaw/runtime/mysearch"
 
-# 以 bundle 实际发布的 .py 文件为准自动发现，新增 runtime 文件无需再手工登记。
-# 递归：bundle 现在有 providers/ 子包，只扫顶层会漏掉子目录里的漂移。
-FILES=()
-while IFS= read -r path; do
-    FILES+=("${path#"$DST"/}")
-done < <(find "$DST" -name '*.py' -type f | sort)
-EXIT=0
-
-for f in "${FILES[@]}"; do
-    if [[ ! -f "$SRC/$f" ]]; then
-        echo "STALE: $DST/$f 没有对应的 $SRC/$f（bundle 独有文件）"
-        EXIT=1
-        continue
-    fi
-    if ! diff -q "$SRC/$f" "$DST/$f" >/dev/null 2>&1; then
-        echo "DESYNC: $f"
-        EXIT=1
-    fi
-done
-
-if [[ $EXIT -eq 0 ]]; then
-    echo "OK: all runtime files in sync (${#FILES[@]} files)"
-else
-    echo ""
-    echo "Fix: cp mysearch/<file>.py openclaw/runtime/mysearch/"
-    exit 1
-fi
+python3 "$BASE/scripts/openclaw_runtime.py" check "$SRC" "$DST"

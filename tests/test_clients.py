@@ -4895,13 +4895,13 @@ class MySearchClientTests(unittest.TestCase):
 
         client._request_json_once = fake_request_json  # type: ignore[method-assign]
 
-        with patch("mysearch.clients.time.sleep") as sleep:
+        with patch("mysearch.providers.firecrawl_crawl.wait_before_retry") as wait:
             result = client.map_site(url="https://fastapi.tiangolo.com", limit=10)
 
         self.assertEqual(calls, [("POST", "/v2/map"), ("POST", "/v2/map")])
         self.assertEqual(result["count"], 1)
         self.assertEqual(result["links"][0]["url"], "https://fastapi.tiangolo.com/")
-        sleep.assert_called_once_with(1.5)
+        wait.assert_called_once_with(1.5)
 
     def test_crawl_site_retries_transient_firecrawl_status_poll_once(self) -> None:
         client = MySearchClient()
@@ -4931,7 +4931,7 @@ class MySearchClientTests(unittest.TestCase):
 
         client._request_json_once = fake_request_json  # type: ignore[method-assign]
 
-        with patch("mysearch.clients.time.sleep") as sleep:
+        with patch("mysearch.providers.firecrawl_crawl.wait_before_retry") as wait:
             result = client.crawl_site(
                 url="https://fastapi.tiangolo.com/tutorial/background-tasks/",
                 limit=5,
@@ -4953,7 +4953,7 @@ class MySearchClientTests(unittest.TestCase):
             "https://fastapi.tiangolo.com/tutorial/background-tasks/",
         )
         # 瞬时错误的重试延迟 1.5s 必须出现（另有 2.0s 的轮询间隔，属正常行为）。
-        self.assertIn(1.5, [call.args[0] for call in sleep.call_args_list])
+        self.assertIn(1.5, [call.args[0] for call in wait.call_args_list])
 
     def test_crawl_poll_intervals_grow_and_cap(self) -> None:
         """轮询必须退避，且**先睡再问**，而不是固定间隔地立刻开问。
@@ -5001,7 +5001,7 @@ class MySearchClientTests(unittest.TestCase):
 
         client._request_json_once = fake_request_json  # type: ignore[method-assign]
 
-        with patch("mysearch.clients.time.sleep", side_effect=lambda s: order.append("sleep")):
+        with patch("mysearch.providers.firecrawl_crawl.wait_before_retry", side_effect=lambda s: order.append("sleep")):
             client.crawl_site(url="https://s", limit=1)
 
         self.assertEqual(order, ["req:POST", "sleep", "req:GET"])
@@ -5155,14 +5155,13 @@ class MySearchClientTests(unittest.TestCase):
         client._scrape_firecrawl = lambda **kwargs: (_ for _ in ()).throw(MySearchError("firecrawl failed"))  # type: ignore[method-assign]
         client._extract_tavily = lambda **kwargs: (_ for _ in ()).throw(MySearchError("tavily failed"))  # type: ignore[method-assign]
         client._provider_can_serve = lambda provider: provider.name == "exa"  # type: ignore[method-assign]
-        client._search_exa = lambda **kwargs: {  # type: ignore[method-assign]
-            "provider": "exa",
-            "transport": "env",
+        client._get_key_or_raise = lambda provider: SimpleNamespace(key="test-key", source="env")  # type: ignore[method-assign]
+        client._request_json = lambda **kwargs: {  # type: ignore[method-assign]
             "results": [
                 {
                     "title": "Different domain",
                     "url": "https://other.example.net/article",
-                    "content": "Different domain content. " * 20,
+                    "text": "Different domain content. " * 20,
                 }
             ],
         }
@@ -5170,21 +5169,20 @@ class MySearchClientTests(unittest.TestCase):
         with self.assertRaises(MySearchError) as ctx:
             client.extract_url(url="https://docs.example.com/target", provider="auto")
 
-        self.assertIn("same-domain", str(ctx.exception))
+        self.assertIn("exact URL", str(ctx.exception))
 
-    def test_extract_url_exa_fallback_reports_actual_same_domain_url(self) -> None:
+    def test_extract_url_exa_fallback_reports_actual_same_page_url(self) -> None:
         client = MySearchClient()
         client._scrape_firecrawl = lambda **kwargs: (_ for _ in ()).throw(MySearchError("firecrawl failed"))  # type: ignore[method-assign]
         client._extract_tavily = lambda **kwargs: (_ for _ in ()).throw(MySearchError("tavily failed"))  # type: ignore[method-assign]
         client._provider_can_serve = lambda provider: provider.name == "exa"  # type: ignore[method-assign]
-        client._search_exa = lambda **kwargs: {  # type: ignore[method-assign]
-            "provider": "exa",
-            "transport": "env",
+        client._get_key_or_raise = lambda provider: SimpleNamespace(key="test-key", source="env")  # type: ignore[method-assign]
+        client._request_json = lambda **kwargs: {  # type: ignore[method-assign]
             "results": [
                 {
-                    "title": "Same domain",
-                    "url": "https://docs.example.com/target?ref=exa",
-                    "content": "Same domain content. " * 20,
+                    "title": "Same page",
+                    "url": "https://docs.example.com/target/#overview",
+                    "text": "Same page content. " * 20,
                 }
             ],
         }
@@ -5192,7 +5190,7 @@ class MySearchClientTests(unittest.TestCase):
         result = client.extract_url(url="https://docs.example.com/target", provider="auto")
 
         self.assertEqual(result["provider"], "exa")
-        self.assertEqual(result["url"], "https://docs.example.com/target?ref=exa")
+        self.assertEqual(result["url"], "https://docs.example.com/target/#overview")
         self.assertEqual(result["metadata"]["requested_url"], "https://docs.example.com/target")
 
     def test_firecrawl_domain_filtered_search_falls_back_to_tavily(self) -> None:

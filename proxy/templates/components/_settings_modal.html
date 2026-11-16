@@ -6,6 +6,8 @@
         <div class="settings-kicker">Console Settings</div>
         <h2 id="settings-title">控制台配置中心</h2>
         <p>把登录权限、Tavily 路由和 Social / X 上游分开管理。保存后会立即刷新当前控制台状态，不需要手动重载页面。</p>
+        <div id="settings-load-status" class="settings-status hidden" role="status" aria-live="polite" aria-atomic="true"></div>
+        <button id="settings-load-retry" class="btn btn-soft btn-sm hidden" type="button" onclick="loadSettings()">重试读取设置</button>
       </div>
       <button class="btn btn-soft" type="button" data-overlay-autofocus="true" onclick="closeSettingsModal()">关闭</button>
     </div>
@@ -27,7 +29,8 @@
           </div>
         </div>
         <div class="settings-panel-main">
-          <form class="settings-form" onsubmit="changePwd(event)">
+          <form onsubmit="changePwd(event)">
+            <fieldset id="settings-console-fields" class="settings-form" style="border:0;margin:0;padding:0;min-width:0" disabled>
             <div class="settings-summary-strip" id="settings-console-summary"></div>
             <input type="text" name="proxy-admin-user-reset" value="admin" autocomplete="username" tabindex="-1" aria-hidden="true" style="position:absolute;opacity:0;pointer-events:none;height:0">
             <div class="settings-fields">
@@ -51,6 +54,7 @@
               </div>
             </div>
             <div class="settings-status hidden" id="settings-password-status" role="status" aria-live="polite" aria-atomic="true"></div>
+            </fieldset>
           </form>
         </div>
       </div>
@@ -68,7 +72,8 @@
           <div class="settings-secret-meta" id="settings-tavily-meta"></div>
         </div>
         <div class="settings-panel-main">
-          <form class="settings-form" onsubmit="saveTavilySettings(event)">
+          <form onsubmit="saveTavilySettings(event)">
+            <fieldset id="settings-tavily-fields" class="settings-form" style="border:0;margin:0;padding:0;min-width:0" disabled>
             <div class="settings-summary-strip" id="settings-tavily-summary"></div>
             <div class="settings-fields">
               <div class="settings-field">
@@ -141,6 +146,7 @@
             </div>
             <div class="settings-probe hidden" id="settings-tavily-probe"></div>
             <div class="settings-status hidden" id="settings-tavily-status" role="status" aria-live="polite" aria-atomic="true"></div>
+            </fieldset>
           </form>
         </div>
       </div>
@@ -159,7 +165,8 @@
           <div class="settings-secret-meta" id="settings-social-meta"></div>
         </div>
         <div class="settings-panel-main">
-          <form class="settings-form" onsubmit="saveSocialSettings(event)">
+          <form onsubmit="saveSocialSettings(event)">
+            <fieldset id="settings-social-fields" class="settings-form" style="border:0;margin:0;padding:0;min-width:0" disabled>
             <div class="settings-summary-strip" id="settings-social-summary"></div>
             <div class="settings-fields">
               <div class="settings-field full-width">
@@ -320,6 +327,7 @@
             </div>
             <div class="settings-probe hidden" id="settings-social-probe"></div>
             <div class="settings-status hidden" id="settings-social-status" role="status" aria-live="polite" aria-atomic="true"></div>
+            </fieldset>
           </form>
         </div>
       </div>

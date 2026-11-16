@@ -26,6 +26,8 @@ RUN groupadd --system --gid 10001 app \
  && chown -R app:app /app /data
 USER app
 
+RUN --network=none python -c "import os, sys; os.environ['ADMIN_PASSWORD'] = 'container-import-smoke-only'; sys.path.insert(0, '/app/proxy'); import proxy.server; import mysearch.server"
+
 EXPOSE 9874 8000
 
 CMD ["/app/docker/combined-entrypoint.sh"]

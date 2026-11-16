@@ -3032,6 +3032,10 @@ body.theme-dark .detail-drawer {
   gap: 14px;
 }
 
+#diagnostics-content .mono {
+  overflow-wrap: anywhere;
+}
+
 .drawer-section {
   padding: 16px 18px;
   border-radius: 12px;
@@ -3605,6 +3609,7 @@ body.theme-dark .app-dialog {
     right: 14px;
     bottom: 14px;
     width: auto;
+    max-height: calc(100dvh - 28px);
   }
 
   .quickstart-install-steps,

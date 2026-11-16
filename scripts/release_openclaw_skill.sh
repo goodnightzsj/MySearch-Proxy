@@ -83,52 +83,8 @@ PY
 
 sync_runtime() {
   echo "Syncing MySearch runtime into OpenClaw bundle..."
-  rm -rf "$RUNTIME_DIR" "$OPENCLAW_DIR/scripts/__pycache__" "$OPENCLAW_DIR/runtime/__pycache__"
-  mkdir -p "$RUNTIME_DIR"
-
-  # bundle 只带 clients.py 的传递 import 闭包，不带 server.py / __main__.py /
-  # social_gateway.py 这些宿主侧文件。闭包按源码实时计算，避免手工清单漏掉新
-  # 模块（clients.py 依赖 provider_contract.py、config.py 依赖
-  # grok_registry.py，漏一个 bundle 就会在 import 时崩溃）。
-  local -a files
-  files=($(python3 - "$MYSEARCH_DIR" <<'PY'
-import ast
-import sys
-from pathlib import Path
-
-src_dir = Path(sys.argv[1])
-seen: set[str] = set()
-stack = ["clients.py"]
-while stack:
-    name = stack.pop()
-    if name in seen or not (src_dir / name).exists():
-        continue
-    seen.add(name)
-    tree = ast.parse((src_dir / name).read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom):
-            module = node.module or ""
-            if module.startswith("mysearch."):
-                stack.append(module.split(".", 1)[1].replace(".", "/") + ".py")
-            elif module == "mysearch":
-                # `from mysearch import postprocess` -- the imported name is
-                # itself a module, so it must ship even though the module
-                # string is just the package.
-                for alias in node.names:
-                    stack.append(alias.name.replace(".", "/") + ".py")
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name.startswith("mysearch."):
-                    stack.append(alias.name.split(".", 1)[1].replace(".", "/") + ".py")
-print("\n".join(sorted(seen)))
-PY
-))
-
-  local file
-  for file in "${files[@]}"; do
-    install -m 0644 "$MYSEARCH_DIR/$file" "$RUNTIME_DIR/$file"
-    echo "  - $file"
-  done
+  python3 "$ROOT_DIR/scripts/openclaw_runtime.py" sync "$MYSEARCH_DIR" "$RUNTIME_DIR"
+  rm -rf "$OPENCLAW_DIR/scripts/__pycache__" "$OPENCLAW_DIR/runtime/__pycache__"
 }
 
 run_smoke() {
@@ -140,7 +96,7 @@ run_smoke() {
   done
   python3 -m py_compile "${py_files[@]}"
 
-  python3 "$OPENCLAW_DIR/scripts/mysearch_openclaw.py" health >/dev/null
+  python3 -I "$OPENCLAW_DIR/scripts/mysearch_openclaw.py" health >/dev/null
   echo "Smoke test passed."
 }
 

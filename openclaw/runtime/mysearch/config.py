@@ -277,7 +277,7 @@ class ProviderConfig:
     alternate_base_urls: dict[str, str] = field(default_factory=dict)
     provider_mode: str = ""
     search_mode: XAISearchMode = "official"
-    api_keys: list[str] = field(default_factory=list)
+    api_keys: list[str] = field(default_factory=list, repr=False)
     keys_file: Path | None = None
     managed_key_pool: bool = False
 
@@ -310,6 +310,8 @@ class MySearchConfig:
     firecrawl: ProviderConfig
     exa: ProviderConfig
     xai: ProviderConfig
+    proxy_base_url: str = ""
+    proxy_api_key: str = field(default="", repr=False)
 
     @classmethod
     def from_env(cls) -> "MySearchConfig":
@@ -341,6 +343,8 @@ class MySearchConfig:
             and not xai_social_base_url
         )
         return cls(
+            proxy_base_url=_normalize_base_url(proxy_base_url),
+            proxy_api_key=proxy_api_key,
             server_name=_get_str("MYSEARCH_NAME", "MYSEARCH_SERVER_NAME", default="MySearch"),
             timeout_seconds=max(5, _get_int("MYSEARCH_TIMEOUT_SECONDS", 45)),
             # crawl 是**异步作业 + 轮询**，天然比单次检索慢：上游作业本身固定跑
@@ -561,6 +565,12 @@ class MySearchConfig:
                         proxy_base_url=proxy_base_url if exa_uses_proxy else "",
                         proxy_default="/exa/search",
                         default="/search",
+                    ),
+                    "contents": _provider_path(
+                        explicit_name="MYSEARCH_EXA_CONTENTS_PATH",
+                        proxy_base_url=proxy_base_url if exa_uses_proxy else "",
+                        proxy_default="/exa/contents",
+                        default="/contents",
                     ),
                 },
                 api_keys=(

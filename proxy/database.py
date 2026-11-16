@@ -2,6 +2,7 @@
 SQLite 数据库管理
 """
 import atexit
+import json
 import math
 import os
 import re
@@ -150,6 +151,43 @@ def init_db():
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS tool_requests (
+            id INTEGER PRIMARY KEY,
+            token_id INTEGER NOT NULL,
+            request_id TEXT NOT NULL,
+            tool TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            elapsed_ms INTEGER NOT NULL CHECK(elapsed_ms >= 0),
+            failure_reason TEXT NOT NULL DEFAULT '',
+            cache_hit INTEGER,
+            report_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(token_id, request_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_tool_requests_created ON tool_requests(created_at);
+
+        CREATE TABLE IF NOT EXISTS request_attempts (
+            id INTEGER PRIMARY KEY,
+            token_id INTEGER,
+            request_id TEXT,
+            call_id TEXT,
+            provider TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            phase TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            elapsed_ms INTEGER NOT NULL CHECK(elapsed_ms >= 0),
+            status_code INTEGER,
+            outcome TEXT NOT NULL,
+            failure_reason TEXT NOT NULL DEFAULT '',
+            upstream_request_id TEXT NOT NULL DEFAULT '',
+            usage_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_attempts_created ON request_attempts(created_at);
+        CREATE INDEX IF NOT EXISTS idx_attempts_request ON request_attempts(token_id, request_id, call_id);
+        CREATE INDEX IF NOT EXISTS idx_attempts_provider_created ON request_attempts(provider, created_at);
     """)
     _ensure_service_columns(conn)
     _ensure_usage_columns(conn)
@@ -908,6 +946,116 @@ def log_usage(
         conn.commit()
     finally:
         pass  # connection reused via thread-local
+
+
+def save_tool_request(token_id, report):
+    """A terminal report is immutable; repeated identical delivery is accepted."""
+    encoded = json.dumps(report, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    conn = get_conn()
+    with conn:
+        cursor = conn.execute(
+            "INSERT INTO tool_requests (token_id, request_id, tool, outcome, started_at, elapsed_ms, "
+            "failure_reason, cache_hit, report_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(token_id, request_id) DO NOTHING",
+            (token_id, report["request_id"], report["tool"], report["outcome"], report["started_at"],
+             report["elapsed_ms"], report["failure_reason"], report["cache_hit"], encoded),
+        )
+        stored = conn.execute(
+            "SELECT report_json FROM tool_requests WHERE token_id = ? AND request_id = ?",
+            (token_id, report["request_id"]),
+        ).fetchone()
+        if stored["report_json"] != encoded:
+            raise ValueError("diagnostic_report_conflict")
+        return cursor.rowcount == 1
+
+
+def save_request_attempts(attempts):
+    if not attempts:
+        return
+    conn = get_conn()
+    with conn:
+        conn.executemany(
+            "INSERT INTO request_attempts (token_id, request_id, call_id, provider, operation, phase, "
+            "started_at, elapsed_ms, status_code, outcome, failure_reason, upstream_request_id, usage_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [(row["token_id"], row["request_id"], row["call_id"], row["provider"], row["operation"], row["phase"],
+              row["started_at"], row["elapsed_ms"], row["status_code"], row["outcome"], row["failure_reason"],
+              row["upstream_request_id"], json.dumps(row["usage"], allow_nan=False)) for row in attempts],
+        )
+
+
+def get_diagnostics(service="", limit=20, hours=24):
+    conn = get_conn()
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+    attempt_filter = "created_at >= ?"
+    attempt_params = [since]
+    request_filter = "t.created_at >= ?"
+    request_params = [since]
+    if service:
+        attempt_filter += " AND provider = ?"
+        attempt_params.append(service)
+        request_filter += (
+            " AND (EXISTS (SELECT 1 FROM request_attempts a WHERE a.token_id = t.token_id "
+            "AND a.request_id = t.request_id AND a.provider = ?) OR EXISTS ("
+            "SELECT 1 FROM json_each(t.report_json, '$.diagnostics.calls') c "
+            "WHERE json_extract(c.value, '$.provider') = ?))"
+        )
+        request_params.extend([service, service])
+
+    def summarize(table, where, params, *, logical=False):
+        rows = conn.execute(
+            f"SELECT outcome, COUNT(*) AS count FROM {table} WHERE {where} GROUP BY outcome", params,
+        ).fetchall()
+        outcomes = {row["outcome"]: row["count"] for row in rows}
+        count = sum(outcomes.values())
+        percentiles = {}
+        for label, fraction in (("p50_ms", 0.5), ("p95_ms", 0.95)):
+            percentiles[label] = None
+            if count:
+                percentiles[label] = conn.execute(
+                    f"SELECT elapsed_ms FROM {table} WHERE {where} ORDER BY elapsed_ms LIMIT 1 OFFSET ?",
+                    [*params, max(0, math.ceil(count * fraction) - 1)],
+                ).fetchone()[0]
+        reasons = conn.execute(
+            f"SELECT failure_reason, COUNT(*) AS count FROM {table} WHERE {where} "
+            "AND failure_reason != '' GROUP BY failure_reason ORDER BY count DESC", params,
+        ).fetchall()
+        successes = sum(outcomes.get(name, 0) for name in (("success", "empty") if logical else ("success",)))
+        failures = sum(outcomes.get(name, 0) for name in ("unavailable", "error", "deadline", "cancelled"))
+        return {"count": count, "success_count": successes, "failure_count": failures,
+                "degraded_count": outcomes.get("degraded", 0),
+                "outcomes": outcomes, "failure_reasons": {row["failure_reason"]: row["count"] for row in reasons}, **percentiles}
+
+    def attempt_dict(row):
+        result = dict(row)
+        result["usage"] = json.loads(result.pop("usage_json"))
+        result["layer"] = "proxy"
+        return result
+
+    requests = []
+    for row in conn.execute(
+        f"SELECT t.* FROM tool_requests t WHERE {request_filter} ORDER BY t.id DESC LIMIT ?",
+        [*request_params, limit],
+    ).fetchall():
+        record = dict(row)
+        record.update(json.loads(record.pop("report_json")))
+        record["attempts"] = [attempt_dict(item) for item in conn.execute(
+            "SELECT * FROM request_attempts WHERE token_id = ? AND request_id = ? ORDER BY id LIMIT 1001",
+            (row["token_id"], row["request_id"]),
+        ).fetchall()]
+        record["attempts_truncated"] = len(record["attempts"]) > 1000
+        record["attempts"] = record["attempts"][:1000]
+        requests.append(record)
+    return {
+        "hours": hours, "service": service or "mysearch", "since": since,
+        "logical_requests": summarize("tool_requests t", request_filter, request_params, logical=True),
+        "physical_attempts": summarize("request_attempts", attempt_filter, attempt_params),
+        "recent_requests": requests,
+        "recent_attempts": [attempt_dict(row) for row in conn.execute(
+            f"SELECT * FROM request_attempts WHERE {attempt_filter} ORDER BY id DESC LIMIT ?",
+            [*attempt_params, limit],
+        ).fetchall()],
+    }
 
 
 def get_usage_stats(token_id=None, service=None):

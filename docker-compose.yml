@@ -1,8 +1,8 @@
 services:
   proxy:
     build:
-      context: ./proxy
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: proxy/Dockerfile
     ports:
       - "${MYSEARCH_PROXY_PORT:-9874}:9874"
     environment:

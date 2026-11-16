@@ -87,6 +87,12 @@ So Social / X is an enhancement, not the only reason this console exists.
 
 ## Recommended connection pattern
 
+The console includes request diagnostics with separate logical-tool and physical-upstream counts, failure reasons and latency. `GET /api/diagnostics` requires existing admin authentication. `POST /api/mysearch/requests` accepts terminal reports using a MySearch token; conflicting replays return 409. Missing usage is unknown, not zero. Diagnostic records have no automatic retention policy.
+
+`GET /api/stats` retains its full response by default and accepts repeated `service` parameters for scoped refreshes, for example `?service=exa&service=mysearch`. Exa now exposes both `POST /exa/search` and `POST /exa/contents` with the same authentication and key scheduling.
+
+Build the standalone Proxy from the complete repository using `docker build -f proxy/Dockerfile -t mysearch-proxy:local .`; it includes shared `mysearch/` modules. Both Compose files and CI use this context. All three images run an offline import check during the build.
+
 The default recommended full stack is:
 
 ```text

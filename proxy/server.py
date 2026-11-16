@@ -17,13 +17,17 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse, urlunparse
 
 import httpx
+import anyio
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.datastructures import Headers
 
 import database as db
+import diagnostics
 from key_pool import classify_upstream_key_failure, pool
+from mysearch.diagnostics import extract_usage, upstream_request_id
 
 # 纯规范化函数已收敛到 mysearch/social_normalization.py —— 两侧共用单一权威实现。
 # 这里是**显式**列举而非 import *：star import 会触发 ruff F403/F405，
@@ -604,10 +608,11 @@ def _should_retry_tavily_hikari_compat(response, current_url, effective_mode):
 
 async def _post_tavily_with_gateway_fallback(*, base_url, path, api_key, payload, effective_mode):
     request_target = _build_tavily_upstream_url(base_url, path, api_key)
-    response = await http_client.post(request_target, json=payload)
+    operation = diagnostics.operation_for_path(path, "POST")
+    response = await _diagnostic_http("tavily", operation, http_client.post, request_target, json=payload)
     if _should_retry_tavily_hikari_compat(response, request_target, effective_mode):
         retry_target = _build_tavily_hikari_gateway_url(base_url, path)
-        retry_response = await http_client.post(retry_target, json=payload)
+        retry_response = await _diagnostic_http("tavily", operation, http_client.post, retry_target, json=payload)
         return retry_response, retry_target, True
     return response, request_target, False
 
@@ -1032,13 +1037,88 @@ social_gateway_state_lock_loop = None
 social_admin_session_cache = {"fingerprint": "", "access_token": "", "expires_at": 0.0}
 social_admin_session_lock = None
 social_admin_session_lock_loop = None
-stats_payload_cache = {"expires_at": 0.0, "value": None}
-stats_payload_lock = None
+STATS_SECTIONS = (*db.SUPPORTED_SERVICES, "mysearch", "social")
+stats_payload_cache = {}
+stats_payload_generation = 0
+stats_payload_locks = {}
 stats_payload_lock_loop = None
 background_sync_tasks = {}
 background_sync_last_started = {}
 background_sync_lock = None
 background_sync_lock_loop = None
+
+
+def _diagnostic_db_call(function, *args):
+    try:
+        return function(*args)
+    finally:
+        db.close_conn()
+
+
+class DiagnosticMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        try:
+            request_scope = diagnostics.scope_from_headers(Headers(scope=scope))
+        except ValueError:
+            response = JSONResponse(status_code=400, content={"detail": "Invalid diagnostic headers"})
+            return await response(scope, receive, send)
+        context = diagnostics.current_scope.set(request_scope)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            diagnostics.current_scope.reset(context)
+            if request_scope.attempts:
+                try:
+                    # Flush after the route's finally, including cancelled physical sends.
+                    with anyio.CancelScope(shield=True):
+                        await anyio.to_thread.run_sync(_diagnostic_db_call, db.save_request_attempts, request_scope.attempts)
+                except Exception as exc:
+                    logger.warning("diagnostic_attempt_write_failed:%s", type(exc).__name__)
+
+
+app.add_middleware(DiagnosticMiddleware)
+
+
+async def _diagnostic_http(provider, operation, send, *args, **kwargs):
+    scope = diagnostics.current_scope.get()
+    if scope is None or not scope.authorized:
+        return await send(*args, **kwargs)
+    started = time.monotonic()
+    row = {
+        "token_id": scope.token_id, "request_id": scope.request_id, "call_id": scope.call_id,
+        "provider": provider, "operation": operation, "phase": scope.phase,
+        "started_at": datetime.now(timezone.utc).isoformat(), "status_code": None,
+        "outcome": "error", "failure_reason": "", "upstream_request_id": "", "usage": [],
+    }
+    try:
+        response = await send(*args, **kwargs)
+    except BaseException as exc:
+        row["failure_reason"] = type(exc).__name__
+        raise
+    else:
+        row["status_code"] = response.status_code
+        row["outcome"] = "success" if response.status_code < 400 else "error"
+        row["failure_reason"] = "" if response.status_code < 400 else "http_error"
+        try:
+            try:
+                payload = response.json()
+            except (ValueError, TypeError):
+                payload = None
+            row["usage"] = extract_usage(payload)
+            row["upstream_request_id"] = upstream_request_id(payload)
+            if response.status_code >= 400:
+                row["failure_reason"] = classify_upstream_key_failure(response.status_code, payload, service=provider) or "http_error"
+        except Exception as exc:
+            logger.warning("diagnostic_response_metadata_failed:%s", type(exc).__name__)
+        return response
+    finally:
+        row["elapsed_ms"] = max(0, round((time.monotonic() - started) * 1000))
+        scope.attempts.append(row)
 
 
 def get_social_gateway_state_lock():
@@ -1059,13 +1139,13 @@ def get_social_admin_session_lock():
     return social_admin_session_lock
 
 
-def get_stats_payload_lock():
-    global stats_payload_lock, stats_payload_lock_loop
+def get_stats_payload_lock(sections):
+    global stats_payload_lock_loop
     loop = asyncio.get_running_loop()
-    if stats_payload_lock is None or stats_payload_lock_loop is not loop:
-        stats_payload_lock = asyncio.Lock()
+    if stats_payload_lock_loop is not loop:
+        stats_payload_locks.clear()
         stats_payload_lock_loop = loop
-    return stats_payload_lock
+    return stats_payload_locks.setdefault(sections, asyncio.Lock())
 
 
 def get_background_sync_lock():
@@ -1154,8 +1234,9 @@ def reset_social_gateway_cache(*, clear_key_schedule=False):
 
 
 def reset_stats_cache():
-    stats_payload_cache["expires_at"] = 0.0
-    stats_payload_cache["value"] = None
+    global stats_payload_generation
+    stats_payload_generation += 1
+    stats_payload_cache.clear()
 
 
 def get_setting_text(key, default=""):
@@ -2269,6 +2350,7 @@ def verify_social_gateway_token(token_value, accepted_tokens):
     if token_value:
         token_row = db.get_token_by_value(token_value)
         if token_row and token_row["service"] == "mysearch":
+            diagnostics.bind_token(token_row)
             return token_row
     if not accepted_tokens:
         raise HTTPException(status_code=503, detail="Social gateway is not configured")
@@ -2280,6 +2362,7 @@ def verify_social_gateway_token(token_value, accepted_tokens):
             matched = True
     if not matched:
         raise HTTPException(status_code=401, detail="Invalid token")
+    diagnostics.bind_token(None)
     return None
 
 
@@ -2289,6 +2372,7 @@ def get_token_row_or_401(token_value, service):
     token_row = db.get_token_by_value(token_value)
     if not token_row or token_row["service"] not in {service, "mysearch"}:
         raise HTTPException(status_code=401, detail="Invalid token")
+    diagnostics.bind_token(token_row)
     return token_row
 
 
@@ -2902,28 +2986,30 @@ async def build_settings_payload():
     }
 
 
-async def build_stats_payload(auto_sync=False):
-    tavily_stats, firecrawl_stats, exa_stats, social_stats, mysearch_stats = await asyncio.gather(
-        build_service_dashboard("tavily", auto_sync=auto_sync),
-        build_service_dashboard("firecrawl", auto_sync=auto_sync),
-        build_service_dashboard("exa", auto_sync=auto_sync),
-        build_social_dashboard(),
-        build_mysearch_dashboard(),
-    )
-    return {
-        "services": {
-            "tavily": tavily_stats,
-            "firecrawl": firecrawl_stats,
-            "exa": exa_stats,
-        },
-        "social": social_stats,
-        "mysearch": mysearch_stats,
-        "meta": {
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "stats_cache_ttl_seconds": STATS_CACHE_TTL_SECONDS,
-            "dashboard_auto_sync_on_stats": DASHBOARD_AUTO_SYNC_ON_STATS,
-        },
+async def build_stats_payload(auto_sync=False, sections=None):
+    sections = STATS_SECTIONS if sections is None else sections
+    tasks = {}
+    for section in sections:
+        if section == "social":
+            tasks[section] = build_social_dashboard()
+        elif section == "mysearch":
+            tasks[section] = build_mysearch_dashboard()
+        else:
+            tasks[section] = build_service_dashboard(section, auto_sync=auto_sync)
+    values = dict(zip(tasks, await asyncio.gather(*tasks.values())))
+    payload = {}
+    services = {name: values[name] for name in db.SUPPORTED_SERVICES if name in values}
+    if services:
+        payload["services"] = services
+    for name in ("social", "mysearch"):
+        if name in values:
+            payload[name] = values[name]
+    payload["meta"] = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "stats_cache_ttl_seconds": STATS_CACHE_TTL_SECONDS,
+        "dashboard_auto_sync_on_stats": DASHBOARD_AUTO_SYNC_ON_STATS,
     }
+    return payload
 
 
 def build_forward_headers(request, real_key):
@@ -3543,7 +3629,7 @@ async def execute_social_search_attempt(query, body, state, model, max_results):
     for upstream_key in upstream_keys:
         start = time.monotonic()
         try:
-            response = await http_client.post(
+            response = await _diagnostic_http("xai", "social_search", http_client.post,
                 f"{state['upstream_base_url']}{state['upstream_responses_path']}",
                 json=upstream_payload,
                 headers={"Authorization": f"Bearer {upstream_key}"},
@@ -4057,7 +4143,7 @@ async def proxy_firecrawl(path: str, request: Request):
 
         start = time.monotonic()
         try:
-            resp = await http_client.request(
+            resp = await _diagnostic_http("firecrawl", diagnostics.operation_for_path(path, request.method), http_client.request,
                 request.method,
                 f"{FIRECRAWL_API_BASE}/{path}",
                 params=dict(request.query_params),
@@ -4141,6 +4227,15 @@ async def proxy_firecrawl(path: str, request: Request):
 
 @app.post("/exa/search")
 async def proxy_exa_search(request: Request):
+    return await _proxy_exa(request, "search")
+
+
+@app.post("/exa/contents")
+async def proxy_exa_contents(request: Request):
+    return await _proxy_exa(request, "contents")
+
+
+async def _proxy_exa(request: Request, operation: str):
     raw_body, body_json = await parse_json_body(request)
     token_value = extract_token(request, body_json)
     token_row = get_token_row_or_401(token_value, "exa")
@@ -4170,8 +4265,8 @@ async def proxy_exa_search(request: Request):
         last_upstream_key = key_info["key"]
         start = time.monotonic()
         try:
-            resp = await http_client.post(
-                f"{EXA_API_BASE}/search",
+            resp = await _diagnostic_http("exa", operation, http_client.post,
+                f"{EXA_API_BASE}/{operation}",
                 params=dict(request.query_params),
                 content=forward_content,
                 headers=build_exa_forward_headers(request, key_info["key"]),
@@ -4185,7 +4280,7 @@ async def proxy_exa_search(request: Request):
                 generation=key_info.get("_pool_generation"),
             )
             db.log_usage(
-                token_row["id"], key_info["id"], "search", 0, latency, service="exa",
+                token_row["id"], key_info["id"], operation, 0, latency, service="exa",
                 failure_reason=_transport_failure_reason(exc),
             )
             logger.exception("exa proxy error")
@@ -4208,7 +4303,7 @@ async def proxy_exa_search(request: Request):
             generation=key_info.get("_pool_generation"),
         )
         db.log_usage(
-            token_row["id"], key_info["id"], "search", int(success), latency, service="exa",
+            token_row["id"], key_info["id"], operation, int(success), latency, service="exa",
             failure_reason="" if success else (failure_kind or "upstream_error"),
             upstream_status=resp.status_code if not success else None,
         )
@@ -4415,6 +4510,44 @@ async def proxy_social_search(request: Request):
 
 # ═══ 控制台 ═══
 
+@app.post("/api/mysearch/requests")
+async def report_mysearch_request(request: Request):
+    token_row = await asyncio.to_thread(
+        _diagnostic_db_call, get_token_row_or_401, extract_token(request), "mysearch",
+    )
+    try:
+        raw = bytearray()
+        async for chunk in request.stream():
+            raw.extend(chunk)
+            if len(raw) > 262144:
+                raise ValueError("Diagnostic report too large")
+        report = diagnostics.validate_report(json.loads(raw))
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid diagnostic report")
+    try:
+        created = await asyncio.to_thread(_diagnostic_db_call, db.save_tool_request, token_row["id"], report)
+    except ValueError:
+        raise HTTPException(status_code=409, detail="Diagnostic request already finalized differently")
+    except Exception as exc:
+        logger.warning("diagnostic_report_write_failed:%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Diagnostic report unavailable")
+    return {"ok": True, "created": created}
+
+
+@app.get("/api/diagnostics")
+async def request_diagnostics(request: Request):
+    await asyncio.to_thread(_diagnostic_db_call, verify_admin, request)
+    service = request.query_params.get("service", "").strip().lower()
+    service = {"mysearch": "", "social": "xai"}.get(service, service)
+    try:
+        limit = int(request.query_params.get("limit", "20"))
+        hours = int(request.query_params.get("hours", "24"))
+        if service not in diagnostics.PROVIDERS | {""} or not 1 <= limit <= 100 or not 1 <= hours <= 168:
+            raise ValueError("Invalid diagnostic window")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid diagnostic query")
+    return await asyncio.to_thread(_diagnostic_db_call, db.get_diagnostics, service, limit, hours)
+
 @app.get("/", response_class=HTMLResponse)
 async def console(request: Request):
     return templates.TemplateResponse(
@@ -4472,24 +4605,29 @@ async def logout_session(_=Depends(verify_admin)):
 
 @app.get("/api/stats")
 async def stats(request: Request, _=Depends(verify_admin)):
+    requested = request.query_params.getlist("service")
+    if any(service not in STATS_SECTIONS for service in requested):
+        raise HTTPException(status_code=400, detail="Unknown stats service")
+    sections = tuple(sorted(set(requested or STATS_SECTIONS)))
     force = request.query_params.get("force", "").strip().lower() in {"1", "true", "yes", "on"}
     if force or STATS_CACHE_TTL_SECONDS <= 0:
-        return await build_stats_payload(auto_sync=DASHBOARD_AUTO_SYNC_ON_STATS)
+        return await build_stats_payload(auto_sync=DASHBOARD_AUTO_SYNC_ON_STATS, sections=sections)
 
     now = time.monotonic()
-    cached_value = stats_payload_cache["value"]
-    if cached_value is not None and now < stats_payload_cache["expires_at"]:
-        return cached_value
+    cached = stats_payload_cache.get(sections)
+    if cached is not None and now < cached["expires_at"]:
+        return cached["value"]
 
-    async with get_stats_payload_lock():
+    async with get_stats_payload_lock(sections):
         now = time.monotonic()
-        cached_value = stats_payload_cache["value"]
-        if cached_value is not None and now < stats_payload_cache["expires_at"]:
-            return cached_value
+        cached = stats_payload_cache.get(sections)
+        if cached is not None and now < cached["expires_at"]:
+            return cached["value"]
 
-        payload = await build_stats_payload(auto_sync=DASHBOARD_AUTO_SYNC_ON_STATS)
-        stats_payload_cache["value"] = payload
-        stats_payload_cache["expires_at"] = now + STATS_CACHE_TTL_SECONDS
+        generation = stats_payload_generation
+        payload = await build_stats_payload(auto_sync=DASHBOARD_AUTO_SYNC_ON_STATS, sections=sections)
+        if generation == stats_payload_generation:
+            stats_payload_cache[sections] = {"value": payload, "expires_at": time.monotonic() + STATS_CACHE_TTL_SECONDS}
         return payload
 
 

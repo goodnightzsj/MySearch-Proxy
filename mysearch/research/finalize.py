@@ -73,7 +73,9 @@ def _trim_search_payload(
     max_results: int,
 ) -> dict[str, Any]:
         trimmed = dict(result)
-        results = list(trimmed.get("results") or [])[:max_results]
+        results = selection._dedupe_research_results_for_report(
+            list(trimmed.get("results") or [])
+        )[:max_results]
         trimmed["results"] = results
         trimmed["citations"] = postprocess._align_citations_with_results(
             results=results,

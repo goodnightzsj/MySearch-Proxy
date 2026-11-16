@@ -34,6 +34,11 @@
 
 - 优先 Firecrawl
 - Firecrawl 失败或正文为空时回退 Tavily extract
+- 两者都无法提供正文时，使用 Exa Contents；只接受目标 URL 的精确规范化匹配，逐 URL 失败不会被 HTTP 200 掩盖
+
+需要显式时效时，设置 `provider="firecrawl", max_age_seconds=0` 请求实时抓取，正整数表示允许的缓存年龄（秒）。此选项绕过本地 extract 缓存，并按毫秒传给 Firecrawl；不设置时保留现有缓存行为。
+
+MCP 调用可用 `offset` 和 `max_chars` 按字符读取正文片段，返回 `content_window` 中的总长度、下一偏移量和截断状态；省略时仍返回全文。分页复用正常提取缓存，不保证缓存过期后的页面快照不变。
 
 ### `research`
 
@@ -45,7 +50,7 @@
 - 再抓取前几条正文
 - 可选补充 X / Social 讨论
 
-`research` 的发现、正文抓取、重试和补搜共享 `MYSEARCH_TIMEOUT_SECONDS` 总预算；过期会显式失败。已发出的同步 I/O 不能强杀，但过期分支不能继续发请求，普通 `search` 的默认预算不变。
+`research` 的发现、正文抓取、重试和补搜共享 `MYSEARCH_RESEARCH_TIMEOUT_SECONDS` 总预算（默认 90 秒）；过期会显式失败。普通 search/extract/map 默认使用 `MYSEARCH_TIMEOUT_SECONDS`（45 秒），Social 使用独立预算，crawl 保留独立请求预算与 pinned-key 冷却余量。MCP 排队时间也计入预算；已发出的同步 I/O 不能强杀，取消或过期后不再启动新请求，关闭客户端会等待在途工作释放资源。
 
 `deep` 的 docs 补搜先检查本轮已有来源，仅在正文数量或比较对象覆盖不足时执行，最多3个既有查询变体；达到目标或预算耗尽即停止，域名和日期过滤继续生效。`evidence.supplemental_search` 记录查询、停止原因和错误。
 
@@ -54,6 +59,14 @@
 ### `mysearch_health`
 
 返回当前 provider 配置、base URL、search mode、auth mode 和 key 可用性。
+
+## MCP 合同与诊断
+
+六个工具提供 `outputSchema` 与 annotations，保留既有文本结果及扩展字段；`crawl_site` 会创建上游作业，因此不声明只读或幂等。携带 progress token 的调用可收到排队、已完成阶段和终态通知。
+
+使用显式 `MYSEARCH_PROXY_BASE_URL` 与 `MYSEARCH_PROXY_API_KEY` 时，每次工具调用向 Proxy 上报一条终态记录，关联 runtime 调用和 Proxy 实际上游尝试。缓存命中也有新的请求 ID；用量缺失记为未知，不跨 provider 或单位相加。诊断不记录 query、URL、正文或凭证。上报最多等待 2 秒，不重试；失败只记 warning，不改工具结果。诊断耗时不包含该上报等待，用户端实际延迟仍包含它。
+
+快速检索仅在兼容输入上使用 Tavily `fast` 和 Exa `lite`；日期、类别、排除过滤或正文需求会保留对应的既有检索深度。Tavily 请求同时收集上游 `usage`，不把 credits 当作美元费用。
 
 ## 当前推荐接法
 

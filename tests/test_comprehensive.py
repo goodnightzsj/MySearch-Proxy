@@ -1185,7 +1185,7 @@ class MergeDedupeTests(unittest.TestCase):
     def test_result_dedupe_key_uses_url(self) -> None:
         client = _make_client()
         key = client._result_dedupe_key({"url": "https://Example.Com/Page", "title": "Page"})
-        self.assertEqual(key, "https://example.com/page")
+        self.assertEqual(key, "https://example.com/Page")
 
     def test_result_dedupe_key_falls_back_to_title_snippet(self) -> None:
         client = _make_client()
