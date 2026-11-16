@@ -80,6 +80,7 @@ class McpRuntimeTests(unittest.IsolatedAsyncioTestCase):
     def build(self, client):
         with patch.object(server, "MySearchClient", return_value=client), patch.object(server.atexit, "register"):
             _, mcp = server.build_mcp(mcp_config())
+        self.addAsyncCleanup(server._close_client, client)
         return mcp
 
     async def test_six_tools_expose_schemas_annotations_and_matching_text_structured_results(self):
@@ -108,7 +109,7 @@ class McpRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     text = [item.text for item in result.content if item.type == "text"]
                     self.assertEqual(len(text), 1)
                     self.assertEqual(json.loads(text[0]), result.structuredContent)
-        self.assertTrue(client.closed)
+        self.assertFalse(client.closed)
         self.assertEqual(len(client.terminals), 6)
 
     async def test_invalid_required_output_fails_without_fabricated_success(self):
@@ -157,7 +158,7 @@ class McpRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(states[0].final["outcome"], "error" if invalid else "success")
                 self.assertEqual(states[0].final["failure_reason"], "ValidationError" if invalid else "")
                 self.assertFalse(client._active_requests)
-                self.assertTrue(client._closed)
+                self.assertFalse(client._closed)
                 if not invalid:
                     self.assertEqual(result.structuredContent["diagnostics"], states[0].final["diagnostics"])
                     self.assertNotIn("diagnostics", client.output)
@@ -202,7 +203,7 @@ class McpRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(messages, ["queued", "failed"])
         self.assertEqual(len(client.terminals), 1)
         self.assertEqual(client.terminals[0]["outcome"], "error")
-        self.assertTrue(client.closed)
+        self.assertFalse(client.closed)
 
     async def test_cancel_queued_call_has_one_terminal_and_never_runs_worker(self):
         client = StubClient()
@@ -410,8 +411,16 @@ class McpRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 done.set()
 
         async def shutdown():
-            async with mcp.settings.lifespan(mcp):
-                pass
+            messages = iter([{"type": "lifespan.startup"}, {"type": "lifespan.shutdown"}])
+
+            async def receive():
+                return next(messages)
+
+            async def send(message):
+                if message["type"] == "lifespan.shutdown.complete":
+                    self.assertTrue(client._closed)
+
+            await mcp.sse_app()({"type": "lifespan", "state": {}}, receive, send)
             close_done.set()
 
         timely = False

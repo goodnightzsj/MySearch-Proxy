@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import atexit
 import copy
-from contextlib import asynccontextmanager
 from dataclasses import replace
 from functools import partial
 from threading import Event
@@ -14,6 +13,8 @@ import anyio
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import Field
+from starlette.applications import Starlette
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from mysearch.clients import MySearchClient
 from mysearch.config import MCPTransport, MySearchConfig
@@ -29,6 +30,63 @@ OUTPUT_MODELS = {
     "crawl_site": CrawlResult,
     "health": HealthResult,
 }
+
+
+async def _close_client(client: MySearchClient) -> None:
+    with anyio.CancelScope(shield=True):
+        await anyio.to_thread.run_sync(client.close, limiter=anyio.CapacityLimiter(1))
+
+
+class _ClientLifetimeMiddleware:
+    """Own shared resources at ASGI application scope, not MCP session scope."""
+
+    def __init__(self, app: ASGIApp, client: MySearchClient) -> None:
+        self.app, self.client = app, client
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "lifespan":
+            await self.app(scope, receive, send)
+            return
+        closed = False
+
+        async def close():
+            nonlocal closed
+            if not closed:
+                closed = True
+                await _close_client(self.client)
+
+        async def send_lifespan(message):
+            if message["type"] in {"lifespan.shutdown.complete", "lifespan.shutdown.failed", "lifespan.startup.failed"}:
+                # The host may exit as soon as it receives this acknowledgement.
+                await close()
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_lifespan)
+        finally:
+            await close()
+
+
+class _MySearchMCP(FastMCP):
+    def __init__(self, *args, client: MySearchClient, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._client = client
+
+    def sse_app(self, mount_path: str | None = None) -> Starlette:
+        app = super().sse_app(mount_path)
+        app.add_middleware(_ClientLifetimeMiddleware, client=self._client)
+        return app
+
+    def streamable_http_app(self) -> Starlette:
+        app = super().streamable_http_app()
+        app.add_middleware(_ClientLifetimeMiddleware, client=self._client)
+        return app
+
+    async def run_stdio_async(self) -> None:
+        try:
+            await super().run_stdio_async()
+        finally:
+            await _close_client(self._client)
 
 
 async def _offload(client, tool, ctx=None, **kwargs):
@@ -116,16 +174,9 @@ def build_mcp(config: MySearchConfig) -> tuple[MySearchClient, FastMCP]:
     client = MySearchClient(config)
     atexit.register(client.close)
 
-    @asynccontextmanager
-    async def lifespan(_server):
-        try:
-            yield
-        finally:
-            with anyio.CancelScope(shield=True):
-                await anyio.to_thread.run_sync(client.close, limiter=anyio.CapacityLimiter(1))
-
-    mcp = FastMCP(
+    mcp = _MySearchMCP(
         config.server_name,
+        client=client,
         json_response=True,
         host=config.mcp_host,
         port=config.mcp_port,
@@ -133,7 +184,6 @@ def build_mcp(config: MySearchConfig) -> tuple[MySearchClient, FastMCP]:
         sse_path=config.mcp_sse_path,
         streamable_http_path=config.mcp_streamable_http_path,
         stateless_http=config.mcp_stateless_http,
-        lifespan=lifespan,
     )
 
     read_annotations = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True)
