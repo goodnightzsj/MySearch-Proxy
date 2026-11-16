@@ -22,7 +22,7 @@ MAX_CALLS = 128
 MAX_PHASES = 64
 
 
-def extract_usage(payload: object) -> list[dict[str, Any]]:
+def extract_usage(payload: object, operation: str = "request") -> list[dict[str, Any]]:
     """Keep reported quantities in their original units; missing is not zero."""
     if not isinstance(payload, dict):
         return []
@@ -31,7 +31,9 @@ def extract_usage(payload: object) -> list[dict[str, Any]]:
     candidates = [(name, "tokens", usage.get(name)) for name in (
         "input_tokens", "output_tokens", "total_tokens",
     )]
-    credits = usage.get("credits", payload.get("creditsUsed", payload.get("credits_used")))
+    # Crawl status reports job totals, so repeated polls must not add them again.
+    top_level_credits = None if operation == "crawl_status" else payload.get("creditsUsed", payload.get("credits_used"))
+    credits = usage.get("credits", top_level_credits)
     candidates.append(("credits", "credits", credits))
     cost = payload.get("costDollars")
     if isinstance(cost, dict):

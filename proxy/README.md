@@ -193,6 +193,8 @@ DASHBOARD_BACKGROUND_SYNC_MIN_INTERVAL_SECONDS=45
 
 顶栏“请求诊断”显示当前 provider 的逻辑工具请求、实际上游尝试、失败原因与延迟；展开请求可查看两层关联。MySearch 页显示所有 provider。逻辑请求和物理尝试分别计数，避免将重试或 key 轮换误算成多个用户请求；未知用量明确标注，保留各 provider 原单位。
 
+Firecrawl crawl 轮询的 `creditsUsed` 为作业累计快照，不作为单次请求用量求和；没有独立用量时显示未知。旧版本已保存的累计值不自动改写，诊断汇总不能代替账单。
+
 - `POST /api/mysearch/requests` 使用既有 `mysp-` token 上报终态；相同 token/request ID 的相同内容可重放，不同内容返回 409。
 - `GET /api/diagnostics` 需要管理员认证；支持 `service`、`hours=1..168` 和 `limit=1..100`。与原有 `/api/stats`、`usage_logs` 统计分开。
 - 诊断表仅保存白名单字段，不保存 query、URL、正文或凭证。逻辑耗时不含上报等待；Proxy 物理尝试包含实际重试和 key 切换。历史上游未返回的费用无法补算，现有记录没有自动清理策略。

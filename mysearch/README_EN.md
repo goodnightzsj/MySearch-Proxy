@@ -64,6 +64,8 @@ For an explicit freshness bound, use `provider="firecrawl"` with `max_age_second
 
 All six tools expose output schemas and annotations. Calls with a progress token receive queued, completed-stage and terminal notifications. Queue time counts toward the request budget; cancellation prevents new work, while shutdown waits for in-flight synchronous I/O. Explicit Proxy configurations report one terminal tool event, linked to physical upstream attempts, without query/URL/body/credential storage. Missing usage remains unknown; provider units are not combined. Reporting may add up to 2 seconds to client latency and is excluded from diagnostic elapsed time.
 
+Firecrawl crawl status reports cumulative job `creditsUsed`; poll snapshots are excluded from per-request usage sums. Without separate request usage, usage remains unknown. Diagnostics are not billing records, and previously stored cumulative values are not rewritten.
+
 So content extraction is a first-class feature, not an afterthought.
 
 ### 3. It is a real MCP runtime, not just a prompt

@@ -1109,7 +1109,7 @@ async def _diagnostic_http(provider, operation, send, *args, **kwargs):
                 payload = response.json()
             except (ValueError, TypeError):
                 payload = None
-            row["usage"] = extract_usage(payload)
+            row["usage"] = extract_usage(payload, operation=operation)
             row["upstream_request_id"] = upstream_request_id(payload)
             if response.status_code >= 400:
                 row["failure_reason"] = classify_upstream_key_failure(response.status_code, payload, service=provider) or "http_error"

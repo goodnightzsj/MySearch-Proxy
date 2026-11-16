@@ -484,7 +484,7 @@ class ProviderTransport:
                 ) from exc
             raise MySearchError(f"non-json response from {url}: {response_text[:300]}") from exc
 
-        call["usage"] = extract_usage(data)
+        call["usage"] = extract_usage(data, operation=call["operation"])
         request_id = upstream_request_id(data)
         if request_id:
             call["upstream_request_id"] = request_id

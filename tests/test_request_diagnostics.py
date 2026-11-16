@@ -312,6 +312,42 @@ class RequestDiagnosticsTests(unittest.TestCase):
         self.assertEqual(extract_usage({}), [])
         self.assertEqual(upstream_request_id({"request_id": "https://private.test/query"}), "")
 
+    def test_crawl_poll_totals_are_not_additive_runtime_usage(self):
+        client = self.client()
+        selected = provider()
+        selected.name = "firecrawl"
+        selected.default_paths = {"crawl": "/v2/crawl"}
+        for field in ("creditsUsed", "credits_used"):
+            with self.subTest(field=field):
+                payloads = [{"status": "scraping", field: count, "data": []} for count in (4, 5, 5)]
+                state = client.new_request("crawl_site")
+                try:
+                    with request_context(state), patch.object(client._http, "request", side_effect=[
+                        httpx.Response(200, json=payload) for payload in payloads
+                    ]) as send:
+                        received = [client._request_json_once(provider=selected, method="GET", path="/v2/crawl/test-job",
+                            payload=None, key="synthetic-provider-key") for _ in payloads]
+                finally:
+                    client.finish_request(state)
+                self.assertEqual(received, payloads)
+                self.assertEqual(send.call_count, 3)
+                details = state.final["diagnostics"]
+                self.assertEqual(details["call_count"], 3)
+                self.assertTrue(all(call["operation"] == "crawl_status" for call in details["calls"]))
+                self.assertEqual([call["usage"] for call in details["calls"]], [[], [], []])
+                self.assertEqual(details["usage"], [])
+
+    def test_crawl_status_retains_per_request_credits_and_other_operations_keep_top_level_credits(self):
+        for field in ("creditsUsed", "credits_used"):
+            with self.subTest(field=field):
+                payload = {field: 5}
+                for operation in ("search", "scrape", "request"):
+                    self.assertEqual(extract_usage(payload, operation=operation), [{"name": "credits", "unit": "credits", "value": 5}])
+                self.assertEqual(extract_usage(payload), [{"name": "credits", "unit": "credits", "value": 5}])
+                for credits in (0, 2):
+                    self.assertEqual(extract_usage({**payload, "usage": {"credits": credits}}, operation="crawl_status"),
+                                     [{"name": "credits", "unit": "credits", "value": credits}])
+
     def test_close_waits_for_shared_and_temporary_workers_before_http_close(self):
         for temporary in (False, True):
             with self.subTest(temporary=temporary):

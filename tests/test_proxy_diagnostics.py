@@ -123,6 +123,37 @@ class ProxyDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(row["operation"] == "crawl_status" for row in data["recent_attempts"]))
         self.assertNotIn("private-job-id", json.dumps(data))
 
+    async def test_crawl_poll_cumulative_credits_are_not_physical_attempt_usage(self):
+        for index, field in enumerate(("creditsUsed", "credits_used")):
+            with self.subTest(field=field):
+                payloads = [{"status": "scraping", field: count, "data": []} for count in (4, 5, 5)]
+                with patch.object(server.pool, "get_next_key", return_value={"id": 1, "key": "synthetic-key"}), patch.object(
+                    server.pool, "report_result",
+                ), patch.object(server, "_preferred_crawl_job_key", return_value=""), patch.object(
+                    server.http_client, "request", new=AsyncMock(side_effect=[httpx.Response(200, json=payload) for payload in payloads]),
+                ) as send:
+                    responses = [await self.client.get("/firecrawl/v2/crawl/test-job", headers=self.headers) for _ in payloads]
+                self.assertEqual([response.status_code for response in responses], [200, 200, 200])
+                self.assertEqual([response.json() for response in responses], payloads)
+                self.assertEqual(send.await_count, 3)
+                details = await self.diagnostics(service="firecrawl")
+                self.assertEqual(details["physical_attempts"]["count"], (index + 1) * 3)
+                self.assertTrue(all(row["operation"] == "crawl_status" for row in details["recent_attempts"]))
+                self.assertTrue(all(row["usage"] == [] for row in details["recent_attempts"]))
+
+    async def test_crawl_status_keeps_explicit_per_request_credits(self):
+        payload = {"status": "completed", "creditsUsed": 5, "usage": {"credits": 2}, "data": []}
+        with patch.object(server.pool, "get_next_key", return_value={"id": 1, "key": "synthetic-key"}), patch.object(
+            server.pool, "report_result",
+        ), patch.object(server, "_preferred_crawl_job_key", return_value=""), patch.object(
+            server.http_client, "request", new=AsyncMock(return_value=httpx.Response(200, json=payload)),
+        ):
+            response = await self.client.get("/firecrawl/v2/crawl/test-job", headers=self.headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), payload)
+        self.assertEqual((await self.diagnostics(service="firecrawl"))["recent_attempts"][0]["usage"],
+                         [{"name": "credits", "unit": "credits", "value": 2}])
+
     async def test_social_key_retry_and_model_fallback_count_real_sends(self):
         state = {"accepted_tokens": [], "upstream_api_keys": ["social-secret-a", "social-secret-b"],
                  "resolved_upstream_api_key": "social-secret-a", "upstream_base_url": "https://social.test",

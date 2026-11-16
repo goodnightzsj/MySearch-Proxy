@@ -66,6 +66,8 @@ MCP 调用可用 `offset` 和 `max_chars` 按字符读取正文片段，返回 `
 
 使用显式 `MYSEARCH_PROXY_BASE_URL` 与 `MYSEARCH_PROXY_API_KEY` 时，每次工具调用向 Proxy 上报一条终态记录，关联 runtime 调用和 Proxy 实际上游尝试。缓存命中也有新的请求 ID；用量缺失记为未知，不跨 provider 或单位相加。诊断不记录 query、URL、正文或凭证。上报最多等待 2 秒，不重试；失败只记 warning，不改工具结果。诊断耗时不包含该上报等待，用户端实际延迟仍包含它。
 
+Firecrawl crawl 状态中的 `creditsUsed` 是作业累计值，轮询返回值不进入逐请求用量求和；缺少独立请求用量时显示未知。诊断不是账单，旧版本已保存的累计值不会自动改写。
+
 快速检索仅在兼容输入上使用 Tavily `fast` 和 Exa `lite`；日期、类别、排除过滤或正文需求会保留对应的既有检索深度。Tavily 请求同时收集上游 `usage`，不把 credits 当作美元费用。
 
 ## 当前推荐接法
