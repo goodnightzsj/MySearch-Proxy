@@ -13,7 +13,6 @@ dict 与路由决策，输出是规范化引用、输出文本，或附加了 de
 from __future__ import annotations
 
 from typing import Any
-from urllib.parse import urlparse
 
 from mysearch import postprocess
 from mysearch.types import (
@@ -91,24 +90,6 @@ def _annotate_extract_fallback(
             "reason": fallback_reason,
         }
         return annotated
-
-
-def _extract_candidate_matches_requested_url(
-    *,
-    requested_url: str,
-    candidate_url: str,
-) -> bool:
-        requested = postprocess._canonical_result_url(requested_url)
-        candidate = postprocess._canonical_result_url(candidate_url)
-        if not requested or not candidate:
-            return False
-        if requested.rstrip("/") == candidate.rstrip("/"):
-            return True
-        requested_host = postprocess._clean_hostname(urlparse(requested).netloc)
-        candidate_host = postprocess._clean_hostname(urlparse(candidate).netloc)
-        if not requested_host or not candidate_host:
-            return False
-        return postprocess._registered_domain(requested_host) == postprocess._registered_domain(candidate_host)
 
 
 def _extract_xai_output_text(

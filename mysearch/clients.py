@@ -6334,14 +6334,6 @@ class MySearchClient(ProviderTransport):
     def _canonicalize_result_item(self, item: dict[str, Any]) -> dict[str, Any]:
         return postprocess._canonicalize_result_item(item)
 
-    def _extract_candidate_matches_requested_url(
-        self,
-        *,
-        requested_url: str,
-        candidate_url: str,
-    ) -> bool:
-        return responses._extract_candidate_matches_requested_url(requested_url=requested_url, candidate_url=candidate_url)
-
     @staticmethod
     def _is_social_unavailable_result(result: dict[str, Any] | None) -> bool:
         return query_routing._is_social_unavailable_result(result)

@@ -119,6 +119,9 @@ class RequestDiagnosticsTests(unittest.TestCase):
         for result, expected in [
             ({"results": [1]}, "success"),
             ({"results": []}, "empty"),
+            ({"provider": "custom_social", "results": [1]}, "success"),
+            ({"provider": "custom_social", "results": []}, "empty"),
+            ({"provider": "custom_social", "results": [1], "fallback": {"from": "xai"}}, "degraded"),
             ({"provider": "tavily_social_fallback", "results": [1]}, "degraded"),
             ({"kind": "unavailable", "results": []}, "unavailable"),
             ({"results": [1], "fallback": {"from": "exa"}}, "degraded"),

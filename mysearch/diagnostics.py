@@ -198,7 +198,7 @@ def result_outcome(tool: str, result: Any) -> str:
         return "success"
     if ProviderResponse.kind_of(result) == "unavailable":
         return "unavailable"
-    if result.get("provider") in SOCIAL_PROVIDER_VARIANTS or result.get("fallback") or result.get("social_error"):
+    if result.get("provider") in SOCIAL_PROVIDER_VARIANTS - {"custom_social"} or result.get("fallback") or result.get("social_error"):
         return "degraded"
     field_name = {"search": "results", "extract_url": "content", "map_site": "links", "crawl_site": "pages"}.get(tool)
     if field_name in result and not result[field_name]:
