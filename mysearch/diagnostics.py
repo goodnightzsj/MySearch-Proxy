@@ -122,14 +122,17 @@ def request_context(state: RequestState):
 
 def remaining_seconds() -> float | None:
     state = current_request.get()
-    if state is None:
+    deadline = current_deadline.get()
+    if state is None and deadline is None:
         return None
-    deadline = min(state.deadline, current_deadline.get() or state.deadline)
+    if state is not None:
+        deadline = min(state.deadline, deadline or state.deadline)
     remaining = deadline - time.monotonic()
-    if state.cancelled.is_set() or remaining <= 0:
-        if remaining <= 0 and deadline == state.deadline:
+    if (state is not None and state.cancelled.is_set()) or remaining <= 0:
+        if state is not None and remaining <= 0 and deadline == state.deadline:
             state.cancel("deadline")
-        raise MySearchError(f"{state.tool or 'research'} request budget exhausted")
+        tool = (state.tool or "research") if state is not None else "provider"
+        raise MySearchError(f"{tool} request budget exhausted")
     return remaining
 
 
@@ -201,6 +204,8 @@ def result_outcome(tool: str, result: Any) -> str:
     if ProviderResponse.kind_of(result) == "unavailable":
         return "unavailable"
     if result.get("provider") in SOCIAL_PROVIDER_VARIANTS - {"custom_social"} or result.get("fallback") or result.get("social_error"):
+        return "degraded"
+    if tool == "crawl_site" and result.get("metadata", {}).get("entry_page", {}).get("status") == "failed":
         return "degraded"
     field_name = {"search": "results", "extract_url": "content", "map_site": "links", "crawl_site": "pages"}.get(tool)
     if field_name in result and not result[field_name]:

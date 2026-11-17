@@ -154,6 +154,8 @@ def _extract_software_version_answer(
             ):
                 continue
             for version_tuple, signal_score, version_text in item_candidates:
+                if signal_score < MIN_VERSION_ASSERTION_SCORE:
+                    continue
                 candidates.append(
                     (item_score + signal_score, version_tuple, -index, version_text, signal_score)
                 )
@@ -309,85 +311,49 @@ def _software_version_candidates_from_text(
     *,
     subject_tokens: tuple[str, ...] = (),
 ) -> list[tuple[str, tuple[int, int, int], int]]:
-        if not text:
-            return []
-        normalized = re.sub(r"\s+", " ", text).strip()
+    candidates: list[tuple[str, tuple[int, int, int], int]] = []
+    previous_clause = ""
+    for clause in _claim_clauses(text):
+        normalized = re.sub(r"\s+", " ", clause).strip()
         lowered = normalized.lower()
-        if not normalized:
-            return []
-        positive_markers = (
-            "current stable",
-            "latest stable",
-            "stable version",
-            "stable release",
-            "latest version",
-            "latest release",
-            "released",
-            "release",
-            "supported",
-            "version",
+        matches = list(re.finditer(r"\b\d+\.\d+(?:\.\d+)?(?!\w|[.-]\w)", normalized))
+        # A download heading applies only to its immediately following download.
+        download_heading = (
+            re.match(r"^[#*\s]*\[?download\b", lowered)
+            and re.search(r"\b(?:latest|current|newest)\b", previous_clause)
+            and re.search(r"\b(?:version|release)\b", previous_clause)
+            and not re.search(r"\d+\.\d+", previous_clause)
         )
-        negative_markers = (
-            "alpha",
-            "beta",
-            "development branch",
-            "development version",
-            "future",
-            "main branch",
-            "planned",
-            "pre-release",
-            "prerelease",
-            "preview",
-            "rc",
-            "release candidate",
-            "scheduled",
-            "upcoming",
+        context = f"{previous_clause} {lowered}" if download_heading else lowered
+        previous_clause = lowered
+        if re.search(
+            r"\b(?:alpha|beta|development (?:branch|versions?)|future|main branch|"
+            r"planned|pre-releases?|prerelease|preview|rc\d*|release candidate|scheduled|upcoming)\b",
+            context,
+        ):
+            continue
+        current = (
+            len(matches) == 1
+            and re.search(r"\b(?:latest|current|newest)\b", context)
+            and re.search(r"\b(?:version|release|stable)\b", context)
+            and not re.search(r"\b(?:lts|long.term support|previously|formerly|was)\b", context)
         )
-        candidates: list[tuple[str, tuple[int, int, int], int]] = []
-        for match in re.finditer(r"\b\d+\.\d+(?:\.\d+)?\b", normalized):
+        for match in matches:
             version_text = match.group(0)
             version_tuple = _extract_semantic_version(version_text)
             if version_tuple is None:
                 continue
-            start = max(0, match.start() - 80)
-            end = min(len(lowered), match.end() + 80)
-            context = lowered[start:end]
-            sentence_start = start
-            sentence_end = end
-            left_context = lowered[start:match.start()]
-            left_boundaries = list(re.finditer(r"[.!?;]\s+", left_context))
-            if left_boundaries:
-                sentence_start += left_boundaries[-1].end()
-            right_context = lowered[match.end():end]
-            right_boundary = re.search(r"[.!?;]\s+", right_context)
-            if right_boundary:
-                sentence_end = match.end() + right_boundary.start()
-            sentence_context = lowered[sentence_start:sentence_end]
-            if any(marker in sentence_context for marker in negative_markers):
-                continue
-            score = 0
-            if any(marker in context for marker in positive_markers):
-                score += 2
-            if "latest" in context and "stable" in context:
-                score += 2
-            if "as of" in context or "maintenance release" in context:
-                score += 1
-            # Prefer an exact patch release over a major-only status-page mention
-            # when both are otherwise plausible stable-version evidence.
-            if version_text.count(".") >= 2:
-                score += 1
-            if score <= 0:
-                continue
-            # 紧邻锚点不是主语就丢弃：版本号在页面上存在，不代表它属于被问的软件。
-            # `Minecraft Java Edition 26.1.2` 的锚点是 `Edition`，被这一步挡下。
             if not _version_is_anchored_to_subject(
-                text=normalized,
-                start=match.start(),
-                subject_tokens=subject_tokens,
+                text=normalized, start=match.start(), subject_tokens=subject_tokens,
             ):
                 continue
+            score = 4 if current else 2 if re.search(r"\b(?:versions?|releases?|released|supported)\b", context) else 0
+            if score == 0:
+                continue
+            if version_text.count(".") >= 2:
+                score += 1
             candidates.append((version_text, version_tuple, score))
-        return candidates
+    return candidates
 
 
 def _software_version_result_score(
@@ -634,16 +600,8 @@ def _asserted_versions_from_text(
         clause_lower = clause.lower()
         if any(marker in clause_lower for marker in _VERSION_CLAIM_NEGATIVE):
             continue
-        # 裸主版本号：1-2 位，且**不是**带点版本号的一部分。
-        # 右侧守卫写作 `(?!\d|\.\d|,\d)` 而不是 `(?![\d.])`：
-        #  - 去掉 `.` 单字符：否则句末句点也算"属于更长的版本号"，
-        #    `…is JDK 27.`（句号结尾）整类不匹配 —— 实测 oracle.com 与
-        #    wikipedia 的原文都是句子形态，这条守卫错一格就等于谓词在真实
-        #    输入上永远读不到数。改为只挡 `.` 后**紧跟数字**的情形。
-        #  - 加 `,\d`：千分位不是版本号。实测
-        #    `The current metro area population of Tokyo in 2026 is 36,954,000`
-        #    会把 `36` 读成"当前版本"（`current` 在左侧，形态 2 命中）。
-        for match in re.finditer(r"(?<![\d.])(\d{1,2})(?!\d|\.\d|,\d)", clause):
+        # 裸主版本号不能来自版本片段、预发布后缀或千分位；句末句点仍合法。
+        for match in re.finditer(r"(?<![\w.-])(\d{1,2})(?!\w|[.-]\w|,\d)", clause):
             start = match.start()
             before = clause_lower[max(0, start - 90):start]
             after = clause_lower[match.end():match.end() + 50]

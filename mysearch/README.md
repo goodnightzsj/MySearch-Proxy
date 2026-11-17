@@ -60,6 +60,10 @@ MCP 调用可用 `offset` 和 `max_chars` 按字符读取正文片段，返回 `
 
 返回当前 provider 配置、base URL、search mode、auth mode 和 key 可用性。
 
+### `crawl_site`
+
+Firecrawl 作业完成后，若入口 URL 缺失或其正文为空，会在原请求预算内精确补抓入口一次（瞬时错误沿用有界重试）。成功时入口优先，其余页面保持顺序且总数不超过 `limit`；`metadata.entry_page` 记录补抓结果及省略页数，`total/completed` 仍表示上游 crawl 作业计数。失败保留已有页面并标记 `degraded`；取消或预算耗尽继续报错。未声明完成的同步响应不触发补抓。
+
 ## MCP 合同与诊断
 
 六个工具提供 `outputSchema` 与 annotations，保留既有文本结果及扩展字段；`crawl_site` 会创建上游作业，因此不声明只读或幂等。携带 progress token 的调用可收到排队、已完成阶段和终态通知。
@@ -69,6 +73,8 @@ MCP 调用可用 `offset` 和 `max_chars` 按字符读取正文片段，返回 `
 Firecrawl crawl 状态中的 `creditsUsed` 是作业累计值，轮询返回值不进入逐请求用量求和；缺少独立请求用量时显示未知。诊断不是账单，旧版本已保存的累计值不会自动改写。
 
 快速检索仅在兼容输入上使用 Tavily `fast` 和 Exa `lite`；日期、类别、排除过滤或正文需求会保留对应的既有检索深度。Tavily 请求同时收集上游 `usage`，不把 credits 当作美元费用。
+
+Social 备用 provider 的窗口包含内部域名重试、换 key 和嵌套 fallback，不能逐调用重新获得整段预算；窗口到期后仍有父预算时继续下一 provider。版本答案只采用明确的当前版本声明或紧邻下载标题的版本，不把历史条目、支持列表或预发布尾缀当作最新版证据。
 
 ## 当前推荐接法
 

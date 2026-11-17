@@ -4997,7 +4997,7 @@ class MySearchClientTests(unittest.TestCase):
             order.append(f"req:{kwargs['method']}")
             if kwargs["method"] == "POST":
                 return {"id": "job-1"}
-            return {"status": "completed", "data": []}
+            return {"status": "completed", "data": [{"url": "https://s", "markdown": "Entry content"}]}
 
         client._request_json_once = fake_request_json  # type: ignore[method-assign]
 
@@ -5048,7 +5048,7 @@ class MySearchClientTests(unittest.TestCase):
 
         def fake_request_json(**kwargs):  # type: ignore[no-untyped-def]
             timeouts.append(float(kwargs["timeout_seconds"]))
-            return {"status": "completed", "data": []}
+            return {"status": "completed", "data": [{"url": "https://fastapi.tiangolo.com", "markdown": "Entry content"}]}
 
         client._request_json_once = fake_request_json  # type: ignore[method-assign]
 
@@ -5070,7 +5070,7 @@ class MySearchClientTests(unittest.TestCase):
 
         def fake_request_json(**kwargs):  # type: ignore[no-untyped-def]
             timeouts.append(float(kwargs["timeout_seconds"]))
-            return {"status": "completed", "data": []}
+            return {"status": "completed", "data": [{"url": "https://fastapi.tiangolo.com", "markdown": "Entry content"}]}
 
         client._request_json_once = fake_request_json  # type: ignore[method-assign]
 
@@ -14241,13 +14241,15 @@ class ExaSocialFallbackBudgetTests(unittest.TestCase):
     def test_expired_budget_does_not_start_second_exa_call(self) -> None:
         client = MySearchClient()
         captured: list[int | None] = []
+        clock = [0.0]
 
         def fake_search_exa(**kwargs):  # type: ignore[no-untyped-def]
             captured.append(kwargs.get("timeout_seconds"))
+            clock[0] = 31.0
             return {"results": []}
 
         client._search_exa = fake_search_exa  # type: ignore[method-assign]
-        with patch("mysearch.clients.time.monotonic", side_effect=[0.0, 0.0, 31.0]):
+        with patch("mysearch.clients.time.monotonic", side_effect=lambda: clock[0]):
             with self.assertRaisesRegex(MySearchError, "budget exhausted"):
                 client._search_exa_social_fallback(
                     query="test",

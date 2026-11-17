@@ -26,6 +26,7 @@ from mysearch.config import ProviderConfig
 from mysearch.diagnostics import (
     RequestState as _RequestBudget,
     current_request as _request_budget,
+    current_deadline,
     current_phase,
     direct_call,
     elapsed_ms,
@@ -58,8 +59,31 @@ def wait_before_retry(delay: float) -> None:
         return
     if delay >= remaining:
         raise MySearchError("research request budget exhausted before retry")
-    if _request_budget.get().cancelled.wait(delay):
+    state = _request_budget.get()
+    if state is None:
+        time.sleep(delay)
+    elif state.cancelled.wait(delay):
         raise MySearchError("research request cancelled before retry")
+
+
+def budgeted_provider(method):
+    """An explicit provider window includes domain retries and nested fallbacks."""
+    @wraps(method)
+    def run(self, *args, **kwargs):
+        timeout = kwargs.get("timeout_seconds")
+        if timeout is None:
+            return method(self, *args, **kwargs)
+        deadline = time.monotonic() + timeout
+        parent_deadline = current_deadline.get()
+        token = current_deadline.set(min(deadline, parent_deadline) if parent_deadline is not None else deadline)
+        try:
+            remaining_request_seconds()
+            result = method(self, *args, **kwargs)
+            remaining_request_seconds()
+            return result
+        finally:
+            current_deadline.reset(token)
+    return run
 
 
 def budgeted_research(method):

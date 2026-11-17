@@ -38,7 +38,7 @@ from mysearch.research import selection
 from mysearch.research import shaping
 from mysearch.research import social
 from mysearch.providers import firecrawl_crawl
-from mysearch.providers.base import ProviderTransport, budgeted_research, remaining_request_seconds
+from mysearch.providers.base import ProviderTransport, budgeted_provider, budgeted_research, remaining_request_seconds
 from mysearch.provider_contract import ProviderResponse
 
 logger = logging.getLogger(__name__)
@@ -4642,6 +4642,7 @@ class MySearchClient(ProviderTransport):
             },
         }
 
+    @budgeted_provider
     def _search_firecrawl(
         self,
         *,
@@ -5612,6 +5613,7 @@ class MySearchClient(ProviderTransport):
             },
         }
 
+    @budgeted_provider
     def _search_exa_social_fallback(
         self,
         *,
@@ -5760,6 +5762,7 @@ class MySearchClient(ProviderTransport):
             allow_key_rotation=allow_key_rotation,
         )
 
+    @budgeted_provider
     def _search_tavily_social_fallback(
         self,
         *,

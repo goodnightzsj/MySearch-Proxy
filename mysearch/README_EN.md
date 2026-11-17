@@ -66,6 +66,10 @@ All six tools expose output schemas and annotations. Calls with a progress token
 
 Firecrawl crawl status reports cumulative job `creditsUsed`; poll snapshots are excluded from per-request usage sums. Without separate request usage, usage remains unknown. Diagnostics are not billing records, and previously stored cumulative values are not rewritten.
 
+After a completed crawl, a missing or empty entry URL is scraped within the original request budget, using the existing bounded retry policy. The entry page comes first and the total stays within `limit`; `metadata.entry_page` records recovery and omitted-page counts while `total/completed` retain upstream job counts. Recovery failure preserves existing pages and marks the result degraded; cancellation and budget exhaustion remain errors. Synchronous responses without an explicit completed status do not trigger recovery.
+
+Social fallback windows include domain retries, key rotation, and nested fallbacks; remaining parent time stays available to the next provider. Version answers require an explicit current-version claim or a download caption immediately after a current-version heading. Historical entries, support tables, and prerelease suffixes do not establish the latest stable version.
+
 So content extraction is a first-class feature, not an afterthought.
 
 ### 3. It is a real MCP runtime, not just a prompt

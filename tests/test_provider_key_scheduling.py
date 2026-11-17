@@ -704,7 +704,7 @@ class DirectKeySchedulingTests(unittest.TestCase):
                 )
             if method == "POST":
                 return {"id": "job-1"}
-            return {"status": "completed", "data": []}
+            return {"status": "completed", "data": [{"url": "https://example.com/docs", "markdown": "Entry content"}]}
 
         client._request_json_once = request_once  # type: ignore[method-assign]
         result = client._crawl_firecrawl(

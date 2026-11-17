@@ -26,7 +26,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from mysearch import query_routing
+from mysearch import postprocess, query_routing
 from mysearch.config import ProviderConfig
 from mysearch.errors import MySearchError, MySearchHTTPError
 from mysearch.providers.base import remaining_request_seconds, wait_before_retry
@@ -287,12 +287,55 @@ def crawl_firecrawl(
         selected_key=key.key,
         allow_key_rotation=True,
     )
+
+    def finish_crawl(status_payload: dict[str, Any]) -> dict[str, Any]:
+        result = query_routing._build_firecrawl_crawl_result(
+            url=url, limit=limit, transport=key.source, status_payload=status_payload
+        )
+        if result["status"] != "completed" or limit <= 0:
+            return result
+        identity = postprocess._result_url_identity(url)
+        entry_pages = [page for page in result["pages"] if postprocess._result_url_identity(page["url"]) == identity]
+        if any(page["content"] for page in entry_pages):
+            return result
+        # Crawl discovery can omit its seed URL; fetch only that missing page.
+        remaining_timeout()
+        try:
+            scraped, _ = request_with_deadline(
+                method="POST", path=provider.path("scrape"),
+                payload={"url": url, "formats": ["markdown"], "onlyMainContent": True},
+                selected_key=selected_key, allow_key_rotation=True,
+            )
+            data = scraped.get("data")
+            if not isinstance(data, dict):
+                raise MySearchError("firecrawl entry page scrape returned no data")
+            page = query_routing._build_firecrawl_crawl_result(
+                url=url, limit=1, transport=key.source, status_payload={"data": [data]},
+            )["pages"][0]
+            page["url"] = page["url"] or url
+            if postprocess._result_url_identity(page["url"]) != identity:
+                raise MySearchError("firecrawl entry page scrape returned a different URL")
+            issue = postprocess._extract_quality_issue(page)
+            if issue:
+                raise MySearchError(f"firecrawl entry page scrape returned {issue}")
+        except MySearchError as exc:
+            remaining_timeout()  # Cancellation/deadline must not become partial success.
+            result["metadata"]["entry_page"] = {"status": "failed", "reason": str(exc)}
+            return result
+        remaining_timeout()
+        other_pages = [page for page in result["pages"] if postprocess._result_url_identity(page["url"]) != identity]
+        result["pages"] = [page, *other_pages[:limit - 1]]
+        result["count"] = len(result["pages"])
+        result["metadata"]["entry_page"] = {
+            "status": "retrieved", "url": page["url"],
+            "omitted_pages": max(0, len(other_pages) + 1 - limit),
+        }
+        return result
+
     job_id = start.get("id")
     if not job_id:
         # Some deployments answer synchronously with the data already present.
-        return query_routing._build_firecrawl_crawl_result(
-            url=url, limit=limit, transport=key.source, status_payload=start
-        )
+        return finish_crawl(start)
     status_path = f"{provider.path('crawl')}/{job_id}"
     status_payload: dict[str, Any] = start
     terminal = False
@@ -329,9 +372,7 @@ def crawl_firecrawl(
             raise MySearchError("firecrawl crawl deadline exceeded")
     if not terminal:
         raise MySearchError("firecrawl crawl did not reach a terminal state before deadline")
-    return query_routing._build_firecrawl_crawl_result(
-        url=url, limit=limit, transport=key.source, status_payload=status_payload
-    )
+    return finish_crawl(status_payload)
 
 
 def crawl_site(
