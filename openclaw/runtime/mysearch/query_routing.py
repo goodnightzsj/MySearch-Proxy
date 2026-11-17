@@ -2692,10 +2692,12 @@ def _result_event_page_priority(*,
     url = str(item.get("url") or "")
     hostname = _registered_domain(_result_hostname({"url": url}))
     score = 0
+    award_query = _looks_like_award_result_query(query_lower)
     if hostname in {"nytimes.com", "npr.org", "pbs.org", "latimes.com", "washingtonpost.com", "apnews.com"}:
         score += 4
     if (
-        hostname in _OFFICIAL_AWARD_DOMAINS
+        award_query
+        and hostname in _OFFICIAL_AWARD_DOMAINS
         and not _looks_like_award_nomination_result(
             title_text=title_text,
             snippet_text=snippet_text,
@@ -2707,7 +2709,7 @@ def _result_event_page_priority(*,
         )
     ):
         score += 6
-    if any(token in title_text or token in snippet_text for token in ("winner", "winners", "full results", "full list")):
+    if award_query and any(token in title_text or token in snippet_text for token in ("winner", "winners", "full results", "full list")):
         score += 3
     if _looks_like_award_result_query(query_lower):
         award_coverage_page = _looks_like_award_coverage_page(

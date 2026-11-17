@@ -35,7 +35,7 @@ def _normalize_firecrawl_social_fallback_results(
         normalized: list[dict[str, Any]] = []
         for item in results:
             url = str(item.get("url") or "").strip()
-            if not _X_DOMAIN_RE.search(url):
+            if not _X_DOMAIN_RE.search(url) or postprocess._is_social_aggregate_result(item):
                 continue
             normalized.append(
                 {
@@ -56,7 +56,7 @@ def _normalize_exa_social_fallback_results(
 ) -> list[dict[str, Any]]:
         normalized: list[dict[str, Any]] = []
         for item in results:
-            if not query_routing._is_exa_social_candidate(item):
+            if not query_routing._is_exa_social_candidate(item) or postprocess._is_social_aggregate_result(item):
                 continue
             url = str(item.get("url") or "")
             normalized.append(

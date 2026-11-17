@@ -184,6 +184,29 @@ class ExaCapabilitiesTests(unittest.TestCase):
             self.assertEqual(upstream_request_id({"requestId": value}), "")
 
 
+class FirecrawlResultTests(unittest.TestCase):
+    def test_exact_duplicates_do_not_repeat_bodies_or_citations(self):
+        page = {"url": URL, "title": "Target", "description": "Summary", "markdown": TEXT}
+        other = {**page, "markdown": TEXT + "Additional evidence."}
+        response = {"data": {"web": [page, dict(page), other], "news": [page]}}
+        config = make_config()
+        config.firecrawl = provider()
+        client = MySearchClient(config=config, keyring=Mock())
+        self.addCleanup(client.close)
+        client._get_key_or_raise = Mock(return_value=Mock(key="synthetic-key", source="test"))
+        client._request_json = Mock(return_value=response)
+
+        result = client._search_firecrawl_once(
+            query="Target", max_results=5, categories=[], include_content=True,
+        )
+
+        self.assertEqual([row["content"] for row in result["results"]],
+                         [TEXT, other["markdown"], TEXT])
+        self.assertEqual([row["source"] for row in result["results"]], ["web", "web", "news"])
+        self.assertEqual(len(result["citations"]), 3)
+        self.assertEqual(response["data"]["web"], [page, page, other])
+
+
 class ExaContentsProxyTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()

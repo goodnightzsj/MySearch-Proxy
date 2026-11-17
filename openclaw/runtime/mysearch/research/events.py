@@ -381,11 +381,11 @@ def _extract_result_event_answer_from_text(
             entity = _extract_named_fact_entity(
                 text,
                 patterns=[
-                    r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+(?:becomes|become|became|scores|scored|tops|topped)[^\n]{0,80}(?:highest-grossing|biggest opening|opening weekend|box office)",
+                    r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+(?:becomes|become|became|scores|scored|tops|topped)(?:[^\n.!?]|(?<=\d)\.(?=\d)){0,80}(?:highest-grossing[^\n.!?]{0,30}(?:debut|opening)|biggest opening|largest opening|record opening)",
                     # Unquoted titles need a sentence boundary and title case, not a clause fragment.
                     r"(?:^|\n|[.!?]\s+)[#* ]*((?-i:[A-Z][A-Za-z0-9:,'’&\-]*)"
                     r"(?:[ \t]+(?-i:[A-Z0-9][A-Za-z0-9:,'’&\-]*|[&-]|a|an|and|at|by|for|from|in|of|on|the|to|with)){0,14})[ \t]+"
-                    r"(?:becomes|become|became|scores|scored|tops|topped)[^\n]{0,80}(?:highest-grossing|biggest opening|opening weekend|box office)",
+                    r"(?:becomes|become|became|scores|scored|tops|topped)(?:[^\n.!?]|(?<=\d)\.(?=\d)){0,80}(?:highest-grossing[^\n.!?]{0,30}(?:debut|opening)|biggest opening|largest opening|record opening)",
                 ],
             )
             if entity:

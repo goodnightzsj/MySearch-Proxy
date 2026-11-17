@@ -4936,21 +4936,21 @@ class MySearchClient(ProviderTransport):
         source_order = ("news", "web", "research") if requested_news else ("web", "news", "research")
         for source_name in source_order:
             for item in data.get(source_name, []) or []:
-                results.append(
-                    {
-                        "provider": "firecrawl",
-                        "source": source_name,
-                        "title": item.get("title", ""),
-                        "url": item.get("url", ""),
-                        "snippet": item.get("description", "") or item.get("markdown", ""),
-                        "content": item.get("markdown", "") if include_content else "",
-                        "published_date": item.get("publishedDate")
-                        or item.get("date")
-                        or item.get("published_date")
-                        or item.get("published_at")
-                        or "",
-                    }
-                )
+                candidate = {
+                    "provider": "firecrawl",
+                    "source": source_name,
+                    "title": item.get("title", ""),
+                    "url": item.get("url", ""),
+                    "snippet": item.get("description", "") or item.get("markdown", ""),
+                    "content": item.get("markdown", "") if include_content else "",
+                    "published_date": item.get("publishedDate")
+                    or item.get("date")
+                    or item.get("published_date")
+                    or item.get("published_at")
+                    or "",
+                }
+                if candidate not in results:
+                    results.append(candidate)
 
         return {
             "provider": "firecrawl",
@@ -5815,7 +5815,11 @@ class MySearchClient(ProviderTransport):
                 "author": self._social_result_identity(item),
             }
             for item in tavily_result.get("results", [])
+            if not postprocess._is_social_aggregate_result(item)
         ]
+        answer = tavily_result.get("answer", "")
+        if len(fallback_results) != len(tavily_result.get("results", [])):
+            answer = ""  # The generated answer may rely on a removed aggregate page.
         fallback_results = self._diversify_social_results(
             fallback_results,
             max_results=max_results,
@@ -5827,7 +5831,7 @@ class MySearchClient(ProviderTransport):
             "provider": "tavily_social_fallback",
             "transport": tavily_result.get("transport", "env"),
             "query": query,
-            "answer": tavily_result.get("answer", ""),
+            "answer": answer,
             "results": fallback_results,
             "citations": self._align_citations_with_results(
                 results=fallback_results,

@@ -1860,12 +1860,6 @@ def _research_canonical_doc_catalog() -> dict[str, list[dict[str, Any]]]:
             },
             {
                 "provider": "canonical_research_docs",
-                "title": "Migrate to Responses API - OpenAI Docs",
-                "url": "https://platform.openai.com/docs/guides/responses-vs-chat-completions",
-                "snippet": "OpenAI recommends Responses for tool use, built-in tools, multimodal inputs, and modern interactive API workflows.",
-            },
-            {
-                "provider": "canonical_research_docs",
                 "title": "Rate limits - OpenAI Developers",
                 "url": "https://developers.openai.com/api/docs/guides/rate-limits/",
                 "snippet": "Rate limits vary by model and tier and should be considered when interactive request flows need predictable throughput.",
@@ -1910,6 +1904,9 @@ def _research_canonical_doc_snippet_for_url(
         return ""
     parsed = urlparse(normalized)
     normalized = parsed._replace(fragment="", query="").geturl().rstrip("/")
+    # Preserve evidence lookup for the redirect without scheduling it as another page.
+    if normalized == "https://platform.openai.com/docs/guides/responses-vs-chat-completions":
+        normalized = "https://developers.openai.com/api/docs/guides/migrate-to-responses"
     for items in _research_canonical_doc_catalog().values():
         for item in items:
             candidate_url = str(item.get("url") or "").strip()
@@ -2330,24 +2327,7 @@ def _research_excerpt_looks_like_schema_noise(
 def _research_is_canonical_vendor_doc(
     url: str,
 ) -> bool:
-    normalized = url.strip()
-    if not normalized:
-        return False
-    parsed = urlparse(normalized)
-    normalized = parsed._replace(fragment="", query="").geturl().rstrip("/")
-    for items in _research_canonical_doc_catalog().values():
-        for item in items:
-            candidate_url = str(item.get("url") or "").strip()
-            if not candidate_url:
-                continue
-            candidate_parsed = urlparse(candidate_url)
-            candidate_normalized = candidate_parsed._replace(
-                fragment="",
-                query="",
-            ).geturl().rstrip("/")
-            if candidate_normalized == normalized:
-                return True
-    return False
+    return bool(_research_canonical_doc_snippet_for_url(url))
 
 
 def _research_item_matches_brand_token(

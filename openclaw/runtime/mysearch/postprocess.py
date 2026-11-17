@@ -206,6 +206,15 @@ def _strip_hcaptcha_block(text: str) -> str:
     return "\n\n".join(kept)
 
 
+def _is_social_aggregate_result(item: dict[str, Any]) -> bool:
+    parsed = urlparse(str(item.get("url") or ""))
+    host = (parsed.hostname or "").lower()
+    if host not in {"x.com", "www.x.com", "mobile.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com"}:
+        return False
+    path = parsed.path.rstrip("/").lower()
+    return path in {"/home", "/search", "/explore", "/i/trending"} or path.startswith(("/i/trending/", "/hashtag/"))
+
+
 def _social_result_identity(item: dict[str, Any]) -> str:
     explicit_handle = str(item.get("handle") or item.get("username") or "").strip()
     if explicit_handle:

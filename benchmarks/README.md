@@ -4,8 +4,12 @@
 
 ## 本轮变更
 
-- `scoring_version=2026-10-09-evidence-v3`：输出标记当前评分公式版本，不代表旧 raw 已补齐。更换合同后必须重跑完整矩阵，旧结果不得计入新的连续 clean loop。
+- `scoring_version=2026-11-17-evidence-v4`：输出标记当前评分公式版本，不代表旧 raw 已补齐。更换合同后必须重跑完整矩阵，旧结果不得计入新的连续 clean loop。
 - 重复请求按正文长度、引用数选择中位成功样本；summary、URLs、正文量与保存的 raw 必须来自同一样本。延迟和稳定性仍使用全部重复观察。
+- `diagnostics` 子树在任意深度均不参与 provider、fallback 与发布日期计分；矩阵和权重不变，两侧须用同一 runner 新采样。
+- 全部逻辑重复调用另外保存在 `raw/repeats/`：成功及工具错误保存完整 MCP 响应，调用异常保存错误、阶段及异常类型。现有 observations 列记录真实 `run`、`raw_path`、`raw_sha256` 和 `scored_sample`；全部失败也保留记录，不选取成功样本。选中 raw 与 100 列 CSV 保持兼容，旧工件不改写。
+- 恢复新版 CSV 时同时核验重复工件路径和哈希；缺失或内容变化会显式报错，不自动重采样。
+- 重复响应在远端整体脱敏后才落盘，哈希针对本地持久化后的 UTF-8 内容。证据粒度是一次 `call_tool`，不代表内部 HTTP 重试；进程被强制终止前未完成返回的调用不声称已有完整证据。
 - 分批运行与 `--reuse-output-csv` 会按 notes 中的原始路径恢复 raw；`--mysearch-only` 保留对照正文。引用的 raw 丢失会显式报错，请连同 CSV 保留原文件及相对路径，不能只搬运 CSV。
 - `claim_groundedness` 只回查本侧结果、抓取页面及检索分支中的正文/snippet，不读生成的 answer、summary、report、标题、URL 或 metadata。有事实 token 却无来源文本时为0；无事实 token 时不扣分。它只检查文本命中，不证明主语归属或事实蕴含。
 - `expected_content_patterns` 使用 `|` 分隔**所有必需正文片段**，忽略大小写并折叠空白。每个片段分别判定，通过比例作为 `assertion_pass_rate` 的一个断言组；不能用 URL、标题、生成的 answer/summary、metadata 或搜索 snippet 代替抓取正文。

@@ -1,9 +1,45 @@
 import unittest
 
+from mysearch import query_routing
 from mysearch.research import events
 
 
 class ResultEventEvidenceTests(unittest.TestCase):
+    def test_award_list_bonus_does_not_promote_box_office_weekly_winners(self):
+        base = {"title": "2026 box office", "url": "https://example.test/report"}
+        winners = {**base, "title": "2026 box office winners full list"}
+        query = "2026 highest grossing movie opening weekend"
+        self.assertEqual(query_routing._result_event_page_priority(query=query, item=base),
+                         query_routing._result_event_page_priority(query=query, item=winners))
+        query = "2026 Oscars best picture winner"
+        self.assertGreater(query_routing._result_event_page_priority(query=query, item=winners),
+                           query_routing._result_event_page_priority(query=query, item=base))
+
+    def test_box_office_requires_opening_record_not_studio_or_weekly_revenue(self):
+        for text in (
+            "Fictional Pictures Becomes First Studio to Reach $4 Billion at the Global Box Office in 2026",
+            "'Fictional Pictures' becomes the highest-grossing studio in 2026.",
+            "Solar Harbor tops the box office this weekend.",
+            "Solar Harbor scores $20 million on opening weekend.",
+            "Solar Harbor becomes the highest-grossing film. Another film has the biggest opening.",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(events._extract_result_event_answer_from_text(
+                    query_lower="2026 highest grossing movie opening weekend", text=text,
+                ), "")
+
+    def test_box_office_decimal_amount_does_not_end_the_sentence(self):
+        for title in ("Solar Harbor", "'Solar Harbor'"):
+            for tail, expected in (
+                (", the biggest opening of 2026.", "Top opening-weekend title: Solar Harbor"),
+                (". Another film has the biggest opening of 2026.", ""),
+            ):
+                with self.subTest(title=title, tail=tail):
+                    self.assertEqual(events._extract_result_event_answer_from_text(
+                        query_lower="2026 highest grossing movie opening weekend",
+                        text=f"{title} scores $100.5 million{tail}",
+                    ), expected)
+
     def test_award_list_uses_explicit_winner_not_first_nominee(self):
         for category, label in (("Record of the Year", "Record of the Year"),
                                 ("Best Picture", "Best Picture")):

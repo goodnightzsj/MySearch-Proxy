@@ -9,6 +9,29 @@ from mysearch.research import finalize
 
 
 class SourceEvidenceTests(unittest.TestCase):
+    def test_comparison_fetches_distinct_documents_instead_of_catalog_redirect_alias(self):
+        client = MySearchClient()
+        self.addCleanup(client.close)
+        client._provider_can_serve = Mock(return_value=False)
+        client.search = Mock(side_effect=MySearchError("provider unavailable"))
+        client.extract_url = Mock(side_effect=lambda **kw: {
+            "url": kw["url"], "provider": "firecrawl",
+            "content": "Retrieved document explaining " + kw["url"],
+        })
+
+        result = client.research(
+            query="compare OpenAI Responses API and Batch API for long-running tasks 2026",
+            mode="research", strategy="deep", include_social=False, scrape_top_n=4,
+        )
+
+        urls = [page["url"] for page in result["pages"]]
+        self.assertEqual(len(urls), 4)
+        self.assertEqual(len(set(urls)), 4)
+        self.assertEqual(sum("migrate-to-responses" in url for url in urls), 1)
+        self.assertTrue(any("batch" in url for url in urls))
+        self.assertFalse(any("responses-vs-chat-completions" in url for url in urls))
+        self.assertTrue(set(urls).issubset({item["url"] for item in result["citations"]}))
+
     def test_search_reports_text_and_provider_agreement_without_claim_verification(self):
         result = finalize._augment_evidence_summary(
             {"provider": "hybrid", "results": [

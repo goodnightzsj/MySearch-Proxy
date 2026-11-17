@@ -2,6 +2,7 @@
 import argparse
 import base64
 import csv
+import hashlib
 import json
 import os
 import re
@@ -31,7 +32,7 @@ DEFAULT_TAVILY_MCP_SERVER = "tavily-hikari"
 FIRECRAWL_CRAWL_MAP_TOOLS = {"map_site", "crawl_site"}
 FIRECRAWL_CRAWL_MAP_COOLDOWN_SECONDS = 65
 DEFAULT_MATRIX = Path(__file__).resolve().parents[1] / "benchmarks" / "search-matrix.csv"
-SCORING_VERSION = "2026-10-09-evidence-v3"
+SCORING_VERSION = "2026-11-17-evidence-v4"
 
 #: 仅作**兜底**：CSV 的 `include_domains` 列优先（见 build_case）。
 #: 这 9 条当前与 CSV 完全重复，所以实际增量为 0。保留是为了 CSV 列被清空时
@@ -786,8 +787,9 @@ def extract_official_mode(blob):
 def walk_dicts(value):
     if isinstance(value, dict):
         yield value
-        for child in value.values():
-            yield from walk_dicts(child)
+        for key, child in value.items():
+            if key != "diagnostics":
+                yield from walk_dicts(child)
     elif isinstance(value, list):
         for child in value:
             yield from walk_dicts(child)
@@ -1274,6 +1276,13 @@ def _median_sample_index(samples: list[dict[str, object]]) -> int:
     return ordered[len(ordered) // 2]
 
 
+class ToolRunsFailed(RuntimeError):
+    def __init__(self, message, observations, timeout):
+        super().__init__(message)
+        self.observations = observations
+        self.timeout = timeout
+
+
 def timed_tool_runs(client, tool_name, arguments, repeat_runs, latency_budget_ms=0):
     latencies = []
     errors = []
@@ -1287,6 +1296,7 @@ def timed_tool_runs(client, tool_name, arguments, repeat_runs, latency_budget_ms
     fallback_used = False
     for run_index in range(max(1, int(repeat_runs or 1))):
         started = time.perf_counter()
+        payload = None
         try:
             payload = client.call_tool(tool_name, arguments)
             elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
@@ -1297,6 +1307,8 @@ def timed_tool_runs(client, tool_name, arguments, repeat_runs, latency_budget_ms
                 observations.append(
                     {
                         "run": run_index + 1,
+                        "raw_payload": payload,
+                        "scored_sample": False,
                         "cache_state": "cold" if run_index == 0 else "warm",
                         "success": False,
                         "latency_ms": elapsed_ms,
@@ -1313,10 +1325,13 @@ def timed_tool_runs(client, tool_name, arguments, repeat_runs, latency_budget_ms
                 continue
             summarized = summarize(blob)
             summarized["raw_text"] = text
+            summarized["run"] = run_index + 1
             latencies.append(elapsed_ms)
             observations.append(
                 {
                     "run": run_index + 1,
+                    "raw_payload": payload,
+                    "scored_sample": False,
                     "cache_state": "cold" if run_index == 0 else "warm",
                     "success": True,
                     "latency_ms": elapsed_ms,
@@ -1344,6 +1359,13 @@ def timed_tool_runs(client, tool_name, arguments, repeat_runs, latency_budget_ms
             observations.append(
                 {
                     "run": run_index + 1,
+                    "raw_payload": {
+                        "error": message,
+                        "exception_type": type(exc).__name__,
+                        "phase": "tools/call" if payload is None else "parse/summarize",
+                        "response": payload,
+                    },
+                    "scored_sample": False,
                     "cache_state": "cold" if run_index == 0 else "warm",
                     "success": False,
                     "latency_ms": elapsed_ms,
@@ -1360,7 +1382,7 @@ def timed_tool_runs(client, tool_name, arguments, repeat_runs, latency_budget_ms
     if first_success is not None and str(tool_name or "").startswith("tavily"):
         errors = [message for message in errors if not is_tavily_comparator_limit_error(tool_name, message)]
     if first_success is None:
-        raise RuntimeError(" ; ".join(errors[:3]) or "all repeats failed")
+        raise ToolRunsFailed(" ; ".join(errors[:3]) or "all repeats failed", observations, timeout_flag)
     variance = repeat_variance(observations)
     observation_latencies = [float(item["latency_ms"]) for item in observations]
     warm_latencies = observation_latencies[1:]
@@ -1369,6 +1391,7 @@ def timed_tool_runs(client, tool_name, arguments, repeat_runs, latency_budget_ms
     # 由单次抽样决定（实测 46/48 行的计分输入在样本间变化）。见 `_median_sample_index`
     # 里对"为什么是中位而不是多数票"的实测依据。
     scored = success_samples[_median_sample_index(success_samples)] if success_samples else first_success
+    observations[scored["run"] - 1]["scored_sample"] = True
     return {
         "summary": scored["summary"],
         "urls": scored["urls"],
@@ -1548,7 +1571,11 @@ for case in payload["cases"]:
         except Exception as exc:
             row["run_status"] = "partial-error"
             row["error"] = f"mysearch: {exc}"
-            row["mysearch_raw"] = ""
+            row["mysearch_raw"] = json.dumps({"error": str(exc), "phase": "tools/call"}, ensure_ascii=False)
+            if isinstance(exc, ToolRunsFailed):
+                row["mysearch_repeat_observations"] = json.dumps(exc.observations, ensure_ascii=False)
+                row["mysearch_repeat_variance"] = json.dumps(repeat_variance(exc.observations))
+                row["mysearch_timeout"] = exc.timeout
 
     if tavily is not None:
         try:
@@ -1590,6 +1617,10 @@ for case in payload["cases"]:
                 row["run_status"] = "partial-error" if row["run_status"] == "captured" else "error"
             row["error"] = (row["error"] + " ; " if row["error"] else "") + f"tavily: {error_text}"
             row["tavily_raw"] = json.dumps({"error": error_text, "phase": "tools/call"}, ensure_ascii=False)
+            if isinstance(exc, ToolRunsFailed):
+                row["tavily_repeat_observations"] = json.dumps(exc.observations, ensure_ascii=False)
+                row["tavily_repeat_variance"] = json.dumps(repeat_variance(exc.observations))
+                row["tavily_timeout"] = exc.timeout
     elif tavily_init_error:
         if not should_preserve_captured_tavily_error(row["run_status"], case["tavily_tool"], tavily_init_error):
             row["run_status"] = "partial-error" if row["run_status"] == "captured" else row["run_status"]
@@ -1809,6 +1840,20 @@ def write_raw(raw_dir: Path, benchmark_id: str, provider: str, text: str) -> str
     return str(path)
 
 
+def write_repeat_raw(row: dict[str, object], raw_dir: Path, benchmark_id: str, prefix: str) -> None:
+    observations = json.loads(row.get(f"{prefix}_repeat_observations") or "[]")
+    for observation in observations:
+        if "raw_payload" not in observation:
+            continue
+        # The remote runner redacts the entire output before its first persistence.
+        text = json.dumps(observation.pop("raw_payload"), ensure_ascii=False)
+        run = int(observation["run"])
+        observation["raw_path"] = write_raw(raw_dir / "repeats", benchmark_id, f"{prefix}.run-{run:03d}", text)
+        observation["raw_sha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    if observations:
+        row[f"{prefix}_repeat_observations"] = json.dumps(observations, ensure_ascii=False)
+
+
 def is_recoverable_mcp_session_error(error_text: str) -> bool:
     lowered = str(error_text or "").lower()
     return (
@@ -1996,7 +2041,7 @@ def _trace_provider_names(trace: dict[str, object]) -> set[str]:
                 items = value.get(key)
                 if isinstance(items, list):
                     providers.update(str(item).strip() for item in items if str(item).strip())
-            stack.extend(value.values())
+            stack.extend(child for key, child in value.items() if key != "diagnostics")
         elif isinstance(value, list):
             stack.extend(value)
     return providers
@@ -2510,6 +2555,12 @@ def load_existing_rows(path: Path) -> tuple[list[str], dict[str, dict[str, str]]
             key, separator, raw_path = note.strip().partition("=")
             if separator and key in {"mysearch_raw", "tavily_raw"}:
                 restored[key] = Path(raw_path).read_text(encoding="utf-8")
+        for prefix in ("mysearch", "tavily"):
+            for observation in json.loads(restored.get(f"{prefix}_repeat_observations") or "[]"):
+                if observation.get("raw_path"):
+                    digest = hashlib.sha256(Path(observation["raw_path"]).read_bytes()).hexdigest()
+                    if digest != observation.get("raw_sha256"):
+                        raise ValueError(f"Repeat evidence hash mismatch: {observation['raw_path']}")
         normalized[row["benchmark_id"]] = restored
     return [row["benchmark_id"] for row in rows], normalized
 
@@ -2556,6 +2607,8 @@ def build_output_row(
             continue
         row[key] = value
     sync_input_contract(row, input_row)
+    for prefix in ("mysearch", "tavily"):
+        write_repeat_raw(row, raw_dir, input_row["benchmark_id"], prefix)
 
     mysearch_raw = item.get("mysearch_raw", "")
     tavily_raw = item.get("tavily_raw", "")
