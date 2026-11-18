@@ -19,7 +19,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from mysearch.clients import MySearchClient
 from mysearch.config import MCPTransport, MySearchConfig
 from mysearch.diagnostics import remaining_seconds, request_context
-from mysearch.mcp_results import CrawlResult, ExtractResult, HealthResult, MapResult, ResearchResult, SearchResult
+from mysearch.mcp_results import CrawlResult, ExtractResult, HealthResult, MapResult, ResearchResult, SearchResult, compact_search_result
 
 
 OUTPUT_MODELS = {
@@ -216,10 +216,11 @@ def build_mcp(config: MySearchConfig) -> tuple[MySearchClient, FastMCP]:
         to_date: str | None = None,
         include_x_images: bool = False,
         include_x_videos: bool = False,
+        response_format: Literal["full", "compact"] = "full",
         ctx: Context = None,
     ) -> SearchResult:
-        """统一搜索入口。按任务类型自动选择 Tavily / Firecrawl / Exa / xAI。"""
-        return await _offload(
+        """按任务自动选择 Tavily / Firecrawl / Exa / xAI。默认 full；compact 将候选中的重复长正文表示为指向本响应内正文的 {"$ref": "/..."}。"""
+        result = await _offload(
             client, "search", ctx,
             query=query,
             mode=mode,
@@ -239,6 +240,7 @@ def build_mcp(config: MySearchConfig) -> tuple[MySearchClient, FastMCP]:
             include_x_images=include_x_images,
             include_x_videos=include_x_videos,
         )
+        return compact_search_result(result) if response_format == "compact" else result
 
     @mcp.tool(annotations=read_annotations)
     async def extract_url(

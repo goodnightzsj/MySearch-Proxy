@@ -15,6 +15,8 @@
 
 统一搜索入口。
 
+MCP 调用默认 `response_format="full"`，与省略该参数相同。支持引用的客户端可显式传 `"compact"`：最终 `results`、答案、来源、引用及独有正文仍完整返回。仅在 `primary_search` / `secondary_search`（可嵌套）的 `results[i].content` 中，重复长正文可能变为 `{"$ref":"/results/0/content"}`。从**同一份工具结果对象的根**按 JSON Pointer 取原文即可，不访问网络；目标一定是字符串，不会是另一个引用。仅在上述候选位置解码单键标记；`{"$literal": value}` 原样解包一次，不继续解码。文本与结构化响应采用相同表示。此参数不改变上游调用、缓存或计费。
+
 支持的模式：
 
 - `auto`

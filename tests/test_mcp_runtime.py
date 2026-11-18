@@ -123,6 +123,55 @@ class McpRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.terminals[0]["outcome"], "error")
         self.assertEqual(client.terminals[0]["failure_reason"], "ValidationError")
 
+    async def test_compact_search_only_references_exact_duplicate_candidate_bodies(self):
+        body = "正文 / ~ 🧪\n" * 100
+        other = body + "different end"
+        full = {
+            **PAYLOADS["search"], "results": [{"url": "a", "content": body}],
+            "citations": [{"url": "a"}], "answer": "answer", "extra": {"content": body},
+            "primary_search": {"results": [{"content": body, "source": "one"}, {"content": other}]},
+            "secondary_search": {"secondary_search": {"results": [
+                {"content": other, "source": "two"}, {"content": ""}, {}, {"content": None},
+                {"content": {"$ref": "/original/extension"}}, {"content": "short"}, {"content": "short"},
+            ]}},
+        }
+        client = StubClient()
+        client.payloads["search"] = full
+        async with create_connected_server_and_client_session(self.build(client)) as session:
+            tools = {tool.name: tool for tool in (await session.list_tools()).tools}
+            spec = tools["search"].inputSchema["properties"]["response_format"]
+            self.assertEqual((spec["default"], set(spec["enum"])), ("full", {"full", "compact"}))
+            for args in ({}, {"response_format": "compact"}, {"response_format": "full"}):
+                response = await session.call_tool("search", {"query": "q", **args})
+                self.assertFalse(response.isError)
+                output = response.structuredContent.copy()
+                self.assertEqual(output, json.loads(response.content[0].text))
+                self.assertEqual(output.pop("diagnostics"), client.terminals[-1]["diagnostics"])
+                if args.get("response_format") == "compact":
+                    expected = copy.deepcopy(full)
+                    expected["primary_search"]["results"][0]["content"] = {"$ref": "/results/0/content"}
+                    nested = expected["secondary_search"]["secondary_search"]["results"]
+                    nested[0]["content"] = {"$ref": "/primary_search/results/1/content"}
+                    nested[4]["content"] = {"$literal": {"$ref": "/original/extension"}}
+                    self.assertEqual(output, expected)
+                else:
+                    self.assertEqual(output, full)
+            invalid = await session.call_tool("search", {"query": "q", "response_format": "typo"})
+            self.assertTrue(invalid.isError)
+            self.assertEqual(len(client.terminals), 3)
+
+    def test_compact_preserves_shared_runtime_rows_and_literal_marker(self):
+        body = "long" * 64
+        row = {"content": body, "url": "https://example.test/a"}
+        literal = {"$literal": "provider extension"}
+        payload = {"results": [row], "primary_search": {"results": [row, {"content": literal}]}}
+        before = copy.deepcopy(payload)
+        compact = server.compact_search_result(payload)
+        self.assertEqual(payload, before)
+        self.assertEqual(compact["results"], before["results"])
+        self.assertEqual(compact["primary_search"]["results"][0]["content"], {"$ref": "/results/0/content"})
+        self.assertEqual(compact["primary_search"]["results"][1]["content"], {"$literal": literal})
+
     async def test_decorated_client_waits_for_output_validation_before_only_terminal(self):
         config = SimpleNamespace(timeout_seconds=45, research_timeout_seconds=90, crawl_timeout_seconds=90,
                                  xai_social_timeout_seconds=120, max_parallel_workers=2,
