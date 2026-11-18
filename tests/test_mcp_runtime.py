@@ -123,7 +123,7 @@ class McpRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.terminals[0]["outcome"], "error")
         self.assertEqual(client.terminals[0]["failure_reason"], "ValidationError")
 
-    async def test_compact_search_only_references_exact_duplicate_candidate_bodies(self):
+    async def test_search_returns_full_inline_json_without_a_format_option(self):
         body = "正文 / ~ 🧪\n" * 100
         other = body + "different end"
         full = {
@@ -139,38 +139,24 @@ class McpRuntimeTests(unittest.IsolatedAsyncioTestCase):
         client.payloads["search"] = full
         async with create_connected_server_and_client_session(self.build(client)) as session:
             tools = {tool.name: tool for tool in (await session.list_tools()).tools}
-            spec = tools["search"].inputSchema["properties"]["response_format"]
-            self.assertEqual((spec["default"], set(spec["enum"])), ("full", {"full", "compact"}))
-            for args in ({}, {"response_format": "compact"}, {"response_format": "full"}):
-                response = await session.call_tool("search", {"query": "q", **args})
-                self.assertFalse(response.isError)
-                output = response.structuredContent.copy()
-                self.assertEqual(output, json.loads(response.content[0].text))
-                self.assertEqual(output.pop("diagnostics"), client.terminals[-1]["diagnostics"])
-                if args.get("response_format") == "compact":
-                    expected = copy.deepcopy(full)
-                    expected["primary_search"]["results"][0]["content"] = {"$ref": "/results/0/content"}
-                    nested = expected["secondary_search"]["secondary_search"]["results"]
-                    nested[0]["content"] = {"$ref": "/primary_search/results/1/content"}
-                    nested[4]["content"] = {"$literal": {"$ref": "/original/extension"}}
-                    self.assertEqual(output, expected)
-                else:
-                    self.assertEqual(output, full)
-            invalid = await session.call_tool("search", {"query": "q", "response_format": "typo"})
-            self.assertTrue(invalid.isError)
-            self.assertEqual(len(client.terminals), 3)
+            self.assertNotIn("response_format", tools["search"].inputSchema["properties"])
+            response = await session.call_tool("search", {"query": "q"})
+            self.assertFalse(response.isError, response.content)
+            output = response.structuredContent.copy()
+            text = response.content[0].text
+            self.assertNotIn("\n", text)
+            self.assertEqual(json.loads(text), output)
+            self.assertEqual(output.pop("diagnostics"), client.terminals[-1]["diagnostics"])
+            self.assertEqual(output, full)
 
-    def test_compact_preserves_shared_runtime_rows_and_literal_marker(self):
-        body = "long" * 64
-        row = {"content": body, "url": "https://example.test/a"}
-        literal = {"$literal": "provider extension"}
-        payload = {"results": [row], "primary_search": {"results": [row, {"content": literal}]}}
-        before = copy.deepcopy(payload)
-        compact = server.compact_search_result(payload)
-        self.assertEqual(payload, before)
-        self.assertEqual(compact["results"], before["results"])
-        self.assertEqual(compact["primary_search"]["results"][0]["content"], {"$ref": "/results/0/content"})
-        self.assertEqual(compact["primary_search"]["results"][1]["content"], {"$literal": literal})
+    async def test_search_failure_is_reported_before_publishing_a_success(self):
+        client = StubClient()
+        client.payloads["search"]["citations"] = "invalid"
+        async with create_connected_server_and_client_session(self.build(client)) as session:
+            result = await session.call_tool("search", {"query": "q"})
+        self.assertTrue(result.isError)
+        self.assertIsNone(result.structuredContent)
+        self.assertEqual([row["failure_reason"] for row in client.terminals], ["ValidationError"])
 
     async def test_decorated_client_waits_for_output_validation_before_only_terminal(self):
         config = SimpleNamespace(timeout_seconds=45, research_timeout_seconds=90, crawl_timeout_seconds=90,

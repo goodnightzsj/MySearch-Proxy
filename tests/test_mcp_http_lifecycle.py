@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import timedelta
+import gzip
+import json
 import socket
 from threading import Event
 from types import SimpleNamespace
@@ -10,6 +12,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 import anyio
+import httpx
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamable_http_client
@@ -95,6 +98,63 @@ class HttpLifecycleTests(unittest.IsolatedAsyncioTestCase):
         with anyio.fail_after(3):
             while not predicate():
                 await anyio.sleep(0.005)
+
+    async def test_large_json_negotiates_gzip_without_changing_the_result(self):
+        client = LocalClient()
+        mcp = self.build(client)
+        text = "长正文\n" * 3000
+        body = {"provider": "test", "results": [{"content": text}], "citations": [],
+                "primary_search": {"results": [{"content": text}]}}
+        request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                   "params": {"name": "search", "arguments": {"query": "q"}}}
+        async with self.running(mcp, "streamable-http") as address, httpx.AsyncClient(trust_env=False) as http:
+            with patch.object(server, "_offload", new=AsyncMock(return_value=body)):
+                plain = None
+                for encoding, compressed in (("identity", False), ("gzip, deflate", True),
+                                             ("GZip;q=0.8", True), ("br, *;q=0.5", True), ("*;q=1, gzip;q=0", False),
+                                             ("gzip;q=0.4, identity;q=1", False), ("x-gzip-unknown", False)):
+                    with self.subTest(encoding=encoding):
+                        async with http.stream("POST", address + "/mcp", json=request, headers={
+                            "Accept": "application/json, text/event-stream", "Accept-Encoding": encoding,
+                        }) as response:
+                            response.raise_for_status()
+                            raw = b"".join([chunk async for chunk in response.aiter_raw()])
+                            self.assertEqual(len(raw), int(response.headers["content-length"]))
+                            self.assertIn("accept-encoding", response.headers["vary"].lower())
+                            self.assertEqual(response.headers.get("content-encoding"), "gzip" if compressed else None)
+                            if compressed:
+                                self.assertLess(len(raw), len(plain))
+                                raw = gzip.decompress(raw)
+                            if plain is None:
+                                plain = raw
+                            else:
+                                self.assertEqual(raw, plain)
+                            result = json.loads(raw)["result"]
+                            self.assertEqual(result["structuredContent"], body)
+                            self.assertEqual(json.loads(result["content"][0]["text"]), body)
+
+    async def test_gzip_leaves_small_streamed_or_encoded_responses_intact(self):
+        for status, kind, body_size, chunks, extra_headers in (
+            (200, b"application/json", 4095, [4095], []),
+            (200, b"text/event-stream", 5000, [5000], []),
+            (200, b"application/json", 5000, [2500, 2500], []),
+            (200, b"application/json", 5000, [5000], [(b"content-encoding", b"br")]),
+            (400, b"application/json", 5000, [5000], []),
+        ):
+            with self.subTest(status=status, kind=kind, chunks=chunks, extra=extra_headers):
+                headers = [(b"content-type", kind), (b"content-length", str(body_size).encode()), *extra_headers]
+                messages = [{"type": "http.response.start", "status": status, "headers": headers.copy()}]
+                messages.extend({"type": "http.response.body", "body": b"x" * n, "more_body": i < len(chunks) - 1}
+                                for i, n in enumerate(chunks))
+                async def app(scope, receive, send):
+                    for message in messages:
+                        await send(message)
+                send = AsyncMock()
+                await server.gzip_json_responses(app)(
+                    {"type": "http", "method": "POST", "headers": [(b"accept-encoding", b"gzip")]}, AsyncMock(), send)
+                sent = [call.args[0] for call in send.await_args_list]
+                self.assertEqual(sent[1:], messages[1:])
+                self.assertEqual([header for header in sent[0]["headers"] if header[0] != b"vary"], headers)
 
     async def test_sequential_sessions_and_stateless_http_requests_keep_shared_client_open(self):
         for transport, stateless in (("streamable-http", True), ("streamable-http", False), ("sse", False)):

@@ -131,7 +131,7 @@ If you already have official keys, direct official mode still works.
 
 Unified search entry.
 
-MCP `response_format` defaults to `"full"`. Opt into `"compact"` to reference duplicate long bodies in nested `primary_search` / `secondary_search` candidate rows. Final results, answers, sources, citations and unique bodies remain inline. Only at those branches' `results[i].content`, a single-key `{"$ref":"/results/0/content"}` points directly to a string in the same tool payload (JSON Pointer, never a network fetch); unwrap `{"$literal": value}` once without interpreting its value. Text and structured output agree. Provider calls and cache behavior do not change.
+Call `search` directly for the full result. Answers, citations and candidate bodies are available inline at their usual paths. The single-line JSON in `content[0].text` decodes to the same value as `structuredContent`. Streamable HTTP clients can negotiate gzip for JSON responses of 4 KiB or more.
 
 Common modes:
 

@@ -11,15 +11,17 @@ from typing import Annotated, Literal
 
 import anyio
 from mcp.server.fastmcp import Context, FastMCP
-from mcp.types import ToolAnnotations
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import Field
+from pydantic_core import to_json
 from starlette.applications import Starlette
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from mysearch.clients import MySearchClient
 from mysearch.config import MCPTransport, MySearchConfig
 from mysearch.diagnostics import remaining_seconds, request_context
-from mysearch.mcp_results import CrawlResult, ExtractResult, HealthResult, MapResult, ResearchResult, SearchResult, compact_search_result
+from mysearch.mcp_http import gzip_json_responses
+from mysearch.mcp_results import CrawlResult, ExtractResult, HealthResult, MapResult, ResearchResult, SearchResult
 
 
 OUTPUT_MODELS = {
@@ -79,6 +81,7 @@ class _MySearchMCP(FastMCP):
 
     def streamable_http_app(self) -> Starlette:
         app = super().streamable_http_app()
+        app.add_middleware(gzip_json_responses)
         app.add_middleware(_ClientLifetimeMiddleware, client=self._client)
         return app
 
@@ -216,10 +219,9 @@ def build_mcp(config: MySearchConfig) -> tuple[MySearchClient, FastMCP]:
         to_date: str | None = None,
         include_x_images: bool = False,
         include_x_videos: bool = False,
-        response_format: Literal["full", "compact"] = "full",
         ctx: Context = None,
-    ) -> SearchResult:
-        """按任务自动选择 Tavily / Firecrawl / Exa / xAI。默认 full；compact 将候选中的重复长正文表示为指向本响应内正文的 {"$ref": "/..."}。"""
+    ) -> Annotated[CallToolResult, SearchResult]:
+        """按任务自动选择 Tavily / Firecrawl / Exa / xAI。"""
         result = await _offload(
             client, "search", ctx,
             query=query,
@@ -240,7 +242,8 @@ def build_mcp(config: MySearchConfig) -> tuple[MySearchClient, FastMCP]:
             include_x_images=include_x_images,
             include_x_videos=include_x_videos,
         )
-        return compact_search_result(result) if response_format == "compact" else result
+        payload = SearchResult.model_validate(result).model_dump(mode="json", by_alias=True)
+        return CallToolResult(content=[TextContent(type="text", text=to_json(payload).decode())], structuredContent=payload)
 
     @mcp.tool(annotations=read_annotations)
     async def extract_url(
