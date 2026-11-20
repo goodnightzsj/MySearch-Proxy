@@ -28,6 +28,7 @@ import database as db
 import diagnostics
 from key_pool import classify_upstream_key_failure, pool
 from mysearch.diagnostics import extract_usage, upstream_request_id
+from mysearch.errors import classify_upstream_operation_failure
 
 # 纯规范化函数已收敛到 mysearch/social_normalization.py —— 两侧共用单一权威实现。
 # 这里是**显式**列举而非 import *：star import 会触发 ruff F403/F405，
@@ -1112,7 +1113,11 @@ async def _diagnostic_http(provider, operation, send, *args, **kwargs):
             row["usage"] = extract_usage(payload, operation=operation)
             row["upstream_request_id"] = upstream_request_id(payload)
             if response.status_code >= 400:
-                row["failure_reason"] = classify_upstream_key_failure(response.status_code, payload, service=provider) or "http_error"
+                row["failure_reason"] = (
+                    classify_upstream_key_failure(response.status_code, payload, service=provider)
+                    or classify_upstream_operation_failure(response.status_code, payload, service=provider)
+                    or "http_error"
+                )
         except Exception as exc:
             logger.warning("diagnostic_response_metadata_failed:%s", type(exc).__name__)
         return response
@@ -1208,7 +1213,7 @@ def get_token_service(service_value, default="tavily"):
 
 
 def is_key_schedulable(key):
-    if not key.get("active"):
+    if not key.get("active") or not db.key_supports_operation(key):
         return False
     schedule_until = str(key.get("schedule_until") or "").strip()
     if not schedule_until:
@@ -2809,6 +2814,11 @@ def mask_key_rows(keys):
             key["key_masked"] = raw[:8] + "***" + raw[-4:]
         # 显式删原文。如果调用方真的需要原文，请直接调 db.get_all_keys（不要经过 mask）。
         key.pop("key", None)
+        key["blocked_operations"] = db.key_blocked_operations(key)
+        if key.get("service") == "exa":
+            key["available_operations"] = [
+                operation for operation in db.EXA_OPERATIONS if db.key_supports_operation(key, operation)
+            ] if is_key_schedulable(key) else []
     return keys
 
 
@@ -3851,7 +3861,7 @@ def _transport_failure_reason(exc: Exception) -> str:
     return f"transport:{type(exc).__name__}"[:120]
 
 
-def _upstream_key_failure(response, upstream_key="", *, service=""):
+def _upstream_key_failure(response, upstream_key="", *, service="", operation=None):
     detail = response.text.strip()
     try:
         payload = response.json()
@@ -3885,7 +3895,9 @@ def _upstream_key_failure(response, upstream_key="", *, service=""):
     if service not in {"tavily", "firecrawl", "exa"}:
         classification_detail = redact_secret_text(classification_detail, upstream_key)
     return (
-        classify_upstream_key_failure(response.status_code, classification_detail, service=service),
+        classify_upstream_key_failure(response.status_code, classification_detail, service=service)
+        or (classify_upstream_operation_failure(response.status_code, classification_detail, service=service)
+            if operation else ""),
         detail,
         _parse_retry_after_header(response.headers),
     )
@@ -3897,12 +3909,15 @@ def _safe_upstream_error_response(
     *,
     gateway_pool_exhausted=False,
     service="",
+    operation=None,
 ):
-    failure_kind, detail, _ = _upstream_key_failure(response, upstream_key, service=service)
+    failure_kind, detail, _ = _upstream_key_failure(response, upstream_key, service=service, operation=operation)
     status_code = response.status_code
     if gateway_pool_exhausted and failure_kind and failure_kind != "rate_limited":
         status_code = 503
         detail = "Upstream API key pool is unavailable; manual key action required"
+        if failure_kind == "team_blocked":
+            detail = f"Upstream {service} API key pool is unavailable for {operation}; restore endpoint access first"
     return JSONResponse(
         content={"detail": detail or f"Upstream returned {response.status_code}"},
         status_code=status_code,
@@ -3925,13 +3940,13 @@ def _select_key_pool_failure(failures):
     return selected[0], selected[1], True
 
 
-def _no_available_key_error(service, token_id=None):
+def _no_available_key_error(service, token_id=None, *, operation=None):
     """池中没有可用 key。
 
     这条路径此前不留任何 `usage_logs` 记录 —— 池空时整个服务静默 503，事后
     只能看到"没有调用"，无法与"没有流量"区分。补一条 `key_pool_empty` 记录。
     """
-    retry_after = pool.get_retry_after(service)
+    retry_after = pool.get_retry_after(service, operation=operation) if operation else pool.get_retry_after(service)
     if token_id is not None:
         db.log_usage(
             token_id, None, "key_pool_empty", 0, 0, service=service,
@@ -3944,7 +3959,8 @@ def _no_available_key_error(service, token_id=None):
             detail=f"All {service} API keys are temporarily rate limited",
             headers={"Retry-After": str(retry_after)},
         )
-    return HTTPException(status_code=503, detail="No available API keys")
+    detail = f"No available {service} API keys for {operation}; manual key action required" if operation else "No available API keys"
+    return HTTPException(status_code=503, detail=detail)
 
 
 # ═══ Tavily 代理端点 ═══
@@ -4253,13 +4269,13 @@ async def _proxy_exa(request: Request, operation: str):
     pool_exhausted = False
     attempted_key_ids = set()
     while True:
-        key_info = pool.get_next_key("exa", exclude_ids=attempted_key_ids)
+        key_info = pool.get_next_key("exa", exclude_ids=attempted_key_ids, operation=operation)
         if not key_info:
             selected_failure = _select_key_pool_failure(key_failures)
             if selected_failure is not None:
                 resp, last_upstream_key, pool_exhausted = selected_failure
                 break
-            raise _no_available_key_error("exa", token_row["id"])
+            raise _no_available_key_error("exa", token_row["id"], operation=operation)
 
         attempted_key_ids.add(key_info["id"])
         last_upstream_key = key_info["key"]
@@ -4291,6 +4307,7 @@ async def _proxy_exa(request: Request, operation: str):
             resp,
             key_info["key"],
             service="exa",
+            operation=operation,
         )
         success = resp.status_code < 400
         pool.report_result(
@@ -4301,6 +4318,7 @@ async def _proxy_exa(request: Request, operation: str):
             failure_detail=failure_detail,
             retry_after_seconds=retry_after_seconds,
             generation=key_info.get("_pool_generation"),
+            operation=operation,
         )
         db.log_usage(
             token_row["id"], key_info["id"], operation, int(success), latency, service="exa",
@@ -4318,6 +4336,7 @@ async def _proxy_exa(request: Request, operation: str):
             last_upstream_key,
             gateway_pool_exhausted=pool_exhausted,
             service="exa",
+            operation=operation,
         )
     content_type = resp.headers.get("content-type", "").lower()
     if "application/json" in content_type:

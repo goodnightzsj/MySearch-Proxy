@@ -175,6 +175,7 @@ _EXA_TAG_FAILURES = {
     (402, "team_budget_exceeded"): "team_budget_exceeded",
     (429, "rate_limit_exceeded"): "rate_limited",
     (403, "feature_disabled"): "",
+    (403, "team_blocked"): "",
     (403, "prohibited_content"): "",
     (403, "content_filter_error"): "",
     (400, "invalid_request_body"): "",
@@ -192,6 +193,15 @@ _EXA_TAG_FAILURES = {
     (500, "x402_internal_error"): "",
     (503, "service_overloaded"): "",
 }
+
+
+def classify_upstream_operation_failure(status_code: int, detail: Any = "", *, service: str = "") -> str:
+    """Access denied to this endpoint does not prove the whole key is invalid."""
+    if service == "exa" and status_code == 403 and isinstance(detail, dict):
+        for error in (detail, detail.get("detail"), detail.get("error")):
+            if isinstance(error, dict) and str(error.get("tag", "")).strip().lower() == "team_blocked":
+                return "team_blocked"
+    return ""
 
 
 def classify_upstream_key_failure(status_code: int, detail: Any = "", *, service: str = "") -> str:

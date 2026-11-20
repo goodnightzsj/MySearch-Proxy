@@ -89,9 +89,14 @@ Firecrawl 错误分类依据 [官方认证代码](https://github.com/firecrawl/f
 - Exa 当前在控制台里支持接入和分发
 - 实时官方额度暂时无法查询，所以页面会明确标注这一点
 - [Exa 官方错误码](https://exa.ai/docs/admin/error-codes) 使用 HTTP 状态与 `tag` 联合判断：`401/INVALID_API_KEY`、`402/NO_MORE_CREDITS` 停用；`402/API_KEY_BUDGET_EXCEEDED` 和 `402/TEAM_BUDGET_EXCEEDED` 分别记录 Key/团队预算耗尽原因并停用。`429/RATE_LIMIT_EXCEEDED` 临时冷却。
+- `403/TEAM_BLOCKED` 表示团队撤权或端点禁止。Proxy 将本次 `search` / `contents` 隔离到该 Key 的 `blocked_operations`，随后轮转到同池其他合格 Key；其他端点仍可调度。限制在刷新和重启后保留，普通成功响应不会清除。控制台显示“部分端点受限”或“端点受限”；上游权限恢复后点击“恢复端点”，或通过既有 toggle 接口传 `active=1` 显式恢复。
 - `403/FEATURE_DISABLED`、`PROHIBITED_CONTENT`、`CONTENT_FILTER_ERROR` 只影响当前功能或内容，不停用整把 Key；`X402_*`/`MPP_*` 支付错误不等同 API Key 额度耗尽。请求参数、服务过载和 `200` 响应里的单 URL 抓取失败也不永久停用。
 
 三平台共用 `mysearch/errors.py` 的分类，Proxy 沿用 SQLite 持久化停用原因，直连 MySearch/OpenClaw 沿用进程内隔离至显式 reload。不回扫历史日志；界面显示中文原因与脱敏上游详情。手工停用、鉴权、封禁、验证和无法确认来源的历史停用不自动恢复；额度同步不得覆盖这些原因。后台仅同步启用或额度暂停项，手动强制同步仍可用于诊断；Exa 无官方额度同步，保持显式恢复。普通池刷新不废弃在途结果，显式管理重置仍保护新状态不被旧请求覆盖。
+
+本地 Tavily/Firecrawl/Exa 共用同一调度池：必须 `active=1` 且冷却已结束，Exa 还需本次操作未被隔离。新导入或手动恢复只代表允许调度，不代表已通过最新验证；真实调用更新状态，不新增收费轮检。全池不可用时明确返回 `503`，仅限流时保留 `429/Retry-After`，不会把上游池失败变成下游 `mysp-` Token 失效。操作限制仅在 Proxy 管理的池中持久化，直连模式不会因此全局停用 Key。
+
+`api_keys.blocked_operations` 通过既有启动迁移新增，保留历史数据。管理 API 将其返回为对象（操作名对应 `reason/detail/blocked_at`），Exa 另返回当前 `available_operations`。新代码部署需重启 Proxy；旧版本可以读取新增列，但不执行操作隔离，因此回退旧代码会失去这项保护。既有内存池按单 Proxy 进程使用，生产与 bench 的独立数据库不自动同步。
 
 ### MySearch 通用 token
 
@@ -122,6 +127,7 @@ Firecrawl 错误分类依据 [官方认证代码](https://github.com/firecrawl/f
 
 - 明确选择互斥的“本地模式”或“上游模式”
 - 本地模式：独立 Base URL、Responses Path、本地 Social/X key 池轮询、可调度数量/隔离原因展示、单 key 立即恢复与整池替换
+- 本地 Social/X 沿用 `settings` 中的隔离/冷却记录筛选可调度 Key，真实调用失败后更新并持久化；没有另建 `api_keys.active` 池。上游模式仅管理连接上游的 client key，上游账号池仍由上游管理。
 - 上游模式：上游 Base URL、client key 池和 grok2api Admin 对接；不会读取本地模式 Key
 - gateway token 管理
 - grok2api v3 管理员会话与 v2 legacy app key 对接
@@ -381,11 +387,12 @@ ADMIN_SESSION_MAX_AGE=2592000
 - `GET /api/settings`
 - `PUT /api/settings/social`
 - `GET /api/keys`
+- `PUT /api/keys/{key_id}/toggle` 的 `active=1` 同时清除冷却和操作限制；仍需管理员认证。
 - `POST /api/keys`
   - 兼容历史注册器请求：`{"service":"firecrawl","key":"fc-...","email":"account@example.com"}`
   - 批量导入继续使用：`{"service":"firecrawl","file":"email,password,fc-...,timestamp\\nfc-..."}`
   - 响应保留 `service`、`ok` / `imported`，并新增 `inserted`、`reactivated`、`duplicates`、`disabled`、`invalid` 等精确统计。
-  - 历史失败阈值留下的无原因停用 Key 会在重传时恢复；手动、鉴权、额度/预算、验证或封禁原因的停用默认均保持，可传 `"reactivate": true` 显式恢复。
+  - 历史失败阈值留下的无原因停用 Key 会在重传时恢复；手动、鉴权、额度/预算、验证、封禁或操作限制默认均保持，可传 `"reactivate": true` 显式恢复并清除限制。
   - 默认沿用管理员 session、`X-Admin-Password` 或管理员 Bearer；配置 `MYSEARCH_PROXY_KEY_UPLOAD_TOKEN` 后，注册器也可仅带 `X-Key-Upload-Token`，该 Token 不可用于其他管理 API。
   - 单条上传保留历史 opaque gateway credential 兼容；批量文本仍按 Provider Key 格式筛选。
 

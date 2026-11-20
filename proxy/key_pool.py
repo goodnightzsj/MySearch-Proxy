@@ -9,6 +9,8 @@ from database import (
     SUPPORTED_SERVICES,
     get_active_keys,
     get_next_key_schedule_delay,
+    key_blocked_operations,
+    key_supports_operation,
     normalize_retry_after_seconds,
     normalize_service,
     update_key_usage,
@@ -32,7 +34,7 @@ class ServiceKeyPool:
             for item in services:
                 self._reload_service_locked(item)
 
-    def get_next_key(self, service="tavily", *, exclude_ids=None):
+    def get_next_key(self, service="tavily", *, exclude_ids=None, operation=None):
         """Round-robin 返回某个服务下一个可用 key。"""
         service = normalize_service(service)
         excluded = set(exclude_ids or ())
@@ -42,12 +44,14 @@ class ServiceKeyPool:
             if service not in self._initialized or cooldown_expired:
                 self._reload_service_locked(service)
             eligible_keys = [
-                key for key in self._keys[service] if key.get("id") not in excluded
+                key for key in self._keys[service]
+                if key.get("id") not in excluded and key_supports_operation(key, operation)
             ]
             if not eligible_keys and not self._keys[service]:
                 self._reload_service_locked(service)
                 eligible_keys = [
-                    key for key in self._keys[service] if key.get("id") not in excluded
+                    key for key in self._keys[service]
+                    if key.get("id") not in excluded and key_supports_operation(key, operation)
                 ]
             if not eligible_keys:
                 return None
@@ -81,9 +85,12 @@ class ServiceKeyPool:
         with self._lock:
             self._generations[service] += 1
 
-    def get_retry_after(self, service):
+    def get_retry_after(self, service, *, operation=None):
         service = normalize_service(service)
         with self._lock:
+            if operation is not None:
+                delay = get_next_key_schedule_delay(service, operation=operation)
+                return max(1, min(86400, math.ceil(delay))) if delay is not None and delay > 0 else None
             reload_after = self._reload_after[service]
             if reload_after is not None:
                 remaining = reload_after - time.monotonic()
@@ -99,6 +106,8 @@ class ServiceKeyPool:
         # Refreshing a snapshot must not discard results already in flight.
         # Explicit administrative resets call invalidate() before reload().
         self._keys[service] = [dict(row) for row in get_active_keys(service)]
+        for key in self._keys[service]:
+            key["blocked_operations"] = key_blocked_operations(key)
         if self._indexes[service] >= len(self._keys[service]):
             self._indexes[service] = 0
         next_delay = get_next_key_schedule_delay(service)
@@ -119,8 +128,9 @@ class ServiceKeyPool:
         failure_detail="",
         retry_after_seconds=None,
         generation=None,
+        operation=None,
     ):
-        """Record usage and remove terminal credential failures immediately."""
+        """Persist failures before excluding the key or its denied operation."""
         service = normalize_service(service)
         with self._lock:
             if generation is not None and generation != self._generations[service]:
@@ -131,7 +141,11 @@ class ServiceKeyPool:
                 failure_kind=failure_kind,
                 failure_detail=failure_detail,
                 retry_after_seconds=retry_after_seconds,
+                operation=operation,
             )
+            if failure_kind == "team_blocked":
+                self._reload_service_locked(service)
+                return True
             if failure_kind:
                 self._keys[service] = [
                     key for key in self._keys[service] if key.get("id") != key_id

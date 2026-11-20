@@ -1447,7 +1447,7 @@ class ProxyForwardingSchedulingTests(unittest.IsolatedAsyncioTestCase):
             selected_headers.append(kwargs["headers"]["x-api-key"])
             return responses.pop(0)
 
-        def next_key(_service, *, exclude_ids=None):  # type: ignore[no-untyped-def]
+        def next_key(_service, *, exclude_ids=None, operation=None):  # type: ignore[no-untyped-def]
             excluded = set(exclude_ids or ())
             return next((key for key in keys if key["id"] not in excluded), None)
 
@@ -1675,7 +1675,7 @@ class ProxyForwardingSchedulingTests(unittest.IsolatedAsyncioTestCase):
             ],
         ):
             with self.subTest(order=[response.status_code for response in responses]):
-                def next_key(_service, *, exclude_ids=None):  # type: ignore[no-untyped-def]
+                def next_key(_service, *, exclude_ids=None, operation=None):  # type: ignore[no-untyped-def]
                     excluded = set(exclude_ids or ())
                     return next((key for key in keys if key["id"] not in excluded), None)
 
@@ -1719,7 +1719,7 @@ class ProxyForwardingSchedulingTests(unittest.IsolatedAsyncioTestCase):
                 json={"error": f"invalid api key: {selected_key}"},
             )
 
-        def next_key(_service, *, exclude_ids=None):  # type: ignore[no-untyped-def]
+        def next_key(_service, *, exclude_ids=None, operation=None):  # type: ignore[no-untyped-def]
             excluded = set(exclude_ids or ())
             return next((key for key in keys if key["id"] not in excluded), None)
 

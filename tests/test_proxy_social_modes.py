@@ -233,6 +233,29 @@ class ProxySocialModeTests(unittest.IsolatedAsyncioTestCase):
             "Bearer upstream-key",
         )
 
+    async def test_local_pool_excludes_failed_keys_across_searches_and_reload(self) -> None:
+        self.server.social_upstream_key_schedule.clear()
+        self.server.social_upstream_key_cursor = 0
+        state = await self.server.resolve_social_gateway_state_for_config(self._base_config(
+            mode="local", local_api_key="fixture-local-bad,fixture-local-ok",
+        ))
+        responses = [
+            httpx.Response(401, json={"error":"Invalid API key"}),
+            httpx.Response(200, json={"output_text": '{"answer":"ok","results":[]}'}),
+            httpx.Response(200, json={"output_text": '{"answer":"ok","results":[]}'}),
+        ]
+        try:
+            with patch.object(self.server.http_client, "post", new=AsyncMock(side_effect=responses)) as post:
+                self.assertTrue((await self.server.execute_social_search_attempt("test", {}, state, "grok-test", 5))["ok"])
+                self.server.social_upstream_key_schedule.clear()
+                self.server._load_social_upstream_key_schedule()
+                self.assertTrue((await self.server.execute_social_search_attempt("test", {}, state, "grok-test", 5))["ok"])
+            self.assertEqual([call.kwargs["headers"]["Authorization"] for call in post.call_args_list],
+                             ["Bearer fixture-local-bad", "Bearer fixture-local-ok", "Bearer fixture-local-ok"])
+        finally:
+            self.server.social_upstream_key_schedule.clear()
+            self.server.db.set_setting("social_upstream_key_schedule", "{}")
+
     async def test_state_reset_cannot_commit_inflight_old_social_state(self) -> None:
         started = asyncio.Event()
         release = asyncio.Event()
