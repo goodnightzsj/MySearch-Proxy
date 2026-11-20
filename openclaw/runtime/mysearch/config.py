@@ -562,6 +562,12 @@ class MySearchConfig:
                         proxy_default="/exa/search",
                         default="/search",
                     ),
+                    "contents": _provider_path(
+                        explicit_name="MYSEARCH_EXA_CONTENTS_PATH",
+                        proxy_base_url=proxy_base_url if exa_uses_proxy else "",
+                        proxy_default="/exa/contents",
+                        default="/contents",
+                    ),
                 },
                 api_keys=(
                     ([proxy_api_key] if proxy_api_key else [])

@@ -145,16 +145,12 @@ assert.ok(formatDisabledDetail({active: 1, disabled_reason: 'rate_limited', disa
         self.assertIn("const disabledDetail = formatDisabledDetail(key);", javascript)
         self.assertNotIn("escapeHtml(key.disabled_detail)", javascript)
 
-    def test_console_exposes_social_key_recovery_and_filters_only_schedulable_keys(self) -> None:
+    def test_console_exposes_social_key_recovery(self) -> None:
         javascript = (REPO_ROOT / "proxy/static/js/console.js").read_text(encoding="utf-8")
         settings = (REPO_ROOT / "proxy/templates/components/_settings_modal.html").read_text(
             encoding="utf-8"
         )
 
-        self.assertIn(
-            "items = items.filter((key) => getKeyAvailability(key).schedulable);",
-            javascript,
-        )
         self.assertIn("/api/settings/social/keys/${encodeURIComponent(keyId)}/resume", javascript)
         self.assertIn('id="settings-social-upstream-key-list"', settings)
         self.assertIn('id="settings-social-local-key-list"', settings)

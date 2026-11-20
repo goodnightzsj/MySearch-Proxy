@@ -3,6 +3,7 @@ SQLite 数据库管理
 """
 import atexit
 import math
+import json
 import os
 import re
 import secrets
@@ -13,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(__file__), "data", "proxy.db")
 _thread_local = threading.local()
 SUPPORTED_SERVICES = ("tavily", "firecrawl", "exa")
+EXA_OPERATIONS = ("search", "contents")
 TOKEN_SERVICES = SUPPORTED_SERVICES + ("mysearch",)
 TOKEN_PREFIX = {
     "tavily": "tvly-",
@@ -40,6 +42,7 @@ KEY_USAGE_COLUMNS = {
     "disabled_detail": "TEXT DEFAULT ''",
     "disabled_at": "TEXT",
     "schedule_until": "TEXT",
+    "blocked_operations": "TEXT NOT NULL DEFAULT '{}'",
 }
 
 #: 失败诊断列。`success` 只有布尔，出事后无法回答"为什么失败"——而
@@ -260,6 +263,7 @@ def _ensure_provider_scoped_key_uniqueness(conn):
                 disabled_detail TEXT DEFAULT '',
                 disabled_at TEXT,
                 schedule_until TEXT,
+                blocked_operations TEXT NOT NULL DEFAULT '{}',
                 UNIQUE(service, key)
             )
             """
@@ -407,8 +411,24 @@ def get_active_keys(service=None):
         pass  # connection reused via thread-local
 
 
-def get_next_key_schedule_delay(service=None):
+def key_blocked_operations(key):
+    """Decode the persisted operation restrictions, or reuse an API row's mapping."""
+    value = key.get("blocked_operations", "{}")
+    return json.loads(value) if isinstance(value, str) else value
+
+
+def key_supports_operation(key, operation=None):
+    """Without a requested operation, retain keys usable by any Exa endpoint."""
+    blocked = key_blocked_operations(key)
+    if operation:
+        return operation not in blocked
+    return any(item not in blocked for item in EXA_OPERATIONS)
+
+
+def get_next_key_schedule_delay(service=None, *, operation=None):
     """Return seconds until the next temporarily cooled key becomes schedulable."""
+    if operation is not None and (service != "exa" or operation not in EXA_OPERATIONS):
+        raise ValueError("unsupported key operation")
     conn = get_conn()
     try:
         where_sql, params = _service_where(service)
@@ -419,6 +439,9 @@ def get_next_key_schedule_delay(service=None):
         else:
             sql += " WHERE active = 1 AND schedule_until > ?"
         params.append(now.isoformat())
+        if operation is not None:
+            sql += " AND json_extract(blocked_operations, ?) IS NULL"
+            params.append(f"$.{operation}")
         row = conn.execute(sql, params).fetchone()
         raw_next = str((row["next_at"] if row else "") or "").strip()
         if not raw_next:
@@ -450,9 +473,15 @@ def update_key_usage(
     failure_kind="",
     failure_detail="",
     retry_after_seconds=None,
+    operation=None,
 ):
     conn = get_conn()
     try:
+        normalized_kind = (failure_kind or "").strip().lower()
+        if normalized_kind == "team_blocked":
+            row = conn.execute("SELECT service FROM api_keys WHERE id = ?", (key_id,)).fetchone()
+            if success or operation not in EXA_OPERATIONS or row is None or row["service"] != "exa":
+                raise ValueError("team_blocked requires a failed Exa operation")
         now = datetime.now(timezone.utc).isoformat()
         if success:
             conn.execute(
@@ -478,13 +507,21 @@ def update_key_usage(
                 (now, now, now, now, now, key_id),
             )
         else:
-            normalized_kind = (failure_kind or "").strip().lower()
             normalized_detail = " ".join(str(failure_detail or "").split())[:500]
             conn.execute(
                 "UPDATE api_keys SET total_failed = total_failed + 1, consecutive_fails = consecutive_fails + 1, last_used_at = ? WHERE id = ?",
                 (now, key_id),
             )
-            if normalized_kind == "rate_limited":
+            if normalized_kind == "team_blocked":
+                # Merge in SQL: overlapping search/contents failures must both survive.
+                conn.execute(
+                    """UPDATE api_keys SET blocked_operations = json_set(blocked_operations, ?, json(?))
+                       WHERE id = ? AND active = 1""",
+                    (f"$.{operation}", json.dumps({
+                        "reason": normalized_kind, "detail": normalized_detail, "blocked_at": now,
+                    }), key_id),
+                )
+            elif normalized_kind == "rate_limited":
                 cooldown_seconds = normalize_retry_after_seconds(retry_after_seconds)
                 schedule_until = (
                     datetime.now(timezone.utc) + timedelta(seconds=cooldown_seconds)
@@ -526,6 +563,9 @@ def update_key_usage(
                     (normalized_kind, normalized_detail, now, key_id),
                 )
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         pass  # connection reused via thread-local
 
@@ -542,7 +582,8 @@ def toggle_key(key_id, active):
                     disabled_reason = '',
                     disabled_detail = '',
                     disabled_at = NULL,
-                    schedule_until = NULL
+                    schedule_until = NULL,
+                    blocked_operations = '{}'
                 WHERE id = ?
                 """,
                 (key_id,),
@@ -628,7 +669,7 @@ def ingest_key(key, email="", service="tavily", *, reactivate=False):
         "legacy_failure_threshold",
     }
     should_reactivate = bool(reactivate) and (
-        not row["active"] or disabled_reason or row.get("schedule_until")
+        not row["active"] or disabled_reason or row.get("schedule_until") or key_blocked_operations(row)
     )
     should_reactivate = should_reactivate or is_legacy_disabled
     metadata_updated = bool(normalized_email and normalized_email != (row.get("email") or ""))
@@ -647,6 +688,7 @@ def ingest_key(key, email="", service="tavily", *, reactivate=False):
                 "disabled_detail = ''",
                 "disabled_at = NULL",
                 "schedule_until = NULL",
+                "blocked_operations = '{}'",
             ]
         )
     if updates:

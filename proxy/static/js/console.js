@@ -353,7 +353,8 @@ function getKeyRiskScore(service, key) {
   if (String(key.usage_sync_error || '').trim()) {
     score += 500000;
   }
-  if (!getKeyAvailability(key).schedulable) {
+  const availability = getKeyAvailability(key);
+  if (!availability.schedulable || availability.restricted) {
     score += 300000;
   }
   if (Number.isFinite(remaining)) {
@@ -400,7 +401,7 @@ function getKeyRowClass(service, key) {
   if (!availability.active) {
     return 'is-off';
   }
-  if (!availability.schedulable) {
+  if (!availability.schedulable || availability.restricted) {
     return 'is-warn';
   }
   const remaining = getKeyRemaining(key);
@@ -433,6 +434,19 @@ function getKeyAvailability(key) {
     };
   }
   if (active) {
+    const blocked = Object.keys(key.blocked_operations || {});
+    if (blocked.length) {
+      const schedulable = (key.available_operations || []).length > 0;
+      return {
+        active,
+        schedulable,
+        restricted: true,
+        reason: 'team_blocked',
+        label: schedulable ? '部分端点受限' : '端点受限',
+        detail: `已隔离：${blocked.join(' / ')}`,
+        actionLabel: schedulable ? '禁用' : '恢复端点',
+      };
+    }
     return {
       active,
       schedulable: true,
@@ -526,7 +540,10 @@ function getFilteredKeys(service, keys) {
   }
 
   if (state.filter === 'active') {
-    items = items.filter((key) => getKeyAvailability(key).schedulable);
+    items = items.filter((key) => {
+      const availability = getKeyAvailability(key);
+      return availability.schedulable && !availability.restricted;
+    });
   } else if (state.filter === 'disabled') {
     items = items.filter((key) => Number(key.active) !== 1);
   } else if (state.filter === 'error') {
@@ -3240,9 +3257,12 @@ function formatDisabledDetail(key) {
     team_budget_exceeded: 'Exa 团队账期预算已用尽，需预算恢复或管理员调整后手动启用。',
     repeated_failure: '连续请求失败达到保护阈值。',
   };
-  if (getKeyAvailability(key).schedulable) return '';
+  const blocked = Object.entries(key.blocked_operations || {}).map(([operation, state]) => (
+    `${operation}：Exa 团队访问受限（TEAM_BLOCKED），请先联系上游恢复权限，再恢复端点。${state.detail ? ` ${state.detail}` : ''}`
+  ));
+  if (getKeyAvailability(key).schedulable) return blocked.join(' · ');
   const upstreamDetail = String(key?.disabled_detail || '').trim();
-  return [details[reason] || reason, upstreamDetail].filter(Boolean).join(' · ');
+  return [details[reason] || reason, upstreamDetail, ...blocked].filter(Boolean).join(' · ');
 }
 
 function quotaBar(used, limit) {
@@ -3763,7 +3783,7 @@ function renderKeyStatusSummary(service, key) {
   const remain = key.usage_key_remaining ?? key.usage_account_remaining;
   const remainLabel = remain === null || remain === undefined ? '剩余待同步' : `剩余 ${fmtNum(remain)}`;
   return `
-    <div class="table-note"><span class="tag ${availability.schedulable ? 'tag-ok' : 'tag-off'}">${escapeHtml(availability.label)}</span></div>
+    <div class="table-note"><span class="tag ${availability.schedulable && !availability.restricted ? 'tag-ok' : 'tag-off'}">${escapeHtml(availability.label)}</span></div>
     <div class="table-note muted">${escapeHtml(availability.detail)}</div>
     ${disabledDetail ? `<div class="table-note danger">${escapeHtml(disabledDetail)}</div>` : ''}
     <div class="table-note">${remainLabel}</div>
@@ -4007,11 +4027,12 @@ function renderKeys(service, keys) {
         <td data-label="邮箱">${escapeHtml(key.email || '-')}</td>
         <td data-label="同步 / 状态">${renderKeyStatusSummary(service, key)}</td>
         <td data-label="代理摘要">${renderKeyUsageSummary(key)}</td>
-        <td data-label="状态"><span class="tag ${availability.schedulable ? 'tag-ok' : 'tag-off'}">${escapeHtml(availability.label)}</span></td>
+        <td data-label="状态"><span class="tag ${availability.schedulable && !availability.restricted ? 'tag-ok' : 'tag-off'}">${escapeHtml(availability.label)}</span></td>
         <td data-label="操作">
           <div class="table-actions">
             <!-- r5 P0-2: 删除按钮已挪到抽屉的 Danger Zone，行内只保留启用/禁用。 -->
             <button class="btn btn-sm" onclick="event.stopPropagation(); toggleKey('${service}', ${key.id}, ${availability.schedulable ? 0 : 1})">${escapeHtml(availability.actionLabel)}</button>
+            ${availability.restricted && availability.schedulable ? `<button class="btn btn-sm" onclick="event.stopPropagation(); toggleKey('${service}', ${key.id}, 1)">恢复端点</button>` : ''}
           </div>
         </td>
       </tr>
@@ -4101,7 +4122,7 @@ function openKeyDetail(service, keyId) {
     kicker: `${label} Key`,
     title: key.email || `${label} Key #${key.id}`,
     subtitle: `${escapeHtml(key.key_masked || maskToken(key.key))} · ${escapeHtml(availability.label)}`,
-    tone: availability.schedulable ? 'ok' : 'danger',
+    tone: availability.schedulable && !availability.restricted ? 'ok' : 'danger',
     summaryHtml: [
       drawerMetric('Key 状态', availability.label, availability.detail),
       drawerMetric('成功调用', fmtNum(key.total_used || 0), `失败 ${fmtNum(key.total_failed || 0)}`),
@@ -4123,6 +4144,7 @@ function openKeyDetail(service, keyId) {
     actionsHtml: [
       renderDrawerActionGroup('维护动作', `
         <button class="btn btn-soft" type="button" onclick="closeDetailDrawer(); toggleKey('${service}', ${key.id}, ${availability.schedulable ? 0 : 1})">${escapeHtml(availability.actionLabel)} Key</button>
+        ${availability.restricted && availability.schedulable ? `<button class="btn btn-soft" type="button" onclick="closeDetailDrawer(); toggleKey('${service}', ${key.id}, 1)">恢复端点</button>` : ''}
       `),
       renderDrawerActionGroup('危险动作', `
         <button class="btn btn-danger" type="button" onclick="closeDetailDrawer(); delKey('${service}', ${key.id})">删除 Key</button>
