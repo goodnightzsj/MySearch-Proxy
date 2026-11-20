@@ -139,6 +139,10 @@ def _get_bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def is_exa_enabled() -> bool:
+    return _get_bool("MYSEARCH_EXA_ENABLED", False)
+
+
 def _get_list(*names: str) -> list[str]:
     for name in names:
         value = os.getenv(name)
@@ -280,6 +284,7 @@ class ProviderConfig:
     api_keys: list[str] = field(default_factory=list, repr=False)
     keys_file: Path | None = None
     managed_key_pool: bool = False
+    enabled: bool = True
 
     def path(self, key: str) -> str:
         return self.default_paths.get(key, "")
@@ -544,6 +549,7 @@ class MySearchConfig:
             ),
             exa=ProviderConfig(
                 name="exa",
+                enabled=is_exa_enabled(),
                 base_url=_provider_base_url(
                     explicit_names=("MYSEARCH_EXA_BASE_URL",),
                     proxy_base_url=proxy_base_url,

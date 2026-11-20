@@ -8,6 +8,7 @@ services:
     environment:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD to a strong value}
       MYSEARCH_PROXY_DB_PATH: ${MYSEARCH_PROXY_DB_PATH:-/data/proxy.db}
+      MYSEARCH_EXA_ENABLED: ${MYSEARCH_EXA_ENABLED:-false}
       # r6 C1: 默认空——bootstrap 接口默认 disabled。要启用单容器/双容器自动签发
       # mysearch token，请在 .env 显式设置 MYSEARCH_PROXY_BOOTSTRAP_TOKEN=<32+ 字节随机值>。
       MYSEARCH_PROXY_BOOTSTRAP_TOKEN: ${MYSEARCH_PROXY_BOOTSTRAP_TOKEN:-}
@@ -35,6 +36,7 @@ services:
     environment:
       MYSEARCH_NAME: ${MYSEARCH_NAME:-MySearch}
       MYSEARCH_TIMEOUT_SECONDS: ${MYSEARCH_TIMEOUT_SECONDS:-45}
+      MYSEARCH_EXA_ENABLED: ${MYSEARCH_EXA_ENABLED:-false}
       MYSEARCH_PROXY_BASE_URL: ${MYSEARCH_PROXY_BASE_URL:-http://proxy:9874}
       MYSEARCH_PROXY_API_KEY: ${MYSEARCH_PROXY_API_KEY:-}
       # r6 C1: 默认空——bootstrap 接口默认 disabled。要启用单容器/双容器自动签发

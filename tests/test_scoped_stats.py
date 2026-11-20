@@ -53,7 +53,7 @@ class ScopedStatsTests(unittest.IsolatedAsyncioTestCase):
         payload = response.json()
         self.assertEqual(set(payload), {"services", "social", "mysearch", "meta"})
         self.assertEqual(set(payload["services"]), {"tavily", "firecrawl", "exa"})
-        self.assertEqual(set(payload["meta"]), {"generated_at", "stats_cache_ttl_seconds", "dashboard_auto_sync_on_stats"})
+        self.assertEqual(set(payload["meta"]), {"generated_at", "stats_cache_ttl_seconds", "dashboard_auto_sync_on_stats", "exa_enabled"})
         self.assertEqual(self.service.await_count, 3)
         self.social.assert_awaited_once()
         self.mysearch.assert_awaited_once()

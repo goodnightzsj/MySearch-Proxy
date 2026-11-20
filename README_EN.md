@@ -30,6 +30,8 @@ The goal is to make `Tavily`, `Firecrawl`, and optional `X / Social` search
 work as one reusable product that can be installed locally, shared publicly,
 and routed through the same runtime across multiple environments.
 
+Exa is disabled and hidden by default without deleting keys, tokens or history. Enable `MYSEARCH_EXA_ENABLED=true` in both runtime and Proxy only after checking permissions and balance. Disabled Exa requests return `provider_disabled` (Proxy HTTP 503) after normal authentication. Balanced web search consults a second provider only when the primary results are insufficient; verify/deep retain cross-provider discovery.
+
 The public OpenClaw page is live here:
 
 - [clawhub.ai/skernelx/mysearch](https://clawhub.ai/skernelx/mysearch)

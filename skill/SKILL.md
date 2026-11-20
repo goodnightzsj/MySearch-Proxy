@@ -3,7 +3,7 @@ name: mysearch
 version: "0.1.11"
 description: >-
   Install, verify, debug, and use MySearch MCP/Skill. Aggregates Tavily,
-  Firecrawl, Exa, and X search (via xAI) behind one workflow. Use when the user
+  Firecrawl, and X search (via xAI) behind one workflow. Use when the user
   shares a MySearch repo/skill URL, wants MySearch installed or repaired, or
   wants current web search, social/X search, document-oriented search, URL
   content extraction, or a small multi-source research pack with citations.
@@ -25,7 +25,7 @@ MySearch 是一层聚合搜索技能，不假设你只用单一 provider，也�
 
 - Tavily：适合普通网页发现、新闻检索、快速答案
 - Firecrawl：适合文档、GitHub、pricing、changelog、正文抓取
-- Exa：作为网页与长尾资料的补位 provider，只在主 provider 不可用、结果稀疏或需要语义补搜时介入
+- Exa：默认停用，不自动探测或补搜；仅在确认权限与余额并显式设置 `MYSEARCH_EXA_ENABLED=true` 后作为补位 provider
 - X 搜索：适合”大家在 X 上怎么说”、实时舆情、开发者讨论
 - `research`：当前会尽量输出结构化 short report，包含 `claim-level evidence`、`source clusters`、shortlist 与 decision table，不再只是结果拼接
 
@@ -438,8 +438,8 @@ MySearch 会自动回退到 `Tavily extract`。
 - `intent="resource"`：docs、GitHub、pricing、changelog、PDF
 
 - `strategy="fast"`：单 provider，最小候选池
-- `strategy="balanced"`：主 provider 为主，按模式补少量候选
-- `strategy="verify"`：扩大候选池并做交叉验证，必要时启用 Exa 补位
+- `strategy="balanced"`：先取主 provider，数量不足、低置信度或所需正文缺失时才补搜第二家
+- `strategy="verify"`：扩大候选池并做 Tavily + Firecrawl 交叉验证，不自动启用 Exa
 - `strategy="deep"`：更偏 `research` 的较大候选池与更多正文抓取
 
 默认自动行为：
@@ -455,7 +455,7 @@ MySearch 会自动回退到 `Tavily extract`。
 - 文档 / GitHub / PDF / changelog / pricing：默认 Firecrawl
 - X / Twitter / 社交舆情：默认 xAI X search
 - 精确官方 docs topic、official pricing、official changelog 一类 query：先让 Tavily 命中 canonical 页面，再由 Firecrawl 接正文验证与抽取
-- 奖项 / 结果型事实题优先用 `mode="news"` + `strategy="verify"`；当主结果只有弱娱乐页时，runtime 会保持 Exa rescue 开启，而不是提前把弱页摘要写成最终答案
+- 奖项 / 结果型事实题优先用 `mode="news"` + `strategy="verify"`；默认用 Tavily + Firecrawl 与官方页正文，不自动启用 Exa
 - `official / 官方 / 官网`、`docs / pricing / changelog` 一类查询会进入更严格的官方结果模式；宁可明确说明“官方结果不足”，也不默认拿第三方结果补齐
 - `web` 和 `news` 会分开排序：`news` 更重时效与媒体质量，`web` 更重官方性与页面相关性
 - 同时要网页和社交：结果可能是 `hybrid`，但调用时不要传 `mode="hybrid"`；应使用 `sources=["web","x"]` 或拆成 `social + news`

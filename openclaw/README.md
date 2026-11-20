@@ -36,7 +36,7 @@ MYSEARCH_PROXY_API_KEY=mysp-...
 
 这样做的好处：
 
-- Tavily / Firecrawl / Exa 默认共用同一个 token
+- Tavily / Firecrawl 默认共用同一个 token；Exa 默认停用
 - 如果 Proxy 已接通 Social / X，也可以继续走同一套 token
 - OpenClaw 侧配置最少
 - 不需要把一堆 provider key 再散到 skill 里
@@ -49,6 +49,8 @@ MYSEARCH_FIRECRAWL_API_KEY=fc-...
 MYSEARCH_EXA_API_KEY=exa-...
 MYSEARCH_XAI_API_KEY=xai-...
 ```
+
+Exa 凭证可以保留，但只有 runtime / Proxy 两端显式设置 `MYSEARCH_EXA_ENABLED=true` 后才使用；恢复前确认权限与余额。默认停用不会读 Key 文件或发起探测/搜索。
 
 ## 安装方式
 
@@ -168,7 +170,7 @@ OpenClaw 版 MySearch 本质上还是同一套能力，只是打成了 skill bun
 - `docs / github / pdf`
   - 优先 Firecrawl
 - 普通网页补充发现
-  - 可回退 Exa
+  - Tavily / Firecrawl 按需补位，balanced 强首轮不补搜，verify/deep 保留交叉检索
 - `social`
   - 走 xAI 或兼容 `/social/search`
 

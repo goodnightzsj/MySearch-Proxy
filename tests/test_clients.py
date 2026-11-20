@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import sys
 import time
 import unittest
@@ -35,6 +36,9 @@ class _FakeResponse:
 
 
 class MySearchClientTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.enterContext(patch.dict(os.environ, {"MYSEARCH_EXA_ENABLED": "true"}))
+
     def test_fast_official_hybrid_uses_hybrid_timeout_budget(self) -> None:
         client = MySearchClient()
         client.config.xai.search_mode = "official"
@@ -3031,7 +3035,7 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(policy.provider, "tavily")
         self.assertEqual(policy.fallback_chain, ("exa", "firecrawl"))
         self.assertEqual(policy.tavily_topic, "news")
-        self.assertEqual(policy.firecrawl_categories, ("research",))
+        self.assertEqual(policy.firecrawl_categories, ())
         self.assertTrue(policy.allow_exa_rescue)
 
     def test_tutorial_tavily_dispatch_disables_content_fetch(self) -> None:

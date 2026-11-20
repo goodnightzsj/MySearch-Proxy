@@ -2,7 +2,7 @@
 name: mysearch
 version: "0.1.11"
 description: >-
-  DEFAULT search skill for OpenClaw. Aggregates Tavily, Firecrawl, Exa, and
+  DEFAULT search skill for OpenClaw. Aggregates Tavily, Firecrawl, and
   optional X/social search behind one search path. Use for ANY external lookup that needs
   current web results, docs, GitHub, changelog, pricing, URL extraction, or X
   discussion. Prefer this over legacy Tavily-only skill or raw web_search when
@@ -58,10 +58,10 @@ MySearch 是给 OpenClaw 用的默认搜索 skill。
 - 先按 `README` 完成安装与验收
 - 再回到这个 `SKILL.md` 执行搜索规则和调用策略
 
-它把 Tavily、Firecrawl、Exa、X / Social 聚合成同一个入口，并且按任务类型自动路由：
+它把 Tavily、Firecrawl、X / Social 聚合成同一个入口，并且按任务类型自动路由：
 
 - 最新网页、普通实时搜索：优先 Tavily
-- Tavily 结果不够时，网页发现可补 Exa
+- Tavily / Firecrawl 按需互补；balanced 强首轮不补搜，verify/deep 保留交叉检索
 - 文档、GitHub、pricing、changelog、PDF：优先 Firecrawl
 - X / Twitter / 社交舆情：优先 xAI 或 compatible `/social/search`
 - 单页正文抓取：优先 Firecrawl，失败或空正文时回退 Tavily extract
@@ -77,9 +77,11 @@ Hub 版 skill 已经自带 runtime，不需要在安装时再下载远程代码�
 
 这两项配好后：
 
-- `Tavily / Firecrawl / Exa` 会默认都走统一 proxy
+- `Tavily / Firecrawl` 默认走统一 proxy；Exa 默认停用
 - 如果 proxy 同时接通了 `Social / X`，这一套 token 也会继续复用
-- OpenClaw 侧不需要再分别维护三套 provider token
+- OpenClaw 侧不需要再分别维护 provider token
+
+Exa 默认不探测、不读 Key 文件、不搜索；显式请求会返回 `provider_disabled`。只有确认权限与余额并在 runtime / Proxy 两端设置 `MYSEARCH_EXA_ENABLED=true` 后，保留的 Exa 路径才参与调度。不要自动开启或尝试恢复隔离 Key。
 
 兼容旧接法时，仍可直接填：
 

@@ -95,7 +95,8 @@
   <script>
   const INITIAL_AUTHENTICATED = {{ "true" if initial_authenticated else "false" }};
   window.PAGE_KIND = "mysearch";
+  window.EXA_ENABLED = {{ "true" if exa_enabled else "false" }};
   </script>
-  <script src="{{ url_for('static', path='/js/console.js') }}"></script>
+  <script src="{{ url_for('static', path='/js/console.js') }}?v=three-provider-1"></script>
 </body>
 </html>

@@ -29,6 +29,7 @@ import diagnostics
 from key_pool import classify_upstream_key_failure, pool
 from mysearch.diagnostics import extract_usage, upstream_request_id
 from mysearch.errors import classify_upstream_operation_failure
+from mysearch.config import is_exa_enabled
 
 # 纯规范化函数已收敛到 mysearch/social_normalization.py —— 两侧共用单一权威实现。
 # 这里是**显式**列举而非 import *：star import 会触发 ruff F403/F405，
@@ -3018,6 +3019,7 @@ async def build_stats_payload(auto_sync=False, sections=None):
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "stats_cache_ttl_seconds": STATS_CACHE_TTL_SECONDS,
         "dashboard_auto_sync_on_stats": DASHBOARD_AUTO_SYNC_ON_STATS,
+        "exa_enabled": is_exa_enabled(),
     }
     return payload
 
@@ -4255,6 +4257,8 @@ async def _proxy_exa(request: Request, operation: str):
     raw_body, body_json = await parse_json_body(request)
     token_value = extract_token(request, body_json)
     token_row = get_token_row_or_401(token_value, "exa")
+    if not is_exa_enabled():
+        raise HTTPException(status_code=503, detail={"code": "provider_disabled", "message": "exa is disabled by configuration"})
 
     forward_content = raw_body
     if body_json is not None:
@@ -4576,6 +4580,7 @@ async def console(request: Request):
         {
             "base_url": str(request.base_url).rstrip("/"),
             "initial_authenticated": has_valid_admin_session(request),
+            "exa_enabled": is_exa_enabled(),
         },
     )
 
@@ -4588,6 +4593,7 @@ async def mysearch_console(request: Request):
         {
             "base_url": str(request.base_url).rstrip("/"),
             "initial_authenticated": has_valid_admin_session(request),
+            "exa_enabled": is_exa_enabled(),
         },
     )
 

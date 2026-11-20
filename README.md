@@ -19,7 +19,7 @@
 
 - Tavily
 - Firecrawl
-- Exa
+- Exa（默认停用，仅保留显式恢复）
 - 可选 X / Social
 
 目标很简单：
@@ -54,7 +54,7 @@
 
 ```text
 上游 provider / 聚合网关
-  -> Tavily / Firecrawl / Exa / X / Social
+  -> Tavily / Firecrawl / X / Social（Exa 默认停用）
 
 MySearch Proxy
   -> 控制台、Token、额度同步、兼容代理接口
@@ -77,7 +77,7 @@ MySearch MCP / Codex Skill / OpenClaw Skill
 这条路的好处很直接：
 
 - 客户端只需要一组 `MYSEARCH_PROXY_*`
-- Tavily / Firecrawl / Exa 不再散落到每台机器
+- Tavily / Firecrawl / Social 不再散落到每台机器
 - 可以统一管理 token、调用统计和额度同步
 - OpenClaw、本地 Codex、团队代理都能复用同一套配置
 
@@ -320,6 +320,8 @@ docker compose up -d
 
 MySearch 默认不是“所有问题都塞给一个 provider”。
 
+默认使用 Tavily、Firecrawl 和 Social/xAI 三条线路。`MYSEARCH_EXA_ENABLED=false` 同时约束 runtime、Proxy、探测、缓存与控制台；Exa Key、Token 和历史记录不会删除。恢复前确认权限与余额，再在 runtime / Proxy 两端显式设置 `true`。停用时显式 Exa 请求返回 `provider_disabled`（Proxy HTTP 503），鉴权仍有效。
+
 当前推荐理解方式：
 
 - `web / news`
@@ -327,7 +329,7 @@ MySearch 默认不是“所有问题都塞给一个 provider”。
 - `docs / github / pdf / pricing / changelog`
   - 优先 Firecrawl
 - 普通网页补充发现
-  - 可回退 Exa
+  - 按需在 Tavily / Firecrawl 间补搜；balanced 强首轮不补搜，verify/deep 保留交叉检索
 - `social`
   - 走 xAI 或兼容 `/social/search`
 - `extract_url`

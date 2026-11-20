@@ -17,6 +17,8 @@
 
 ## 设计原则
 
+- 默认三 provider：Tavily 网页发现、Firecrawl 文档/正文、Social/xAI X 搜索；Exa 保留为显式恢复能力，但默认全入口停用且隐藏，不删除任何 Key、Token 或历史。共享开关 MYSEARCH_EXA_ENABLED 默认 false，runtime 与 Proxy 必须一致。
+- balanced 的强首轮不补搜；数量不足、低置信度、弱匹配或缺所需正文时再调用第二家。verify/deep 保留交叉检索和既有预算，full 输出与六工具不变。
 - `search` 是统一入口，不让调用方直接感知 provider 差异
 - `intent` 和 `strategy` 分开表达“搜什么”和“怎么搜”
 - `extract_url` 单独负责正文抓取，不把抓取逻辑塞进搜索结果本身

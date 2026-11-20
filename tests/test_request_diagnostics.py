@@ -32,6 +32,7 @@ def make_config(**overrides):
         crawl_timeout_seconds=90, xai_social_timeout_seconds=120,
         max_parallel_workers=2, search_cache_ttl_seconds=60,
         extract_cache_ttl_seconds=60, proxy_base_url="", proxy_api_key="",
+        exa=provider(),
     )
     values.update(overrides)
     return SimpleNamespace(**values)

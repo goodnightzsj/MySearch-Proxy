@@ -221,7 +221,7 @@ def build_mcp(config: MySearchConfig) -> tuple[MySearchClient, FastMCP]:
         include_x_videos: bool = False,
         ctx: Context = None,
     ) -> Annotated[CallToolResult, SearchResult]:
-        """按任务自动选择 Tavily / Firecrawl / Exa / xAI。"""
+        """按任务自动选择 Tavily / Firecrawl / xAI。Exa 默认停用，显式启用后可补位。"""
         result = await _offload(
             client, "search", ctx,
             query=query,

@@ -28,7 +28,7 @@
     <button type="submit" class="btn btn-primary" id="login-submit">进入控制台</button>
   </form>
   <div class="auth-foot" aria-label="控制台能力">
-    <span>4 Providers</span>
+    <span>{{ 4 if exa_enabled else 3 }} Providers</span>
     <span>Token pools</span>
     <span>Quota sync</span>
   </div>
@@ -114,7 +114,8 @@
   <script>
   const INITIAL_AUTHENTICATED = {{ "true" if initial_authenticated else "false" }};
   window.PAGE_KIND = "console";
+  window.EXA_ENABLED = {{ "true" if exa_enabled else "false" }};
   </script>
-  <script src="{{ url_for('static', path='/js/console.js') }}"></script>
+  <script src="{{ url_for('static', path='/js/console.js') }}?v=three-provider-1"></script>
 </body>
 </html>

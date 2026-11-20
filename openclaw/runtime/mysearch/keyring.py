@@ -183,6 +183,8 @@ class MySearchKeyRing:
         ]
 
     def _load_provider(self, provider: ProviderConfig) -> list[KeyRecord]:
+        if not provider.enabled:
+            return []
         loaded: list[KeyRecord] = []
 
         for index, key in enumerate(provider.api_keys, start=1):

@@ -324,7 +324,17 @@ class ProviderTransport:
             raise error
         raise MySearchError(str(error))
 
+    def _require_provider_enabled(self, provider: ProviderConfig) -> None:
+        if not provider.enabled:
+            raise MySearchHTTPError(
+                provider=provider.name,
+                status_code=503,
+                detail={"code": "provider_disabled", "message": f"{provider.name} is disabled by configuration"},
+                url="",
+            )
+
     def _get_key_or_raise(self, provider: ProviderConfig):
+        self._require_provider_enabled(provider)
         remaining_request_seconds()
         record = self.keyring.get_next(provider.name)
         if record is None:
@@ -389,6 +399,7 @@ class ProviderTransport:
         base_url: str | None = None,
         timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
+        self._require_provider_enabled(provider)
         remaining_request_seconds()
         state = _request_budget.get()
         operation = next((name for name, value in getattr(provider, "default_paths", {}).items() if value == path), "request")

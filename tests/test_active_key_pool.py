@@ -39,7 +39,7 @@ class ActiveKeyPoolTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.enterContext(patch.dict(os.environ, {"MYSEARCH_PROXY_DB_PATH": str(Path(self.temp.name) / "proxy.db")}))
+        self.enterContext(patch.dict(os.environ, {"MYSEARCH_PROXY_DB_PATH": str(Path(self.temp.name) / "proxy.db"), "MYSEARCH_EXA_ENABLED": "true"}))
         db.close_conn()
         db.init_db()
         self.addCleanup(db.close_conn)
@@ -237,7 +237,7 @@ class ActiveKeyPoolTests(unittest.IsolatedAsyncioTestCase):
         good = self.add_key("fixture-working")
         self.block(bad)
         token = db.create_token("fixture-runtime", service="mysearch")["token"]
-        with patch.dict(os.environ, {"MYSEARCH_PROXY_BASE_URL":"http://test", "MYSEARCH_PROXY_API_KEY":token}, clear=True):
+        with patch.dict(os.environ, {"MYSEARCH_PROXY_BASE_URL":"http://test", "MYSEARCH_PROXY_API_KEY":token, "MYSEARCH_EXA_ENABLED":"true"}, clear=True):
             config = MySearchConfig.from_env()
         runtime = MySearchClient(config)
         loop = asyncio.get_running_loop()

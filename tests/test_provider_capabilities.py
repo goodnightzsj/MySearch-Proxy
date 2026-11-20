@@ -210,7 +210,7 @@ class FirecrawlResultTests(unittest.TestCase):
 class ExaContentsProxyTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
-        self.env = patch.dict(os.environ, {"MYSEARCH_PROXY_DB_PATH": str(Path(self.directory.name) / "proxy.db")})
+        self.env = patch.dict(os.environ, {"MYSEARCH_PROXY_DB_PATH": str(Path(self.directory.name) / "proxy.db"), "MYSEARCH_EXA_ENABLED": "true"})
         self.env.start()
         server.db.close_conn()
         server.db.init_db()

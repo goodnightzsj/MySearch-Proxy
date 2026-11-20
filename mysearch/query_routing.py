@@ -3246,14 +3246,16 @@ def _firecrawl_categories(
     intent: ResolvedSearchIntent | None = None,
 ) -> list[str]:
         if mode == "github":
-            return ["github"]
+            return ["developer"]
         if mode == "pdf":
             return ["pdf"]
         if mode == "news" or intent in {"news", "status"}:
             return ["news"]
         if intent == "tutorial":
             return []
-        if mode in {"docs", "research"} or intent in {"resource", "tutorial"}:
+        if mode == "docs":
+            return ["developer"]
+        if mode == "research":
             return ["research"]
         return []
 

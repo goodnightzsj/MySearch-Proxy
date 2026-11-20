@@ -204,6 +204,7 @@ class ResearchBudgetTests(unittest.TestCase):
         provider = SimpleNamespace(
             name="firecrawl", base_url="https://example.test", auth_mode="bearer",
             auth_scheme="Bearer", auth_header="Authorization",
+            enabled=True,
         )
         client._http.request.return_value = SimpleNamespace(status_code=200, headers={}, text='{"ok": true}')
 

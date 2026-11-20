@@ -4,8 +4,10 @@
 
 `mysearch/` 是这个仓库里真正可安装的 MCP 服务。
 
-它负责把 Tavily、Firecrawl、Exa 和可选 X / Social 收成一个统一搜索入口，
+它负责把 Tavily、Firecrawl 和可选 X / Social 收成一个统一搜索入口，
 并暴露给 Codex、Claude Code 或其他支持 MCP 的客户端。
+
+Exa 默认停用，保留数据和代码以便显式恢复。`MYSEARCH_EXA_ENABLED=true` 必须在 runtime / Proxy 两端一致配置，并先确认 Key 权限与余额；停用时不会读取 Exa Key 文件、探测或发起补搜，显式 Exa 搜索返回 `provider_disabled`。
 
 如果你只想先把搜索能力装到本机 AI 助手里，优先看这一份文档。
 
@@ -40,7 +42,7 @@
 
 - 优先 Firecrawl
 - Firecrawl 失败或正文为空时回退 Tavily extract
-- 两者都无法提供正文时，使用 Exa Contents；只接受目标 URL 的精确规范化匹配，逐 URL 失败不会被 HTTP 200 掩盖
+- 两者都无法提供正文时明确保留失败；仅显式启用 Exa 后才使用 Contents，逐 URL 失败不会被 HTTP 200 掩盖
 
 需要显式时效时，设置 `provider="firecrawl", max_age_seconds=0` 请求实时抓取，正整数表示允许的缓存年龄（秒）。此选项绕过本地 extract 缓存，并按毫秒传给 Firecrawl；不设置时保留现有缓存行为。
 
@@ -93,7 +95,7 @@ MYSEARCH_PROXY_API_KEY=mysp-...
 
 好处：
 
-- Tavily / Firecrawl / Exa 默认一起走统一 proxy
+- Tavily / Firecrawl 默认一起走统一 proxy；Exa 仅显式启用时加入
 - 如果 proxy 同时接通了 Social / X，同一个 token 还能继续复用
 - 客户端配置最少
 - 更适合团队共享和公开部署
@@ -133,10 +135,11 @@ MYSEARCH_TAVILY_API_KEYS=tvly-a,tvly-b
 MYSEARCH_TAVILY_KEYS_FILE=accounts.txt
 ```
 
-如果你也要接 Exa：
+如果确认 Exa 权限和余额已恢复，需要显式启用（Proxy 端也须设置）：
 
 ```env
 MYSEARCH_EXA_API_KEY=exa-...
+MYSEARCH_EXA_ENABLED=true
 ```
 
 如果你也要接 X / Social：
@@ -348,7 +351,7 @@ MySearch 不是单一 provider 的壳。
 - `pricing / changelog / 官方文档`
   - 仍按 Firecrawl / 官方结果优先处理，不为凑数默认混入第三方页面
 - 补充网页发现 / 长尾资料
-  - Exa 只做补位，不做默认主搜
+  - 默认在 Tavily / Firecrawl 间按需补位；Exa 默认停用
 - `social`
   - 走 xAI 或 compatible `/social/search`
 - `extract_url`
@@ -363,7 +366,8 @@ MySearch 不是单一 provider 的壳。
   - `web` 更看官方性、页面相关性
   - `news` 更看时效、媒体质量与事件一致性
 - `official / 官方 / 官网`、`docs / pricing / changelog` 一类查询会进入更严格的官方结果模式；如果官方域结果不足，会明确说明，而不是默认拿第三方结果补齐
-- Exa 只在 Tavily / Firecrawl 结果不足、长尾语义查询或显式 fallback 场景下介入
+- Exa 只有显式启用后才可在结果不足、长尾语义查询或 fallback 场景下介入
+- Firecrawl github 类别已移除；公共 `mode=github` 保留，内部使用 developer 与 GitHub 域名过滤。docs 使用 developer，research 保持 academic research；发布说明和普通资源不限制学术站点。依据：[官方搜索文档](https://docs.firecrawl.dev/features/search)。
 
 ## Intent 和 Strategy
 
@@ -390,9 +394,9 @@ MySearch 不是单一 provider 的壳。
 - 想快一点：
   - `fast`：单 provider，最小候选池
 - 想稳一点：
-  - `balanced`：主 provider 为主，按模式补少量候选
+  - `balanced`：先取主 provider，数量不足、低置信度、弱匹配或缺少所需正文时才补搜第二家
 - 想多做交叉验证：
-  - `verify`：扩大候选池并交叉验证，必要时启用 Exa 补位
+  - `verify`：扩大候选池，Tavily + Firecrawl 交叉验证；不默认启用 Exa
 - 想做小研究：
   - `deep`：更偏 `research` 的较大候选池与更多正文抓取
 

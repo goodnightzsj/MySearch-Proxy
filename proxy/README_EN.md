@@ -93,7 +93,7 @@ The diagnostics drawer offers 1-hour, 24-hour and 7-day windows, deadline/degrad
 
 Firecrawl crawl poll `creditsUsed` is a cumulative job snapshot and is excluded from per-request usage sums. Missing separate usage remains unknown. Previously stored cumulative values are not rewritten; diagnostic totals are not billing records.
 
-`GET /api/stats` retains its full response by default and accepts repeated `service` parameters for scoped refreshes, for example `?service=exa&service=mysearch`. Exa now exposes both `POST /exa/search` and `POST /exa/contents` with the same authentication and key scheduling.
+`GET /api/stats` retains its full response by default and accepts repeated `service` parameters for scoped refreshes, for example `?service=exa&service=mysearch`. `meta.exa_enabled` reports policy. Exa defaults to disabled and hidden: `POST /exa/search` and `POST /exa/contents` retain authentication and return HTTP 503 / `provider_disabled` without key selection or upstream requests. Data and historical statistics remain available. Set `MYSEARCH_EXA_ENABLED=true` in both runtime and Proxy only after checking permissions and balance.
 
 Build the standalone Proxy from the complete repository using `docker build -f proxy/Dockerfile -t mysearch-proxy:local .`; it includes shared `mysearch/` modules. Both Compose files and CI use this context. All three images run an offline import check during the build.
 

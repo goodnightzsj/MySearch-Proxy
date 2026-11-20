@@ -62,7 +62,9 @@ Default routing:
 
 - `extract_url` prefers Firecrawl
 - if Firecrawl fails or returns empty content, it falls back to Tavily extract
-- if both fail, Exa Contents fetches the exact canonical URL; per-document errors remain failures
+- if both fail, failures remain explicit; Exa Contents is available only when explicitly enabled
+
+Exa defaults to `MYSEARCH_EXA_ENABLED=false`: no key-file loading, probing, cache reuse or upstream requests. Re-enable it in both runtime and Proxy only after checking permissions and balance. Balanced web discovery uses existing confidence and quality checks before a secondary search; verify/deep retain Tavily + Firecrawl discovery. Public GitHub mode now uses Firecrawl's supported developer category and GitHub domain filtering; docs use developer, while academic research retains research.
 
 For an explicit freshness bound, use `provider="firecrawl"` with `max_age_seconds` (0 requests live content). This bypasses the local extract cache; defaults retain existing caching. MCP callers can read character windows with `offset` and `max_chars`; `content_window` reports the next offset and total length. Omitted options still return the full document. Windows are not immutable snapshots after cache expiry.
 

@@ -6,7 +6,7 @@
 
 它不是单纯的 key 面板，而是整套 `proxy-first` 架构的中间层：
 
-- 上游连 Tavily / Firecrawl / Exa / 可选 Social
+- 上游连 Tavily / Firecrawl / 可选 Social；Exa 默认停用
 - 下游给 MySearch MCP、OpenClaw skill 和其他 Agent 发统一 token
 - 页面里同时看 key 池、token 池、调用统计和额度信息
 
@@ -72,6 +72,8 @@ Firecrawl 错误分类依据 [官方认证代码](https://github.com/firecrawl/f
 
 ### Exa
 
+默认 `MYSEARCH_EXA_ENABLED=false`：工作台与接入卡片隐藏，两个代理入口完成既有鉴权后返回 HTTP 503 / `provider_disabled`，不选 Key、不向上游发送。Key、Token、调用与隔离历史保留，管理 API 的历史查询仍可用；`/api/stats.meta.exa_enabled` 明确报告策略。恢复前确认上游权限与余额，并在 runtime / Proxy 两端同时设置 `true`。以下调度行为仅适用于显式启用后。
+
 代理入口：
 
 - `POST /exa/search`
@@ -86,7 +88,7 @@ Firecrawl 错误分类依据 [官方认证代码](https://github.com/firecrawl/f
 
 说明：
 
-- Exa 当前在控制台里支持接入和分发
+- Exa 显式启用后在控制台里支持接入和分发
 - 实时官方额度暂时无法查询，所以页面会明确标注这一点
 - [Exa 官方错误码](https://exa.ai/docs/admin/error-codes) 使用 HTTP 状态与 `tag` 联合判断：`401/INVALID_API_KEY`、`402/NO_MORE_CREDITS` 停用；`402/API_KEY_BUDGET_EXCEEDED` 和 `402/TEAM_BUDGET_EXCEEDED` 分别记录 Key/团队预算耗尽原因并停用。`429/RATE_LIMIT_EXCEEDED` 临时冷却。
 - `403/TEAM_BLOCKED` 表示团队撤权或端点禁止。Proxy 将本次 `search` / `contents` 隔离到该 Key 的 `blocked_operations`，随后轮转到同池其他合格 Key；其他端点仍可调度。限制在刷新和重启后保留，普通成功响应不会清除。控制台显示“部分端点受限”或“端点受限”；上游权限恢复后点击“恢复端点”，或通过既有 toggle 接口传 `active=1` 显式恢复。

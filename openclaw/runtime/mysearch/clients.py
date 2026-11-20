@@ -119,14 +119,14 @@ _MODE_PROVIDER_POLICY: dict[str, SearchRoutePolicy] = {
         key="docs",
         provider="firecrawl",
         fallback_chain=("tavily", "exa"),
-        firecrawl_categories=("research",),
+        firecrawl_categories=("developer",),
         result_profile="resource",
     ),
     "github": SearchRoutePolicy(
         key="github",
         provider="firecrawl",
         fallback_chain=("exa", "tavily"),
-        firecrawl_categories=("github",),
+        firecrawl_categories=("developer",),
         result_profile="resource",
     ),
     "pdf": SearchRoutePolicy(
@@ -147,7 +147,6 @@ _MODE_PROVIDER_POLICY: dict[str, SearchRoutePolicy] = {
         key="resource",
         provider="firecrawl",
         fallback_chain=("tavily", "exa"),
-        firecrawl_categories=("research",),
         result_profile="resource",
     ),
     "tutorial": SearchRoutePolicy(
@@ -162,7 +161,6 @@ _MODE_PROVIDER_POLICY: dict[str, SearchRoutePolicy] = {
         provider="tavily",
         fallback_chain=("exa", "firecrawl"),
         tavily_topic="news",
-        firecrawl_categories=("research",),
         result_profile="resource",
         allow_exa_rescue=True,
     ),
@@ -268,16 +266,20 @@ class MySearchClient(ProviderTransport):
                         int(keyring_info[n]["count"]),
                     )
                 )
-                for name in provider_names
+                for name in provider_names if provider_configs[name].enabled
             },
             max_workers=4,
         )
         providers = {}
         for name in provider_names:
-            status = probe_results.get(name, {"status": "network_error", "error": "probe failed", "checked_at": ""})
             info = keyring_info[name]
             cfg = provider_configs[name]
+            status = (
+                probe_results.get(name, {"status": "network_error", "error": "probe failed", "checked_at": ""})
+                if cfg.enabled else {"status": "disabled", "error": "provider disabled by configuration", "checked_at": ""}
+            )
             providers[name] = {
+                "enabled": cfg.enabled,
                 "base_url": cfg.base_url,
                 "alternate_base_urls": cfg.alternate_base_urls,
                 "provider_mode": cfg.provider_mode,
@@ -327,7 +329,7 @@ class MySearchClient(ProviderTransport):
                 "docs": "firecrawl",
                 "content": "firecrawl",
                 "social": "xai",
-                "fallback": "exa",
+                "fallback": "exa" if self.config.exa.enabled else "firecrawl",
             },
             "providers": providers,
             "cache": cache,
@@ -386,7 +388,7 @@ class MySearchClient(ProviderTransport):
         include_x_videos: bool = False,
         max_results: int = 5,
     ) -> str:
-        return cache_keys._build_search_cache_key(query=query, mode=mode, resolved_intent=resolved_intent, resolved_strategy=resolved_strategy, provider=provider, normalized_sources=normalized_sources, include_content=include_content, include_answer=include_answer, include_domains=include_domains, exclude_domains=exclude_domains, decision=decision, allowed_x_handles=allowed_x_handles, excluded_x_handles=excluded_x_handles, from_date=from_date, to_date=to_date, include_x_images=include_x_images, include_x_videos=include_x_videos, max_results=max_results)
+        return cache_keys._build_search_cache_key(query=query, mode=mode, resolved_intent=resolved_intent, resolved_strategy=resolved_strategy, provider=provider, normalized_sources=normalized_sources, include_content=include_content, include_answer=include_answer, include_domains=include_domains, exclude_domains=exclude_domains, decision=decision, allowed_x_handles=allowed_x_handles, excluded_x_handles=excluded_x_handles, from_date=from_date, to_date=to_date, include_x_images=include_x_images, include_x_videos=include_x_videos, max_results=max_results, exa_enabled=self.config.exa.enabled)
 
     def _build_extract_cache_key(
         self,
@@ -396,7 +398,7 @@ class MySearchClient(ProviderTransport):
         only_main_content: bool,
         provider: Literal["auto", "firecrawl", "tavily"],
     ) -> str:
-        return cache_keys._build_extract_cache_key(url=url, formats=formats, only_main_content=only_main_content, provider=provider)
+        return cache_keys._build_extract_cache_key(url=url, formats=formats, only_main_content=only_main_content, provider=provider, exa_enabled=self.config.exa.enabled)
 
     def _build_social_cache_key(
         self,
@@ -410,7 +412,7 @@ class MySearchClient(ProviderTransport):
         include_x_images: bool,
         include_x_videos: bool,
     ) -> str:
-        return cache_keys._build_social_cache_key(query=query, max_results=max_results, allowed_x_handles=allowed_x_handles, excluded_x_handles=excluded_x_handles, from_date=from_date, to_date=to_date, include_x_images=include_x_images, include_x_videos=include_x_videos)
+        return cache_keys._build_social_cache_key(query=query, max_results=max_results, allowed_x_handles=allowed_x_handles, excluded_x_handles=excluded_x_handles, from_date=from_date, to_date=to_date, include_x_images=include_x_images, include_x_videos=include_x_videos, exa_enabled=self.config.exa.enabled)
 
     def _build_social_gateway_cache_key(
         self,
@@ -472,6 +474,8 @@ class MySearchClient(ProviderTransport):
         query = query.strip()
         if not query:
             raise MySearchError("query must not be empty")
+        if provider == "exa":
+            self._require_provider_enabled(self.config.exa)
         if mode == "github" and not include_domains:
             include_domains = ["github.com"]
 
@@ -1541,6 +1545,7 @@ class MySearchClient(ProviderTransport):
         if (
             not authoritative_research
             and research_plan["web_mode"] == "exploratory"
+            and self.config.exa.enabled
             and self._provider_can_serve(self.config.tavily)
         ):
             research_tasks["tavily_support"] = lambda: self.search(
@@ -3043,7 +3048,7 @@ class MySearchClient(ProviderTransport):
                 tavily_topic="general",
                 firecrawl_categories=policy.firecrawl_categories,
                 result_profile="resource",
-                allow_exa_rescue=policy.allow_exa_rescue,
+                allow_exa_rescue=policy.allow_exa_rescue and self.config.exa.enabled,
             )
 
         if provider != "auto":
@@ -3057,7 +3062,7 @@ class MySearchClient(ProviderTransport):
                         policy=policy,
                     ),
                     result_profile=policy.result_profile,
-                    allow_exa_rescue=policy.allow_exa_rescue,
+                    allow_exa_rescue=policy.allow_exa_rescue and self.config.exa.enabled,
                 )
             if provider == "firecrawl":
                 return RouteDecision(
@@ -3120,10 +3125,10 @@ class MySearchClient(ProviderTransport):
                     policy=policy,
                 ),
                 result_profile=policy.result_profile,
-                allow_exa_rescue=policy.allow_exa_rescue,
+                allow_exa_rescue=policy.allow_exa_rescue and self.config.exa.enabled,
             )
         if policy.key == "tutorial":
-            reason = "教程 / 排障类查询默认走 Tavily，优先拿社区解法，再用 Exa 补语义相邻案例"
+            reason = "教程 / 排障类查询默认走 Tavily，优先拿社区解法，Firecrawl 接正文与备用发现"
         elif policy.key == "changelog":
             reason = "release / changelog 类查询默认走 Tavily，优先拿官方发布页与更新说明"
         elif policy.key in {"docs", "resource"} and include_domains and self._domains_prefer_firecrawl_discovery(include_domains):
@@ -3261,7 +3266,7 @@ class MySearchClient(ProviderTransport):
             sources=sources,
             fallback_chain=fallback_chain,
             result_profile=policy.result_profile,
-            allow_exa_rescue=policy.allow_exa_rescue,
+            allow_exa_rescue=policy.allow_exa_rescue and self.config.exa.enabled,
         )
 
     def _resolve_available_policy_chain(
@@ -3269,7 +3274,12 @@ class MySearchClient(ProviderTransport):
         *,
         policy: SearchRoutePolicy,
     ) -> tuple[ProviderName, list[str] | None]:
-        ordered: list[ProviderName] = [policy.provider, *policy.fallback_chain]
+        ordered: list[ProviderName] = [
+            name for name in [policy.provider, *policy.fallback_chain]
+            if self._provider_config_for_name(name).enabled
+        ]
+        if not ordered:
+            raise MySearchError("No enabled providers for search route")
         provider_configs = {
             provider_name: self._provider_config_for_name(provider_name)
             for provider_name in ordered
@@ -3305,9 +3315,7 @@ class MySearchClient(ProviderTransport):
             return selected, remaining or None
         if degraded:
             return degraded[0], degraded[1:] or None
-        if not healthy and not degraded:
-            return policy.provider, list(policy.fallback_chain) or None
-        return policy.provider, list(policy.fallback_chain) or None
+        return ordered[0], ordered[1:] or None
 
     def _should_keep_tavily_primary_when_degraded(
         self,
@@ -3336,7 +3344,8 @@ class MySearchClient(ProviderTransport):
         provider: ProviderName,
         policy: SearchRoutePolicy,
     ) -> list[str] | None:
-        return query_routing._explicit_provider_fallback_chain(provider=provider, policy=policy)
+        chain = query_routing._explicit_provider_fallback_chain(provider=provider, policy=policy)
+        return [name for name in (chain or []) if self._provider_config_for_name(name).enabled] or None
 
     def _should_blend_web_providers(
         self,
@@ -3404,7 +3413,12 @@ class MySearchClient(ProviderTransport):
         from_date: str | None = None,
         to_date: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
-        chain = [primary_provider, *(decision.fallback_chain or [])]
+        chain = [
+            name for name in [primary_provider, *(decision.fallback_chain or [])]
+            if self._provider_config_for_name(name).enabled
+        ]
+        if not chain:
+            raise MySearchError("No enabled providers for search route")
         last_error: Exception | None = None
         last_quality_issue = ""
         content_candidate: tuple[str, dict[str, Any]] | None = None
@@ -4216,12 +4230,38 @@ class MySearchClient(ProviderTransport):
                 timeout_seconds=verify_timeout,
             )
 
-        blended_results, blended_errors = self._execute_parallel(
-            tasks,
-            max_workers=len(tasks),
-            timeout_seconds=verify_timeout,
-            stop_after_primary_and_verifier=strategy == "verify",
-        )
+        if strategy == "balanced":
+            blended_results, blended_errors = self._execute_parallel(
+                {"primary": tasks.pop("primary")}, max_workers=1,
+            )
+            if "primary" not in blended_errors:
+                primary = self._finalize_search_result(
+                    blended_results["primary"], query=query, mode=mode, intent=intent,
+                    include_domains=include_domains, result_profile=decision.result_profile,
+                    max_results=max_results,
+                )
+                if (
+                    len(primary.get("results") or []) >= min(max_results, 3)
+                    and (primary.get("evidence") or {}).get("confidence") != "low"
+                    and not self._fallback_quality_issue(
+                        result=primary, mode=mode, intent=intent,
+                        include_domains=include_domains, include_content=include_content,
+                    )
+                    and not self._result_set_looks_weak_for_exa_rescue(
+                        query=query, mode=mode, result=primary,
+                    )
+                ):
+                    return primary
+            secondary_results, secondary_errors = self._execute_parallel(tasks, max_workers=len(tasks))
+            blended_results.update(secondary_results)
+            blended_errors.update(secondary_errors)
+        else:
+            blended_results, blended_errors = self._execute_parallel(
+                tasks,
+                max_workers=len(tasks),
+                timeout_seconds=verify_timeout,
+                stop_after_primary_and_verifier=strategy == "verify",
+            )
         primary_failed = "primary" in blended_errors
         secondary_failed = "secondary" in blended_errors
         exa_supplement = blended_results.get("exa_supplement")
@@ -5516,6 +5556,8 @@ class MySearchClient(ProviderTransport):
         )
         failures: list[str] = []
         for name, search in fallback_chain:
+            if not self._provider_config_for_name(name).enabled:
+                continue
             elapsed_now = max(0.0, time.monotonic() - social_start)
             remaining = max(0, int(math.ceil(total_social_timeout - elapsed_now)))
             if remaining <= 0:
@@ -6764,6 +6806,8 @@ class MySearchClient(ProviderTransport):
         provider: ProviderConfig,
         key_count: int,
     ) -> dict[str, str]:
+        if not provider.enabled:
+            return {"status": "disabled", "error": "provider disabled by configuration", "checked_at": ""}
         if key_count <= 0:
             if self.keyring.has_configured_provider(provider.name):
                 return {
@@ -6948,6 +6992,8 @@ class MySearchClient(ProviderTransport):
     def _looks_like_provider_limit_error(error_text: str) -> bool:
         return query_routing._looks_like_provider_limit_error(error_text)
     def _provider_can_serve(self, provider: ProviderConfig) -> bool:
+        if not provider.enabled:
+            return False
         if not self.keyring.has_provider(provider.name):
             return False
         key_count = int(self.keyring.describe()[provider.name]["count"])
@@ -6962,6 +7008,8 @@ class MySearchClient(ProviderTransport):
         return True
 
     def _provider_live_status(self, provider: ProviderConfig) -> str | None:
+        if not provider.enabled:
+            return None
         if not self.keyring.has_provider(provider.name):
             return None
         key_count = int(self.keyring.describe()[provider.name]["count"])

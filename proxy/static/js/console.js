@@ -67,8 +67,8 @@ const SERVICE_META = {
     syncButton: '同步 Tavily 额度',
     syncSupported: true,
     panelIntro: '适合新闻、网页线索和基础搜索入口；现在既支持本地 API Key 池，也支持接上游 Tavily Gateway。',
-    tokenPoolDesc: '给业务侧发放 Tavily 代理 Token，和 Exa / Firecrawl 完全分开创建、限流、统计。',
-    keyPoolDesc: 'Tavily Key 独立存储，导入时只写入 Tavily 池，不会和 Exa 或 Firecrawl 混用。',
+    tokenPoolDesc: '给业务侧发放 Tavily 代理 Token，各 provider 独立创建、限流和统计。',
+    keyPoolDesc: 'Tavily Key 独立存储，导入时只写入 Tavily 池，不与其他 provider 混用。',
     switcherRoute: '/api/search · /api/extract',
     switcherBadges: ['网页发现', '官方同步'],
     switcherFoot: 'API Key 池 + Gateway 双模式',
@@ -103,7 +103,7 @@ const SERVICE_META = {
     syncButton: '同步 Firecrawl 额度',
     syncSupported: true,
     panelIntro: '适合正文抓取、文档页、PDF 和结构化抽取，继续保持独立 Firecrawl 工作台。',
-    tokenPoolDesc: '给业务侧发放 Firecrawl 代理 Token，和 Tavily / Exa 完全分开创建、限流、统计。',
+    tokenPoolDesc: '给业务侧发放 Firecrawl 代理 Token，各 provider 独立创建、限流和统计。',
     keyPoolDesc: 'Firecrawl Key 独立存储，导入时只写入 Firecrawl 池，不会和其他服务混用。',
     switcherRoute: '/firecrawl/*',
     switcherBadges: ['正文抓取', '官方同步'],
@@ -111,6 +111,8 @@ const SERVICE_META = {
     spotlightDesc: 'Firecrawl 继续负责正文抓取与页面抽取，额度同步仍按 Firecrawl credits 展示。',
   },
 };
+
+if (window.EXA_ENABLED !== true) delete SERVICE_META.exa;
 
 const WORKSPACE_META = {
   ...SERVICE_META,
@@ -129,6 +131,10 @@ const WORKSPACE_META = {
 
 let PWD = localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY) || '';
 let activeService = localStorage.getItem(ACTIVE_SERVICE_KEY) || 'tavily';
+if (!WORKSPACE_META[activeService]) {
+  activeService = 'tavily';
+  localStorage.setItem(ACTIVE_SERVICE_KEY, activeService);
+}
 let latestServices = {};
 let latestSocial = {};
 let latestMySearch = {};
@@ -1420,6 +1426,7 @@ function getQuickstartProviderCards(services = latestServices, social = latestSo
   }
 
   ['exa', 'firecrawl'].forEach((service) => {
+    if (!SERVICE_META[service]) return;
     const payload = services?.[service] || {};
     const active = Number(payload.keys_active || 0);
     const total = Number(payload.keys_total || 0);
@@ -1766,11 +1773,12 @@ SOCIAL_GATEWAY_ADMIN_PASSWORD=YOUR_GROK2API_ADMIN_PASSWORD
 function buildSocialMySearchEnv(social) {
   const baseUrl = location.origin;
   const socialReady = getSocialUpstreamState(social || {}).canProxySearch;
-  return `# 推荐：直接用 MySearch 通用 token，一次接上 Tavily / Firecrawl / Exa / Social
+  return `# 推荐：直接用 MySearch 通用 token，一次接上 Tavily / Firecrawl / Social
 MYSEARCH_PROXY_BASE_URL=${baseUrl}
 MYSEARCH_PROXY_API_KEY=YOUR_MYSEARCH_PROXY_TOKEN
+MYSEARCH_EXA_ENABLED=${window.EXA_ENABLED === true}
 
-# 当前 Social / X ${socialReady ? '已经接通，可直接复用上面的通用 token。' : '还没完全接通；上面的通用 token 先可用于 Tavily / Firecrawl / Exa。'}
+# 当前 Social / X ${socialReady ? '已经接通，可直接复用上面的通用 token。' : '还没完全接通；上面的通用 token 先可用于 Tavily / Firecrawl。'}
 
 # 如果你只想单独接 Social / X，也可以显式写 compatible 模式：
 MYSEARCH_XAI_SEARCH_MODE=compatible
@@ -1791,6 +1799,7 @@ function buildMySearchEnv(mysearch, social, { includeSecret = false } = {}) {
   return `# 最省事的接法：只填这两项，MySearch 会默认走当前 proxy
 MYSEARCH_PROXY_BASE_URL=${baseUrl}
 MYSEARCH_PROXY_API_KEY=${token}
+MYSEARCH_EXA_ENABLED=${window.EXA_ENABLED === true}
 
 # 当前路由状态：
 ${routeCards.map((card) => `# - ${card.label}: ${card.title}${card.desc ? ` · ${card.desc}` : ''}`).join('\n')}
@@ -3499,7 +3508,7 @@ function renderGlobalSummary(services, social) {
   const socialUsesUpstream = isSocialUpstreamManaged(social || {});
   const localProviderTokenSources = [
     ...(!tavilyUsesUpstream ? [{ label: 'Tavily', count: Number((tavilyPayload.tokens || []).length) }] : []),
-    { label: 'Exa', count: Number((services?.exa?.tokens || []).length) },
+    ...(SERVICE_META.exa ? [{ label: 'Exa', count: Number((services?.exa?.tokens || []).length) }] : []),
     { label: 'Firecrawl', count: Number((services?.firecrawl?.tokens || []).length) },
     ...(!socialUsesUpstream ? [{ label: 'Social / X', count: Number(getSocialUpstreamState(social || {}).acceptedTokenCount || 0) }] : []),
   ];

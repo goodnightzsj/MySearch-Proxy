@@ -1310,6 +1310,7 @@ class ProxyForwardingSchedulingTests(unittest.IsolatedAsyncioTestCase):
         cls.addClassCleanup(cls.server.db.close_conn)
 
     def setUp(self) -> None:
+        self.enterContext(patch.dict(os.environ, {"MYSEARCH_EXA_ENABLED": "true"}))
         self.setting_patch = patch.object(self.server.db, "set_setting")
         self.set_setting = self.setting_patch.start()
 

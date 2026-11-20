@@ -16,6 +16,7 @@ import hashlib
 import json
 from typing import Any, Literal
 
+from mysearch.errors import MySearchError
 from mysearch.research import render
 from mysearch.research import sections
 from mysearch.types import ProviderName, ResolvedSearchIntent, RouteDecision, SearchMode, SearchStrategy
@@ -55,6 +56,7 @@ def _build_search_cache_key(
     include_x_images: bool = False,
     include_x_videos: bool = False,
     max_results: int = 5,
+    exa_enabled: bool = True,
 ) -> str:
         # `search()` 接受日期窗口和 X handle 过滤参数，且这些会改变上游请求的实际
         # query / 结果集；不把它们放进 cache key 会导致两次"同 query 但不同日期范围"
@@ -82,6 +84,7 @@ def _build_search_cache_key(
                 "include_x_images": include_x_images,
                 "include_x_videos": include_x_videos,
                 "requested_max_results": max_results,
+                "exa_enabled": exa_enabled,
             },
         )
 
@@ -92,6 +95,7 @@ def _build_extract_cache_key(
     formats: list[str],
     only_main_content: bool,
     provider: Literal['auto', 'firecrawl', 'tavily'],
+    exa_enabled: bool = True,
 ) -> str:
         return _build_cache_key(
             "extract",
@@ -100,6 +104,7 @@ def _build_extract_cache_key(
                 "formats": formats,
                 "only_main_content": only_main_content,
                 "provider": provider,
+                "exa_enabled": exa_enabled,
             },
         )
 
@@ -114,6 +119,7 @@ def _build_social_cache_key(
     to_date: str | None,
     include_x_images: bool,
     include_x_videos: bool,
+    exa_enabled: bool = True,
 ) -> str:
         return _build_cache_key(
             "social",
@@ -126,6 +132,7 @@ def _build_social_cache_key(
                 "to_date": to_date or "",
                 "include_x_images": include_x_images,
                 "include_x_videos": include_x_videos,
+                "exa_enabled": exa_enabled,
             },
         )
 
@@ -175,12 +182,16 @@ def _build_firecrawl_domain_query(
 def _normalize_firecrawl_search_categories(
     categories: list[str],
 ) -> list[str]:
-        supported = {"github", "research", "pdf"}
+        supported = {"developer", "research", "pdf"}
         normalized: list[str] = []
         for item in categories:
             value = str(item or "").strip().lower()
+            if value == "github":
+                value = "developer"
             if value in supported and value not in normalized:
                 normalized.append(value)
+        if "developer" in normalized and len(normalized) > 1:
+            raise MySearchError("Firecrawl developer category cannot be combined with other categories")
         return normalized
 
 
