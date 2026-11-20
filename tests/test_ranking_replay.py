@@ -36,6 +36,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from mysearch import query_routing, ranking
+from mysearch.research.selection import _rerank_resource_results
 
 FIXTURE = REPO_ROOT / "tests" / "fixtures" / "ranking_replay_docs_02.json"
 
@@ -116,6 +117,25 @@ class FrozenFixtureReplaysTest(unittest.TestCase):
 
 class WorkingCopyDemotionTest(unittest.TestCase):
     """loop44: an unpublished working copy must rank below the published page."""
+
+    def test_named_api_lookup_on_an_explicit_docs_host(self) -> None:
+        for host, name, slug in [
+            ("nextjs.org", "generateMetadata", "generate-metadata"),
+            ("react.dev", "useEffect", "useEffect"),
+        ]:
+            with self.subTest(name=name):
+                query = f"{name} docs"
+                exact = {"url": f"https://{host}/docs/{slug}/#example", "title": name}
+                guide = {"url": f"https://{host}/docs/{slug}/errors", "title": f"{name} docs errors"}
+                preview = {**guide, "url": f"https://beta.{host}/docs/{slug}"}
+                results = [guide, preview, exact]
+                def order(q, domains):
+                    return [item["url"] for item in _rerank_resource_results(
+                        query=q, mode="docs", results=results, include_domains=domains)]
+                self.assertEqual(order(query, [host])[0], exact["url"])
+                for q in (query + " error", query + " v15", query + " 中文"):
+                    self.assertEqual(order(q, [host])[0], guide["url"])
+                self.assertEqual(order(query, None)[0], guide["url"])
 
     def test_published_page_outranks_the_working_copy(self) -> None:
         case = load_case(FIXTURE)

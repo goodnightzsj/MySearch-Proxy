@@ -984,7 +984,7 @@ def save_request_attempts(attempts):
         )
 
 
-def get_diagnostics(service="", limit=20, hours=24):
+def get_diagnostics(service="", limit=20, hours=24, outcome=""):
     conn = get_conn()
     since = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
     attempt_filter = "created_at >= ?"
@@ -1032,10 +1032,12 @@ def get_diagnostics(service="", limit=20, hours=24):
         result["layer"] = "proxy"
         return result
 
+    recent_filter = request_filter + (" AND t.outcome = ?" if outcome else "")
+    recent_params = [*request_params, outcome] if outcome else request_params
     requests = []
     for row in conn.execute(
-        f"SELECT t.* FROM tool_requests t WHERE {request_filter} ORDER BY t.id DESC LIMIT ?",
-        [*request_params, limit],
+        f"SELECT t.* FROM tool_requests t WHERE {recent_filter} ORDER BY t.id DESC LIMIT ?",
+        [*recent_params, limit],
     ).fetchall():
         record = dict(row)
         record.update(json.loads(record.pop("report_json")))
@@ -1047,7 +1049,7 @@ def get_diagnostics(service="", limit=20, hours=24):
         record["attempts"] = record["attempts"][:1000]
         requests.append(record)
     return {
-        "hours": hours, "service": service or "mysearch", "since": since,
+        "hours": hours, "service": service or "mysearch", "since": since, "outcome": outcome,
         "logical_requests": summarize("tool_requests t", request_filter, request_params, logical=True),
         "physical_attempts": summarize("request_attempts", attempt_filter, attempt_params),
         "recent_requests": requests,

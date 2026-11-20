@@ -776,6 +776,18 @@ def _resource_result_rank(
     non_working_copy = int(
         not (strict_official and query_routing._looks_like_working_copy_path(path))
     )
+    # A named API page should beat guides that repeat its name in the title.
+    named_api_page = int(bool(
+        mode == "docs" and official_docs_query and include_domains and not tutorial_query
+        and hostname in {postprocess._clean_hostname(domain) for domain in include_domains}
+        and non_locale_variant and non_preview_react_variant
+        and not query_routing._preferred_react_docs_locale(query)
+        and not re.search(r"\bv?\d+(?:\.\d+)*\b", query_lower)
+        and not re.search(r"/v?\d+(?:\.\d+)*/", path)
+        and path.rstrip("/").rsplit("/", 1)[-1].replace("-", "").replace("_", "") in {
+            token.lower() for token in re.findall(r"\b[a-z][a-z0-9]*[A-Z][A-Za-z0-9]*\b", query)
+        }
+    ))
     matched_provider_count = len(item.get("matched_providers") or [])
     content_score, snippet_score, title_score = postprocess._result_quality_score(item)
     return (
@@ -797,6 +809,7 @@ def _resource_result_rank(
         non_paper_compound_mismatch,
         paper_landing_bonus,
         non_working_copy,
+        named_api_page,
         topic_path_hits,
         topic_total_hits,
         tutorial_brand_aligned_resource,

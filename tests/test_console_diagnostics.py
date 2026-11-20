@@ -125,6 +125,22 @@ assert.ok(html.includes('仅显示前 20 条'));
 assert.ok(html.includes('运行时调用明细已截断'));
 """)
 
+    def test_phase_summary_excludes_enclosing_tool_and_filter_reaches_server(self) -> None:
+        self.run_console(r"""
+const html = renderDiagnosticRequest({tool: 'search', diagnostics: {phases: [
+  {name: 'search', elapsed_ms: 10000}, {name: 'request', elapsed_ms: 10000},
+  {name: 'primary', elapsed_ms: 100}, {name: 'extract_url', elapsed_ms: 900},
+] }});
+assert.match(html.split('</summary>')[0], /最慢已记录阶段.*extract_url.*900 ms/);
+assert.match(renderDiagnosticRequest({tool: 'search'}), /最慢已记录阶段.*未知/);
+node('diagnostics-hours').value = '1';
+node('diagnostics-outcome').value = 'deadline';
+const calls = [];
+api = async (...args) => { calls.push(args); return payload(); };
+await loadRequestDiagnostics('exa');
+assert.equal(calls[0][1], '/api/diagnostics?service=exa&hours=1&limit=20&outcome=deadline');
+""")
+
     def test_open_reads_only_diagnostics_and_restores_focus(self) -> None:
         self.run_console(r"""
 const calls = [];

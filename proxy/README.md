@@ -196,10 +196,12 @@ DASHBOARD_BACKGROUND_SYNC_MIN_INTERVAL_SECONDS=45
 Firecrawl crawl 轮询的 `creditsUsed` 为作业累计快照，不作为单次请求用量求和；没有独立用量时显示未知。旧版本已保存的累计值不自动改写，诊断汇总不能代替账单。
 
 - `POST /api/mysearch/requests` 使用既有 `mysp-` token 上报终态；相同 token/request ID 的相同内容可重放，不同内容返回 409。
-- `GET /api/diagnostics` 需要管理员认证；支持 `service`、`hours=1..168` 和 `limit=1..100`。与原有 `/api/stats`、`usage_logs` 统计分开。
+- `GET /api/diagnostics` 需要管理员认证；支持 `service`、`hours=1..168`、`limit=1..100` 和 `outcome`。结果筛选在截取最近逻辑请求前执行，汇总和物理尝试仍按时间范围与 provider 统计。与原有 `/api/stats`、`usage_logs` 统计分开。
 - 诊断表仅保存白名单字段，不保存 query、URL、正文或凭证。逻辑耗时不含上报等待；Proxy 物理尝试包含实际重试和 key 切换。历史上游未返回的费用无法补算，现有记录没有自动清理策略。
 
 设置加载失败时保持表单禁用并可重试；写入成功但刷新失败会明确提示，不诱导重复提交。密码变更和已有服务器会话恢复后清除浏览器中的旧明文密码。
+
+诊断抽屉可选择近 1 小时、24 小时或 7 天，并筛选超时或降级请求。请求摘要显示最慢已记录子阶段，排除覆盖整个请求的外层阶段；缺失或截断会明确标注，各阶段可能重叠，不能相加推算总耗时。
 
 ## 部署
 

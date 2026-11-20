@@ -4539,14 +4539,15 @@ async def request_diagnostics(request: Request):
     await asyncio.to_thread(_diagnostic_db_call, verify_admin, request)
     service = request.query_params.get("service", "").strip().lower()
     service = {"mysearch": "", "social": "xai"}.get(service, service)
+    outcome = request.query_params.get("outcome", "")
     try:
         limit = int(request.query_params.get("limit", "20"))
         hours = int(request.query_params.get("hours", "24"))
-        if service not in diagnostics.PROVIDERS | {""} or not 1 <= limit <= 100 or not 1 <= hours <= 168:
+        if service not in diagnostics.PROVIDERS | {""} or outcome not in diagnostics.OUTCOMES | {""} or not 1 <= limit <= 100 or not 1 <= hours <= 168:
             raise ValueError("Invalid diagnostic window")
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid diagnostic query")
-    return await asyncio.to_thread(_diagnostic_db_call, db.get_diagnostics, service, limit, hours)
+    return await asyncio.to_thread(_diagnostic_db_call, db.get_diagnostics, service, limit, hours, outcome)
 
 @app.get("/", response_class=HTMLResponse)
 async def console(request: Request):

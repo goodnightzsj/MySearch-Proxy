@@ -89,6 +89,8 @@ So Social / X is an enhancement, not the only reason this console exists.
 
 The console includes request diagnostics with separate logical-tool and physical-upstream counts, failure reasons and latency. `GET /api/diagnostics` requires existing admin authentication. `POST /api/mysearch/requests` accepts terminal reports using a MySearch token; conflicting replays return 409. Missing usage is unknown, not zero. Diagnostic records have no automatic retention policy.
 
+The diagnostics drawer offers 1-hour, 24-hour and 7-day windows, deadline/degraded filters, and the slowest recorded child phase. The API applies `outcome` before limiting recent logical requests; summary counts and physical attempts retain the complete provider/time scope. Phase durations can overlap and are not additive.
+
 Firecrawl crawl poll `creditsUsed` is a cumulative job snapshot and is excluded from per-request usage sums. Missing separate usage remains unknown. Previously stored cumulative values are not rewritten; diagnostic totals are not billing records.
 
 `GET /api/stats` retains its full response by default and accepts repeated `service` parameters for scoped refreshes, for example `?service=exa&service=mysearch`. Exa now exposes both `POST /exa/search` and `POST /exa/contents` with the same authentication and key scheduling.

@@ -96,6 +96,23 @@ class ProxyDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         for secret in ("private-search-text", "secret-first", "secret-second", self.token["token"]):
             self.assertNotIn(secret, serialized)
 
+    async def test_outcome_filter_precedes_limit_and_preserves_window_summaries(self):
+        for outcome in ["deadline", "degraded", "success", "success"]:
+            report = self.report()
+            report.update(request_id=uuid4().hex, outcome=outcome)
+            response = await self.client.post("/api/mysearch/requests", json=report, headers=self.headers)
+            self.assertEqual(response.status_code, 200)
+        data = await self.diagnostics(service="exa", outcome="deadline", limit=1)
+        self.assertEqual([r["outcome"] for r in data["recent_requests"]], ["deadline"])
+        self.assertEqual(data["logical_requests"]["count"], 4)
+        self.assertEqual(data["outcome"], "deadline")
+        data = await self.diagnostics(service="tavily", outcome="deadline")
+        self.assertEqual(data["recent_requests"], [])
+        with patch.object(server, "get_admin_password", return_value="admin-test"):
+            response = await self.client.get("/api/diagnostics?outcome=invalid",
+                                            headers={"X-Admin-Password": "admin-test"})
+        self.assertEqual(response.status_code, 400)
+
     async def test_tavily_gateway_404_counts_both_physical_sends(self):
         server.db.set_setting("tavily_mode", "upstream")
         server.db.set_setting("tavily_upstream_base_url", "https://gateway.test")

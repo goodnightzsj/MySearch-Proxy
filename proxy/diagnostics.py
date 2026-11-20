@@ -21,6 +21,7 @@ Operation = Literal["search", "contents", "extract", "scrape", "map", "crawl", "
 Outcome = Literal["success", "empty", "degraded", "unavailable", "error", "deadline", "cancelled"]
 PROVIDERS = set(get_args(Provider))
 OPERATIONS = set(get_args(Operation))
+OUTCOMES = set(get_args(Outcome))
 Elapsed = conint(strict=True, ge=0, le=86400000)
 PhaseName = constr(strict=True, regex=r"^[a-z][a-z0-9_]{0,47}\Z")
 FailureReason = constr(strict=True, regex=r"^(?:[A-Za-z][A-Za-z0-9_]{0,119})?\Z")

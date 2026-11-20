@@ -17,6 +17,10 @@
 
 直接调用 `search` 即可读取完整结果。答案、引用和各候选的正文均可按原字段内联读取。`content[0].text` 是单行 JSON，解析后与 `structuredContent` 一致。通过 Streamable HTTP 调用时，支持 gzip 的客户端可以压缩传输 4 KiB 及以上的 JSON 响应。
 
+带明确域名的 API 文档查找会优先匹配命名 API 的正式页面，保留版本、语言和调试查询的既有排序。奖项补充取页在同次搜索内复用已读页面，并共享最多 15 秒的时限，预留当时剩余总预算的一半。时限内未补足答案时，`evidence.result_event_page_budget_exhausted` 明确标记限制，诊断为 `degraded`。
+
+服务端仍固定 MCP SDK 1.26.0。2026-11-20 实测 Python SDK 2.3.0 客户端可自动回退到 `2025-11-25`，六个工具的完整 JSON 和 gzip 可用；原生 `2026-07-28` 尚不支持。旧协议无状态 HTTP 的取消通知不会立即终止服务端工作，后续调用仍可继续。协议迁移说明见 [官方 v2 文档](https://py.sdk.modelcontextprotocol.io/whats-new/)。
+
 支持的模式：
 
 - `auto`

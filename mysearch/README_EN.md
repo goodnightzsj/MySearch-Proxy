@@ -30,6 +30,10 @@ gateway UI, see [../proxy/README_EN.md](../proxy/README_EN.md).
 
 ## Transports
 
+The server pins MCP SDK 1.26.0. A Python SDK 2.3.0 client was verified on 2026-11-20 to negotiate `2025-11-25` automatically, call all six tools, and decode complete gzip JSON results. Native `2026-07-28` is not supported. Cancellation in legacy stateless HTTP does not immediately stop server work, though subsequent calls remain usable.
+
+Named API lookups with an explicit docs domain favor the matching published API page while preserving existing version, locale and debugging query behavior. Award page extraction reuses pages within a search and shares a window of at most 15 seconds, reserving half the remaining request budget. Incomplete extraction after this window is marked by `evidence.result_event_page_budget_exhausted` and a `degraded` diagnostic outcome.
+
 `MySearch MCP` now supports:
 
 - `stdio`

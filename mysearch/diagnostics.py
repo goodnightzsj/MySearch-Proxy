@@ -205,6 +205,8 @@ def result_outcome(tool: str, result: Any) -> str:
         return "unavailable"
     if result.get("provider") in SOCIAL_PROVIDER_VARIANTS - {"custom_social"} or result.get("fallback") or result.get("social_error"):
         return "degraded"
+    if (result.get("evidence") or {}).get("result_event_page_budget_exhausted"):
+        return "degraded"
     if tool == "crawl_site" and result.get("metadata", {}).get("entry_page", {}).get("status") == "failed":
         return "degraded"
     field_name = {"search": "results", "extract_url": "content", "map_site": "links", "crawl_site": "pages"}.get(tool)

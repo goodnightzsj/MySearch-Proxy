@@ -757,8 +757,11 @@ function renderDiagnosticRequest(request) {
   const calls = details.calls || [];
   const attempts = request.attempts || [];
   const truncated = request.attempts_truncated || attempts.length > 20;
+  const slowest = (details.phases || [])
+    .filter((item) => item.name !== request.tool && item.name !== 'request' && Number.isFinite(item.elapsed_ms))
+    .reduce((largest, item) => !largest || item.elapsed_ms > largest.elapsed_ms ? item : largest, null);
   return `<details class="settings-advanced">
-    <summary>${escapeHtml(request.tool)} · ${escapeHtml(request.outcome)} · ${escapeHtml(diagnosticDuration(request.elapsed_ms))} · ${escapeHtml(formatTime(request.started_at))}</summary>
+    <summary>${escapeHtml(request.tool)} · ${escapeHtml(request.outcome)} · ${escapeHtml(diagnosticDuration(request.elapsed_ms))} · ${escapeHtml(formatTime(request.started_at))}<br><span class="hint">最慢已记录阶段：${slowest ? `${escapeHtml(slowest.name)} · ${escapeHtml(diagnosticDuration(slowest.elapsed_ms))}` : '未知'}${details.phases_truncated ? '（记录有截断）' : ''}</span></summary>
     <div class="drawer-section-body">
       <p class="inline-meta-base-url mono">Request ${escapeHtml(request.request_id)}</p>
       <p>缓存：${request.cache_hit === true ? '命中' : request.cache_hit === false ? '未命中' : '未知'} · 运行时调用 ${escapeHtml(fmtNum(details.call_count))} 次</p>
@@ -781,9 +784,9 @@ function renderRequestDiagnostics(payload) {
   const attempts = payload.recent_attempts || [];
   return [
     `<p class="hint">近 ${escapeHtml(fmtNum(payload.hours))} 小时 · 汇总从 ${escapeHtml(payload.since)}（UTC）起。明细最多 20 条；用量仅展示各条已报告值，不估算窗口总额。</p>`,
+    drawerSection('最近逻辑请求', `<p class="hint">结果筛选仅影响此列表，汇总和物理尝试按时间范围统计。</p>${requests.length ? requests.map(renderDiagnosticRequest).join('') : '<p class="hint">当前筛选暂无记录。</p>'}`),
     renderDiagnosticSummary('逻辑请求', payload.logical_requests, '一次 MCP 工具调用计一次；成功包含空结果，降级单列。Provider 筛选保留请求整体耗时。'),
     renderDiagnosticSummary('物理尝试', payload.physical_attempts, '代理每次实际发送计一次，包括重试与回退；仅统计当前 Provider 范围。'),
-    drawerSection('最近逻辑请求', requests.length ? requests.map(renderDiagnosticRequest).join('') : '<p class="hint">当前范围暂无逻辑请求上报；不能据此判断没有搜索调用。</p>'),
     drawerSection('最近物理尝试', attempts.length ? `<ol class="drawer-section-body">${attempts.map(renderDiagnosticAttempt).join('')}</ol>` : '<p class="hint">当前范围暂无已记录的物理尝试。</p>'),
   ].join('');
 }
@@ -796,7 +799,9 @@ async function loadRequestDiagnostics(service) {
   button.disabled = true;
   setStatus('diagnostics-status', '正在读取请求诊断...');
   try {
-    const payload = await api('GET', `/api/diagnostics?service=${encodeURIComponent(service)}&hours=24&limit=20`);
+    const hours = document.getElementById('diagnostics-hours').value || '24';
+    const outcome = document.getElementById('diagnostics-outcome').value || '';
+    const payload = await api('GET', `/api/diagnostics?service=${encodeURIComponent(service)}&hours=${encodeURIComponent(hours)}&limit=20${outcome ? `&outcome=${encodeURIComponent(outcome)}` : ''}`);
     if (generation !== diagnosticsLoadGeneration) return;
     content.innerHTML = renderRequestDiagnostics(payload);
     setStatus('diagnostics-status', '诊断已更新。');
@@ -820,7 +825,14 @@ async function openRequestDiagnostics() {
     kicker: 'Request Diagnostics',
     title: `${getServiceDisplayLabel(service)} 请求诊断`,
     subtitle: '区分工具调用与上游尝试；不展示搜索词、页面地址或凭证。',
-    bodyHtml: '<div id="diagnostics-status" class="settings-status" role="status" aria-live="polite" aria-atomic="true"></div><div id="diagnostics-content" class="drawer-section-body"></div>',
+    bodyHtml: `<div class="drawer-grid drawer-grid-compact">
+      <label for="diagnostics-hours">时间范围<select id="diagnostics-hours" onchange="loadRequestDiagnostics('${service}')">
+        <option value="1">近 1 小时</option><option value="24" selected>近 24 小时</option><option value="168">近 7 天</option>
+      </select></label>
+      <label for="diagnostics-outcome">逻辑请求结果<select id="diagnostics-outcome" onchange="loadRequestDiagnostics('${service}')">
+        <option value="">全部结果</option><option value="deadline">超时 · deadline</option><option value="degraded">降级 · degraded</option>
+      </select></label>
+    </div><div id="diagnostics-status" class="settings-status" role="status" aria-live="polite" aria-atomic="true"></div><div id="diagnostics-content" class="drawer-section-body"></div>`,
     actionsHtml: `<button id="diagnostics-refresh" class="btn btn-soft" type="button" onclick="loadRequestDiagnostics('${service}')">刷新诊断</button>`,
   });
   await loadRequestDiagnostics(service);

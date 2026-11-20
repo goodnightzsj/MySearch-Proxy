@@ -19,7 +19,7 @@ from urllib.request import Request, urlopen
 import httpx
 
 from mysearch.cache import CacheStore
-from mysearch.diagnostics import diagnosed, direct_call
+from mysearch.diagnostics import current_deadline, diagnosed, direct_call, phase
 from mysearch.config import MySearchConfig, ProviderConfig
 from mysearch.keyring import MySearchKeyRing
 from mysearch import postprocess
@@ -879,12 +879,22 @@ class MySearchClient(ProviderTransport):
         from_date: str | None = None,
         to_date: str | None = None,
     ) -> dict[str, Any]:
+        page_answers: dict[str, str] = {}
+        page_deadline = None
+        if self._looks_like_result_event_query(query.lower()):
+            remaining = remaining_request_seconds()
+            page_deadline = time.monotonic() + min(
+                OPTIONAL_VERIFY_TIMEOUT_SECONDS,
+                remaining / 2 if remaining is not None else self.config.timeout_seconds / 2,
+            )
         result = self._apply_result_event_answer_override(
             query=query,
             mode=mode,
             intent=resolved_intent,
             strategy=resolved_strategy,
             result=result,
+            page_answers=page_answers,
+            page_deadline=page_deadline,
         )
         result = self._maybe_refine_tavily_result_event_discovery(
             query=query,
@@ -902,6 +912,8 @@ class MySearchClient(ProviderTransport):
             intent=resolved_intent,
             strategy=resolved_strategy,
             result=result,
+            page_answers=page_answers,
+            page_deadline=page_deadline,
         )
         if self._should_attempt_exa_rescue(
             query=query,
@@ -931,6 +943,8 @@ class MySearchClient(ProviderTransport):
                 intent=resolved_intent,
                 strategy=resolved_strategy,
                 result=result,
+                page_answers=page_answers,
+                page_deadline=page_deadline,
             )
 
         result = self._finalize_search_result(
@@ -948,6 +962,8 @@ class MySearchClient(ProviderTransport):
             intent=resolved_intent,
             strategy=resolved_strategy,
             result=result,
+            page_answers=page_answers,
+            page_deadline=page_deadline,
         )
         final_official_mode = str(
             ((result.get("evidence") or {}) if isinstance(result.get("evidence"), dict) else {}).get(
@@ -1169,6 +1185,8 @@ class MySearchClient(ProviderTransport):
             intent=resolved_intent,
             strategy=resolved_strategy,
             result=result,
+            page_answers=page_answers,
+            page_deadline=page_deadline,
         )
 
         should_supplement_answer = (
@@ -7149,6 +7167,8 @@ class MySearchClient(ProviderTransport):
         intent: ResolvedSearchIntent,
         strategy: SearchStrategy,
         result: dict[str, Any],
+        page_answers: dict[str, str] | None = None,
+        page_deadline: float | None = None,
     ) -> dict[str, Any]:
         query_lower = query.lower()
         if not (
@@ -7187,16 +7207,30 @@ class MySearchClient(ProviderTransport):
             and should_try_page_extraction
             and (not weak_award_signal or allow_award_page_extraction)
         ):
+            if page_deadline is None:
+                remaining = remaining_request_seconds()
+                page_deadline = time.monotonic() + min(
+                    OPTIONAL_VERIFY_TIMEOUT_SECONDS,
+                    remaining / 2 if remaining is not None else self.config.timeout_seconds / 2,
+                )
             extracted_answer = self._extract_result_event_answer_from_top_page(
                 query=query,
                 results=result_items,
+                page_answers=page_answers,
+                page_deadline=page_deadline,
             )
+            if not extracted_answer and time.monotonic() >= page_deadline:
+                result = {**result, "evidence": {
+                    **(result.get("evidence") or {}),
+                    "result_event_page_budget_exhausted": True,
+                }}
 
         if extracted_answer:
             updated = dict(result)
             updated["answer"] = extracted_answer
             updated["evidence"] = dict(updated.get("evidence") or {})
             updated["evidence"]["answer_source"] = "result-event-extraction"
+            updated["evidence"].pop("result_event_page_budget_exhausted", None)
             return updated
 
         if current_answer and self._answer_looks_uncertain(current_answer):
@@ -7259,18 +7293,47 @@ class MySearchClient(ProviderTransport):
         *,
         query: str,
         results: list[dict[str, Any]],
+        page_answers: dict[str, str] | None = None,
+        page_deadline: float | None = None,
+    ) -> str:
+        page_answers = {} if page_answers is None else page_answers
+        page_deadline = page_deadline if page_deadline is not None else time.monotonic() + OPTIONAL_VERIFY_TIMEOUT_SECONDS
+        parent_deadline = current_deadline.get()
+        token = current_deadline.set(min(parent_deadline, page_deadline) if parent_deadline is not None else page_deadline)
+        try:
+            with phase("result_event_pages"):
+                return self._read_result_event_pages(query=query, results=results, page_answers=page_answers, page_deadline=page_deadline)
+        finally:
+            current_deadline.reset(token)
+            remaining_request_seconds()
+
+    def _read_result_event_pages(
+        self, *, query: str, results: list[dict[str, Any]],
+        page_answers: dict[str, str], page_deadline: float,
     ) -> str:
         candidates = self._result_event_candidates(query=query, results=results, limit=5)
         for top in candidates:
             url = str(top.get("url") or "").strip()
             if not url:
                 continue
+            identity = postprocess._result_url_identity(url)
+            if identity in page_answers:
+                if page_answers[identity]:
+                    return page_answers[identity]
+                continue
+            if time.monotonic() >= page_deadline:
+                break
+            remaining_request_seconds()
+            page_answers[identity] = ""
             extracted_answer = self._extract_result_event_answer_from_official_page_html(
                 query=query,
                 url=url,
             )
             if extracted_answer:
+                page_answers[identity] = extracted_answer
                 return extracted_answer
+            if time.monotonic() >= page_deadline:
+                break
             try:
                 extracted_page = self.extract_url(
                     url=url,
@@ -7291,6 +7354,7 @@ class MySearchClient(ProviderTransport):
                 ],
             )
             if extracted_answer:
+                page_answers[identity] = extracted_answer
                 return extracted_answer
         return ""
 
