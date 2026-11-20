@@ -463,8 +463,8 @@ function getKeyAvailability(key) {
       active,
       schedulable: true,
       reason: '',
-      label: '正常',
-      detail: '可参与调度',
+      label: '可调度',
+      detail: '调度资格不代表实时健康',
       actionLabel: '禁用',
     };
   }
@@ -3072,7 +3072,7 @@ function renderServiceShells() {
                       <div class="mini-switch" role="group" aria-label="${meta.label} API Key 筛选">
                         <button type="button" class="mini-switch-btn is-active" data-service="${service}" data-key-filter="all" aria-pressed="true" onclick="setKeyFilter('${service}', 'all')">全部</button>
                         <button type="button" class="mini-switch-btn" data-service="${service}" data-key-filter="issue" aria-pressed="false" onclick="setKeyFilter('${service}', 'issue')">待处理</button>
-                        <button type="button" class="mini-switch-btn" data-service="${service}" data-key-filter="active" aria-pressed="false" onclick="setKeyFilter('${service}', 'active')">正常</button>
+                        <button type="button" class="mini-switch-btn" data-service="${service}" data-key-filter="active" aria-pressed="false" onclick="setKeyFilter('${service}', 'active')">可调度</button>
                         <button type="button" class="mini-switch-btn" data-service="${service}" data-key-filter="disabled" aria-pressed="false" onclick="setKeyFilter('${service}', 'disabled')">禁用</button>
                         <button type="button" class="mini-switch-btn" data-service="${service}" data-key-filter="error" aria-pressed="false" onclick="setKeyFilter('${service}', 'error')">异常</button>
                       </div>
@@ -3084,7 +3084,7 @@ function renderServiceShells() {
                       </div>
                     </div>
                   </div>
-                  <div class="detail-caption">主表只保留同步状态和代理摘要。点击行可在右侧查看额度、账户层级信息和维护动作。</div>
+                  <div class="detail-caption">可调度表示当前未被隔离，不保证实时额度或端点可用。点击行查看验证依据、额度与维护动作。</div>
                   ${renderTableLegend('key')}
 	                <div class="table-wrap">
 	                  <table>
@@ -3095,7 +3095,7 @@ function renderServiceShells() {
 	                        <th scope="col">邮箱</th>
 	                        <th scope="col">同步 / 状态</th>
 	                        <th scope="col">代理摘要</th>
-	                        <th scope="col">状态</th>
+                        <th scope="col">验证依据</th>
 	                        <th scope="col">操作</th>
 	                      </tr>
 	                    </thead>
@@ -3961,6 +3961,12 @@ function renderKeyUsageSummary(key) {
   `;
 }
 
+function renderKeyHealthEvidence(key) {
+  const succeeded = Number(key.total_used || 0) > 0;
+  const label = succeeded ? '有历史成功' : (Number(key.total_failed || 0) > 0 ? '仅有失败记录' : '尚无成功证据');
+  return `<div class="table-note">${label}</div><div class="table-note muted">最近调用 ${escapeHtml(formatTime(key.last_used_at))}</div>`;
+}
+
 function syncTokenToolbar(service) {
   const state = getTokenTableState(service);
   const search = document.getElementById(`token-search-${service}`);
@@ -4093,7 +4099,7 @@ function renderKeyQuota(service, key) {
     `;
   }
 
-  if (key.usage_key_limit !== null && key.usage_key_used !== null) {
+  if (key.usage_key_limit != null && key.usage_key_used != null) {
     const remain = key.usage_key_remaining ?? Math.max(0, key.usage_key_limit - key.usage_key_used);
     return `
       <div class="table-note">已用 ${fmtNum(key.usage_key_used)} / ${fmtNum(key.usage_key_limit)}</div>
@@ -4116,7 +4122,7 @@ function renderKeyQuota(service, key) {
     return `<div class="table-note" style="color: var(--warn)">同步失败：${escapeHtml(key.usage_sync_error)}</div>`;
   }
 
-  return '<span class="muted">未同步</span>';
+  return '<span class="muted">额度未知 · 尚未同步</span>';
 }
 
 function renderAccountQuota(service, key) {
@@ -4124,7 +4130,7 @@ function renderAccountQuota(service, key) {
     return '<span class="muted">Exa 账户实时额度暂时无法查询</span>';
   }
 
-  if (key.usage_account_limit !== null && key.usage_account_used !== null) {
+  if (key.usage_account_limit != null && key.usage_account_used != null) {
     const remain = key.usage_account_remaining ?? Math.max(0, key.usage_account_limit - key.usage_account_used);
     const plan = key.usage_account_plan || (service === 'firecrawl' ? 'Firecrawl Credits' : '未知计划');
     return `
@@ -4134,7 +4140,7 @@ function renderAccountQuota(service, key) {
       ${quotaBar(key.usage_account_used, key.usage_account_limit)}
     `;
   }
-  return '<span class="muted">未返回</span>';
+  return '<span class="muted">额度未知 · 上游未返回</span>';
 }
 
 function renderKeys(service, keys) {
@@ -4189,7 +4195,7 @@ function renderKeys(service, keys) {
         <td data-label="邮箱">${escapeHtml(key.email || '-')}</td>
         <td data-label="同步 / 状态">${renderKeyStatusSummary(service, key)}</td>
         <td data-label="代理摘要">${renderKeyUsageSummary(key)}</td>
-        <td data-label="状态"><span class="tag ${availability.schedulable && !availability.restricted ? 'tag-ok' : 'tag-off'}">${escapeHtml(availability.label)}</span></td>
+        <td data-label="验证依据">${renderKeyHealthEvidence(key)}</td>
         <td data-label="操作">
           <div class="table-actions">
             <!-- r5 P0-2: 删除按钮已挪到抽屉的 Danger Zone，行内只保留启用/禁用。 -->
@@ -4291,6 +4297,7 @@ function openKeyDetail(service, keyId) {
       drawerMetric('最近使用', formatTime(key.last_used_at), key.usage_sync_error ? '存在同步异常' : '统计正常'),
     ].join(''),
     bodyHtml: [
+      drawerSection('验证依据', renderKeyHealthEvidence(key)),
       drawerSection('Key 配额', renderKeyQuota(service, key)),
       drawerSection('账户额度', renderAccountQuota(service, key)),
       disabledDetail ? drawerSection('调度原因', `<div class="table-note danger">${escapeHtml(disabledDetail)}</div>`) : '',

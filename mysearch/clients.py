@@ -821,15 +821,21 @@ class MySearchClient(ProviderTransport):
         )
         merged_results = list(merged["results"])
         merged_citations = list(merged["citations"])
+        providers_consulted = list(dict.fromkeys(
+            name
+            for branch in (web_result, social_result)
+            for name in (branch.get("evidence", {}).get("providers_consulted") or [branch.get("provider")])
+            if ProviderResponse.is_real_provider({"provider": name})
+        ))
         evidence = {
-            "providers_consulted": [web_result.get("provider"), social_result.get("provider")],
+            "providers_consulted": providers_consulted,
             "web_result_count": len(web_results),
             "social_result_count": len(social_results),
             "result_count_before_trim": len(web_results) + len(social_results),
             "returned_result_count": len(merged_results),
             "matched_results": merged["matched_results"],
             "citation_count": len(merged_citations),
-            "verification": "cross-provider",
+            "verification": "cross-provider" if len(providers_consulted) > 1 else "single-provider",
         }
         web_error = ""
         if web_result.get("provider") == "web_unavailable":
@@ -4951,8 +4957,12 @@ class MySearchClient(ProviderTransport):
         key = self._get_key_or_raise(provider)
         requested_news = "news" in categories
         search_categories = self._normalize_firecrawl_search_categories(categories)
+        content_query = (
+            query_routing._firecrawl_content_query(query)
+            if include_content and not requested_news else query
+        )
         payload: dict[str, Any] = {
-            "query": query,
+            "query": content_query,
             "limit": max_results,
         }
         if requested_news:
@@ -5011,7 +5021,7 @@ class MySearchClient(ProviderTransport):
                 if candidate not in results:
                     results.append(candidate)
 
-        return {
+        result = {
             "provider": "firecrawl",
             "transport": key.source,
             "query": query,
@@ -5023,6 +5033,12 @@ class MySearchClient(ProviderTransport):
                 if item.get("url")
             ],
         }
+        if content_query != query:
+            result["route_debug"] = {
+                "content_discovery_policy": "specific-pages",
+                "effective_query": content_query,
+            }
+        return result
 
     @staticmethod
     def _build_firecrawl_tbs(from_date: str | None, to_date: str | None) -> str:

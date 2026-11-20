@@ -104,6 +104,20 @@ class ConsoleOperationTests(unittest.TestCase):
         result = subprocess.run(["node"], input=script, text=True, capture_output=True, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_scheduling_history_and_unknown_quota_are_not_current_health(self) -> None:
+        self.run_console(("getKeyAvailability", "renderKeyHealthEvidence", "renderKeyQuota", "renderAccountQuota"), r"""
+const key = {active: 1, total_used: 115, total_failed: 17, last_used_at: '2026-11-20T21:55:09Z'};
+assert.equal(getKeyAvailability(key).label, '可调度');
+assert.match(getKeyAvailability(key).detail, /不代表实时健康/);
+assert.match(renderKeyHealthEvidence(key), /有历史成功/);
+assert.doesNotMatch(renderKeyHealthEvidence(key), /最新成功|实时健康|当前健康/);
+assert.match(renderKeyHealthEvidence({active: 1}), /尚无成功证据/);
+assert.match(renderKeyHealthEvidence({total_failed: 2}), /仅有失败记录/);
+assert.match(renderKeyQuota('tavily', key), /额度未知/);
+assert.match(renderAccountQuota('tavily', key), /额度未知/);
+assert.doesNotMatch(renderKeyQuota('tavily', key), /NaN|剩余 0/);
+""")
+
     def test_exa_operation_limits_show_scope_and_allow_explicit_restore(self) -> None:
         self.run_console(("getKeyAvailability", "formatDisabledDetail", "renderKeyStatusSummary", "toggleKey"), r"""
 const key = {id: 42, active: 1, blocked_operations: {contents: {reason: 'team_blocked', detail: '<fixture>'}}, available_operations: ['search']};

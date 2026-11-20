@@ -21,7 +21,11 @@ Exa 默认停用，保留数据和代码以便显式恢复。`MYSEARCH_EXA_ENABL
 
 带明确域名的 API 文档查找会优先匹配命名 API 的正式页面，保留版本、语言和调试查询的既有排序。奖项补充取页在同次搜索内复用已读页面，并共享最多 15 秒的时限，预留当时剩余总预算的一半。时限内未补足答案时，`evidence.result_event_page_budget_exhausted` 明确标记限制，诊断为 `degraded`。
 
-服务端仍固定 MCP SDK 1.26.0。2026-11-20 实测 Python SDK 2.3.0 客户端可自动回退到 `2025-11-25`，六个工具的完整 JSON 和 gzip 可用；原生 `2026-07-28` 尚不支持。旧协议无状态 HTTP 的取消通知不会立即终止服务端工作，后续调用仍可继续。协议迁移说明见 [官方 v2 文档](https://py.sdk.modelcontextprotocol.io/whats-new/)。
+普通 Firecrawl 正文搜索通过官方负 `inurl` 运算符优先具体页面，避免默认抓取 `llms.txt` / `llms-full.txt` 聚合索引；明确搜索这些文件或直接 `extract_url` 时保留全文。辅助分支的正文仍完整内联。
+
+服务端固定 MCP SDK 1.30.0 维护版。2026-11-21 隔离验证 Python SDK 2.3.0 客户端可自动回退到 `2025-11-25`，有状态与无状态 HTTP 均能调用六工具并完整读取 200 万字符 gzip JSON；原生 `2026-07-28` 尚不支持。无状态 HTTP 的取消通知不会立即终止服务端工作，后续调用仍可继续。维护版默认空闲会话30分钟过期（下次请求404，需重新初始化），最多10000会话；4MiB上限针对请求体，不限制全文响应。保持GET流的会话不按空闲回收。见 [1.30.0 官方说明](https://github.com/modelcontextprotocol/python-sdk/releases/tag/v1.30.0) 与 [v2 迁移文档](https://py.sdk.modelcontextprotocol.io/migration/)。
+
+进程内缓存每命名空间保守计量最多64MiB的 Python 载荷内存、最多256条，TTL不变。超大结果仍完整返回，只不驻留缓存；健康信息含 `payload_bytes` / `max_payload_bytes` / `oversized_skips`。这不是进程RSS上限。
 
 支持的模式：
 
@@ -63,6 +67,8 @@ MCP 调用可用 `offset` 和 `max_chars` 按字符读取正文片段，返回 `
 `deep` 的 docs 补搜先检查本轮已有来源，仅在正文数量或比较对象覆盖不足时执行，最多3个既有查询变体；达到目标或预算耗尽即停止，域名和日期过滤继续生效。`evidence.supplemental_search` 记录查询、停止原因和错误。
 
 `search` / `research` 的 `evidence.sources` 按 URL 区分无来源文本、检索文本与抽取正文，并记录抓取失败／空正文／预取、多 provider 命中。内置目录描述不算检索正文；`claim_verification=not-assessed` 与 `verification_scope=source-agreement-not-claim-verification` 明确表示这些信号不证明结论真实。`research` 另返回本次 `request_budget` 耗时。
+
+hybrid 的失败占位和同provider双分支不算多provider；同一官方域名经多个provider返回也不因此获得高置信度。控制台“可调度”仅表示未隔离资格，历史成功和最近调用不代表实时额度或端点健康。限流沿用 `Retry-After`，没有可信team归属时不猜测全池分组。
 
 ### `mysearch_health`
 

@@ -154,6 +154,9 @@ def _augment_evidence_summary(
             social_identity_count=social_identity_diversity,
             social_identity_diversity_applies=social_identity_diversity_applies,
         )
+        for branch in ("web", "social"):
+            if evidence.get(f"{branch}_error"):
+                conflicts.append(f"{branch}-search-unavailable")
         evidence["source_diversity"] = len(source_domains)
         evidence["source_domains"] = source_domains[:5]
         if social_identities or mode == "social" or intent == "social":
@@ -781,7 +784,7 @@ def _estimate_search_confidence(
         if query_routing._should_rerank_resource_results(mode=mode, intent=intent):
             if official_source_count > 0 and "official-source-not-confirmed" not in conflicts:
                 if (
-                    verification == "cross-provider"
+                    (verification == "cross-provider" and effective_diversity >= 2)
                     or (effective_diversity >= 2 and "mixed-official-and-third-party" not in conflicts)
                 ):
                     return "medium" if content_conflict else "high"

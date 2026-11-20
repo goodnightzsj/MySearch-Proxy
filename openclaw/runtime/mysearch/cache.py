@@ -4,7 +4,7 @@
 
 命名空间（`search` / `extract` / `social` / `social_gateway` /
 `social_unavailable`）的 TTL 由 `MySearchConfig` 决定，容量上限 256，
-超出时先裁剪过期项、再淘汰最旧项。
+每命名空间另限64MiB载荷，超出时先裁剪过期项、再淘汰最旧项。
 
 内部自己读时钟（`time.monotonic`）而不是由调用方传入 `now`：有 30 处调用
 点，逐一传参会让每个调用点都要先取一次时钟。需要控制时钟的测试应 patch
@@ -17,12 +17,32 @@
 from __future__ import annotations
 
 import copy
+import sys
 import threading
 import time
 from typing import Any
 
 #: 单个命名空间的条目上限，超出后按 `inserted_at` 淘汰最旧项。
 DEFAULT_MAX_ENTRIES = 256
+DEFAULT_MAX_BYTES = 64 * 1024 * 1024
+
+
+def _payload_size(value: Any) -> int:
+    """Count retained Python payload memory without serializing full documents."""
+    stack, seen, total = [value], set(), 0
+    while stack:
+        item = stack.pop()
+        identity = id(item)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        total += sys.getsizeof(item)
+        if isinstance(item, dict):
+            stack.extend(item.keys())
+            stack.extend(item.values())
+        elif isinstance(item, (list, tuple)):
+            stack.extend(item)
+    return total
 
 
 class CacheStore:
@@ -32,15 +52,17 @@ class CacheStore:
     TTL <= 0 的命名空间既不存也不读（用于关闭某一类缓存）。
     """
 
-    def __init__(self, *, ttls: dict[str, int], max_entries: int = DEFAULT_MAX_ENTRIES) -> None:
+    def __init__(self, *, ttls: dict[str, int], max_entries: int = DEFAULT_MAX_ENTRIES, max_bytes: int = DEFAULT_MAX_BYTES) -> None:
         self._lock = threading.Lock()
         self._ttls = dict(ttls)
         self._store: dict[str, dict[str, dict[str, Any]]] = {
             namespace: {} for namespace in self._ttls
         }
         self._stats: dict[str, dict[str, int]] = {
-            namespace: {"hits": 0, "misses": 0} for namespace in self._ttls
+            namespace: {"hits": 0, "misses": 0, "oversized_skips": 0} for namespace in self._ttls
         }
+        self._bytes = dict.fromkeys(self._ttls, 0)
+        self._max_bytes = max_bytes
         # provider 探测缓存：键由 provider 名 + 密钥指纹 + 密钥数 + keyring
         # 代数拼成，每次换密钥都会产生新键。与命名空间缓存共用一把锁就够了
         # ——探测发生在健康检查与路由路径上，不是热路径。
@@ -68,6 +90,9 @@ class CacheStore:
                     "entries": len(self._store[namespace]),
                     "hits": stats["hits"],
                     "misses": stats["misses"],
+                    "payload_bytes": self._bytes[namespace],
+                    "max_payload_bytes": self._max_bytes,
+                    "oversized_skips": stats["oversized_skips"],
                 }
         return snapshot
 
@@ -78,7 +103,12 @@ class CacheStore:
             if payload.get("expires_at", 0.0) <= now
         ]
         for key in expired_keys:
-            self._store[namespace].pop(key, None)
+            self._delete_locked(namespace, key)
+
+    def _delete_locked(self, namespace: str, cache_key: str) -> None:
+        payload = self._store[namespace].pop(cache_key, None)
+        if payload is not None:
+            self._bytes[namespace] -= payload["size_bytes"]
 
     def get(self, namespace: str, cache_key: str) -> dict[str, Any] | None:
         ttl_seconds = self._ttls.get(namespace, 0)
@@ -92,7 +122,7 @@ class CacheStore:
                 self._stats[namespace]["misses"] += 1
                 return None
             if payload.get("expires_at", 0.0) <= now:
-                self._store[namespace].pop(cache_key, None)
+                self._delete_locked(namespace, cache_key)
                 self._stats[namespace]["misses"] += 1
                 return None
 
@@ -107,22 +137,31 @@ class CacheStore:
         with self._lock:
             now = time.monotonic()
             store = self._store[namespace]
-            if len(store) >= self.max_entries:
+            cached_value = copy.deepcopy(value)
+            size_bytes = _payload_size(cached_value)
+            self._delete_locked(namespace, cache_key)
+            if size_bytes > self._max_bytes:
+                # Oversized results still return in full; only cache retention is skipped.
+                self._stats[namespace]["oversized_skips"] += 1
+                return
+            if len(store) >= self.max_entries or self._bytes[namespace] + size_bytes > self._max_bytes:
                 self._prune_expired_locked(namespace, now)
-            if len(store) >= self.max_entries:
+            while store and (len(store) >= self.max_entries or self._bytes[namespace] + size_bytes > self._max_bytes):
                 oldest_key = min(store, key=lambda k: store[k].get("inserted_at", 0.0))
-                store.pop(oldest_key, None)
+                self._delete_locked(namespace, oldest_key)
             store[cache_key] = {
                 "expires_at": now + ttl_seconds,
                 "inserted_at": now,
-                "value": copy.deepcopy(value),
+                "value": cached_value,
+                "size_bytes": size_bytes,
             }
+            self._bytes[namespace] += size_bytes
 
     def delete(self, namespace: str, cache_key: str) -> None:
         if namespace not in self._store:
             return
         with self._lock:
-            self._store[namespace].pop(cache_key, None)
+            self._delete_locked(namespace, cache_key)
 
     def annotate(
         self,

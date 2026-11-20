@@ -33,6 +33,12 @@ _OFFICIAL_AWARD_DOMAINS = frozenset(
     }
 )
 
+def _firecrawl_content_query(query: str) -> str:
+    if re.search(r"\bllms(?:-full)?\.txt\b", query, re.IGNORECASE):
+        return query
+    # Filter document indexes before scraping; explicit aggregate requests keep full content.
+    return f"{query} -inurl:llms-full.txt -inurl:llms.txt"
+
 def _looks_like_technical_research_query(query_lower: str) -> bool:
     technical_markers = (
         " api",
