@@ -69,6 +69,18 @@ class AwardPageBudgetTests(unittest.TestCase):
                 self.extract()
         self.assertIsNone(current_deadline.get())
 
+    def test_optional_deadline_race_returns_partial_without_cancelling_root(self):
+        clock = [100.0]
+        state = RequestState(deadline=145, tool="search", claimed=True)
+        def expired(**kwargs):
+            clock[0] = 106
+            remaining_seconds()
+        with patch("mysearch.diagnostics.time.monotonic", side_effect=lambda: clock[0]):
+            with request_context(state), patch.object(self.client, "_read_result_event_pages", side_effect=expired):
+                self.assertEqual(self.extract(page_deadline=105), "")
+                self.assertEqual(remaining_seconds(), 39)
+                self.assertFalse(state.cancelled.is_set())
+
     def test_exhausted_evidence_is_explicit_and_degraded(self):
         with patch.object(self.client, "extract_url") as fetch:
             result = self.client._apply_result_event_answer_override(

@@ -7303,6 +7303,10 @@ class MySearchClient(ProviderTransport):
         try:
             with phase("result_event_pages"):
                 return self._read_result_event_pages(query=query, results=results, page_answers=page_answers, page_deadline=page_deadline)
+        except MySearchError:
+            if time.monotonic() < page_deadline:
+                raise
+            return ""
         finally:
             current_deadline.reset(token)
             remaining_request_seconds()
