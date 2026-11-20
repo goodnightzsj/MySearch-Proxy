@@ -21,7 +21,7 @@ Exa 默认停用，保留数据和代码以便显式恢复。`MYSEARCH_EXA_ENABL
 
 带明确域名的 API 文档查找会优先匹配命名 API 的正式页面，保留版本、语言和调试查询的既有排序。奖项补充取页在同次搜索内复用已读页面，并共享最多 15 秒的时限，预留当时剩余总预算的一半。时限内未补足答案时，`evidence.result_event_page_budget_exhausted` 明确标记限制，诊断为 `degraded`。
 
-普通 Firecrawl 正文搜索通过官方负 `inurl` 运算符优先具体页面，避免默认抓取 `llms.txt` / `llms-full.txt` 聚合索引；明确搜索这些文件或直接 `extract_url` 时保留全文。辅助分支的正文仍完整内联。
+普通 Firecrawl 正文搜索先发现 URL，再按解码后的文件路径排除 `llms*.txt` 聚合文档，最后并行抓取全部合格页面。负 `inurl` 仅为搜索提示，不能代替 URL 资格检查；`route_debug.excluded_urls` 记录排除原因与 `not-attempted`，抓取失败在 `content_fetch` 中明确保留。明确搜索聚合文档或直接 `extract_url` 时仍返回全文；辅助分支的正文仍完整内联。
 
 服务端固定 MCP SDK 1.30.0 维护版。2026-11-21 隔离验证 Python SDK 2.3.0 客户端可自动回退到 `2025-11-25`，有状态与无状态 HTTP 均能调用六工具并完整读取 200 万字符 gzip JSON；原生 `2026-07-28` 尚不支持。无状态 HTTP 的取消通知不会立即终止服务端工作，后续调用仍可继续。维护版默认空闲会话30分钟过期（下次请求404，需重新初始化），最多10000会话；4MiB上限针对请求体，不限制全文响应。保持GET流的会话不按空闲回收。见 [1.30.0 官方说明](https://github.com/modelcontextprotocol/python-sdk/releases/tag/v1.30.0) 与 [v2 迁移文档](https://py.sdk.modelcontextprotocol.io/migration/)。
 
@@ -49,6 +49,8 @@ Exa 默认停用，保留数据和代码以便显式恢复。`MYSEARCH_EXA_ENABL
 - 两者都无法提供正文时明确保留失败；仅显式启用 Exa 后才使用 Contents，逐 URL 失败不会被 HTTP 200 掩盖
 
 需要显式时效时，设置 `provider="firecrawl", max_age_seconds=0` 请求实时抓取，正整数表示允许的缓存年龄（秒）。此选项绕过本地 extract 缓存，并按毫秒传给 Firecrawl；不设置时保留现有缓存行为。
+
+普通 pricing/status 页面的正文搜索请求实时 Firecrawl 抓取（`maxAge=0`），而不是复用参考文档缓存。其他页面的 `auto` 提取可复用参数一致的 Firecrawl 完整正文缓存，但不延长该正文原有 TTL；formats、only_main_content 不同的投影不会混用。这不保证其他 provider 的搜索索引或上游计费信息是实时的。
 
 MCP 调用可用 `offset` 和 `max_chars` 按字符读取正文片段，返回 `content_window` 中的总长度、下一偏移量和截断状态；省略时仍返回全文。分页复用正常提取缓存，不保证缓存过期后的页面快照不变。
 

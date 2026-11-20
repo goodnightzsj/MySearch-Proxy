@@ -1860,6 +1860,78 @@ table td .mono {
   white-space: nowrap;
 }
 
+.keys-table {
+  min-width: 960px;
+}
+
+.keys-table .key-col-id { width: 5%; }
+.keys-table .key-col-value { width: 16%; }
+.keys-table .key-col-email { width: 22%; }
+.keys-table .key-col-status { width: 23%; }
+.keys-table .key-col-usage { width: 13%; }
+.keys-table .key-col-evidence { width: 11%; }
+.keys-table .key-col-actions { width: 10%; }
+
+.keys-table th,
+.keys-table td {
+  padding: 16px 12px;
+  overflow-wrap: anywhere;
+}
+
+.keys-table th {
+  white-space: nowrap;
+  letter-spacing: 0.03em;
+}
+
+.keys-table td:first-child {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.key-value {
+  display: block;
+  font-size: 12px;
+}
+
+.key-email {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.key-status-head,
+.key-call-counts {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+}
+
+.key-quota,
+.key-call-counts {
+  font-variant-numeric: tabular-nums;
+}
+
+.key-quota,
+.key-call-counts span {
+  white-space: nowrap;
+}
+
+.key-row-meta {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.keys-table .table-actions .btn {
+  padding-inline: 10px;
+  white-space: nowrap;
+}
+
 th,
 td {
   padding: 15px 16px;
@@ -3026,6 +3098,21 @@ body.theme-dark .detail-drawer {
   line-height: 1.65;
 }
 
+.detail-drawer-head > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.detail-drawer-head h3 {
+  font-size: 20px;
+  line-height: 1.5;
+}
+
+.detail-drawer-head > .btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .detail-drawer-body {
   display: flex;
   flex-direction: column;
@@ -3054,6 +3141,8 @@ body.theme-dark .detail-drawer {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .drawer-grid {
@@ -3661,6 +3750,15 @@ body.theme-dark .app-dialog {
   }
 
   /* r5 P1-8: 移动端表格卡片化——把 row 展开为 stacked card，避免 360px 横拉 3 屏 */
+  .keys-table {
+    min-width: 0;
+  }
+  .keys-table colgroup {
+    display: none;
+  }
+  .keys-table .key-email {
+    display: block;
+  }
   .table-wrap table,
   .table-wrap tbody,
   .table-wrap tr,
@@ -3704,6 +3802,17 @@ body.theme-dark .app-dialog {
   /* 空状态 td 在移动端撑满整张表，不显示 data-label */
   .table-wrap td .empty-state {
     padding: 24px 12px;
+  }
+
+  .keys-table tr {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .keys-table td:nth-child(3),
+  .keys-table td:nth-child(4),
+  .keys-table td:nth-child(7),
+  .keys-table td[colspan] {
+    grid-column: 1 / -1;
   }
 }
 

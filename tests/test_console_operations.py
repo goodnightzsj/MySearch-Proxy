@@ -118,13 +118,74 @@ assert.match(renderAccountQuota('tavily', key), /额度未知/);
 assert.doesNotMatch(renderKeyQuota('tavily', key), /NaN|剩余 0/);
 """)
 
+    def test_key_table_summary_keeps_errors_in_detail_and_zero_distinct_from_unknown(self) -> None:
+        self.run_console(("getKeyAvailability", "formatDisabledDetail", "renderKeyStatusSummary",
+                          "renderKeyHealthEvidence", "renderKeyQuota", "renderAccountQuota", "quotaBar",
+                          "drawerMetric", "drawerSection", "renderDrawerActionGroup", "openKeyDetail"), r"""
+const key = {id: 251, key_masked: 'fc-demo***41f3', email: 'synthetic@example.invalid', active: 0,
+  disabled_reason: 'quota_exhausted', disabled_detail: 'RAW_MARKER <unsafe> ' + 'quota exhausted '.repeat(100),
+  usage_account_remaining: 0, usage_sync_error: 'SYNC_MARKER <unsafe>'};
+for (const service of ['tavily', 'firecrawl', 'exa']) {
+  const summary = renderKeyStatusSummary(service, key);
+  assert.match(summary, /额度耗尽/);
+  assert.match(summary, /剩余 0/);
+  assert.match(summary, /同步异常/);
+  assert.doesNotMatch(summary, /RAW_MARKER|SYNC_MARKER|<unsafe>/);
+  assert.ok(summary.length < 900, 'upstream diagnostic length must not grow the main row');
+  const unknown = renderKeyStatusSummary(service, {active: 1});
+  assert.match(unknown, /额度未知/);
+  assert.doesNotMatch(unknown, /剩余 0/);
+  global.getServicePayload = () => ({keys: [key]});
+  global.getServiceDisplayLabel = () => service;
+  let drawer;
+  global.openDetailDrawer = value => { drawer = value; };
+  openKeyDetail(service, key.id);
+  assert.ok(drawer.bodyHtml.includes(escapeHtml(key.disabled_detail.trim())));
+  assert.match(drawer.bodyHtml, /SYNC_MARKER &lt;unsafe&gt;/);
+  assert.doesNotMatch(drawer.bodyHtml, /<unsafe>/);
+  const restricted = {...key, active: 1, blocked_operations: {contents: {reason: 'team_blocked', detail: 'ENDPOINT_MARKER <unsafe>'}}, available_operations: ['search']};
+  global.getServicePayload = () => ({keys: [restricted]});
+  openKeyDetail(service, key.id);
+  assert.match(drawer.bodyHtml, /ENDPOINT_MARKER &lt;unsafe&gt;/);
+}
+""")
+
+    def test_shared_key_rows_bound_email_and_preserve_actions_and_keyboard_entry(self) -> None:
+        self.run_console(("getKeyAvailability", "getKeyRemaining", "getKeyRowClass", "formatDisabledDetail",
+                          "renderKeyStatusSummary", "renderKeyUsageSummary", "renderKeyHealthEvidence", "renderKeys"), r"""
+global.syncKeyToolbar = () => {};
+global.getFilteredKeys = (service, keys) => keys;
+global.getKeyTableState = () => ({page: 1});
+global.getKeyPageSize = () => 10;
+global.getServiceDisplayLabel = service => service;
+const key = {id: 7, key_masked: 'fc-demo***f93b', email: 'long.<unsafe>@' + 'department'.repeat(20) + '.example.invalid',
+  active: 1, usage_account_remaining: 993, total_used: 115, total_failed: 17};
+for (const service of ['tavily', 'firecrawl', 'exa']) {
+  renderKeys(service, [key]);
+  const row = node(`keys-body-${service}`).innerHTML;
+  assert.match(row, /class="key-email"/);
+  assert.ok(row.includes(`title="${escapeHtml(key.email)}"`));
+  assert.doesNotMatch(row, /<unsafe>/);
+  assert.match(row, /tabindex="0"/);
+  assert.ok(row.includes(`handleTableRowKey(event, 'key', '${service}', 7)`));
+  assert.ok(row.includes(`event.stopPropagation(); toggleKey('${service}', 7, 0, this)`));
+  assert.match(row, /剩余 993/);
+  assert.match(row, /有历史成功/);
+  renderKeys(service, [{...key, blocked_operations: {contents: {reason: 'team_blocked'}}, available_operations: ['search']}]);
+  assert.match(node(`keys-body-${service}`).innerHTML, /恢复端点/);
+}
+""")
+
     def test_exa_operation_limits_show_scope_and_allow_explicit_restore(self) -> None:
         self.run_console(("getKeyAvailability", "formatDisabledDetail", "renderKeyStatusSummary", "toggleKey"), r"""
 const key = {id: 42, active: 1, blocked_operations: {contents: {reason: 'team_blocked', detail: '<fixture>'}}, available_operations: ['search']};
 assert.equal(getKeyAvailability(key).schedulable, true);
 assert.equal(getKeyAvailability(key).label, '部分端点受限');
 assert.match(formatDisabledDetail(key), /contents.*TEAM_BLOCKED/);
-assert.match(renderKeyStatusSummary('exa', key), /&lt;fixture&gt;/);
+assert.match(renderKeyStatusSummary('exa', key), /部分端点受限/);
+assert.match(renderKeyStatusSummary('exa', key), /contents/);
+assert.doesNotMatch(renderKeyStatusSummary('exa', key), /fixture/);
+assert.match(formatDisabledDetail(key), /<fixture>/);
 assert.doesNotMatch(renderKeyStatusSummary('exa', key), /<fixture>/);
 key.blocked_operations.search = {reason: 'team_blocked'};
 key.available_operations = [];

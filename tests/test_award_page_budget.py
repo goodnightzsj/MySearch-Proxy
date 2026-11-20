@@ -36,6 +36,26 @@ class AwardPageBudgetTests(unittest.TestCase):
         self.assertIn("Not Like Us", first)
         self.assertEqual(fetch.call_count, 1)
 
+    def test_prefetched_page_is_read_before_any_network(self):
+        self.items[0]["content"] = 'Record of the Year: "Not Like Us", Kendrick Lamar'
+        with patch.object(self.client, "extract_url") as fetch, patch.object(
+            self.client, "_extract_result_event_answer_from_official_page_html", return_value=""
+        ) as html:
+            answer = self.extract(page_answers={})
+        self.assertIn("Not Like Us", answer)
+        fetch.assert_not_called()
+        html.assert_not_called()
+
+    def test_release_body_is_not_hidden_by_nonempty_snippet(self):
+        with patch.object(self.client, "extract_url") as fetch:
+            answer = self.client._github_release_summary_excerpt({
+                "url": "https://github.com/example/sdk/releases",
+                "snippet": "SDK releases and changelog",
+                "content": "## 7.2.1 (2026-11-19)\nFixes\n## 7.2.0 (2026-11-18)",
+            })
+        self.assertEqual(answer, "Latest release 7.2.1 (2026-11-19)")
+        fetch.assert_not_called()
+
     def test_rescue_can_read_new_pages_within_same_budget(self):
         cache = {}
         with patch.object(self.client, "extract_url", return_value={"content": ""}) as fetch:

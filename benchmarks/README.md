@@ -44,3 +44,13 @@ MySearch 侧通过 MCP 使用目标实例的配置；在 `proxy-first` 接线下
 远端 runner 上传的脚本不含凭证，载荷仅经 SSH stdin 传入子进程；私有目录和文件权限为 0700/0600，嵌套 JSON 的凭证回显也会脱敏。完整成功输出才会原子发布；超时、上传失败和子进程崩溃保留各自失败语义。
 
 每轮同时保存 runtime revision、runner/矩阵哈希和实际缓存 TTL。`cold/warm` 表示重复顺序，不证明是否命中缓存；独立 bench 关闭 search 缓存时，extract/social 缓存仍可能生效。
+
+## 多维未见题
+
+固定48行用于回归；泛化结论另用 `scripts/generate_heldout_matrix.py` 在候选代码冻结后生成32行分层样本。主题库与固定集不同，每层随机选主题/措辞，覆盖中英文、5种工具、来源/时间约束、正文开关和多种策略；URL型工具的语言标签只代表层配额，实际参数仍是URL。
+
+保存随机seed、候选commit、生成器/runner/CSV哈希、每行工具参数及断言来源。两侧用同一冻结输入和评分，不用不同随机题对比；所有失败和重复原始响应必须保留。评测后修代码须重新抽样，不能沿用已见题声称泛化。URL/片段命中不证明语义正确性，顺序A/B仍受上游与池状态漂移影响。
+
+```bash
+python scripts/generate_heldout_matrix.py --template benchmarks/search-matrix.csv
+```

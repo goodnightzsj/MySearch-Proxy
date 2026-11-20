@@ -3084,17 +3084,21 @@ function renderServiceShells() {
                       </div>
                     </div>
                   </div>
-                  <div class="detail-caption">可调度表示当前未被隔离，不保证实时额度或端点可用。点击行查看验证依据、额度与维护动作。</div>
+                  <div class="detail-caption">可调度不等于实时健康；余额来自最近同步。点击行查看完整邮箱、错误原因、验证依据与维护动作。</div>
                   ${renderTableLegend('key')}
 	                <div class="table-wrap">
-	                  <table>
+	                  <table class="keys-table">
+                      <colgroup>
+                        <col class="key-col-id"><col class="key-col-value"><col class="key-col-email">
+                        <col class="key-col-status"><col class="key-col-usage"><col class="key-col-evidence"><col class="key-col-actions">
+                      </colgroup>
 	                    <thead>
 	                      <tr>
 	                        <th scope="col">ID</th>
 	                        <th scope="col">Key</th>
 	                        <th scope="col">邮箱</th>
-	                        <th scope="col">同步 / 状态</th>
-	                        <th scope="col">代理摘要</th>
+	                        <th scope="col">状态 / 额度</th>
+	                        <th scope="col">调用统计</th>
                         <th scope="col">验证依据</th>
 	                        <th scope="col">操作</th>
 	                      </tr>
@@ -3941,30 +3945,30 @@ function renderTokenSummary(token) {
 
 function renderKeyStatusSummary(service, key) {
   const availability = getKeyAvailability(key);
-  const disabledDetail = formatDisabledDetail(key);
   const remain = key.usage_key_remaining ?? key.usage_account_remaining;
-  const remainLabel = remain === null || remain === undefined ? '剩余待同步' : `剩余 ${fmtNum(remain)}`;
+  const remainLabel = remain === null || remain === undefined ? '额度未知' : `剩余 ${fmtNum(remain)}`;
   return `
-    <div class="table-note"><span class="tag ${availability.schedulable && !availability.restricted ? 'tag-ok' : 'tag-off'}">${escapeHtml(availability.label)}</span></div>
-    <div class="table-note muted">${escapeHtml(availability.detail)}</div>
-    ${disabledDetail ? `<div class="table-note danger">${escapeHtml(disabledDetail)}</div>` : ''}
-    <div class="table-note">${remainLabel}</div>
-    <div class="table-note muted">${key.usage_synced_at ? `同步 ${formatTime(key.usage_synced_at)}` : (service === 'exa' ? '实时额度暂不可查' : '尚未同步')}</div>
+    <div class="key-status-head">
+      <span class="tag ${availability.schedulable && !availability.restricted ? 'tag-ok' : 'tag-off'}" title="${escapeHtml(availability.detail)}">${escapeHtml(availability.label)}</span>
+      <span class="key-quota ${remain === 0 ? 'danger' : 'muted'}">${remainLabel}</span>
+    </div>
+    ${!availability.schedulable || availability.restricted ? `<div class="key-row-meta" title="${escapeHtml(availability.detail)}">${escapeHtml(availability.detail)}</div>` : ''}
+    <div class="key-row-meta">${key.usage_synced_at ? `同步 ${escapeHtml(formatTime(key.usage_synced_at))}` : (service === 'exa' ? '实时额度暂不可查' : '尚未同步')}</div>
+    ${key.usage_sync_error ? '<div class="key-row-meta danger">同步异常 · 点击行查看原因</div>' : ''}
   `;
 }
 
 function renderKeyUsageSummary(key) {
   return `
-    <div class="table-note">成功 ${fmtNum(key.total_used || 0)}</div>
-    <div class="table-note">失败 ${fmtNum(key.total_failed || 0)}</div>
-    <div class="table-note muted">最近 ${formatTime(key.last_used_at)}</div>
+    <div class="key-call-counts"><span>成功 <b>${fmtNum(key.total_used || 0)}</b></span><span class="muted">失败 <b>${fmtNum(key.total_failed || 0)}</b></span></div>
+    <div class="key-row-meta">${key.last_used_at ? `最近 ${escapeHtml(formatTime(key.last_used_at))}` : '尚无调用时间'}</div>
   `;
 }
 
 function renderKeyHealthEvidence(key) {
   const succeeded = Number(key.total_used || 0) > 0;
   const label = succeeded ? '有历史成功' : (Number(key.total_failed || 0) > 0 ? '仅有失败记录' : '尚无成功证据');
-  return `<div class="table-note">${label}</div><div class="table-note muted">最近调用 ${escapeHtml(formatTime(key.last_used_at))}</div>`;
+  return `<div class="table-note">${label}</div><div class="key-row-meta">非实时探测</div>`;
 }
 
 function syncTokenToolbar(service) {
@@ -4188,19 +4192,19 @@ function renderKeys(service, keys) {
         onkeydown="handleTableRowKey(event, 'key', '${service}', ${key.id})"
       >
         <td data-label="ID">${fmtNum(key.id)}</td>
-        <td class="mono" data-label="Key">
-          ${escapeHtml(key.key_masked || maskToken(key.key))}
+        <td data-label="Key">
+          <span class="key-value mono">${escapeHtml(key.key_masked || maskToken(key.key))}</span>
           <div class="row-meta">点击查看详情</div>
         </td>
-        <td data-label="邮箱">${escapeHtml(key.email || '-')}</td>
-        <td data-label="同步 / 状态">${renderKeyStatusSummary(service, key)}</td>
-        <td data-label="代理摘要">${renderKeyUsageSummary(key)}</td>
+        <td data-label="邮箱"><span class="key-email" title="${escapeHtml(key.email || '-')}">${escapeHtml(key.email || '-')}</span></td>
+        <td data-label="状态 / 额度">${renderKeyStatusSummary(service, key)}</td>
+        <td data-label="调用统计">${renderKeyUsageSummary(key)}</td>
         <td data-label="验证依据">${renderKeyHealthEvidence(key)}</td>
         <td data-label="操作">
           <div class="table-actions">
             <!-- r5 P0-2: 删除按钮已挪到抽屉的 Danger Zone，行内只保留启用/禁用。 -->
-            <button class="btn btn-sm" onclick="event.stopPropagation(); toggleKey('${service}', ${key.id}, ${availability.schedulable ? 0 : 1}, this)">${escapeHtml(availability.actionLabel)}</button>
-            ${availability.restricted && availability.schedulable ? `<button class="btn btn-sm" onclick="event.stopPropagation(); toggleKey('${service}', ${key.id}, 1, this)">恢复端点</button>` : ''}
+            <button class="btn btn-soft btn-sm" type="button" onclick="event.stopPropagation(); toggleKey('${service}', ${key.id}, ${availability.schedulable ? 0 : 1}, this)">${escapeHtml(availability.actionLabel)}</button>
+            ${availability.restricted && availability.schedulable ? `<button class="btn btn-soft btn-sm" type="button" onclick="event.stopPropagation(); toggleKey('${service}', ${key.id}, 1, this)">恢复端点</button>` : ''}
           </div>
         </td>
       </tr>

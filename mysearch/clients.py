@@ -1351,6 +1351,13 @@ class MySearchClient(ProviderTransport):
                     namespace="extract",
                     hit=False,
                 )
+            firecrawl_cache_key = self._build_extract_cache_key(
+                url=url, formats=formats, only_main_content=only_main_content, provider="firecrawl",
+            )
+            cached_page = self._cache_get("extract", firecrawl_cache_key)
+            if cached_page is not None:
+                # Do not copy into the auto key: that would restart the source body's TTL.
+                return self._annotate_cache(cached_page, namespace="extract", hit=True)
 
         if provider in {"auto", "firecrawl"}:
             firecrawl_attempts = 2
@@ -4752,6 +4759,7 @@ class MySearchClient(ProviderTransport):
             citations = []
             seen_urls: set[str] = set()
             retried_domains: list[str] = []
+            excluded_urls = list((native_result.get("route_debug") or {}).get("excluded_urls", []))
             for domain in include_domains:
                 domain_result = self._search_firecrawl_once(
                     query=self._build_firecrawl_domain_query(
@@ -4767,6 +4775,7 @@ class MySearchClient(ProviderTransport):
                     from_date=from_date,
                     to_date=to_date,
                 )
+                excluded_urls.extend((domain_result.get("route_debug") or {}).get("excluded_urls", []))
                 if not domain_result.get("results"):
                     retry_result = self._search_firecrawl_domain_retry(
                         query=query,
@@ -4780,6 +4789,7 @@ class MySearchClient(ProviderTransport):
                     )
                     if retry_result is not None:
                         domain_result = retry_result
+                        excluded_urls.extend((retry_result.get("route_debug") or {}).get("excluded_urls", []))
                         retried_domains.append(domain)
                 per_domain_results.append(domain_result)
                 for item in domain_result.get("results", []):
@@ -4804,6 +4814,8 @@ class MySearchClient(ProviderTransport):
                     to_date=to_date,
                 )
                 if fallback_result is not None:
+                    if excluded_urls:
+                        fallback_result.setdefault("route_debug", {})["excluded_urls"] = excluded_urls
                     return fallback_result
             response = {
                 "provider": "firecrawl",
@@ -4818,6 +4830,8 @@ class MySearchClient(ProviderTransport):
                     "domain_filter_mode": "client_filter_retry",
                     "retried_include_domains": retried_domains,
                 }
+            if excluded_urls:
+                response.setdefault("route_debug", {})["excluded_urls"] = excluded_urls
             return response
 
         return self._search_firecrawl_once(
@@ -4935,6 +4949,7 @@ class MySearchClient(ProviderTransport):
                 if item.get("url")
             ][:max_results],
             "route_debug": {
+                **(retry_result.get("route_debug") or {}),
                 "domain_filter_mode": "client_filter_retry",
                 "include_domain": include_domain,
             },
@@ -4978,7 +4993,8 @@ class MySearchClient(ProviderTransport):
         tbs = self._build_firecrawl_tbs(from_date, to_date)
         if tbs:
             payload["tbs"] = tbs
-        if include_content:
+        specific_pages = content_query != query
+        if include_content and not specific_pages:
             if not requested_news and "news" not in search_categories:
                 payload["scrapeOptions"] = {
                     "formats": ["markdown"],
@@ -4997,6 +5013,7 @@ class MySearchClient(ProviderTransport):
         if not isinstance(data, dict):
             data = {}
         results = []
+        excluded_urls = []
         # Group order sets result priority (news first when news was requested).
         # `research` is included because Firecrawl moves the results of the
         # `research` category out of `data.web` into `data.research` on
@@ -5005,6 +5022,12 @@ class MySearchClient(ProviderTransport):
         source_order = ("news", "web", "research") if requested_news else ("web", "news", "research")
         for source_name in source_order:
             for item in data.get(source_name, []) or []:
+                if specific_pages and query_routing._is_aggregate_document_url(item.get("url", "")):
+                    excluded_urls.append({
+                        "url": item["url"], "reason": "aggregate-document",
+                        "fetch_status": "not-attempted",
+                    })
+                    continue
                 candidate = {
                     "provider": "firecrawl",
                     "source": source_name,
@@ -5020,6 +5043,35 @@ class MySearchClient(ProviderTransport):
                 }
                 if candidate not in results:
                     results.append(candidate)
+
+        if specific_pages:
+            # Fetch every eligible discovered page, not only the presentation shortlist.
+            fresh_content = self._looks_like_pricing_query(query.lower()) or self._looks_like_status_query(query.lower())
+            page_tasks = {
+                item["url"]: lambda url=item["url"]: self.extract_url(
+                    url=url, provider="firecrawl",
+                    **({"max_age_seconds": 0} if fresh_content else {}),
+                )
+                for item in results if item.get("url") and (fresh_content or not item.get("content"))
+            }
+            pages, errors = self._execute_parallel(page_tasks)
+            for item in results:
+                url = item.get("url", "")
+                if item.get("content") and not fresh_content:
+                    item["content_fetch"] = {"status": "prefetched"}
+                elif url in pages:
+                    page = pages[url]
+                    item["content"] = page.get("content", "")
+                    issue = self._extract_quality_issue(page)
+                    item["content_fetch"] = {
+                        "status": "empty" if issue else "succeeded",
+                        "provider": page.get("provider", "firecrawl"),
+                        **({"error": issue} if issue else {}),
+                        **({"max_age_seconds": 0} if fresh_content else {}),
+                    }
+                elif url in errors:
+                    item["content"] = ""
+                    item["content_fetch"] = {"status": "failed", "error": str(errors[url])}
 
         result = {
             "provider": "firecrawl",
@@ -5037,6 +5089,7 @@ class MySearchClient(ProviderTransport):
             result["route_debug"] = {
                 "content_discovery_policy": "specific-pages",
                 "effective_query": content_query,
+                "excluded_urls": excluded_urls,
             }
         return result
 
@@ -7188,7 +7241,9 @@ class MySearchClient(ProviderTransport):
         hostname = self._registered_domain(parsed.hostname or "")
         if hostname != "github.com" or not parsed.path.rstrip("/").endswith("/releases"):
             return ""
-        text = re.sub(r"\s+", " ", str(item.get("snippet") or item.get("content") or "").strip()).strip()
+        text = re.sub(r"\s+", " ", "\n".join(
+            str(item.get(field) or "") for field in ("snippet", "content")
+        )).strip()
         matches = re.findall(
             r"(?:##\s+)?(v?\d+\.\d+\.\d+(?:[-+._][a-z0-9]+)?)\s*\((\d{4}-\d{2}-\d{2})\)",
             text,
@@ -7385,6 +7440,11 @@ class MySearchClient(ProviderTransport):
             if not url:
                 continue
             identity = postprocess._result_url_identity(url)
+            if top.get("content"):
+                extracted_answer = self._extract_result_event_answer(query=query, results=[top])
+                if extracted_answer:
+                    page_answers[identity] = extracted_answer
+                    return extracted_answer
             if identity in page_answers:
                 if page_answers[identity]:
                     return page_answers[identity]
