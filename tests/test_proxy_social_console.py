@@ -36,7 +36,8 @@ for (const [reason, label] of Object.entries(labels)) {
   assert.ok(formatDisabledDetail(key).includes('upstream details'));
   const html = renderKeyStatusSummary('firecrawl', key);
   assert.ok(html.includes(label));
-  assert.ok(html.includes('&lt;img'));
+  assert.ok(!html.includes('upstream details'));
+  assert.ok(escapeHtml(formatDisabledDetail(key)).includes('&lt;img'));
   assert.ok(!html.includes('<img'));
 }
 assert.ok(formatDisabledDetail({active: 0, disabled_reason: 'auth_rejected', disabled_detail: 'precise upstream cause'}).includes('precise upstream cause'));
@@ -210,7 +211,10 @@ assert.ok(formatDisabledDetail({active: 1, disabled_reason: 'rate_limited', disa
         self.assertIn("const MOBILE_KEY_PAGE_SIZE = 5;", javascript)
         self.assertIn('id="key-pagination-${service}"', javascript)
         self.assertIn("filtered.slice(pageStart, pageStart + pageSize)", javascript)
-        self.assertIn('data-label="同步 / 状态"', javascript)
+        self.assertIn('data-label="调度状态"', javascript)
+        self.assertIn('data-label="剩余额度"', javascript)
+        self.assertIn('class="keys-table"', javascript)
+        self.assertIn('class="key-col-identity"', javascript)
         self.assertIn("key.key_masked || maskToken(key.key)", javascript)
         self.assertIn(".table-pagination-actions", stylesheet)
 

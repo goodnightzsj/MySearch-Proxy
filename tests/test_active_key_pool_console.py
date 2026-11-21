@@ -33,7 +33,9 @@ const key = {id: 42, active: 1, blocked_operations: {contents: {reason: 'team_bl
 assert.equal(getKeyAvailability(key).schedulable, true);
 assert.equal(getKeyAvailability(key).label, '部分端点受限');
 assert.match(formatDisabledDetail(key), /contents.*TEAM_BLOCKED/);
-assert.match(renderKeyStatusSummary('exa', key), /&lt;fixture&gt;/);
+assert.match(renderKeyStatusSummary('exa', key), /部分端点受限/);
+assert.match(renderKeyStatusSummary('exa', key), /contents/);
+assert.doesNotMatch(renderKeyStatusSummary('exa', key), /fixture/);
 assert.doesNotMatch(renderKeyStatusSummary('exa', key), /<fixture>/);
 key.blocked_operations.search = {reason: 'team_blocked'};
 key.available_operations = [];

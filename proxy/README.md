@@ -10,6 +10,8 @@
 - 下游给 MySearch MCP、OpenClaw skill 和其他 Agent 发统一 token
 - 页面里同时看 key 池、token 池、调用统计和额度信息
 
+本地管理的 Tavily、Firecrawl、Exa Key 列表统一展示账号、调度状态、剩余额度和调用统计，小屏自动改为卡片。完整邮箱和上游错误保留在详情抽屉；Social 本地及上游 Key 列表同样分开展示身份、状态和恢复动作。「可调度」表示允许进入调度，不代表实时健康；未知额度、零余额与过期同步记录会明确区分。管理 API 的只读 `usage_sync_stale` 字段复用现有额度同步过期规则，不改变 Key 调度。
+
 ![MySearch Console Hero](../docs/images/mysearch-console-hero.jpg)
 
 ## 它解决什么问题

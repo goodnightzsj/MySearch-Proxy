@@ -1860,6 +1860,137 @@ table td .mono {
   white-space: nowrap;
 }
 
+.keys-table-wrap { container: key-list / inline-size; }
+.keys-table { min-width: 800px; }
+.keys-table .key-col-identity { width: 32%; }
+.keys-table .key-col-status { width: 19%; }
+.keys-table .key-col-quota { width: 18%; }
+.keys-table .key-col-usage { width: 19%; }
+.keys-table .key-col-actions { width: 12%; }
+
+.key-detail-button {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.key-detail-link {
+  flex-shrink: 0;
+  margin-left: auto;
+  color: var(--accent);
+  font-size: 12px;
+}
+.key-detail-button:hover .key-detail-link { text-decoration: underline; }
+.key-detail-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+.key-quota-cell { text-align: right; }
+.key-quota { font-size: 18px; font-weight: 600; }
+.key-sync-time {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.keys-table th,
+.keys-table td {
+  padding: 14px 12px;
+  overflow-wrap: anywhere;
+}
+.keys-table td { vertical-align: middle; }
+
+.keys-table th {
+  white-space: nowrap;
+  letter-spacing: 0.03em;
+}
+
+.key-identity-line {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.key-id {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.key-value {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.key-email {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.key-status-head,
+.key-call-counts {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+}
+
+.key-quota,
+.key-call-counts {
+  font-variant-numeric: tabular-nums;
+}
+
+.key-quota,
+.key-call-counts span {
+  white-space: nowrap;
+}
+
+.key-row-meta {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.keys-table td[data-label="调度状态"] .key-row-meta {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+.keys-table .tag {
+  max-width: 100%;
+  letter-spacing: 0;
+}
+
+.keys-table .key-actions-cell { text-align: right; }
+.keys-table .table-actions { justify-content: flex-end; }
+
+.keys-table .table-actions .btn {
+  min-height: 44px;
+  padding-inline: 10px;
+  white-space: nowrap;
+}
+
 th,
 td {
   padding: 15px 16px;
@@ -1945,6 +2076,11 @@ tr:last-child td {
 .tag-off {
   color: var(--danger);
   background: rgba(187, 59, 49, 0.12);
+}
+
+.tag-neutral {
+  color: var(--text-soft);
+  background: var(--surface-muted);
 }
 
 .quota-bar {
@@ -2752,7 +2888,7 @@ body.theme-dark .settings-dialog {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
   align-items: center;
-  padding: 8px 0;
+  padding: 12px 0;
   border-top: 1px solid var(--border);
 }
 
@@ -2763,9 +2899,11 @@ body.theme-dark .settings-dialog {
   overflow-wrap: anywhere;
 }
 
-.settings-key-schedule-copy strong {
+.settings-key-schedule-copy .key-value {
   color: var(--text);
 }
+.settings-key-schedule-copy .key-status-head { margin-top: 8px; }
+.settings-key-schedule-row > .btn { min-height: 44px; white-space: nowrap; }
 
 .settings-actions,
 .settings-footer-actions {
@@ -3026,10 +3164,29 @@ body.theme-dark .detail-drawer {
   line-height: 1.65;
 }
 
+.detail-drawer-head > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.detail-drawer-head h3 {
+  font-size: 20px;
+  line-height: 1.5;
+}
+
+.detail-drawer-head > .btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .detail-drawer-body {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+#diagnostics-content .mono {
+  overflow-wrap: anywhere;
 }
 
 .drawer-section {
@@ -3050,6 +3207,8 @@ body.theme-dark .detail-drawer {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .drawer-grid {
@@ -3605,6 +3764,7 @@ body.theme-dark .app-dialog {
     right: 14px;
     bottom: 14px;
     width: auto;
+    max-height: calc(100dvh - 28px);
   }
 
   .quickstart-install-steps,
@@ -3700,6 +3860,57 @@ body.theme-dark .app-dialog {
   .table-wrap td .empty-state {
     padding: 24px 12px;
   }
+}
+
+/* Adapt to the workspace width, including tablet windows with the provider rail. */
+@container key-list (max-width: 800px) {
+  .keys-table-wrap .keys-table {
+    display: block;
+    min-width: 0;
+  }
+  .keys-table colgroup { display: none; }
+  .keys-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .keys-table tbody { display: block; width: 100%; }
+  .keys-table tr {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-bottom: 1px solid var(--border-strong);
+    border-radius: 0;
+  }
+  .keys-table tr:last-child { border-bottom: 0; }
+  .keys-table td {
+    display: block;
+    min-width: 0;
+    width: 100%;
+    padding: 12px 14px;
+    border: 0;
+  }
+  .keys-table .key-identity-cell,
+  .keys-table td[colspan] { grid-column: 1 / -1; }
+  .keys-table .key-identity-cell { border-bottom: 1px solid var(--border); }
+  .keys-table td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 6px;
+    font-size: 11px;
+    color: var(--muted);
+    letter-spacing: 0;
+  }
+  .keys-table .key-identity-cell[data-label]::before,
+  .keys-table .key-actions-cell[data-label]::before { display: none; }
+  .keys-table .key-quota-cell { text-align: left; }
+  .keys-table .key-actions-cell { align-self: end; }
 }
 
 @media (prefers-reduced-motion: reduce) {

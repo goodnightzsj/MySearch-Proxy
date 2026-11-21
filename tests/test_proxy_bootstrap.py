@@ -120,6 +120,15 @@ class ProxySecurityHardeningTests(unittest.TestCase):
         # 极短 key 也脱敏：sh***rt
         self.assertEqual(masked[0]["key_masked"], "sh***rt")
 
+    def test_key_quota_staleness_reuses_sync_policy(self) -> None:
+        for stale in (False, True):
+            with patch.object(self.proxy_server, "is_usage_sync_stale", return_value=stale) as check:
+                masked = self.proxy_server.mask_key_rows([{"id": 3, "key": "fixture", "usage_account_remaining": 0}])[0]
+            check.assert_called_once()
+            self.assertIs(masked["usage_sync_stale"], stale)
+            self.assertEqual(masked["usage_account_remaining"], 0)
+            self.assertNotIn("key", masked)
+
     def test_c4_verify_admin_uses_hmac_compare_digest(self) -> None:
         """C4: verify_admin 不能用 `==` 比较密码（侧信道风险）。"""
         import inspect

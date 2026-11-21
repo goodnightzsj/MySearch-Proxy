@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>MySearch Proxy Console</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect width='48' height='48' rx='12' fill='%230f172a'/%3E%3Cpath d='M13 14h8l6.5 11L34 14h8L31.5 34h-7L13 14Z' fill='%23f8fafc'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="{{ url_for('static', path='/css/console.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', path='/css/console.css') }}?v=key-pool-ui-2">
 </head>
 <body class="console-body">
 
@@ -115,6 +115,6 @@
   const INITIAL_AUTHENTICATED = {{ "true" if initial_authenticated else "false" }};
   window.PAGE_KIND = "console";
   </script>
-  <script src="{{ url_for('static', path='/js/console.js') }}"></script>
+  <script src="{{ url_for('static', path='/js/console.js') }}?v=key-pool-ui-2"></script>
 </body>
 </html>
