@@ -2815,6 +2815,7 @@ def mask_key_rows(keys):
             key["key_masked"] = raw[:8] + "***" + raw[-4:]
         # 显式删原文。如果调用方真的需要原文，请直接调 db.get_all_keys（不要经过 mask）。
         key.pop("key", None)
+        key["usage_sync_stale"] = is_usage_sync_stale(key)
         key["blocked_operations"] = db.key_blocked_operations(key)
         if key.get("service") == "exa":
             key["available_operations"] = [

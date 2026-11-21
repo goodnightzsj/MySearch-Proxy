@@ -40,8 +40,8 @@ class Metadata(BaseModel):
 
 
 class Usage(Metadata):
-    name: Literal["credits", "input_tokens", "output_tokens", "total_tokens", "cost", "web_search_calls", "x_search_calls", "social_search_calls"]
-    unit: Literal["credits", "tokens", "usd", "requests"]
+    name: Literal["credits", "input_tokens", "output_tokens", "total_tokens", "cost", "web_search_calls", "x_search_calls", "social_search_calls", "x_posts_fetched", "x_users_fetched"]
+    unit: Literal["credits", "tokens", "usd", "requests", "posts", "users"]
     value: Union[StrictInt, StrictFloat]
 
     @validator("value")
@@ -54,6 +54,7 @@ class Usage(Metadata):
     def matching_unit(cls, values):
         name = values["name"]
         expected = "tokens" if name.endswith("_tokens") else "requests" if name.endswith("_calls") else "usd" if name == "cost" else "credits"
+        expected = {"x_posts_fetched": "posts", "x_users_fetched": "users"}.get(name, expected)
         if values["unit"] != expected:
             raise ValueError("Diagnostic usage unit differs")
         return values

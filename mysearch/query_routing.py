@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import date
 from typing import Any, Mapping
@@ -1203,7 +1204,10 @@ def _is_retryable_social_gateway_error(exc: Exception) -> bool:
 
 
 def _is_retryable_transient_error(exc: Exception) -> bool:
-    return isinstance(exc, MySearchHTTPError) and exc.status_code in {429, 502, 503, 504}
+    return isinstance(exc, MySearchHTTPError) and (
+        exc.status_code in {429, 502, 503, 504}
+        or (exc.provider == "tavily" and exc.status_code == 434)
+    )
 
 
 def _is_hcaptcha_artifact_paragraph(p_lower: str) -> bool:
@@ -2951,11 +2955,23 @@ def _strip_document_hydration(content: str) -> str:
                 fence = ""
             kept.append(line)
             continue
-        if not fence and line.lstrip().startswith('{"docsConfig":') and all(
+        if not fence and not line.startswith(("    ", "\t")) and line.lstrip().startswith('{"docsConfig":') and all(
             marker in line
             for marker in ('"pageMetadata":', '"mdxExtracts":', '"dependencies":', 'mintlify.com/docs.json')
         ):
-            continue
+            stripped = line.lstrip()
+            try:
+                payload, end = json.JSONDecoder().raw_decode(stripped)
+            except ValueError:
+                pass
+            else:
+                if (isinstance(payload.get("docsConfig"), dict)
+                    and payload["docsConfig"].get("$schema") == "https://mintlify.com/docs.json"
+                    and isinstance(payload.get("pageMetadata"), dict)
+                    and isinstance(payload.get("mdxExtracts"), (dict, list))
+                    and isinstance(payload.get("dependencies"), (dict, list))):
+                    kept.append(stripped[end:].lstrip(" \t"))
+                    continue
         kept.append(line)
     return "".join(kept)
 

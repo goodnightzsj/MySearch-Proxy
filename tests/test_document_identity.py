@@ -69,3 +69,12 @@ class DocumentHydrationTests(unittest.TestCase):
     def test_preserves_plain_config_and_prose_mentions(self):
         for text in ('{"docsConfig":{"theme":"aspen"}}', 'Use {"docsConfig": to configure a site.'):
             self.assertEqual(query_routing._clean_extract_content(text), text)
+
+    def test_hydration_keeps_prose_after_json_on_same_line(self):
+        text = "# API\n\n" + self.shell + " Important final contract.\n\n| Field | Type |\n| a | str |"
+        self.assertEqual(query_routing._clean_extract_content(text),
+                         "# API\n\nImportant final contract.\n\n| Field | Type |\n| a | str |")
+
+    def test_invalid_or_indented_literal_payload_is_preserved(self):
+        for text in (self.shell[:-1], "    " + self.shell, "\t" + self.shell):
+            self.assertEqual(query_routing._clean_extract_content(text), text.strip())

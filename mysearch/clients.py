@@ -18,7 +18,7 @@ from urllib.request import Request, urlopen
 
 import httpx
 
-from mysearch.cache import CacheStore
+from mysearch.cache import CacheStore, coalesced_scrape
 from mysearch.diagnostics import current_deadline, diagnosed, direct_call, phase
 from mysearch.config import MySearchConfig, ProviderConfig
 from mysearch.keyring import MySearchKeyRing
@@ -4470,6 +4470,7 @@ class MySearchClient(ProviderTransport):
             refined_query = self._refined_award_result_query(query)
             if refined_query and refined_query != query:
                 effective_query = refined_query
+        fresh_content = self._looks_like_pricing_query(query.lower()) or self._looks_like_status_query(query.lower())
         payload: dict[str, Any] = {
             "query": effective_query,
             "max_results": max_results,
@@ -4482,10 +4483,15 @@ class MySearchClient(ProviderTransport):
             "include_answer": include_answer,
             "include_raw_content": include_content,
             "include_usage": True,
+            "include_published_date": True,
         }
+        if fresh_content:
+            payload["max_age_hours"] = 0
+        if from_date or to_date:
+            payload["filter_by_published_date"] = True
         if from_date:
             payload["start_date"] = from_date
-        elif days and days > 0:
+        elif days and days > 0 and not fresh_content:
             payload["days"] = days
         if to_date:
             payload["end_date"] = to_date
@@ -5033,7 +5039,7 @@ class MySearchClient(ProviderTransport):
                     "source": source_name,
                     "title": item.get("title", ""),
                     "url": item.get("url", ""),
-                    "snippet": item.get("description", "") or item.get("markdown", ""),
+                    "snippet": item.get("description", "") or item.get("snippet", "") or item.get("markdown", ""),
                     "content": item.get("markdown", "") if include_content else "",
                     "published_date": item.get("publishedDate")
                     or item.get("date")
@@ -5992,6 +5998,7 @@ class MySearchClient(ProviderTransport):
     ) -> dict[str, Any]:
         return social._build_social_gateway_unavailable_result(base_url=base_url, fallback_reason=fallback_reason)
 
+    @coalesced_scrape
     def _scrape_firecrawl(
         self,
         *,

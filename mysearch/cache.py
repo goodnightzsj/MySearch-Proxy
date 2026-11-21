@@ -20,11 +20,51 @@ import copy
 import sys
 import threading
 import time
+from concurrent.futures import Future
+from functools import wraps
 from typing import Any
+
+from mysearch.diagnostics import current_request, remaining_seconds
 
 #: 单个命名空间的条目上限，超出后按 `inserted_at` 淘汰最旧项。
 DEFAULT_MAX_ENTRIES = 256
 DEFAULT_MAX_BYTES = 64 * 1024 * 1024
+
+
+def coalesced_scrape(method):
+    """Share identical Firecrawl work only inside the owning logical request."""
+    @wraps(method)
+    def run(self, *, url, formats, only_main_content, max_age_seconds=None):
+        state = current_request.get()
+        arguments = dict(url=url, formats=formats, only_main_content=only_main_content)
+        if max_age_seconds is not None:
+            arguments["max_age_seconds"] = max_age_seconds
+        if state is None:
+            return method(self, **arguments)
+        remaining_seconds()
+        # Keep query, fragment and format order: they may select different documents.
+        identity = (id(self), url, tuple(formats), only_main_content, max_age_seconds)
+        with state.lock:
+            pending = state.extractions.get(identity)
+            owner = pending is None
+            if owner:
+                pending = Future()
+                state.extractions[identity] = pending
+        if not owner:
+            while not pending.done():
+                state.cancelled.wait(min(0.05, remaining_seconds()))
+            remaining_seconds()
+            return copy.deepcopy(pending.result())
+        try:
+            result = method(self, **arguments)
+            pending.set_result(copy.deepcopy(result))
+            return result
+        except BaseException as exc:
+            pending.set_exception(exc)
+            with state.lock:
+                state.extractions.pop(identity, None)
+            raise
+    return run
 
 
 def _payload_size(value: Any) -> int:

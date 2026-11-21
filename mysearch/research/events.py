@@ -66,7 +66,9 @@ def _extract_result_event_answer(
                 )
             ):
                 continue
-            candidate_texts = [text for text in (content_text, snippet_text) if text]
+            candidate_texts = [text for text in (content_text, snippet_text) if text and not (
+                award_query and query_routing._looks_like_query_year_mismatch(query=query_lower, text=text)
+            )]
             title_only_allowed = (
                 not award_query
                 or query_routing._looks_like_award_winner_result(
@@ -85,7 +87,9 @@ def _extract_result_event_answer(
             #  `record of the year winner "luther"` 之前被抽走）。
             strict_texts.extend(t for t in candidate_texts if t)
             combined_item_text = "\n".join(
-                value for value in (snippet_text, content_text, title_text) if value
+                value for value in (snippet_text, content_text, title_text) if value and not (
+                    award_query and query_routing._looks_like_query_year_mismatch(query=query_lower, text=value)
+                )
             )
             if combined_item_text:
                 signal_texts.append(combined_item_text)
@@ -236,7 +240,8 @@ def _strict_award_answer(*, query_lower: str, text: str) -> str:
     for category, (patterns, reject) in _STRICT_AWARD_PATTERNS.items():
         if category not in query_lower:
             continue
-        entity = _extract_named_fact_entity(text, patterns=patterns, reject_substrings=reject)
+        entity = _extract_named_fact_entity(text, patterns=patterns, reject_substrings=reject,
+                                           person=category == "best actor", query=query_lower)
         if entity:
             return f"{_AWARD_LABELS[category]} winner: {entity}"
         # A list needs a winner marker in this category, never its first nominee.
@@ -293,6 +298,8 @@ def _extract_result_event_answer_from_text(
         if "best actor" in query_lower or "最佳男主角" in query_lower:
             entity = _extract_named_fact_entity(
                 text,
+                person=True,
+                query=query_lower,
                 patterns=[
                     r"(?:^|[.!?]\s+)([A-Z][A-Za-z0-9'’&.\- ]{2,80}?)\s+and\s+[A-Z][A-Za-z0-9'’&.\- ]{2,80}\s+won\s+best actor\s+and\s+best actress\b",
                     r"[\"“'‘]([^\"”’'\n]{2,100})[\"”’'‘]\s+won[^\n]{0,80}\bbest actor\b",
@@ -546,20 +553,22 @@ def _extract_named_fact_entity(
     *,
     patterns: list[str],
     reject_substrings: list[str] | None = None,
+    person: bool = False,
+    query: str = "",
 ) -> str:
         for pattern in patterns:
-            match = re.search(pattern, text, flags=re.IGNORECASE)
-            if not match:
-                continue
-            entity = _clean_extracted_fact_entity(
-                match.group(1),
-                reject_substrings=reject_substrings,
-            )
-            # 拒绝"从句子中间切出来"的碎片。放在这里而不是各调用点，是因为
-            # 碎片**两条路径都会产生**：严格模式抓到过
-            # `for "Luther" at 2026 Grammys`，宽松模式抓到过
-            # `at the Academy Awards`。校验在出口处做一次才覆盖得全。
-            if entity and not _looks_like_fragment(entity):
+            for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+                entity = _clean_extracted_fact_entity(match.group(1), reject_substrings=reject_substrings)
+                if not entity or _looks_like_fragment(entity):
+                    continue
+                if person and not re.fullmatch(
+                    r"[A-Z][A-Za-z'’.\-]*(?: (?:[A-Z][A-Za-z'’.\-]*|de|del|van|von|da|di|al|bin)){1,7}", entity,
+                ):
+                    continue
+                # A page's current heading must not validate a historical winning sentence.
+                sentence = re.split(r"(?<!\b[A-Z])[.!?]\s+|\n", text[:match.start()])[-1] + match.group(0)
+                if query and query_routing._looks_like_query_year_mismatch(query=query, text=sentence):
+                    continue
                 return entity
         return ""
 

@@ -6,7 +6,8 @@ from unittest.mock import Mock
 from mcp.shared.memory import create_connected_server_and_client_session
 
 from mysearch.clients import MySearchClient
-from mysearch.errors import MySearchError
+from mysearch.errors import MySearchError, MySearchHTTPError, classify_upstream_key_failure
+from mysearch.query_routing import _is_retryable_transient_error
 import test_mcp_runtime as mcp_tests
 from test_request_diagnostics import provider, make_config
 
@@ -69,6 +70,41 @@ class ProviderFreshnessTests(unittest.TestCase):
                 payload = client._request_json.call_args.kwargs["payload"]
                 self.assertEqual(payload["search_depth"], expected)
                 self.assertTrue(payload["include_usage"])
+
+    def test_tavily_separates_fetch_age_from_publication_window(self):
+        client = self.client()
+        client._request_json = Mock(return_value={"results": []})
+        base = dict(max_results=3, topic="general", include_answer=False,
+                    include_content=False, include_domains=None, exclude_domains=None)
+        for query, dates, fresh in [
+            ("service pricing", {}, True), ("service status outage", {}, True),
+            ("database architecture", {}, False),
+            ("database release notes", {"from_date": "2026-10-01"}, False),
+            ("service pricing", {"to_date": "2026-10-01"}, True),
+        ]:
+            with self.subTest(query=query, dates=dates):
+                client._search_tavily_once(query=query, days=7, **dates, **base)
+                payload = client._request_json.call_args.kwargs["payload"]
+                self.assertTrue(payload["include_published_date"])
+                self.assertEqual(payload.get("max_age_hours"), 0 if fresh else None)
+                self.assertEqual(payload.get("filter_by_published_date", False), bool(dates))
+                if fresh:
+                    self.assertNotIn("days", payload)
+                if dates:
+                    self.assertTrue(payload.get("start_date") or payload.get("end_date"))
+
+    def test_flex_capacity_is_transient_and_does_not_disable_key(self):
+        error = MySearchHTTPError(provider="tavily", status_code=434, detail="Flex tier capacity exceeded", url="https://fixture.test")
+        self.assertTrue(_is_retryable_transient_error(error))
+        self.assertEqual(classify_upstream_key_failure(434, error.detail, service="tavily"), "")
+        self.assertFalse(_is_retryable_transient_error(MySearchHTTPError(provider="firecrawl", status_code=434, detail="other", url="https://fixture.test")))
+        client = self.client()
+        client._request_json = Mock(side_effect=error)
+        with self.assertRaises(MySearchHTTPError):
+            client._search_tavily_once(query="service pricing", max_results=1, topic="general",
+                                      include_answer=False, include_content=False, include_domains=None, exclude_domains=None)
+        self.assertEqual(client._request_json.call_count, 1)
+        self.assertEqual(client._request_json.call_args.kwargs["payload"]["max_age_hours"], 0)
 
 
 class ExtractWindowTests(unittest.IsolatedAsyncioTestCase):

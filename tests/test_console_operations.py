@@ -120,7 +120,7 @@ assert.doesNotMatch(renderKeyQuota('tavily', key), /NaN|剩余 0/);
 
     def test_key_table_summary_keeps_errors_in_detail_and_zero_distinct_from_unknown(self) -> None:
         self.run_console(("getKeyAvailability", "formatDisabledDetail", "renderKeyStatusSummary",
-                          "renderKeyHealthEvidence", "renderKeyQuota", "renderAccountQuota", "quotaBar",
+                          "renderKeyQuotaSummary", "renderKeyHealthEvidence", "renderKeyQuota", "renderAccountQuota", "quotaBar",
                           "drawerMetric", "drawerSection", "renderDrawerActionGroup", "openKeyDetail"), r"""
 const key = {id: 251, key_masked: 'fc-demo***41f3', email: 'synthetic@example.invalid', active: 0,
   disabled_reason: 'quota_exhausted', disabled_detail: 'RAW_MARKER <unsafe> ' + 'quota exhausted '.repeat(100),
@@ -128,12 +128,12 @@ const key = {id: 251, key_masked: 'fc-demo***41f3', email: 'synthetic@example.in
 for (const service of ['tavily', 'firecrawl', 'exa']) {
   const summary = renderKeyStatusSummary(service, key);
   assert.match(summary, /额度耗尽/);
-  assert.match(summary, /剩余 0/);
+  assert.match(renderKeyQuotaSummary(key), />0<.*\n/);
   assert.match(summary, /同步异常/);
   assert.doesNotMatch(summary, /RAW_MARKER|SYNC_MARKER|<unsafe>/);
   assert.ok(summary.length < 900, 'upstream diagnostic length must not grow the main row');
-  const unknown = renderKeyStatusSummary(service, {active: 1});
-  assert.match(unknown, /额度未知/);
+  const unknown = renderKeyQuotaSummary({active: 1});
+  assert.match(unknown, /未知/);
   assert.doesNotMatch(unknown, /剩余 0/);
   global.getServicePayload = () => ({keys: [key]});
   global.getServiceDisplayLabel = () => service;
@@ -152,7 +152,7 @@ for (const service of ['tavily', 'firecrawl', 'exa']) {
 
     def test_shared_key_rows_bound_email_and_preserve_actions_and_keyboard_entry(self) -> None:
         self.run_console(("getKeyAvailability", "getKeyRemaining", "getKeyRowClass", "formatDisabledDetail",
-                          "renderKeyStatusSummary", "renderKeyUsageSummary", "renderKeyHealthEvidence", "renderKeys"), r"""
+                          "renderKeyStatusSummary", "renderKeyQuotaSummary", "renderKeyUsageSummary", "renderKeyHealthEvidence", "renderKeys"), r"""
 global.syncKeyToolbar = () => {};
 global.getFilteredKeys = (service, keys) => keys;
 global.getKeyTableState = () => ({page: 1});
@@ -166,14 +166,26 @@ for (const service of ['tavily', 'firecrawl', 'exa']) {
   assert.match(row, /class="key-email"/);
   assert.ok(row.includes(`title="${escapeHtml(key.email)}"`));
   assert.doesNotMatch(row, /<unsafe>/);
-  assert.match(row, /tabindex="0"/);
-  assert.ok(row.includes(`handleTableRowKey(event, 'key', '${service}', 7)`));
+  assert.doesNotMatch(row, /role="button"|tabindex="0"/);
+  assert.match(row, /<button class="key-detail-button" type="button" aria-label=/);
+  assert.ok(row.includes(`openKeyDetail('${service}', 7)`));
   assert.ok(row.includes(`event.stopPropagation(); toggleKey('${service}', 7, 0, this)`));
-  assert.match(row, /剩余 993/);
+  assert.match(row, />993<\/div>/);
+  assert.match(row, /data-label="剩余额度" class="key-quota-cell"/);
   assert.match(row, /有历史成功/);
   renderKeys(service, [{...key, blocked_operations: {contents: {reason: 'team_blocked'}}, available_operations: ['search']}]);
   assert.match(node(`keys-body-${service}`).innerHTML, /恢复端点/);
 }
+""")
+
+    def test_quota_unknown_zero_and_stale_are_distinct(self) -> None:
+        self.run_console(("renderKeyQuotaSummary",), r"""
+assert.match(renderKeyQuotaSummary({}), /未知/);
+assert.match(renderKeyQuotaSummary({usage_account_remaining: 0}), /已耗尽/);
+assert.match(renderKeyQuotaSummary({usage_account_remaining: 993, usage_sync_stale: true,
+  usage_synced_at: '2026-11-20T14:00:00Z'}), /记录已过期/);
+assert.match(renderKeyQuotaSummary({usage_account_remaining: 993, usage_sync_stale: false,
+  usage_synced_at: '2026-11-21T14:00:00Z'}), /最近同步/);
 """)
 
     def test_exa_operation_limits_show_scope_and_allow_explicit_restore(self) -> None:

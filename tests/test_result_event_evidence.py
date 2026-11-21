@@ -5,6 +5,28 @@ from mysearch.research import events
 
 
 class ResultEventEvidenceTests(unittest.TestCase):
+    def test_person_entities_reject_generic_clauses_and_find_later_supported_person(self):
+        for person in ("Alden Cross", "Mira Stone", "Omar Vale", "Jean-Luc Moreau"):
+            for clause in ("While several performers eventually", "Although those performers previously", "Many of the nominees"):
+                text = f'{clause} won best actor. {person} won best actor for "Fictional Film".'
+                with self.subTest(person=person, clause=clause):
+                    answer = events._extract_result_event_answer(query="2031 Oscars best actor winner",
+                        results=[{"title": "2031 results", "snippet": text}])
+                    self.assertEqual(answer, f"Best Actor winner: {person}")
+
+    def test_award_year_in_unrelated_footer_cannot_validate_wrong_year_statement(self):
+        answer = events._extract_result_event_answer(query="2031 Oscars best actor winner", results=[{
+            "title": "2031 awards coverage", "content": "In 2030, Alden Cross won best actor. Copyright 2031.",
+        }])
+        self.assertEqual(answer, "")
+
+    def test_negative_and_predicted_award_statements_are_not_wins(self):
+        for text in ("Alden Cross could win best actor.", "Alden Cross did not win best actor.",
+                     "Best Actor winner: not yet announced", "Best Actor winner: will be announced tomorrow"):
+            with self.subTest(text=text):
+                self.assertEqual(events._extract_result_event_answer(query="2031 Oscars best actor winner",
+                    results=[{"title": "2031 awards coverage", "snippet": text}]), "")
+
     def test_award_list_bonus_does_not_promote_box_office_weekly_winners(self):
         base = {"title": "2026 box office", "url": "https://example.test/report"}
         winners = {**base, "title": "2026 box office winners full list"}

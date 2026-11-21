@@ -33,6 +33,11 @@ def extract_usage(payload: object, operation: str = "request") -> list[dict[str,
     )]
     # Crawl status reports job totals, so repeated polls must not add them again.
     top_level_credits = None if operation == "crawl_status" else payload.get("creditsUsed", payload.get("credits_used"))
+    if top_level_credits is None and operation == "scrape":
+        document = payload.get("data", payload)
+        metadata = document.get("metadata") if isinstance(document, dict) else None
+        if isinstance(metadata, dict):
+            top_level_credits = metadata.get("creditsUsed", metadata.get("credits_used"))
     credits = usage.get("credits", top_level_credits)
     candidates.append(("credits", "credits", credits))
     cost = payload.get("costDollars")
@@ -42,6 +47,11 @@ def extract_usage(payload: object, operation: str = "request") -> list[dict[str,
     if isinstance(tools, dict):
         candidates.extend((name, "requests", tools.get(name)) for name in (
             "web_search_calls", "x_search_calls", "social_search_calls",
+        ))
+    details = usage.get("server_side_tool_usage_details")
+    if isinstance(details, dict):
+        candidates.extend((name, unit, details.get(name)) for name, unit in (
+            ("x_posts_fetched", "posts"), ("x_users_fetched", "users"),
         ))
     return [
         {"name": name, "unit": unit, "value": value}
@@ -72,6 +82,7 @@ class RequestState:
     phase_count: int = 0
     totals: dict[tuple[str, str, str], float] = field(default_factory=dict)
     final: dict[str, Any] | None = None
+    extractions: dict[tuple, Any] = field(default_factory=dict, repr=False)
     lock: Any = field(default_factory=Lock, repr=False)
 
     def cancel(self, reason: str = "caller_cancelled") -> None:
@@ -254,6 +265,7 @@ def finish_payload(state: RequestState, result: Any = None, error: BaseException
             "diagnostics": diagnostics,
         }
         state.stop_reason = state.stop_reason or "completed"
+        state.extractions.clear()
         state.cancelled.set()
         return state.final
 

@@ -3084,22 +3084,23 @@ function renderServiceShells() {
                       </div>
                     </div>
                   </div>
-                  <div class="detail-caption">可调度不等于实时健康；余额来自最近同步。点击行查看完整邮箱、错误原因、验证依据与维护动作。</div>
+                  <div class="detail-caption">可调度表示允许参与请求；历史记录不代表实时健康。余额以最近同步为准，完整错误与维护动作见详情。</div>
                   ${renderTableLegend('key')}
 	                <div class="table-wrap">
 	                  <table class="keys-table">
                       <colgroup>
                         <col class="key-col-id"><col class="key-col-value"><col class="key-col-email">
-                        <col class="key-col-status"><col class="key-col-usage"><col class="key-col-evidence"><col class="key-col-actions">
+                        <col class="key-col-status"><col class="key-col-quota"><col class="key-col-usage"><col class="key-col-evidence"><col class="key-col-actions">
                       </colgroup>
 	                    <thead>
 	                      <tr>
 	                        <th scope="col">ID</th>
 	                        <th scope="col">Key</th>
 	                        <th scope="col">邮箱</th>
-	                        <th scope="col">状态 / 额度</th>
+	                        <th scope="col">调度状态</th>
+                        <th scope="col" class="key-quota-cell">剩余额度</th>
 	                        <th scope="col">调用统计</th>
-                        <th scope="col">验证依据</th>
+                        <th scope="col">历史证据</th>
 	                        <th scope="col">操作</th>
 	                      </tr>
 	                    </thead>
@@ -3945,17 +3946,23 @@ function renderTokenSummary(token) {
 
 function renderKeyStatusSummary(service, key) {
   const availability = getKeyAvailability(key);
-  const remain = key.usage_key_remaining ?? key.usage_account_remaining;
-  const remainLabel = remain === null || remain === undefined ? '额度未知' : `剩余 ${fmtNum(remain)}`;
   return `
     <div class="key-status-head">
       <span class="tag ${availability.schedulable && !availability.restricted ? 'tag-ok' : 'tag-off'}" title="${escapeHtml(availability.detail)}">${escapeHtml(availability.label)}</span>
-      <span class="key-quota ${remain === 0 ? 'danger' : 'muted'}">${remainLabel}</span>
     </div>
     ${!availability.schedulable || availability.restricted ? `<div class="key-row-meta" title="${escapeHtml(availability.detail)}">${escapeHtml(availability.detail)}</div>` : ''}
-    <div class="key-row-meta">${key.usage_synced_at ? `同步 ${escapeHtml(formatTime(key.usage_synced_at))}` : (service === 'exa' ? '实时额度暂不可查' : '尚未同步')}</div>
-    ${key.usage_sync_error ? '<div class="key-row-meta danger">同步异常 · 点击行查看原因</div>' : ''}
+    ${key.usage_sync_error ? '<div class="key-row-meta danger">同步异常 · 详情可查</div>' : ''}
   `;
+}
+
+function renderKeyQuotaSummary(key) {
+  const remain = key.usage_key_remaining ?? key.usage_account_remaining;
+  const known = typeof remain === 'number' && Number.isFinite(remain);
+  const stale = key.usage_sync_stale === true || Boolean(key.usage_sync_error);
+  const syncLabel = key.usage_synced_at ? (stale ? '记录已过期' : '最近同步') : '尚未同步';
+  return `<div class="key-quota ${known && remain <= 0 ? 'danger' : ''}">${known ? fmtNum(remain) : '<span class="muted">未知</span>'}</div>
+    <div class="key-row-meta">${syncLabel}${known && remain <= 0 ? ' · 已耗尽' : ''}</div>
+    ${key.usage_synced_at ? `<time class="key-row-meta key-sync-time" datetime="${escapeHtml(key.usage_synced_at)}">${escapeHtml(formatTime(key.usage_synced_at))}</time>` : ''}`;
 }
 
 function renderKeyUsageSummary(key) {
@@ -3968,7 +3975,7 @@ function renderKeyUsageSummary(key) {
 function renderKeyHealthEvidence(key) {
   const succeeded = Number(key.total_used || 0) > 0;
   const label = succeeded ? '有历史成功' : (Number(key.total_failed || 0) > 0 ? '仅有失败记录' : '尚无成功证据');
-  return `<div class="table-note">${label}</div><div class="key-row-meta">非实时探测</div>`;
+  return `<div class="table-note">${label}</div>`;
 }
 
 function syncTokenToolbar(service) {
@@ -4153,7 +4160,7 @@ function renderKeys(service, keys) {
   syncKeyToolbar(service);
   if (!keys || keys.length === 0) {
     if (pagination) pagination.innerHTML = '';
-    tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state">
+    tbody.innerHTML = `<tr><td colspan="8"><div class="empty-state">
       <div class="empty-state-icon" aria-hidden="true">🔑</div>
       <strong>当前 service 还没有导入 Key</strong>
       <p>在上方输入框单条或批量导入上游 key，proxy 会自动做 round-robin。</p>
@@ -4164,7 +4171,7 @@ function renderKeys(service, keys) {
   const filtered = getFilteredKeys(service, keys);
   if (!filtered.length) {
     if (pagination) pagination.innerHTML = '';
-    tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state">
+    tbody.innerHTML = `<tr><td colspan="8"><div class="empty-state">
       <div class="empty-state-icon" aria-hidden="true">🔍</div>
       <strong>没有符合当前筛选条件的 Key</strong>
       <p>调整筛选词或切换"显示禁用"再试。</p>
@@ -4185,21 +4192,20 @@ function renderKeys(service, keys) {
     return `
       <tr
         class="table-row-clickable ${rowClass}"
-        tabindex="0"
-        role="button"
-        aria-label="查看 ${escapeHtml(getServiceDisplayLabel(service))} key ${escapeHtml(key.email || String(key.id))} 详情"
         onclick="openKeyDetail('${service}', ${key.id})"
-        onkeydown="handleTableRowKey(event, 'key', '${service}', ${key.id})"
       >
         <td data-label="ID">${fmtNum(key.id)}</td>
         <td data-label="Key">
-          <span class="key-value mono">${escapeHtml(key.key_masked || maskToken(key.key))}</span>
-          <div class="row-meta">点击查看详情</div>
+          <button class="key-detail-button" type="button" aria-label="查看 ${escapeHtml(getServiceDisplayLabel(service))} Key ${key.id} 详情" onclick="event.stopPropagation(); openKeyDetail('${service}', ${key.id})">
+            <span class="key-value mono">${escapeHtml(key.key_masked || maskToken(key.key))}</span>
+            <span class="key-detail-link">详情 →</span>
+          </button>
         </td>
         <td data-label="邮箱"><span class="key-email" title="${escapeHtml(key.email || '-')}">${escapeHtml(key.email || '-')}</span></td>
-        <td data-label="状态 / 额度">${renderKeyStatusSummary(service, key)}</td>
+        <td data-label="调度状态">${renderKeyStatusSummary(service, key)}</td>
+        <td data-label="剩余额度" class="key-quota-cell">${renderKeyQuotaSummary(key)}</td>
         <td data-label="调用统计">${renderKeyUsageSummary(key)}</td>
-        <td data-label="验证依据">${renderKeyHealthEvidence(key)}</td>
+        <td data-label="历史证据">${renderKeyHealthEvidence(key)}</td>
         <td data-label="操作">
           <div class="table-actions">
             <!-- r5 P0-2: 删除按钮已挪到抽屉的 Danger Zone，行内只保留启用/禁用。 -->

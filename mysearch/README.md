@@ -50,6 +50,8 @@ Exa 默认停用，保留数据和代码以便显式恢复。`MYSEARCH_EXA_ENABL
 
 需要显式时效时，设置 `provider="firecrawl", max_age_seconds=0` 请求实时抓取，正整数表示允许的缓存年龄（秒）。此选项绕过本地 extract 缓存，并按毫秒传给 Firecrawl；不设置时保留现有缓存行为。
 
+Tavily 搜索会请求发布日期；显式 `from_date` / `to_date` 同时要求上游剔除未知日期和窗口外来源。价格与状态查询使用 `max_age_hours=0` 获取新内容，不自动用发布日期限制常年更新的页面；容量不足返回真实失败。一次工具请求内相同 Firecrawl 抓取会共享完整结果，独立的实时提取仍重新请求。诊断读取 Firecrawl 抓取元数据中的 credits，xAI 明确上报的帖子/用户数量分别按原单位记录；这些数量不等于费用，缺失仍为未知。
+
 普通 pricing/status 页面的正文搜索请求实时 Firecrawl 抓取（`maxAge=0`），而不是复用参考文档缓存。其他页面的 `auto` 提取可复用参数一致的 Firecrawl 完整正文缓存，但不延长该正文原有 TTL；formats、only_main_content 不同的投影不会混用。这不保证其他 provider 的搜索索引或上游计费信息是实时的。
 
 MCP 调用可用 `offset` 和 `max_chars` 按字符读取正文片段，返回 `content_window` 中的总长度、下一偏移量和截断状态；省略时仍返回全文。分页复用正常提取缓存，不保证缓存过期后的页面快照不变。

@@ -158,6 +158,22 @@ class ProxyDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(all(row["operation"] == "crawl_status" for row in details["recent_attempts"]))
                 self.assertTrue(all(row["usage"] == [] for row in details["recent_attempts"]))
 
+    async def test_scrape_metadata_credits_are_physical_usage_and_fetch_units_are_accepted(self):
+        payload = {"success": True, "data": {"markdown": "Private body", "metadata": {"creditsUsed": 1}}}
+        with patch.object(server.pool, "get_next_key", return_value={"id": 1, "key": "synthetic-key"}), patch.object(
+            server.pool, "report_result",
+        ), patch.object(server.http_client, "request", new=AsyncMock(return_value=httpx.Response(200, json=payload))):
+            response = await self.client.post("/firecrawl/v2/scrape", json={"url": "https://fixture.test"}, headers=self.headers)
+        self.assertEqual(response.status_code, 200)
+        details = await self.diagnostics(service="firecrawl")
+        self.assertEqual(details["recent_attempts"][0]["usage"], [{"name": "credits", "unit": "credits", "value": 1}])
+        report = self.report("xai")
+        quantity = {"name": "x_posts_fetched", "unit": "posts", "value": 4}
+        report["diagnostics"]["calls"][0]["usage"] = [quantity]
+        report["diagnostics"]["usage"] = [{"provider": "xai", **quantity}]
+        response = await self.client.post("/api/mysearch/requests", json=report, headers=self.headers)
+        self.assertEqual(response.status_code, 200, response.text)
+
     async def test_crawl_status_keeps_explicit_per_request_credits(self):
         payload = {"status": "completed", "creditsUsed": 5, "usage": {"credits": 2}, "data": []}
         with patch.object(server.pool, "get_next_key", return_value={"id": 1, "key": "synthetic-key"}), patch.object(
