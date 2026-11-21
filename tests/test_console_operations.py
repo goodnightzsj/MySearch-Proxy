@@ -140,6 +140,8 @@ for (const service of ['tavily', 'firecrawl', 'exa']) {
   let drawer;
   global.openDetailDrawer = value => { drawer = value; };
   openKeyDetail(service, key.id);
+  assert.equal(drawer.title, `${service} Key #${key.id}`);
+  assert.ok(drawer.bodyHtml.includes(escapeHtml(key.email)));
   assert.ok(drawer.bodyHtml.includes(escapeHtml(key.disabled_detail.trim())));
   assert.match(drawer.bodyHtml, /SYNC_MARKER &lt;unsafe&gt;/);
   assert.doesNotMatch(drawer.bodyHtml, /<unsafe>/);
@@ -172,7 +174,9 @@ for (const service of ['tavily', 'firecrawl', 'exa']) {
   assert.ok(row.includes(`event.stopPropagation(); toggleKey('${service}', 7, 0, this)`));
   assert.match(row, />993<\/div>/);
   assert.match(row, /data-label="剩余额度" class="key-quota-cell"/);
-  assert.match(row, /有历史成功/);
+  assert.equal((row.match(/<td /g) || []).length, 5);
+  assert.match(row, /#7/);
+  assert.doesNotMatch(row, /data-label="历史证据"/);
   renderKeys(service, [{...key, blocked_operations: {contents: {reason: 'team_blocked'}}, available_operations: ['search']}]);
   assert.match(node(`keys-body-${service}`).innerHTML, /恢复端点/);
 }
@@ -210,6 +214,31 @@ const calls = [];
 api = async (...args) => { calls.push(args); return {ok: true}; };
 await toggleKey('exa', 42, 1, node('restore'));
 assert.deepEqual(calls, [['PUT', '/api/keys/42/toggle', {active: 1}]]);
+""")
+
+    def test_social_key_lists_separate_identity_status_and_recovery(self) -> None:
+        self.run_console((), r"""
+const keys = [
+  {id: 'ready', index: 1, key_masked: 'xai-fixture***aaaa', schedulable: true},
+  {id: 'cooling', index: 2, key_masked: 'xai-fixture***bbbb', schedulable: false,
+    disabled_reason: 'rate_limited', schedule_until: '2999-01-01T00:00:00Z'},
+  {id: 'empty', index: 3, key_masked: '<unsafe>***cccc', schedulable: false, disabled_reason: 'quota_exhausted'},
+  {id: 'invalid', index: 4, key_masked: 'xai-fixture***dddd', schedulable: false, disabled_reason: 'auth_rejected'},
+];
+for (const mode of ['local', 'upstream']) {
+  renderSocialKeySchedule(keys, mode, true);
+  const html = node(`settings-social-${mode}-key-list`).innerHTML;
+  assert.match(html, /key-identity-line/);
+  for (const label of ['可调度', '限流冷却', '额度耗尽', '凭证失效', '自动恢复']) assert.ok(html.includes(label));
+  assert.match(html, /&lt;unsafe&gt;/);
+  assert.doesNotMatch(html, /<unsafe>|正常/);
+  assert.equal((html.match(/<button/g) || []).length, 3);
+  assert.ok(html.includes("resumeSocialUpstreamKey('cooling', this)"));
+  renderSocialKeySchedule(keys, mode, false);
+  const inactive = node(`settings-social-${mode}-key-list`).innerHTML;
+  assert.match(inactive, /已保存，当前未启用/);
+  assert.doesNotMatch(inactive, /<button/);
+}
 """)
 
     def test_normal_key_filter_excludes_cooldown_disabled_and_partial_access(self) -> None:

@@ -214,7 +214,7 @@ assert.ok(formatDisabledDetail({active: 1, disabled_reason: 'rate_limited', disa
         self.assertIn('data-label="调度状态"', javascript)
         self.assertIn('data-label="剩余额度"', javascript)
         self.assertIn('class="keys-table"', javascript)
-        self.assertIn('class="key-col-email"', javascript)
+        self.assertIn('class="key-col-identity"', javascript)
         self.assertIn("key.key_masked || maskToken(key.key)", javascript)
         self.assertIn(".table-pagination-actions", stylesheet)
 

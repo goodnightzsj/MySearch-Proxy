@@ -2748,16 +2748,18 @@ function renderSocialKeySchedule(keys = [], mode = 'upstream', active = true) {
       auth_rejected: '凭证失效',
     };
     const status = key.schedulable
-      ? (active ? '正常' : '已保存，当前未启用')
+      ? (active ? '可调度' : '已保存，当前未启用')
       : (labels[reason] || '不可调度');
-    const recovery = key.schedule_until ? ` · ${formatTime(key.schedule_until)} 自动恢复` : '';
+    const recovery = key.schedule_until ? `${formatTime(key.schedule_until)} 自动恢复` : '';
     const action = key.schedulable || !active
       ? ''
       : `<button class="btn btn-sm btn-soft" type="button" onclick="resumeSocialUpstreamKey('${escapeHtml(key.id)}', this)">立即恢复</button>`;
     return `
       <div class="settings-key-schedule-row">
         <div class="settings-key-schedule-copy">
-          <strong>#${fmtNum(key.index)}</strong> · ${escapeHtml(key.key_masked || '')} · ${escapeHtml(status)}${escapeHtml(recovery)}
+          <div class="key-identity-line"><span class="key-id">#${fmtNum(key.index)}</span><code class="key-value mono">${escapeHtml(key.key_masked || '')}</code></div>
+          <div class="key-status-head"><span class="tag ${key.schedulable ? (active ? 'tag-ok' : 'tag-neutral') : 'tag-off'}">${escapeHtml(status)}</span></div>
+          ${recovery ? `<div class="key-row-meta">${escapeHtml(recovery)}</div>` : ''}
         </div>
         ${action}
       </div>
@@ -3084,23 +3086,19 @@ function renderServiceShells() {
                       </div>
                     </div>
                   </div>
-                  <div class="detail-caption">可调度表示允许参与请求；历史记录不代表实时健康。余额以最近同步为准，完整错误与维护动作见详情。</div>
+                  <div class="detail-caption">可调度不代表实时健康，余额以最近同步为准。点击 Key 查看完整邮箱、错误原因与维护记录。</div>
                   ${renderTableLegend('key')}
-	                <div class="table-wrap">
+	                <div class="table-wrap keys-table-wrap">
 	                  <table class="keys-table">
                       <colgroup>
-                        <col class="key-col-id"><col class="key-col-value"><col class="key-col-email">
-                        <col class="key-col-status"><col class="key-col-quota"><col class="key-col-usage"><col class="key-col-evidence"><col class="key-col-actions">
+                        <col class="key-col-identity"><col class="key-col-status"><col class="key-col-quota"><col class="key-col-usage"><col class="key-col-actions">
                       </colgroup>
 	                    <thead>
 	                      <tr>
-	                        <th scope="col">ID</th>
-	                        <th scope="col">Key</th>
-	                        <th scope="col">邮箱</th>
+	                        <th scope="col">Key / 账号</th>
 	                        <th scope="col">调度状态</th>
                         <th scope="col" class="key-quota-cell">剩余额度</th>
 	                        <th scope="col">调用统计</th>
-                        <th scope="col">历史证据</th>
 	                        <th scope="col">操作</th>
 	                      </tr>
 	                    </thead>
@@ -3948,7 +3946,7 @@ function renderKeyStatusSummary(service, key) {
   const availability = getKeyAvailability(key);
   return `
     <div class="key-status-head">
-      <span class="tag ${availability.schedulable && !availability.restricted ? 'tag-ok' : 'tag-off'}" title="${escapeHtml(availability.detail)}">${escapeHtml(availability.label)}</span>
+      <span class="tag ${availability.schedulable && !availability.restricted ? 'tag-ok' : availability.reason === 'manual' ? 'tag-neutral' : 'tag-off'}" title="${escapeHtml(availability.detail)}">${escapeHtml(availability.label)}</span>
     </div>
     ${!availability.schedulable || availability.restricted ? `<div class="key-row-meta" title="${escapeHtml(availability.detail)}">${escapeHtml(availability.detail)}</div>` : ''}
     ${key.usage_sync_error ? '<div class="key-row-meta danger">同步异常 · 详情可查</div>' : ''}
@@ -3962,7 +3960,7 @@ function renderKeyQuotaSummary(key) {
   const syncLabel = key.usage_synced_at ? (stale ? '记录已过期' : '最近同步') : '尚未同步';
   return `<div class="key-quota ${known && remain <= 0 ? 'danger' : ''}">${known ? fmtNum(remain) : '<span class="muted">未知</span>'}</div>
     <div class="key-row-meta">${syncLabel}${known && remain <= 0 ? ' · 已耗尽' : ''}</div>
-    ${key.usage_synced_at ? `<time class="key-row-meta key-sync-time" datetime="${escapeHtml(key.usage_synced_at)}">${escapeHtml(formatTime(key.usage_synced_at))}</time>` : ''}`;
+    ${key.usage_synced_at ? `<time class="key-row-meta key-sync-time" datetime="${escapeHtml(key.usage_synced_at)}" title="${escapeHtml(formatTime(key.usage_synced_at))}">${escapeHtml(formatTime(key.usage_synced_at))}</time>` : ''}`;
 }
 
 function renderKeyUsageSummary(key) {
@@ -4160,7 +4158,7 @@ function renderKeys(service, keys) {
   syncKeyToolbar(service);
   if (!keys || keys.length === 0) {
     if (pagination) pagination.innerHTML = '';
-    tbody.innerHTML = `<tr><td colspan="8"><div class="empty-state">
+    tbody.innerHTML = `<tr><td colspan="5"><div class="empty-state">
       <div class="empty-state-icon" aria-hidden="true">🔑</div>
       <strong>当前 service 还没有导入 Key</strong>
       <p>在上方输入框单条或批量导入上游 key，proxy 会自动做 round-robin。</p>
@@ -4171,7 +4169,7 @@ function renderKeys(service, keys) {
   const filtered = getFilteredKeys(service, keys);
   if (!filtered.length) {
     if (pagination) pagination.innerHTML = '';
-    tbody.innerHTML = `<tr><td colspan="8"><div class="empty-state">
+    tbody.innerHTML = `<tr><td colspan="5"><div class="empty-state">
       <div class="empty-state-icon" aria-hidden="true">🔍</div>
       <strong>没有符合当前筛选条件的 Key</strong>
       <p>调整筛选词或切换"显示禁用"再试。</p>
@@ -4194,19 +4192,17 @@ function renderKeys(service, keys) {
         class="table-row-clickable ${rowClass}"
         onclick="openKeyDetail('${service}', ${key.id})"
       >
-        <td data-label="ID">${fmtNum(key.id)}</td>
-        <td data-label="Key">
+        <td data-label="Key / 账号" class="key-identity-cell">
           <button class="key-detail-button" type="button" aria-label="查看 ${escapeHtml(getServiceDisplayLabel(service))} Key ${key.id} 详情" onclick="event.stopPropagation(); openKeyDetail('${service}', ${key.id})">
-            <span class="key-value mono">${escapeHtml(key.key_masked || maskToken(key.key))}</span>
-            <span class="key-detail-link">详情 →</span>
+            <span class="key-identity-line"><span class="key-id">#${fmtNum(key.id)}</span><span class="key-value mono">${escapeHtml(key.key_masked || maskToken(key.key))}</span></span>
+            <span class="key-detail-link" aria-hidden="true">详情 →</span>
           </button>
+          <span class="key-email" title="${escapeHtml(key.email || '未填写邮箱')}">${escapeHtml(key.email || '未填写邮箱')}</span>
         </td>
-        <td data-label="邮箱"><span class="key-email" title="${escapeHtml(key.email || '-')}">${escapeHtml(key.email || '-')}</span></td>
         <td data-label="调度状态">${renderKeyStatusSummary(service, key)}</td>
         <td data-label="剩余额度" class="key-quota-cell">${renderKeyQuotaSummary(key)}</td>
         <td data-label="调用统计">${renderKeyUsageSummary(key)}</td>
-        <td data-label="历史证据">${renderKeyHealthEvidence(key)}</td>
-        <td data-label="操作">
+        <td data-label="操作" class="key-actions-cell">
           <div class="table-actions">
             <!-- r5 P0-2: 删除按钮已挪到抽屉的 Danger Zone，行内只保留启用/禁用。 -->
             <button class="btn btn-soft btn-sm" type="button" onclick="event.stopPropagation(); toggleKey('${service}', ${key.id}, ${availability.schedulable ? 0 : 1}, this)">${escapeHtml(availability.actionLabel)}</button>
@@ -4298,8 +4294,8 @@ function openKeyDetail(service, keyId) {
   const label = getServiceDisplayLabel(service);
   openDetailDrawer({
     kicker: `${label} Key`,
-    title: key.email || `${label} Key #${key.id}`,
-    subtitle: `${escapeHtml(key.key_masked || maskToken(key.key))} · ${escapeHtml(availability.label)}`,
+    title: `${label} Key #${key.id}`,
+    subtitle: `${key.key_masked || maskToken(key.key)} · ${availability.label}`,
     tone: availability.schedulable && !availability.restricted ? 'ok' : 'danger',
     summaryHtml: [
       drawerMetric('Key 状态', availability.label, availability.detail),
@@ -4307,6 +4303,7 @@ function openKeyDetail(service, keyId) {
       drawerMetric('最近使用', formatTime(key.last_used_at), key.usage_sync_error ? '存在同步异常' : '统计正常'),
     ].join(''),
     bodyHtml: [
+      drawerSection('账号邮箱', `<div class="table-note">${escapeHtml(key.email || '未填写邮箱')}</div>`),
       drawerSection('验证依据', renderKeyHealthEvidence(key)),
       drawerSection('Key 配额', renderKeyQuota(service, key)),
       drawerSection('账户额度', renderAccountQuota(service, key)),
