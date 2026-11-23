@@ -50,9 +50,9 @@ def coalesced_scrape(method):
             entry = state.extractions.get(identity)
             owner = entry is None
             if owner:
-                entry = (deadline, Future())
+                entry = {"deadline": deadline, "future": Future(), "failed_at": None}
                 state.extractions[identity] = entry
-            owner_deadline, pending = entry
+            owner_deadline, pending = entry["deadline"], entry["future"]
         if not owner:
             while not pending.done():
                 state.cancelled.wait(min(0.05, remaining_seconds()))
@@ -61,7 +61,7 @@ def coalesced_scrape(method):
                 return copy.deepcopy(pending.result())
             except MySearchError as exc:
                 # A surviving branch may retry after a shorter owner's budget ends.
-                if isinstance(exc, MySearchHTTPError) or owner_deadline >= deadline or time.monotonic() < owner_deadline:
+                if isinstance(exc, MySearchHTTPError) or owner_deadline >= deadline or entry["failed_at"] < owner_deadline:
                     raise
                 remaining_seconds()
                 with state.lock:
@@ -73,6 +73,7 @@ def coalesced_scrape(method):
             pending.set_result(copy.deepcopy(result))
             return result
         except BaseException as exc:
+            entry["failed_at"] = time.monotonic()
             pending.set_exception(exc)
             with state.lock:
                 if state.extractions.get(identity) is entry:

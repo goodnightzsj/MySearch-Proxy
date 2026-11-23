@@ -121,3 +121,34 @@ class RequestExtractReuseTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertGreater(calls[1], calls[0])
         self.assertFalse(self.state.cancelled.is_set())
+
+    def test_early_failure_is_not_retried_when_waiter_observes_it_after_deadline(self):
+        started, waiter_started, failed = Event(), Event(), Event()
+
+        def send(**kwargs):
+            started.set()
+            self.assertTrue(waiter_started.wait(1))
+            raise MySearchError("invalid upstream JSON")
+
+        def optional():
+            token = current_deadline.set(time.monotonic() + 0.2)
+            try:
+                return self.fetch(max_age_seconds=0)
+            finally:
+                current_deadline.reset(token)
+                failed.set()
+
+        def delayed_observation(timeout):
+            waiter_started.set()
+            self.assertTrue(failed.wait(1))
+            time.sleep(0.25)
+
+        with patch.object(self.client, "_request_json", side_effect=send) as request, ThreadPoolExecutor(1) as pool:
+            owner = pool.submit(copy_context().run, optional)
+            self.assertTrue(started.wait(1))
+            with patch.object(self.state.cancelled, "wait", side_effect=delayed_observation):
+                with self.assertRaisesRegex(MySearchError, "invalid upstream JSON"):
+                    self.fetch(max_age_seconds=0)
+            with self.assertRaisesRegex(MySearchError, "invalid upstream JSON"):
+                owner.result()
+        self.assertEqual(request.call_count, 1)
