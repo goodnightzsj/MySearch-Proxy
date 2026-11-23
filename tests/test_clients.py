@@ -186,6 +186,7 @@ class MySearchClientTests(unittest.TestCase):
                 "from": "tavily",
                 "to": "firecrawl",
                 "reason": "tavily: provider returned results without requested content",
+                "errors": ["tavily: provider returned results without requested content"],
             },
         )
 
@@ -5507,7 +5508,8 @@ class MySearchClientTests(unittest.TestCase):
         self.assertEqual(len(result["results"]), 1)
         self.assertEqual(
             fallback,
-            {"from": "exa", "to": "tavily", "reason": "exa: provider returned no results"},
+            {"from": "exa", "to": "tavily", "reason": "exa: provider returned no results",
+             "errors": ["exa: provider returned no results"]},
         )
 
     def test_tavily_domain_filtered_search_retries_with_site_query(self) -> None:

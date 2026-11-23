@@ -278,24 +278,7 @@ class MySearchClient(ProviderTransport):
                 probe_results.get(name, {"status": "network_error", "error": "probe failed", "checked_at": ""})
                 if cfg.enabled else {"status": "disabled", "error": "provider disabled by configuration", "checked_at": ""}
             )
-            providers[name] = {
-                "enabled": cfg.enabled,
-                "base_url": cfg.base_url,
-                "alternate_base_urls": cfg.alternate_base_urls,
-                "provider_mode": cfg.provider_mode,
-                "auth_mode": cfg.auth_mode,
-                "paths": cfg.default_paths,
-                "search_mode": cfg.search_mode,
-                "keys_file": str(cfg.keys_file or ""),
-                "available_keys": info["count"],
-                "total_keys": info.get("total_count", info["count"]),
-                "quarantined_keys": info.get("quarantined_count", 0),
-                "quarantine_reasons": info.get("quarantine_reasons", []),
-                "sources": info["sources"],
-                "live_status": status["status"],
-                "live_error": status["error"],
-                "last_checked_at": status["checked_at"],
-            }
+            providers[name] = self._describe_provider(cfg, info, status=status)
         return {
             "server_name": self.config.server_name,
             "timeout_seconds": self.config.timeout_seconds,
@@ -329,7 +312,9 @@ class MySearchClient(ProviderTransport):
                 "docs": "firecrawl",
                 "content": "firecrawl",
                 "social": "xai",
-                "fallback": "exa" if self.config.exa.enabled else "firecrawl",
+                "fallback": next((name for name in ("exa", "firecrawl", "tavily")
+                                  if providers[name]["enabled"] and providers[name]["available_keys"]
+                                  and providers[name]["operation_ready"] is not False), ""),
             },
             "providers": providers,
             "cache": cache,
@@ -3325,7 +3310,7 @@ class MySearchClient(ProviderTransport):
         degraded: list[ProviderName] = []
         for provider_name in ordered:
             status = probe_results.get(provider_name)
-            if status is None or status == "auth_error":
+            if status is None or status == "auth_error" or self._known_provider_unavailability(provider_configs[provider_name]):
                 continue
             if status == "ok":
                 healthy.append(provider_name)
@@ -3357,7 +3342,7 @@ class MySearchClient(ProviderTransport):
         if policy.key not in {"news", "award_result", "status"}:
             return False
         tavily_status = self._provider_live_status(self.config.tavily)
-        return tavily_status not in {None, "auth_error", "ok"}
+        return tavily_status not in {None, "auth_error", "ok"} and not self._known_provider_unavailability(self.config.tavily)
 
     def _provider_config_for_name(self, provider_name: ProviderName) -> ProviderConfig:
         if provider_name == "tavily":
@@ -3455,6 +3440,11 @@ class MySearchClient(ProviderTransport):
         attempted_providers: list[str] = []
         content_enrichment_errors: list[str] = []
         for provider_name in chain:
+            unavailable = self._known_provider_unavailability(self._provider_config_for_name(provider_name))
+            if unavailable:
+                last_error = MySearchError(f"{provider_name}: skipped: {unavailable}")
+                content_enrichment_errors.append(str(last_error)[:200])
+                continue
             attempted_providers.append(provider_name)
             try:
                 result = self._dispatch_single_provider(
@@ -3497,6 +3487,7 @@ class MySearchClient(ProviderTransport):
                     fallback_info = {
                         "from": primary_provider,
                         "to": provider_name,
+                        "errors": list(content_enrichment_errors),
                         "reason": (
                             str(last_error)[:200]
                             if last_error
@@ -3539,7 +3530,7 @@ class MySearchClient(ProviderTransport):
                 }
             candidate_result["evidence"] = evidence
             return candidate_result, None
-        raise MySearchError(f"All providers failed for query '{query[:80]}': {last_error}")
+        raise MySearchError(f"All providers failed for query '{query[:80]}': {' | '.join(content_enrichment_errors)}")
 
     def _fallback_quality_issue(
         self,
@@ -6842,9 +6833,13 @@ class MySearchClient(ProviderTransport):
         self,
         provider: ProviderConfig,
         keyring_info: dict[str, object],
+        *,
+        status: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        status = self._probe_provider_status(provider, int(keyring_info["count"]))
+        if status is None:
+            status = self._probe_provider_status(provider, int(keyring_info["count"]))
         return {
+            "enabled": provider.enabled,
             "base_url": provider.base_url,
             "alternate_base_urls": provider.alternate_base_urls,
             "provider_mode": provider.provider_mode,
@@ -6853,6 +6848,7 @@ class MySearchClient(ProviderTransport):
             "search_mode": provider.search_mode,
             "keys_file": str(provider.keys_file or ""),
             "available_keys": keyring_info["count"],
+            "credential_scope": "gateway" if provider.managed_key_pool else "provider",
             "total_keys": keyring_info.get("total_count", keyring_info["count"]),
             "quarantined_keys": keyring_info.get("quarantined_count", 0),
             "quarantine_reasons": keyring_info.get("quarantine_reasons", []),
@@ -6860,7 +6856,42 @@ class MySearchClient(ProviderTransport):
             "live_status": status["status"],
             "live_error": status["error"],
             "last_checked_at": status["checked_at"],
+            "probe_evidence": status.get("evidence", "unknown"),
+            "operation_ready": (
+                False if self._probe_is_unavailable(status)
+                else True if status["status"] == "ok" and status.get("evidence") == "operation"
+                else None
+            ),
         }
+
+    def _provider_probe_cache_key(self, provider: ProviderConfig, key_count: int) -> str:
+        record = self.keyring.first(provider.name)
+        if record is None:
+            return ""
+        key_fingerprint = hashlib.sha256(record.key.encode("utf-8")).hexdigest()[:12]
+        return f"{provider.name}:{record.label}:{key_fingerprint}:{key_count}:{self.keyring.generation}"
+
+    @staticmethod
+    def _probe_is_unavailable(probe: dict[str, str]) -> bool:
+        status = probe.get("status", "")
+        error = probe.get("error", "").lower()
+        return status in {"disabled", "not_configured", "auth_error", "key_unavailable"} or (
+            status in {"http_error", "network_error"} and (
+                query_routing._looks_like_provider_limit_error(error)
+                or ("no available" in error and "api key" in error)
+                or "upstream api key pool is unavailable" in error
+                or "all social upstream api keys are unavailable" in error
+            )
+        )
+
+    def _known_provider_unavailability(self, provider: ProviderConfig) -> str:
+        if not self.keyring.has_provider(provider.name):
+            return ""
+        count = int(self.keyring.describe()[provider.name]["count"])
+        probe = self._cache.probe_get(self._provider_probe_cache_key(provider, count))
+        if probe and self._probe_is_unavailable(probe):
+            return probe.get("error") or probe["status"]
+        return ""
 
     def _xai_probe_model(self) -> str:
         # Probe 取当前 registry 首项，跟随 MYSEARCH_GROK_MODELS / EXTRA_MODELS 自定义。
@@ -6965,11 +6996,7 @@ class MySearchClient(ProviderTransport):
                 "checked_at": "",
             }
 
-        key_fingerprint = hashlib.sha256(record.key.encode("utf-8")).hexdigest()[:12]
-        cache_key = (
-            f"{provider.name}:{record.label}:{key_fingerprint}:{key_count}:"
-            f"{self.keyring.generation}"
-        )
+        cache_key = self._provider_probe_cache_key(provider, key_count)
         cached = self._cache.probe_get(cache_key)
         if cached is not None:
             return cached
@@ -6977,11 +7004,12 @@ class MySearchClient(ProviderTransport):
         checked_at = datetime.now(timezone.utc).isoformat()
         cache_ttl_seconds = self._provider_probe_ttl_seconds
         try:
-            self._probe_provider_request(provider, record.key)
+            evidence = self._probe_provider_request(provider, record.key)
             result = {
                 "status": "ok",
                 "error": "",
                 "checked_at": checked_at,
+                "evidence": evidence or "unknown",
             }
         except MySearchHTTPError as exc:
             result = {
@@ -7007,7 +7035,7 @@ class MySearchClient(ProviderTransport):
         self._cache.probe_set(cache_key, result, ttl_seconds=cache_ttl_seconds)
         return result
 
-    def _probe_xai_compatible_gateway(self, provider: ProviderConfig, key: str, timeout_seconds: int) -> None:
+    def _probe_xai_compatible_gateway(self, provider: ProviderConfig, key: str, timeout_seconds: int) -> str:
         health_path = "/health"
         health_base_url = self._derive_root_health_base_url(provider)
         payload = None
@@ -7036,7 +7064,7 @@ class MySearchClient(ProviderTransport):
                     or "social/X gateway health probe reported unavailable"
                 )
                 raise MySearchError(str(detail))
-            return
+            return "service_health"
 
         fallback_timeout_seconds = min(timeout_seconds, min(self.config.timeout_seconds, 20))
         self._request_json(
@@ -7053,8 +7081,9 @@ class MySearchClient(ProviderTransport):
             base_url=provider.base_url_for("social_search"),
             timeout_seconds=fallback_timeout_seconds,
         )
+        return "operation"
 
-    def _probe_provider_request(self, provider: ProviderConfig, key: str) -> None:
+    def _probe_provider_request(self, provider: ProviderConfig, key: str) -> str:
         timeout_seconds = min(self.config.timeout_seconds, 10)
         if provider.name == "tavily":
             self._request_json(
@@ -7072,7 +7101,7 @@ class MySearchClient(ProviderTransport):
                 key=key,
                 timeout_seconds=timeout_seconds,
             )
-            return
+            return "operation"
         if provider.name == "firecrawl":
             self._request_json(
                 provider=provider,
@@ -7085,7 +7114,7 @@ class MySearchClient(ProviderTransport):
                 key=key,
                 timeout_seconds=timeout_seconds,
             )
-            return
+            return "operation"
         if provider.name == "exa":
             self._request_json(
                 provider=provider,
@@ -7098,13 +7127,13 @@ class MySearchClient(ProviderTransport):
                 key=key,
                 timeout_seconds=timeout_seconds,
             )
-            return
+            return "operation"
         if provider.name == "xai":
             if provider.search_mode == "compatible":
-                self._probe_xai_compatible_gateway(provider, key, timeout_seconds)
-                return
+                return self._probe_xai_compatible_gateway(provider, key, timeout_seconds)
             try:
                 self._probe_xai_official_status_page(timeout_seconds=timeout_seconds)
+                return "public_status"
             except MySearchHTTPError:
                 self._probe_xai_official_via_responses(
                     provider=provider,
@@ -7119,7 +7148,8 @@ class MySearchClient(ProviderTransport):
                     key=key,
                     timeout_seconds=timeout_seconds,
                 )
-            return
+            return "operation"
+        raise MySearchError(f"Unsupported provider probe: {provider.name}")
 
     def _summarize_route_error(self, error_text: str) -> str:
         return query_routing._summarize_route_error(error_text=error_text)
@@ -7134,14 +7164,7 @@ class MySearchClient(ProviderTransport):
             return False
         key_count = int(self.keyring.describe()[provider.name]["count"])
         probe = self._probe_provider_status(provider, key_count)
-        status = str(probe.get("status") or "")
-        if status in {"", "not_configured", "auth_error", "key_unavailable"}:
-            return False
-        if status == "http_error" and self._looks_like_provider_limit_error(
-            str(probe.get("error") or "")
-        ):
-            return False
-        return True
+        return bool(probe.get("status")) and not self._probe_is_unavailable(probe)
 
     def _provider_live_status(self, provider: ProviderConfig) -> str | None:
         if not provider.enabled:

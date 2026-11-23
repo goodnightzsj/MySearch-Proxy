@@ -84,6 +84,8 @@ hybrid 的失败占位和同provider双分支不算多provider；同一官方域
 
 返回当前 provider 配置、base URL、search mode、auth mode 和 key 可用性。
 
+`available_keys` 只统计本地可调度凭证；`credential_scope=gateway` 时它是网关令牌数，不是上游健康 Key 数。`probe_evidence` 区分 `operation`、`service_health` 和 `public_status`；`operation_ready` 为 true 仅表示最近一次真实操作探测成功，false 表示已知不可用，null 表示未证实。结合 `last_checked_at` 判断时效；公共状态页正常不证明账号有效或有余额。回退复用现有探测缓存跳过已知空池/额度错误，未知或瞬态故障仍可尝试，失败链保留各 provider 原因。
+
 ### `crawl_site`
 
 Firecrawl 作业完成后，若入口 URL 缺失或其正文为空，会在原请求预算内精确补抓入口一次（瞬时错误沿用有界重试）。成功时入口优先，其余页面保持顺序且总数不超过 `limit`；`metadata.entry_page` 记录补抓结果及省略页数，`total/completed` 仍表示上游 crawl 作业计数。失败保留已有页面并标记 `degraded`；取消或预算耗尽继续报错。未声明完成的同步响应不触发补抓。
