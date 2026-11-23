@@ -6663,7 +6663,7 @@ class MySearchClientTests(unittest.TestCase):
             "Top source: Releases · openai/openai-node - GitHub (github.com) — Latest release 6.33.0 (2026-03-25)",
         )
 
-    def test_search_github_release_summary_hydrates_latest_version_from_release_page(self) -> None:
+    def test_search_github_release_summary_uses_available_snippet_without_hydration(self) -> None:
         client = MySearchClient()
         client._search_tavily = lambda **kwargs: {  # type: ignore[method-assign]
             "provider": "tavily",
@@ -6703,7 +6703,7 @@ class MySearchClientTests(unittest.TestCase):
 
         self.assertEqual(
             result["summary"],
-            "Top source: Releases · openai/openai-node - GitHub (github.com) — Latest release 6.33.0 (2026-03-25)",
+            "Top source: Releases · openai/openai-node - GitHub (github.com) — Official JavaScript / TypeScript library for the OpenAI API - Releases · openai/openai-node.",
         )
 
     def test_resolve_intent_treats_github_latest_release_query_as_resource(self) -> None:
@@ -6823,7 +6823,7 @@ class MySearchClientTests(unittest.TestCase):
         )
         self.assertEqual(
             result["summary"],
-            "Top source: Releases · openai/openai-node - GitHub (github.com) — Latest release 6.33.0 (2026-03-25)",
+            "Top source: Releases · openai/openai-node - GitHub (github.com) — Official GitHub releases page for openai/openai-node.",
         )
 
     def test_search_github_latest_release_query_rescues_canonical_releases_page_for_explicit_repo_slug(self) -> None:
@@ -6894,7 +6894,7 @@ class MySearchClientTests(unittest.TestCase):
         )
         self.assertEqual(
             result["summary"],
-            "Top source: Releases · openai/openai-python - GitHub (github.com) — Latest release 2.29.0 (2026-03-17)",
+            "Top source: Releases · openai/openai-python - GitHub (github.com) — Official GitHub releases page for openai/openai-python.",
         )
 
     def test_github_release_summary_prefers_first_release_in_descending_release_page(self) -> None:
@@ -9077,7 +9077,7 @@ class MySearchClientTests(unittest.TestCase):
         self.assertGreaterEqual(news_plan["social_max_results"], 4)
         self.assertGreaterEqual(news_plan["scrape_top_n"], 4)
 
-    def test_firecrawl_primary_verify_requests_content(self) -> None:
+    def test_firecrawl_primary_verify_respects_content_opt_out(self) -> None:
         client = MySearchClient()
         firecrawl_calls: list[dict[str, object]] = []
 
@@ -9132,7 +9132,7 @@ class MySearchClientTests(unittest.TestCase):
         )
 
         self.assertTrue(firecrawl_calls)
-        self.assertTrue(firecrawl_calls[0]["include_content"])
+        self.assertFalse(firecrawl_calls[0]["include_content"])
 
     def test_exa_search_uses_current_type_for_exact_pricing_query(self) -> None:
         client = MySearchClient()

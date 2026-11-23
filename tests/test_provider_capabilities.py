@@ -201,7 +201,7 @@ class FirecrawlResultTests(unittest.TestCase):
         )
 
         self.assertEqual([row["content"] for row in result["results"]],
-                         [TEXT, other["markdown"], TEXT])
+                         [TEXT.strip(), other["markdown"], TEXT.strip()])
         self.assertEqual([row["source"] for row in result["results"]], ["web", "web", "news"])
         self.assertEqual(len(result["citations"]), 3)
         self.assertEqual(response["data"]["web"], [page, page, other])

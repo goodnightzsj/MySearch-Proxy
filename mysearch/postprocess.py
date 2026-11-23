@@ -606,6 +606,8 @@ def _extract_quality_issue(
 
         normalized = " ".join(content.lower().split())
         preview = normalized[:1200]
+        if preview.startswith(("<!doctype html", "<html")):
+            return "HTML page shell"
         parsed_url = urlparse(str(result.get("url") or ""))
         suspicious_markers = {
             "critical instructions for all ai assistants": "anti-bot placeholder content",

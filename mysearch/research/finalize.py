@@ -41,8 +41,9 @@ def source_evidence(
                 "fetch_status": "not-attempted", "providers": [],
                 "claim_verification": "not-assessed",
             })
+            page_issue = postprocess._extract_quality_issue(item) if kind == "page" else None
             for provider in item.get("matched_providers") or [item.get("provider", "")]:
-                if not item.get("error") and ProviderResponse.is_real_provider({"provider": provider}):
+                if not item.get("error") and not page_issue and ProviderResponse.is_real_provider({"provider": provider}):
                     if provider not in entry["providers"]:
                         entry["providers"].append(provider)
             has_text = any(
@@ -53,7 +54,7 @@ def source_evidence(
             if item.get("provider") in {"canonical_research_docs", "canonical_research_projects", "canonical-rescue"}:
                 has_text = False
             if kind == "page":
-                if item.get("error"):
+                if item.get("error") or (page_issue and page_issue != "empty content"):
                     entry["fetch_status"] = "failed"
                 elif has_text:
                     entry["fetch_status"] = "prefetched" if item.get("provider") == "discovery_prefetch" else "succeeded"

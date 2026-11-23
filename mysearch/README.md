@@ -19,6 +19,8 @@ Exa 默认停用，保留数据和代码以便显式恢复。`MYSEARCH_EXA_ENABL
 
 直接调用 `search` 即可读取完整结果。答案、引用和各候选的正文均可按原字段内联读取。`content[0].text` 是单行 JSON，解析后与 `structuredContent` 一致。通过 Streamable HTTP 调用时，支持 gzip 的客户端可以压缩传输 4 KiB 及以上的 JSON 响应。
 
+`include_content=false` 在所有模式、策略和嵌套分支中都不返回正文；设为 `true` 时保留完整正文。摘要只读取已检索的证据，不隐式补抓发布页。多来源命中表示检索覆盖，不能证明答案或问题前提成立；查询改写只附加提示，保留原始主体及限制条件。
+
 带明确域名的 API 文档查找会优先匹配命名 API 的正式页面，保留版本、语言和调试查询的既有排序。奖项补充取页在同次搜索内复用已读页面，并共享最多 15 秒的时限，预留当时剩余总预算的一半。时限内未补足答案时，`evidence.result_event_page_budget_exhausted` 明确标记限制，诊断为 `degraded`。
 
 普通 Firecrawl 正文搜索先发现 URL，再按解码后的文件路径排除 `llms*.txt` 聚合文档，最后并行抓取全部合格页面。负 `inurl` 仅为搜索提示，不能代替 URL 资格检查；`route_debug.excluded_urls` 记录排除原因与 `not-attempted`，抓取失败在 `content_fetch` 中明确保留。明确搜索聚合文档或直接 `extract_url` 时仍返回全文；辅助分支的正文仍完整内联。
@@ -47,6 +49,10 @@ Exa 默认停用，保留数据和代码以便显式恢复。`MYSEARCH_EXA_ENABL
 - 优先 Firecrawl
 - Firecrawl 失败或正文为空时回退 Tavily extract
 - 两者都无法提供正文时明确保留失败；仅显式启用 Exa 后才使用 Contents，逐 URL 失败不会被 HTTP 200 掩盖
+
+`auto` 的 Markdown 提取先复用现有缓存，再对已核实提供原生导出的 `docs.tavily.com`、`docs.firecrawl.dev` 请求对应 `.md`。只有 `text/markdown` 且正文质量通过时才采用，最多等待3秒、不跟随重定向；失败继续既有提取路径并保留诊断。其他来源及显式指定 provider 的请求不增加此探测。此能力按来源的公开导出合同启用，不依赖查询或评分题目。
+
+Firecrawl 的目标页面状态独立于 API/Key 状态。错误页不会进入正常正文缓存或搜索正文，显式提取保留原响应并附 `warning`，自动提取继续回退；不会因为目标网站404/403而停用Key。
 
 需要显式时效时，设置 `provider="firecrawl", max_age_seconds=0` 请求实时抓取，正整数表示允许的缓存年龄（秒）。此选项绕过本地 extract 缓存，并按毫秒传给 Firecrawl；不设置时保留现有缓存行为。
 

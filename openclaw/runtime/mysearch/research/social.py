@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 
 from mysearch import postprocess
 from mysearch import query_routing
+from mysearch.research.sections import _build_excerpt
 
 #: 只认真实 X 域名。Firecrawl 走通用网页抓取，镜像站会混进 `include_domains`。
 _X_DOMAIN_RE = re.compile(r"^https?://(?:www\.|mobile\.)?(?:x|twitter)\.com/", re.IGNORECASE)
@@ -161,7 +162,7 @@ def _normalize_social_gateway_response(
                 or item.get("username")
                 or url
             )
-            snippet = item.get("snippet") or item.get("summary") or content
+            snippet = item.get("snippet") or item.get("summary") or _build_excerpt(content, limit=320)
             results.append(
                 {
                     "provider": "custom_social",

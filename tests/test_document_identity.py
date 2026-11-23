@@ -77,4 +77,12 @@ class DocumentHydrationTests(unittest.TestCase):
 
     def test_invalid_or_indented_literal_payload_is_preserved(self):
         for text in (self.shell[:-1], "    " + self.shell, "\t" + self.shell):
-            self.assertEqual(query_routing._clean_extract_content(text), text.strip())
+            self.assertEqual(query_routing._clean_extract_content(text), text)
+
+    def test_code_examples_keep_images_whitespace_and_challenge_terms(self):
+        example = '<img src="data:image/png;base64,AAAA" alt="example">\n\n\nI am human\n'
+        for fence in ("```html", "~~~~html", "````markdown"):
+            text = "# Example\n\n" + fence + "\n" + example + fence.split("h")[0].split("m")[0]
+            self.assertEqual(query_routing._clean_extract_content(text), text)
+        text = '    <img src="data:image/png;base64,AAAA">\n\t<pre>  example  </pre>\n'
+        self.assertEqual(query_routing._clean_extract_content(text), text)

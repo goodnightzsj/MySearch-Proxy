@@ -2911,8 +2911,37 @@ def _build_firecrawl_crawl_result(
 def _clean_extract_content(
     content: str,
 ) -> str:
-        if not isinstance(content, str) or not content.strip():
-            return content
+    if not isinstance(content, str) or not content.strip():
+        return content
+    blocks: list[tuple[bool, str]] = []
+    prose: list[str] = []
+    fence = ""
+    for line in content.splitlines(keepends=True):
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        protected = bool(fence or marker or line.startswith(("    ", "\t")))
+        if protected:
+            if prose:
+                blocks.append((False, _clean_extract_prose("".join(prose))))
+                prose.clear()
+            blocks.append((True, line))
+        else:
+            prose.append(line)
+        if marker:
+            run, suffix = marker.groups()
+            if not fence:
+                fence = run
+            elif run[0] == fence[0] and len(run) >= len(fence) and not suffix.strip():
+                fence = ""
+    if prose:
+        blocks.append((False, _clean_extract_prose("".join(prose))))
+    if blocks and not blocks[0][0]:
+        blocks[0] = (False, blocks[0][1].lstrip())
+    if blocks and not blocks[-1][0]:
+        blocks[-1] = (False, blocks[-1][1].rstrip())
+    return "".join(text for _, text in blocks)
+
+
+def _clean_extract_prose(content: str) -> str:
         text = _strip_document_hydration(content)
         text = re.sub(r"!\[[^\]]*\]\(\s*<?Base64-Image-Removed>?\s*\)", "", text)
         text = text.replace("<Base64-Image-Removed>", "")
@@ -2924,7 +2953,7 @@ def _clean_extract_content(
         text = _strip_trailing_hcaptcha(text)
         text = postprocess._strip_trailing_empty_headings(text)
         text = re.sub(r"\n{3,}", "\n\n", text)
-        return text.strip()
+        return text
 
 
 def _strip_document_hydration(content: str) -> str:

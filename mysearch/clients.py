@@ -1366,6 +1366,11 @@ class MySearchClient(ProviderTransport):
             if cached_page is not None:
                 # Do not copy into the auto key: that would restart the source body's TTL.
                 return self._annotate_cache(cached_page, namespace="extract", hit=True)
+            if formats == ["markdown"] and only_main_content:
+                native_page = self._extract_native_markdown(url=url)
+                if native_page is not None:
+                    self._cache_set("extract", cache_key, native_page)
+                    return self._annotate_cache(native_page, namespace="extract", hit=False)
 
         if provider in {"auto", "firecrawl"}:
             firecrawl_attempts = 2
@@ -1778,7 +1783,7 @@ class MySearchClient(ProviderTransport):
                 continue
             urls.append(url)
             content = (result.get("content") or "").strip()
-            if content and len(content) >= 200:
+            if content and len(content) >= 200 and self._extract_quality_issue(result) is None:
                 prefetched_content[url] = content
             if len(urls) >= research_plan["scrape_top_n"]:
                 break
@@ -1853,7 +1858,11 @@ class MySearchClient(ProviderTransport):
                 pages.append(page)
             elif task_name in page_results:
                 page = page_results[task_name]
-                page["excerpt"] = self._build_excerpt(page.get("content", ""))
+                issue = self._extract_quality_issue(page)
+                if issue:
+                    page["error"] = issue
+                else:
+                    page["excerpt"] = self._build_excerpt(page.get("content", ""))
                 pages.append(page)
             else:
                 error = page_errors.get(task_name)
@@ -3606,12 +3615,7 @@ class MySearchClient(ProviderTransport):
                 query=query,
                 max_results=max_results,
                 categories=decision.firecrawl_categories or self._firecrawl_categories(mode, intent),
-                include_content=(
-                    include_content
-                    or mode in {"docs", "research", "github", "pdf"}
-                    or intent == "tutorial"
-                    or (result_event_query and mode == "news" and strategy in {"verify", "deep"})
-                ),
+                include_content=include_content,
                 include_domains=include_domains,
                 exclude_domains=exclude_domains,
                 from_date=from_date,
@@ -4205,7 +4209,7 @@ class MySearchClient(ProviderTransport):
                     query=query,
                     max_results=max_results,
                     categories=self._firecrawl_categories(mode, intent),
-                    include_content=include_content or strategy in {"verify", "deep"},
+                    include_content=include_content,
                     include_domains=include_domains,
                     exclude_domains=exclude_domains,
                     from_date=from_date,
@@ -4219,7 +4223,7 @@ class MySearchClient(ProviderTransport):
                     query=query,
                     max_results=max_results,
                     categories=decision.firecrawl_categories or self._firecrawl_categories(mode, intent),
-                    include_content=include_content or strategy in {"verify", "deep"},
+                    include_content=include_content,
                     include_domains=include_domains,
                     exclude_domains=exclude_domains,
                     from_date=from_date,
@@ -4527,8 +4531,8 @@ class MySearchClient(ProviderTransport):
                 "source": "web",
                 "title": item.get("title", ""),
                 "url": item.get("url", ""),
-                "snippet": item.get("content", ""),
-                "content": item.get("raw_content", "") if include_content else "",
+                "snippet": self._clean_extract_content(item.get("content", "")),
+                "content": self._clean_extract_content(item.get("raw_content", "")) if include_content else "",
                 "score": item.get("score"),
                 "published_date": item.get("published_date")
                 or item.get("publishedDate")
@@ -5047,13 +5051,20 @@ class MySearchClient(ProviderTransport):
                         "fetch_status": "not-attempted",
                     })
                     continue
+                body = self._clean_extract_content(item.get("markdown", ""))
+                issue = self._extract_quality_issue({
+                    "url": item.get("url", ""), "content": body,
+                    "metadata": item.get("metadata") or {},
+                })
                 candidate = {
                     "provider": "firecrawl",
                     "source": source_name,
                     "title": item.get("title", ""),
                     "url": item.get("url", ""),
-                    "snippet": item.get("description", "") or item.get("snippet", "") or item.get("markdown", ""),
-                    "content": item.get("markdown", "") if include_content else "",
+                    "snippet": item.get("description", "") or item.get("snippet", "") or self._build_excerpt(
+                        body if not issue else "", limit=320,
+                    ),
+                    "content": body if include_content and not issue else "",
                     "metadata": item.get("metadata") or {},
                     "published_date": item.get("publishedDate")
                     or item.get("date")
@@ -5061,11 +5072,8 @@ class MySearchClient(ProviderTransport):
                     or item.get("published_at")
                     or "",
                 }
-                if candidate["content"]:
-                    issue = self._extract_quality_issue(candidate)
-                    if issue:
-                        candidate["content"] = ""
-                        candidate["content_fetch"] = {"status": "failed", "error": issue}
+                if issue and issue != "empty content":
+                    candidate["content_fetch"] = {"status": "failed", "error": issue}
                 if candidate not in results:
                     results.append(candidate)
 
@@ -5074,7 +5082,7 @@ class MySearchClient(ProviderTransport):
             fresh_content = self._looks_like_pricing_query(query.lower()) or self._looks_like_status_query(query.lower())
             page_tasks = {
                 item["url"]: lambda url=item["url"]: self.extract_url(
-                    url=url, provider="firecrawl",
+                    url=url, provider="firecrawl" if fresh_content else "auto",
                     **({"max_age_seconds": 0} if fresh_content else {}),
                 )
                 for item in results if item.get("url") and (fresh_content or not item.get("content"))
@@ -5088,6 +5096,7 @@ class MySearchClient(ProviderTransport):
                     page = pages[url]
                     issue = self._extract_quality_issue(page)
                     item["content"] = "" if issue else page.get("content", "")
+                    item["metadata"] = page.get("metadata") or {}
                     item["content_fetch"] = {
                         "status": "failed" if issue else "succeeded",
                         "provider": page.get("provider", "firecrawl"),
@@ -6165,6 +6174,38 @@ class MySearchClient(ProviderTransport):
                 "failed_results": response.get("failed_results") or [],
             },
         }
+
+    def _extract_native_markdown(self, *, url: str) -> dict[str, Any] | None:
+        parsed = urlparse(url)
+        # Confirmed public export origins; do not probe arbitrary/internal targets.
+        if parsed.scheme != "https" or parsed.netloc not in {"docs.tavily.com", "docs.firecrawl.dev"}:
+            return None
+        path = parsed.path.rstrip("/")
+        if not path:
+            return None
+        export_url = parsed._replace(path=path if path.endswith(".md") else path + ".md", fragment="").geturl()
+        remaining = remaining_request_seconds()
+        timeout = min(3.0, self.config.timeout_seconds, remaining if remaining is not None else float("inf"))
+        try:
+            with direct_call(provider="web", operation="extract") as call:
+                response = self._http.get(export_url, headers={"Accept": "text/markdown"},
+                                          timeout=timeout, follow_redirects=False)
+                call["status_code"] = response.status_code
+                response.raise_for_status()
+                if response.headers.get("content-type", "").split(";")[0].strip().lower() != "text/markdown":
+                    call.update(outcome="error", failure_reason="unsupported_content_type")
+                    return None
+                result = {
+                    "provider": "native_markdown", "transport": "direct", "url": url,
+                    "content": self._clean_extract_content(response.text),
+                    "metadata": {"raw_url": export_url, "statusCode": response.status_code, "content_type": "text/markdown"},
+                }
+                issue = self._extract_quality_issue(result)
+                call.update(outcome="error" if issue else "success", failure_reason=issue or "")
+                return None if issue else result
+        except (httpx.HTTPError, ValueError):
+            remaining_request_seconds()
+            return None
 
     def _extract_github_blob_raw(self, *, url: str) -> dict[str, Any] | None:
         raw_urls = self._github_blob_raw_urls(url)
@@ -7275,27 +7316,6 @@ class MySearchClient(ProviderTransport):
             text,
             flags=re.IGNORECASE,
         )
-        if not matches:
-            try:
-                extracted_page = self.extract_url(
-                    url=url,
-                    provider="auto",
-                    formats=["markdown"],
-                    only_main_content=True,
-                )
-            except MySearchError:
-                extracted_page = {}
-            extracted_text = re.sub(
-                r"\s+",
-                " ",
-                str(extracted_page.get("content") or "").strip(),
-            ).strip()
-            if extracted_text:
-                matches = re.findall(
-                    r"(?:##\s+)?(v?\d+\.\d+\.\d+(?:[-+._][a-z0-9]+)?)\s*\((\d{4}-\d{2}-\d{2})\)",
-                    extracted_text,
-                    flags=re.IGNORECASE,
-                )
         if not matches:
             return ""
         version, date = max(matches, key=lambda item: item[1])

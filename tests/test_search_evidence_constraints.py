@@ -5,6 +5,8 @@ from unittest.mock import patch
 
 from mysearch import postprocess, query_routing
 from mysearch.clients import MySearchClient
+from mysearch.diagnostics import result_outcome
+from mysearch.research.finalize import source_evidence
 from test_provider_disabled import fixture_config
 
 
@@ -86,3 +88,12 @@ class SearchEvidenceConstraintsTests(unittest.TestCase):
         self.assertNotIn("corroborated", summary)
         self.assertIn("answer not verified", summary)
         self.assertEqual(result["answer"], "")
+
+    def test_error_page_is_not_successful_extracted_evidence(self):
+        page = {"url": "https://example.test/missing", "provider": "firecrawl", "content": "Resource unavailable",
+                "metadata": {"statusCode": 404}, "warning": "target HTTP 404"}
+        evidence = source_evidence(results=[], pages=[page], citations=[])[0]
+        self.assertEqual(evidence["text_status"], "missing")
+        self.assertEqual(evidence["fetch_status"], "failed")
+        self.assertEqual(evidence["providers"], [])
+        self.assertEqual(result_outcome("extract_url", page), "degraded")

@@ -48,6 +48,7 @@ ITEM_SOURCE_KINDS: frozenset[str] = frozenset(
         "canonical_research_projects",
         "discovery_prefetch",
         "github_raw",
+        "native_markdown",
     }
 )
 
@@ -64,6 +65,7 @@ _LEGACY_KIND_BY_VALUE: dict[str, str] = {
     "canonical-rescue": KIND_ENRICHMENT,
     "discovery_prefetch": KIND_ENRICHMENT,
     "github_raw": KIND_ENRICHMENT,
+    "native_markdown": KIND_ENRICHMENT,
 }
 
 ALL_LEGACY_PROVIDER_VALUES: frozenset[str] = frozenset(_LEGACY_KIND_BY_VALUE)

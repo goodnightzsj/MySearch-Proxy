@@ -37,6 +37,8 @@ def _annotate_search_debug(
     requested_max_results: int | None = None,
     candidate_max_results: int | None = None,
 ) -> dict[str, Any]:
+        if not include_content:
+            _omit_search_content(result)
         result["route_debug"] = {
             "requested_provider": provider,
             "route_provider": decision.provider,
@@ -59,6 +61,15 @@ def _annotate_search_debug(
                 evidence.get("official_filter_applied")
             )
         return result
+
+
+def _omit_search_content(result: dict[str, Any]) -> None:
+    for item in result.get("results") or []:
+        item["content"] = ""
+    for name in ("primary_search", "secondary_search", "web", "social"):
+        branch = result.get(name)
+        if isinstance(branch, dict):
+            _omit_search_content(branch)
 
 
 def _annotate_extract_warning(
