@@ -1774,14 +1774,14 @@ class MySearchClientTests(unittest.TestCase):
 
         refined = client._refined_award_result_query("2026 Oscars best picture winner")
 
-        self.assertEqual(refined, "2026 Oscars winners list best picture full results")
+        self.assertEqual(refined, "2026 Oscars best picture winner full results winners list")
 
     def test_refined_award_result_query_rewrites_grammy_query(self) -> None:
         client = MySearchClient()
 
         refined = client._refined_award_result_query("2026 Grammy album of the year winner")
 
-        self.assertEqual(refined, "2026 Grammy winners list album of the year full results")
+        self.assertEqual(refined, "2026 Grammy album of the year winner full results winners list")
 
     def test_has_strong_award_result_rejects_generic_unrelated_winners_list(self) -> None:
         client = MySearchClient()
@@ -2110,8 +2110,8 @@ class MySearchClientTests(unittest.TestCase):
             strategy="verify",
         )
 
-        self.assertEqual(captured["query"], "2026 Oscars winners list best picture full results")
-        self.assertEqual(result["query"], "2026 Oscars winners list best picture full results")
+        self.assertEqual(captured["query"], "2026 Oscars best picture winner full results winners list")
+        self.assertEqual(result["query"], "2026 Oscars best picture winner full results winners list")
 
     def test_tavily_award_result_refinement_queries_trusted_domains_when_general_results_are_weak(self) -> None:
         client = MySearchClient()
@@ -2128,6 +2128,8 @@ class MySearchClientTests(unittest.TestCase):
             exclude_domains,
             strategy,
             days=None,
+            from_date=None,
+            to_date=None,
         ):
             include_domain_calls.append(tuple(include_domains) if include_domains else None)
             if include_domains == ["grammy.com"]:
@@ -2202,6 +2204,8 @@ class MySearchClientTests(unittest.TestCase):
             exclude_domains,
             strategy,
             days=None,
+            from_date=None,
+            to_date=None,
         ):
             include_domain_calls.append(tuple(include_domains) if include_domains else None)
             if include_domains == ["oscars.org", "theacademy.com"]:
@@ -2290,6 +2294,8 @@ class MySearchClientTests(unittest.TestCase):
             exclude_domains,
             strategy,
             days=None,
+            from_date=None,
+            to_date=None,
         ):
             if include_domains == ["oscars.org", "theacademy.com"]:
                 return {

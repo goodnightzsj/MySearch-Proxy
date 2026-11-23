@@ -591,6 +591,15 @@ def _normalize_citation(item: Any) -> dict[str, Any] | None:
 def _extract_quality_issue(
     result: dict[str, Any],
 ) -> str | None:
+        metadata = result.get("metadata") or {}
+        status = metadata.get("statusCode") if isinstance(metadata, dict) else None
+        if status is not None:
+            if isinstance(status, str) and status.isdigit():
+                status = int(status)
+            if type(status) is not int:
+                return "invalid target HTTP status"
+            if not (200 <= status < 300 or status == 304):
+                return f"target HTTP {status}"
         content = result.get("content")
         if not isinstance(content, str) or not content.strip():
             return "empty content"

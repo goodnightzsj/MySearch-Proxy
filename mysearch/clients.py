@@ -915,6 +915,7 @@ class MySearchClient(ProviderTransport):
             include_domains=include_domains,
             exclude_domains=exclude_domains,
             from_date=from_date,
+            to_date=to_date,
         )
         result = self._apply_result_event_answer_override(
             query=query,
@@ -1084,6 +1085,8 @@ class MySearchClient(ProviderTransport):
                     include_domains=include_domains,
                     exclude_domains=exclude_domains,
                     strategy=resolved_strategy,
+                    from_date=from_date,
+                    to_date=to_date,
                 )
                 if tavily_boost.get("results"):
                     merged = self._merge_search_payloads(
@@ -1200,7 +1203,8 @@ class MySearchClient(ProviderTransport):
         )
 
         should_supplement_answer = (
-            not (result.get("answer") or "").strip()
+            effective_include_answer
+            and not (result.get("answer") or "").strip()
             and decision.provider != "xai"
             and self.config.xai.search_mode == "official"
             and (
@@ -1215,6 +1219,10 @@ class MySearchClient(ProviderTransport):
                     query=query,
                     sources=["web"],
                     max_results=3,
+                    include_domains=include_domains,
+                    exclude_domains=exclude_domains,
+                    from_date=from_date,
+                    to_date=to_date,
                 )
                 xai_answer = (xai_supplement.get("answer") or "").strip()
                 if xai_answer:
@@ -3698,6 +3706,7 @@ class MySearchClient(ProviderTransport):
         include_domains: list[str] | None,
         exclude_domains: list[str] | None,
         from_date: str | None,
+        to_date: str | None = None,
     ) -> dict[str, Any]:
         query_lower = query.lower()
         if result.get("provider") != "tavily":
@@ -3733,6 +3742,8 @@ class MySearchClient(ProviderTransport):
                 exclude_domains=exclude_domains,
                 strategy="verify",
                 days=days,
+                from_date=from_date,
+                to_date=to_date,
             )
             if refined.get("results"):
                 merged = self._merge_search_payloads(
@@ -3755,6 +3766,8 @@ class MySearchClient(ProviderTransport):
                     exclude_domains=exclude_domains,
                     strategy="verify",
                     days=days,
+                    from_date=from_date,
+                    to_date=to_date,
                 )
                 if not focused.get("results"):
                     continue
@@ -5041,12 +5054,18 @@ class MySearchClient(ProviderTransport):
                     "url": item.get("url", ""),
                     "snippet": item.get("description", "") or item.get("snippet", "") or item.get("markdown", ""),
                     "content": item.get("markdown", "") if include_content else "",
+                    "metadata": item.get("metadata") or {},
                     "published_date": item.get("publishedDate")
                     or item.get("date")
                     or item.get("published_date")
                     or item.get("published_at")
                     or "",
                 }
+                if candidate["content"]:
+                    issue = self._extract_quality_issue(candidate)
+                    if issue:
+                        candidate["content"] = ""
+                        candidate["content_fetch"] = {"status": "failed", "error": issue}
                 if candidate not in results:
                     results.append(candidate)
 
@@ -5067,10 +5086,10 @@ class MySearchClient(ProviderTransport):
                     item["content_fetch"] = {"status": "prefetched"}
                 elif url in pages:
                     page = pages[url]
-                    item["content"] = page.get("content", "")
                     issue = self._extract_quality_issue(page)
+                    item["content"] = "" if issue else page.get("content", "")
                     item["content_fetch"] = {
-                        "status": "empty" if issue else "succeeded",
+                        "status": "failed" if issue else "succeeded",
                         "provider": page.get("provider", "firecrawl"),
                         **({"error": issue} if issue else {}),
                         **({"max_age_seconds": 0} if fresh_content else {}),
@@ -7221,7 +7240,7 @@ class MySearchClient(ProviderTransport):
         if top_excerpt and (mode in {"docs", "github", "pdf"} or intent in {"resource", "tutorial"}):
             summary = f"{summary} — {top_excerpt}"
         if verification == "cross-provider" and source_diversity >= 2:
-            summary = f"{summary}; corroborated across {source_diversity} domains"
+            summary = f"{summary}; results from {source_diversity} domains, answer not verified"
         return summary
 
     def _search_summary_excerpt(self, item: Mapping[str, Any], limit: int = 160) -> str:

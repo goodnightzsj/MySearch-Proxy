@@ -536,27 +536,7 @@ def _refined_award_result_query(query: str) -> str:
     query_lower = query.lower()
     if not _looks_like_award_result_query(query_lower):
         return query
-    year_match = re.search(r"\b(20\d{2})\b", query)
-    year = year_match.group(1) if year_match else ""
-    award_name = ""
-    if "grammy" in query_lower:
-        award_name = "Grammy"
-    elif "oscar" in query_lower or "academy awards" in query_lower:
-        award_name = "Oscars"
-    elif "golden globe" in query_lower:
-        award_name = "Golden Globes"
-    elif "bafta" in query_lower:
-        award_name = "BAFTA"
-    category = ""
-    category_markers = _award_query_category_markers(query_lower)
-    if category_markers:
-        category = category_markers[0]
-
-    refined_parts = [part for part in [year, award_name, "winners list", category, "full results"] if part]
-    refined_query = " ".join(refined_parts).strip()
-    if refined_query:
-        return refined_query
-
+    # Search hints must not replace the subject, dates or premise qualifiers.
     extra_terms = []
     if "winner" not in query_lower and "winners" not in query_lower:
         extra_terms.append("winners")
@@ -2900,13 +2880,19 @@ def _build_firecrawl_crawl_result(
             content = entry.get("markdown") or entry.get("content") or ""
             if content:
                 content = _clean_extract_content(content)
-            pages.append({
+            page = {
                 "url": metadata.get("sourceURL")
                 or metadata.get("url")
                 or entry.get("url", ""),
                 "title": metadata.get("title", ""),
                 "content": content,
-            })
+                **({"metadata": metadata} if metadata else {}),
+            }
+            issue = postprocess._extract_quality_issue(page)
+            if issue:
+                page["content"] = ""
+                page["warning"] = issue
+            pages.append(page)
         return {
             "provider": "firecrawl",
             "transport": transport,
