@@ -216,7 +216,7 @@ def result_outcome(tool: str, result: Any) -> str:
         return "unavailable"
     if result.get("provider") in SOCIAL_PROVIDER_VARIANTS - {"custom_social"} or result.get("fallback") or result.get("social_error"):
         return "degraded"
-    if (result.get("evidence") or {}).get("result_event_page_budget_exhausted"):
+    if any((result.get("evidence") or {}).get(name) for name in ("result_event_page_budget_exhausted", "summary_error")):
         return "degraded"
     if result.get("warning") or any(page.get("error") or page.get("warning") for page in result.get("pages", [])):
         return "degraded"

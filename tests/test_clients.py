@@ -358,12 +358,11 @@ class MySearchClientTests(unittest.TestCase):
         # exa_supplement 不能提前放行，所以要等 firecrawl(secondary) 跑完。
         self.assertGreaterEqual(time.monotonic() - started, 0.2)
         self.assertIn("https://example.com/slow", [row["url"] for row in observed["results"]])
-        # 断言的是"预算被下发到三个 provider 且三者一致"，而不是某个具体秒数——
-        # 原实现硬写 10，改预算时会让这条测试假装是行为契约。用常量本身表达。
+        # 主检索保留根预算；可选验证者共享有界窗口。
         expected_timeout = clients_module.OPTIONAL_VERIFY_TIMEOUT_SECONDS
         self.assertEqual(
             captured_timeouts,
-            {"tavily": expected_timeout, "firecrawl": expected_timeout, "exa": expected_timeout},
+            {"tavily": None, "firecrawl": expected_timeout, "exa": expected_timeout},
         )
         self.assertEqual(observed["evidence"]["verification"], "cross-provider")
         # B1 之后 exa_supplement 不再被 quorum 提前取消，所以三者都参与。

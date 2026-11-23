@@ -199,11 +199,12 @@ class ProviderTransport:
         max_workers: int | None = None,
         timeout_seconds: float | None = None,
         stop_after_primary_and_verifier: bool = False,
+        task_timeouts: dict[str, float] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Exception]]:
         if not tasks:
             return {}, {}
 
-        if len(tasks) == 1 and timeout_seconds is None:
+        if len(tasks) == 1 and timeout_seconds is None and not task_timeouts:
             name, task = next(iter(tasks.items()))
             try:
                 with phase(name):
@@ -223,7 +224,9 @@ class ProviderTransport:
         request_remaining = remaining_request_seconds()
         if request_remaining is not None:
             budget = min(budget, request_remaining)
-        deadline = time.monotonic() + budget
+        started = time.monotonic()
+        deadline = started + budget
+        task_deadlines = {name: min(deadline, started + seconds) for name, seconds in (task_timeouts or {}).items()}
         worker_count = max(1, min(max_workers or self.config.max_parallel_workers, len(tasks)))
         executor = self._executor
         temporary_executor: ThreadPoolExecutor | None = None
@@ -234,9 +237,20 @@ class ProviderTransport:
             )
             executor = temporary_executor
         def run_branch(name, task):
-            with phase(name):
-                remaining_request_seconds()
-                return task()
+            token = None
+            if name in task_deadlines:
+                parent_deadline = current_deadline.get()
+                token = current_deadline.set(min(task_deadlines[name], parent_deadline or task_deadlines[name]))
+            try:
+                with phase(name):
+                    remaining_request_seconds()
+                    result = task()
+                    if token is not None:
+                        remaining_request_seconds()
+                    return result
+            finally:
+                if token is not None:
+                    current_deadline.reset(token)
 
         future_map: dict[Future[Any], str] = {}
         try:
@@ -269,9 +283,22 @@ class ProviderTransport:
                 if remaining <= 0:
                     cancel_pending(f"parallel task timed out after {budget:g}s")
                     break
+                wait_seconds = min(remaining, 0.1)
+                for future in list(pending):
+                    name = future_map[future]
+                    if name in task_deadlines:
+                        task_remaining = task_deadlines[name] - time.monotonic()
+                        if not future.done() and task_remaining <= 0:
+                            future.cancel()
+                            pending.discard(future)
+                            errors[name] = MySearchError(f"{name} task timed out after {task_timeouts[name]:g}s")
+                        else:
+                            wait_seconds = min(wait_seconds, max(0, task_remaining))
+                if not pending:
+                    break
                 completed, _ = wait(
                     pending,
-                    timeout=min(remaining, 0.1),
+                    timeout=wait_seconds,
                     return_when=FIRST_COMPLETED,
                 )
                 if not completed:

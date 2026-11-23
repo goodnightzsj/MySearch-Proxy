@@ -182,6 +182,50 @@ class RequestBudgetTests(unittest.TestCase):
             thread.join(2)
         self.assertEqual(state.final["outcome"], "cancelled")
 
+    def test_optional_deadline_does_not_cancel_primary_or_allow_late_http(self):
+        client = self.client(timeout_seconds=1)
+        expired = Event()
+        observations = []
+
+        def optional():
+            time.sleep(0.05)
+            try:
+                remaining_seconds()
+                client._request_text(url="https://late.test")
+            except MySearchError:
+                observations.append(current_request.get().cancelled.is_set())
+            finally:
+                expired.set()
+
+        def primary():
+            self.assertTrue(expired.wait(0.5))
+            remaining_seconds()
+            return "Complete primary body"
+
+        with patch.object(client._http, "get") as http:
+            def root():
+                values, errors = client._execute_parallel(
+                    {"primary": primary, "secondary": optional}, max_workers=2,
+                    task_timeouts={"secondary": 0.01},
+                )
+                self.assertIn("secondary", errors)
+                return {"results": [values["primary"]]}
+            result = client.search(root)
+        self.assertEqual(result["results"], ["Complete primary body"])
+        self.assertEqual(observations, [False])
+        http.assert_not_called()
+
+    def test_optional_window_includes_queue_time(self):
+        client = self.client(timeout_seconds=1)
+        optional = Mock()
+        values, errors = client._execute_parallel(
+            {"primary": lambda: (time.sleep(0.05), "done")[1], "secondary": optional},
+            max_workers=1, task_timeouts={"secondary": 0.01},
+        )
+        self.assertEqual(values, {"primary": "done"})
+        self.assertIn("secondary", errors)
+        optional.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

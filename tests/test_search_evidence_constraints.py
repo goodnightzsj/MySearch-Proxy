@@ -97,3 +97,25 @@ class SearchEvidenceConstraintsTests(unittest.TestCase):
         self.assertEqual(evidence["fetch_status"], "failed")
         self.assertEqual(evidence["providers"], [])
         self.assertEqual(result_outcome("extract_url", page), "degraded")
+
+    def test_research_rejects_error_pages_and_passes_constraints_to_summary(self):
+        page = {"url": "https://example.test/study", "title": "Study", "content": "", "provider": "tavily"}
+        discovery = {"provider": "tavily", "results": [page], "citations": [{"url": page["url"], "title": "Study"}]}
+        failed = {"provider": "firecrawl", "url": page["url"], "content": "Missing document", "metadata": {"statusCode": 404}}
+        self.client.config.xai.search_mode = "official"
+        with patch.object(self.client, "search", return_value=discovery), patch.object(
+            self.client, "extract_url", return_value=failed,
+        ), patch.object(self.client, "_provider_can_serve", side_effect=lambda p: p.name == "xai"), patch.object(
+            self.client, "_search_xai", return_value={"answer": "Insufficient evidence"},
+        ) as summary:
+            result = self.client.research(
+                query="Lunar basalt sample preservation", mode="web", intent="factual", strategy="deep",
+                include_social=False, scrape_top_n=1, exclude_domains=["excluded.test"],
+                from_date="2026-01-01", to_date="2026-02-01",
+            )
+        self.assertEqual(summary.call_args.kwargs["exclude_domains"], ["excluded.test"])
+        self.assertEqual(summary.call_args.kwargs["from_date"], "2026-01-01")
+        self.assertEqual(summary.call_args.kwargs["to_date"], "2026-02-01")
+        self.assertEqual(result["pages"][0]["error"], "target HTTP 404")
+        self.assertNotIn("excerpt", result["pages"][0])
+        self.assertEqual(result["evidence"]["sources"][0]["fetch_status"], "failed")

@@ -1964,10 +1964,14 @@ class MySearchClient(ProviderTransport):
                     query=f"Summarize key findings about: {query}",
                     sources=["web"],
                     max_results=3,
+                    include_domains=include_domains,
+                    exclude_domains=exclude_domains,
+                    from_date=from_date,
+                    to_date=to_date,
                 )
                 executive_summary = (summary_result.get("answer") or "").strip()
-            except MySearchError:
-                pass
+            except MySearchError as exc:
+                evidence["summary_error"] = str(exc)[:200]
         report_sections = self._build_research_report_sections(
             query=query,
             web_search=web_search,
@@ -4194,7 +4198,7 @@ class MySearchClient(ProviderTransport):
                     strategy="fast" if lightweight_official_discovery else strategy,
                     from_date=from_date,
                     to_date=to_date,
-                    timeout_seconds=verify_timeout,
+                    timeout_seconds=None,
                 ),
                 "secondary": lambda: self._search_firecrawl(
                     query=query,
@@ -4219,7 +4223,7 @@ class MySearchClient(ProviderTransport):
                     exclude_domains=exclude_domains,
                     from_date=from_date,
                     to_date=to_date,
-                    timeout_seconds=verify_timeout,
+                    timeout_seconds=None,
                 ),
                 "secondary": lambda: self._search_tavily(
                     query=query,
@@ -4280,7 +4284,7 @@ class MySearchClient(ProviderTransport):
             blended_results, blended_errors = self._execute_parallel(
                 tasks,
                 max_workers=len(tasks),
-                timeout_seconds=verify_timeout,
+                task_timeouts={name: verify_timeout for name in tasks if name != "primary"} if verify_timeout is not None else None,
                 stop_after_primary_and_verifier=strategy == "verify",
             )
         primary_failed = "primary" in blended_errors
