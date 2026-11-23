@@ -214,7 +214,7 @@ def result_outcome(tool: str, result: Any) -> str:
         return "success"
     if ProviderResponse.kind_of(result) == "unavailable":
         return "unavailable"
-    if result.get("provider") in SOCIAL_PROVIDER_VARIANTS - {"custom_social"} or result.get("fallback") or result.get("social_error"):
+    if result.get("provider") in SOCIAL_PROVIDER_VARIANTS - {"custom_social"} or result.get("fallback") or result.get("social_error") or result.get("secondary_error"):
         return "degraded"
     if any((result.get("evidence") or {}).get(name) for name in ("result_event_page_budget_exhausted", "summary_error")):
         return "degraded"

@@ -24,7 +24,8 @@ from concurrent.futures import Future
 from functools import wraps
 from typing import Any
 
-from mysearch.diagnostics import current_request, remaining_seconds
+from mysearch.diagnostics import current_deadline, current_request, remaining_seconds
+from mysearch.errors import MySearchError, MySearchHTTPError
 
 #: 单个命名空间的条目上限，超出后按 `inserted_at` 淘汰最旧项。
 DEFAULT_MAX_ENTRIES = 256
@@ -43,18 +44,30 @@ def coalesced_scrape(method):
             return method(self, **arguments)
         remaining_seconds()
         # Keep query, fragment and format order: they may select different documents.
+        deadline = min(state.deadline, current_deadline.get() or state.deadline)
         identity = (id(self), url, tuple(formats), only_main_content, max_age_seconds)
         with state.lock:
-            pending = state.extractions.get(identity)
-            owner = pending is None
+            entry = state.extractions.get(identity)
+            owner = entry is None
             if owner:
-                pending = Future()
-                state.extractions[identity] = pending
+                entry = (deadline, Future())
+                state.extractions[identity] = entry
+            owner_deadline, pending = entry
         if not owner:
             while not pending.done():
                 state.cancelled.wait(min(0.05, remaining_seconds()))
             remaining_seconds()
-            return copy.deepcopy(pending.result())
+            try:
+                return copy.deepcopy(pending.result())
+            except MySearchError as exc:
+                # A surviving branch may retry after a shorter owner's budget ends.
+                if isinstance(exc, MySearchHTTPError) or owner_deadline >= deadline or time.monotonic() < owner_deadline:
+                    raise
+                remaining_seconds()
+                with state.lock:
+                    if state.extractions.get(identity) is entry:
+                        state.extractions.pop(identity)
+                return run(self, **arguments)
         try:
             result = method(self, **arguments)
             pending.set_result(copy.deepcopy(result))
@@ -62,7 +75,8 @@ def coalesced_scrape(method):
         except BaseException as exc:
             pending.set_exception(exc)
             with state.lock:
-                state.extractions.pop(identity, None)
+                if state.extractions.get(identity) is entry:
+                    state.extractions.pop(identity)
             raise
     return run
 

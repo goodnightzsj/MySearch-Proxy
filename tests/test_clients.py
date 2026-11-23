@@ -5164,7 +5164,7 @@ class MySearchClientTests(unittest.TestCase):
         client = MySearchClient()
         client._scrape_firecrawl = lambda **kwargs: (_ for _ in ()).throw(MySearchError("firecrawl failed"))  # type: ignore[method-assign]
         client._extract_tavily = lambda **kwargs: (_ for _ in ()).throw(MySearchError("tavily failed"))  # type: ignore[method-assign]
-        client._provider_can_serve = lambda provider: provider.name == "exa"  # type: ignore[method-assign]
+        client._provider_can_serve = lambda provider, **kwargs: provider.name == "exa"  # type: ignore[method-assign]
         client._get_key_or_raise = lambda provider: SimpleNamespace(key="test-key", source="env")  # type: ignore[method-assign]
         client._request_json = lambda **kwargs: {  # type: ignore[method-assign]
             "results": [
@@ -5185,7 +5185,7 @@ class MySearchClientTests(unittest.TestCase):
         client = MySearchClient()
         client._scrape_firecrawl = lambda **kwargs: (_ for _ in ()).throw(MySearchError("firecrawl failed"))  # type: ignore[method-assign]
         client._extract_tavily = lambda **kwargs: (_ for _ in ()).throw(MySearchError("tavily failed"))  # type: ignore[method-assign]
-        client._provider_can_serve = lambda provider: provider.name == "exa"  # type: ignore[method-assign]
+        client._provider_can_serve = lambda provider, **kwargs: provider.name == "exa"  # type: ignore[method-assign]
         client._get_key_or_raise = lambda provider: SimpleNamespace(key="test-key", source="env")  # type: ignore[method-assign]
         client._request_json = lambda **kwargs: {  # type: ignore[method-assign]
             "results": [

@@ -84,7 +84,7 @@ hybrid 的失败占位和同provider双分支不算多provider；同一官方域
 
 返回当前 provider 配置、base URL、search mode、auth mode 和 key 可用性。
 
-`available_keys` 只统计本地可调度凭证；`credential_scope=gateway` 时它是网关令牌数，不是上游健康 Key 数。`probe_evidence` 区分 `operation`、`service_health` 和 `public_status`；`operation_ready` 为 true 仅表示最近一次真实操作探测成功，false 表示已知不可用，null 表示未证实。结合 `last_checked_at` 判断时效；公共状态页正常不证明账号有效或有余额。回退复用现有探测缓存跳过已知空池/额度错误，未知或瞬态故障仍可尝试，失败链保留各 provider 原因。
+`available_keys` 只统计本地可调度凭证；`credential_scope=gateway` 时它是网关令牌数，不是上游健康 Key 数。外部兼容 X 端点标为 `endpoint`，不推断其后端账号数。`probe_evidence` 区分 `operation`、`service_health` 和 `public_status`；`operation_ready` 为 true 仅表示最近一次真实操作探测成功，false 表示已知不可用，null 表示未证实。结合 `probe_operation` 和 `last_checked_at` 判断适用操作与时效；公共状态页正常不证明账号有效或有余额。回退复用现有探测缓存跳过已知空池/额度错误，未知或瞬态故障仍可尝试，失败链保留各 provider 原因。单个操作不可用不会停用其他操作。
 
 ### `crawl_site`
 

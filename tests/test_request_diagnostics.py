@@ -126,6 +126,7 @@ class RequestDiagnosticsTests(unittest.TestCase):
             ({"provider": "tavily_social_fallback", "results": [1]}, "degraded"),
             ({"kind": "unavailable", "results": []}, "unavailable"),
             ({"results": [1], "fallback": {"from": "exa"}}, "degraded"),
+            ({"results": [1], "secondary_error": "secondary deadline"}, "degraded"),
         ]:
             with self.subTest(expected=expected):
                 state = client.new_request("search")

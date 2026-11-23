@@ -40,6 +40,7 @@ class ProviderReadinessTests(unittest.TestCase):
             client, "_probe_provider_request", side_effect=failure,
         ) as probe:
             self.assertFalse(client._provider_can_serve(client.config.exa))
+            self.assertTrue(client._provider_can_serve(client.config.exa, operation="contents"))
             with patch.object(client, "_dispatch_single_provider", return_value={"provider": "tavily", "results": [{"url": "https://example.test"}]}) as dispatch:
                 result, fallback = self.search()
             self.assertEqual(result["provider"], "tavily")
@@ -65,3 +66,40 @@ class ProviderReadinessTests(unittest.TestCase):
             self.search()
         for detail in ("exa: first failure", "tavily: second failure", "firecrawl: last failure"):
             self.assertIn(detail, str(caught.exception))
+
+    def test_gateway_explicit_unavailable_is_negative_evidence_and_keeps_token(self):
+        client = self.client
+        client.config.xai.search_mode = "compatible"
+        with patch.object(client, "_request_json", return_value={"ok": False, "upstream_available_key_count": 0}):
+            self.assertFalse(client._provider_can_serve(client.config.xai))
+        self.assertEqual(client.keyring.describe()["xai"]["count"], 1)
+        status = client._probe_provider_status(client.config.xai, 1)
+        self.assertEqual(status["evidence"], "service_health")
+        self.assertEqual(status["operation"], "social_search")
+
+    def test_health_uses_post_probe_key_counts(self):
+        client = self.client
+        def probe(provider, key):
+            if provider.name == "tavily":
+                client.keyring.quarantine("tavily", key, "auth_rejected")
+                raise MySearchHTTPError(provider="tavily", status_code=401, detail="invalid api key", url="https://test")
+            return "operation"
+        with patch.object(client, "_probe_provider_request", side_effect=probe):
+            health = client.health()
+        self.assertEqual(health["providers"]["tavily"]["available_keys"], 0)
+        self.assertEqual(health["providers"]["tavily"]["quarantined_keys"], 1)
+
+    def test_auto_route_keeps_planned_provider_skip_reason(self):
+        client = self.client
+        client.config.exa.enabled = False
+        def probe(provider, key):
+            if provider.name == "tavily":
+                raise MySearchHTTPError(provider="tavily", status_code=503,
+                    detail="No available Tavily API keys for search", url="https://test")
+            return "operation"
+        with patch.object(client, "_probe_provider_request", side_effect=probe):
+            decision = client._route_search(query="Generic reference", mode="web", intent="factual", provider="auto",
+                sources=["web"], include_content=False, include_domains=None, allowed_x_handles=None, excluded_x_handles=None)
+        self.assertEqual(decision.provider, "firecrawl")
+        self.assertIn("No available Tavily API keys", decision.reason)
+        self.assertIn("firecrawl", decision.reason)

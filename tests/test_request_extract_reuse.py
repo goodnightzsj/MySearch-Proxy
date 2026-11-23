@@ -90,3 +90,34 @@ class RequestExtractReuseTests(unittest.TestCase):
             finally:
                 self.client.finish_request(other)
         self.assertEqual(request.call_count, 2)
+
+    def test_primary_recovers_after_short_optional_scrape_owner_expires(self):
+        from mysearch.diagnostics import remaining_seconds
+        started = Event()
+        calls = []
+
+        def send(**kwargs):
+            calls.append(remaining_seconds())
+            if len(calls) == 1:
+                started.set()
+                time.sleep(0.05)
+                remaining_seconds()
+            return {"data": {"markdown": self.body}}
+
+        def optional():
+            token = current_deadline.set(time.monotonic() + 0.02)
+            try:
+                return self.fetch(max_age_seconds=0)
+            finally:
+                current_deadline.reset(token)
+
+        with patch.object(self.client, "_request_json", side_effect=send), ThreadPoolExecutor(1) as pool:
+            owner = pool.submit(copy_context().run, optional)
+            self.assertTrue(started.wait(1))
+            recovered = self.fetch(max_age_seconds=0)
+            with self.assertRaises(MySearchError):
+                owner.result()
+        self.assertEqual(recovered["content"], self.body)
+        self.assertEqual(len(calls), 2)
+        self.assertGreater(calls[1], calls[0])
+        self.assertFalse(self.state.cancelled.is_set())
