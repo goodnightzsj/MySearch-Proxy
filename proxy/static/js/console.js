@@ -3923,11 +3923,12 @@ function renderPoolGlance(service, payload = {}) {
     const keys = payload?.keys || [];
     const activeKeys = keys.filter((key) => getKeyAvailability(key).schedulable).length;
     const limitedKeys = keys.filter((key) => !getKeyAvailability(key).schedulable).length;
-    const syncedKeys = keys.filter((key) => Boolean(key.usage_synced_at)).length;
+    const syncedKeys = keys.filter((key) => key.usage_synced_at && !key.usage_sync_stale
+      && !key.usage_sync_error && Number.isFinite(getKeyRemaining(key))).length;
     const erroredKeys = keys.filter((key) => Boolean(key.usage_sync_error)).length;
     keyRoot.innerHTML = [
       renderGlanceCard('可调度 Key', fmtNum(activeKeys), `隔离 ${fmtNum(limitedKeys)} · 总数 ${fmtNum(keys.length)}`),
-      renderGlanceCard('已同步', fmtNum(syncedKeys), '已有官方或账户级额度信息'),
+      renderGlanceCard('额度记录有效', fmtNum(syncedKeys), `过期或未知 ${fmtNum(keys.length - syncedKeys)} · 以最近同步为准`),
       renderGlanceCard('同步异常', fmtNum(erroredKeys), erroredKeys ? '建议点击行检查失败原因' : '当前没有同步异常'),
     ].join('');
   }

@@ -192,6 +192,18 @@ assert.match(renderKeyQuotaSummary({usage_account_remaining: 993, usage_sync_sta
   usage_synced_at: '2026-11-21T14:00:00Z'}), /最近同步/);
 """)
 
+    def test_pool_summary_counts_only_current_known_quota_records(self) -> None:
+        self.run_console(("renderPoolGlance", "getKeyAvailability", "getKeyRemaining"), r"""
+global.getServiceDisplayLabel = service => service;
+global.renderGlanceCard = (label, value, hint) => `${label}: ${value}; ${hint}\n`;
+const synced = {active: 1, usage_synced_at: '2026-11-23T00:00:00Z', usage_account_remaining: 0};
+renderPoolGlance('tavily', {keys: [synced, {...synced, usage_sync_stale: true},
+  {...synced, usage_sync_error: 'offline'}, {...synced, usage_account_remaining: null}, {active: 1}]});
+assert.match(node('key-glance-tavily').innerHTML, /额度记录有效: 1/);
+assert.match(node('key-glance-tavily').innerHTML, /过期或未知 4/);
+assert.match(node('key-glance-tavily').innerHTML, /可调度 Key: 5/);
+""")
+
     def test_exa_operation_limits_show_scope_and_allow_explicit_restore(self) -> None:
         self.run_console(("getKeyAvailability", "formatDisabledDetail", "renderKeyStatusSummary", "toggleKey"), r"""
 const key = {id: 42, active: 1, blocked_operations: {contents: {reason: 'team_blocked', detail: '<fixture>'}}, available_operations: ['search']};
@@ -373,7 +385,7 @@ api = async () => ({social: {active_key_scope: 'upstream', upstream_keys: [{id: 
 await resumeSocialUpstreamKey('one', node('resume'));
 assert.equal(node('settings-social-model').value, 'another-draft');
 assert.equal(node('settings-social-upstream-api-key').value, 'another-fixture');
-assert.match(node('settings-social-upstream-key-list').innerHTML, /正常/);
+assert.match(node('settings-social-upstream-key-list').innerHTML, /可调度/);
 flushTimers();
 const late = deferred();
 api = () => late.promise;
